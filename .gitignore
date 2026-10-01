@@ -1,0 +1,49 @@
+.venv/
+__pycache__/
+*.pyc
+node_modules/
+
+# 凭据：只保留 .env.example / .env.bot.example，真实配置永不提交
+.env
+.env.local
+# 每进程独立配置（例如 Bot 用自己的 API Key）同样含凭据
+.env.*
+!.env.example
+!.env.bot.example
+
+# --- 运行数据（**绝不进仓库**）---------------------------------------------
+# data/ 下有：记忆库（真实聊天记录）、日志、模型 I/O 追踪、面板令牌/口令、
+# operator_config.json（含密钥）、控制审计、用量账本。这些既是隐私也是凭据。
+data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+.tmp_test_run/
+
+# 历史遗留的本地调试产物
+private_debug_eval.jsonl
+
+# 记忆库合并前的自动备份
+*.before-merge-*
+
+# --- 本地备份（**绝不进仓库**）---------------------------------------------
+# 这个仓库没有 git，`backups/` 一直是唯一的后悔药：里面有数据库快照、
+# 邮件 jsonl、以及各阶段的整份源码压缩包（`stage3-*.zip`，1300+ 个文件）。
+# 它既含运行数据也可能含凭据，所以永远不进公开仓库。
+backups/
+
+# --- 人设正文与原始素材（**公开库不发布**）---------------------------------
+# `docs/yunru-source/` 是从官方单位描述、游戏内语音、制作组发言整理出来的设定，
+# 以及**别人的同人小说原文**、密文与二手整理（约 1.1 MB / 103 个文件）。
+# `docs/YUNRU_FACTS.md` 是从那些素材里摘出的"事实速查"——同样是衍生正文。
+#
+# 公开仓库只放**结构与字数约束**（见 `docs/PROMPT_SHAPE.md`）和一份可直接替换的
+# 人设模板（`src/qq_roleplay_bot/base_prompt.py`）。真实人设留在私有副本里。
+#
+# 注：`src/qq_roleplay_bot/base_prompt.py` **故意不忽略**——它是模板，公开版靠它
+# 才能 clone 下来直接跑。替换成真实人设之后就该把改动留在本地，不要提交。
+docs/yunru-source/
+docs/YUNRU_FACTS.md
+
+# 打包元数据
+*.egg-info/

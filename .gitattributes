@@ -1,0 +1,18 @@
+# 统一换行符，避免 Windows 开发 / Linux 部署之间产生整文件差异
+* text=auto eol=lf
+
+# 显式声明文本类型
+*.py    text eol=lf
+*.md    text eol=lf
+*.toml  text eol=lf
+*.json  text eol=lf
+*.bat   text eol=crlf
+*.ps1   text eol=crlf
+
+# 二进制，不做换行转换
+*.sqlite3       binary
+*.sqlite3-wal   binary
+*.sqlite3-shm   binary
+*.png           binary
+*.jpg           binary
+*.zip           binary

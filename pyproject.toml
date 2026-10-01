@@ -1,0 +1,14 @@
+[project]
+name = "qq-roleplay-bot"
+version = "0.3.0"
+description = "一个面向 QQ 的轻量人格 Bot"
+requires-python = ">=3.11"
+dependencies = [
+    "websockets>=14,<16",
+]
+
+[project.scripts]
+qq-roleplay-bot = "qq_roleplay_bot.stage3_main:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
