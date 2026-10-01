@@ -133,7 +133,7 @@
 | `stage3_main.py` | `runtime_stats`、快照里的 `concurrency` |
 | `dev_config.py` | `QQBOT_MAX_CONCURRENT_SESSIONS`、`QQBOT_SESSION_QUEUE_LIMIT` |
 | `control.py` | `EngineSnapshot.concurrency` |
-| `tests/test_concurrent_sessions.py` | 整个文件，之后按焦点制重写 |
+| `tests/test_concurrent_sessions.py` | 整个文件，之后按焦点制重写（**已删**；并发相关的断言现在在 `tests/test_focus_engine.py`） |
 
 （「续发消息按消息归属」是否跟着退，见第八节第 3 条。）
 

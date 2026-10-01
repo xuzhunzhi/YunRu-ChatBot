@@ -1494,15 +1494,37 @@ class DialogueEngine:
         from .command_plugins import ActionRequest
 
         assert isinstance(request, ActionRequest)  # pragma: no cover - 调用方已经判过
-        if request.group in {"group_admin", "group_owner"}:
-            # 群管理与群主动作的**执行端**不在 `main` 上：它们是 Stage 4 的功能扩展
-            # （`group_admin.py` / `group_owner.py`），跟命令插件一起在
-            # `stage4-plugins` 分支。这条分支上不会有插件产出这两种 `ActionRequest`，
-            # 真收到了也只能是装配错了——**fail-closed**：不执行、记一行日志。
-            # 注意护栏（`mentioned` 必须为真、她得是群主）留在执行端，不在这里放宽。
-            logger.warning("group_action_unavailable group=%s kind=%s",
-                           request.group, request.kind)
-            return "这条分支没有群管理能力。"
+        if request.group == "group_admin":
+            from .group_admin import execute as run_group_action
+
+            return await run_group_action(
+                request.kind,
+                transport=getattr(self, "transport", None),
+                registry=self.capabilities,
+                group_id=group_id,
+                actor_id=actor_id,
+                target_id=request.target_id,
+                minutes=request.text,
+                message_id=message_id or request.message_id,
+                mentioned=mentioned or request.mentioned,
+                protected_ids=frozenset(self._protected_group_ids()),
+                enabled=dev_config.GROUP_MANAGE_ENABLED,
+            )
+        if request.group == "group_owner":
+            from .group_owner import execute as run_owner_action
+
+            return await run_owner_action(
+                request.kind,
+                transport=getattr(self, "transport", None),
+                roles=getattr(self, "self_roles", None),
+                registry=self.capabilities,
+                group_id=group_id,
+                actor_id=actor_id,
+                target_id=request.target_id,
+                text=request.text,
+                mentioned=mentioned or request.mentioned,
+                enabled=dev_config.GROUP_OWNER_ENABLED,
+            )
         logger.warning("Stage 3 unknown plugin action group=%s", request.group)
         return "这个动作没有对应的执行通道，已拒绝。"
 

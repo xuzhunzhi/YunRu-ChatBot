@@ -163,14 +163,13 @@ def build_command_registry(extra: tuple[object, ...] = ()):
 
     ping 排在 help 之前：它更具体，且行为最简单，先匹配掉可以少走一层。
     余额命令放在最后，且默认只在超管私聊可用——它读的是账号资金信息。
-
-    群管理与群主命令（`min_level = "super"`：踢人 / 禁言 / 改名片 / 公告…）
-    **不在这条分支上**——它们是 Stage 4 的功能扩展，在 `stage4-plugins` 分支
-    与执行端（`group_admin.py`、`group_owner.py`）一起。这里只放 Stage 3 与底层的命令。
+    最后是 Stage 4 的两条：群管理与群主命令（`min_level = "super"`，
+    见 `builtin_group_commands.py`——它们只解析与声明意图，执行在核心）。
     """
 
     from . import dev_config
     from .builtin_balance_command import BalanceCommand, build_balance_client
+    from .builtin_group_commands import GroupManageCommand, GroupOwnerCommand, TitleCommand
     from .command_plugins import CommandRegistry
 
     help_plugin = HelpCommand()
@@ -184,7 +183,8 @@ def build_command_registry(extra: tuple[object, ...] = ()):
         allowed_user_ids=dev_config.BALANCE_PRIVATE_USER_IDS,
         allowed_group_ids=dev_config.BALANCE_GROUP_IDS,
     )
-    plugins = (ping_plugin, help_plugin, balance_plugin) + tuple(extra)
+    plugins = (ping_plugin, help_plugin, balance_plugin, TitleCommand(),
+               GroupManageCommand(), GroupOwnerCommand()) + tuple(extra)
     registry = CommandRegistry(plugins)
     help_plugin._help_provider = registry.help_lines
     return registry

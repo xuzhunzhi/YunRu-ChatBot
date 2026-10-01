@@ -47,9 +47,9 @@ def test_handles_command_recognises_the_command_paths() -> None:
     # 组内命令：/admin help 与 /super ...
     assert engine.handles_command(msg("/admin help")) is True
     assert engine.handles_command(msg("/super status")) is True
-    # 群管理命令（`/super kick`…）是 Stage 4 插件，**不在这条分支上**，
-    # 所以这里不认识它；认领它的是 `stage4-plugins` 分支。
-    assert engine.handles_command(msg("/super kick @某人")) is False
+    # 群管理命令（`/super kick`…）是 Stage 4 插件，由 `builtin_group_commands.py`
+    # 认领——那条分支上它在，所以这里是 True。
+    assert engine.handles_command(msg("/super kick @某人")) is True
     # 普通聊天不是命令
     assert engine.handles_command(msg("今天心情不错")) is False
     assert engine.handles_command(msg("/admin enable 800000001")) is False  # 不是 help 那条

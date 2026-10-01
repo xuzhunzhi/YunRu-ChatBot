@@ -11,12 +11,13 @@
 import asyncio
 
 from qq_roleplay_bot import runtime
-from qq_roleplay_bot.qq_roles import ROLE_OWNER
+from qq_roleplay_bot.background_plugins import build_background_plugins
+from qq_roleplay_bot.qq_roles import ROLE_MEMBER, ROLE_OWNER
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 
 GROUP = "717151356"
 ME = "900000001"
-TARGET = "900000007"
+TARGET = "900000005"
 
 
 class FakeTransport:
@@ -54,3 +55,53 @@ def test_build_engine_wires_the_role_cache() -> None:
     assert asyncio.run(engine.self_roles.role(GROUP)) == ROLE_OWNER
 
 
+def test_assembled_engine_can_actually_title_and_appoint() -> None:
+    """从真装配出来的引擎，命令要一路走到 action。"""
+
+    transport = FakeTransport()
+    engine = runtime.build_engine(transport)
+
+    result = asyncio.run(engine.handle(message("/super qqadmin", mentions=(TARGET,))))
+    assert result is not None and "已设置" in result.text
+    assert [name for name, _ in transport.calls] == [
+        "get_login_info", "get_group_member_info", "set_group_admin"]
+    assert transport.calls[-1][1] == {"group_id": int(GROUP), "user_id": int(TARGET),
+                                      "enable": True}
+
+
+def test_assembled_engine_says_so_when_she_is_not_the_owner() -> None:
+    transport = FakeTransport(role=ROLE_MEMBER)
+    engine = runtime.build_engine(transport)
+    result = asyncio.run(engine.handle(message("/title 龙王")))
+    assert result is not None and "做不了" in result.text
+    assert all(name != "set_group_special_title" for name, _ in transport.calls)
+
+
+def test_approval_plugin_refuses_to_load_without_a_role_source() -> None:
+    """没有角色来源就不装审批插件（fail-closed，而且**出声**）。
+
+    以前这里是静默的：插件照装，`_may_approve` 永远 False，一条申请都不处理。
+    """
+
+    from qq_roleplay_bot import dev_config
+
+    original = dev_config.AUTO_APPROVE_JOIN
+    dev_config.AUTO_APPROVE_JOIN = True
+    try:
+        with_roles = build_background_plugins(_Engine(), call_action=lambda *a: None,
+                                              notify=lambda *a: None, roles=object())
+        without_roles = build_background_plugins(_Engine(), call_action=lambda *a: None,
+                                                 notify=lambda *a: None, roles=None)
+    finally:
+        dev_config.AUTO_APPROVE_JOIN = original
+    assert any(plugin.name == "join-approval" for plugin in with_roles)
+    assert all(plugin.name != "join-approval" for plugin in without_roles)
+
+
+class _Engine:
+    """装配点只用到 `daily_reporter` 与 `note_letter`，这里给出最小形状。"""
+
+    daily_reporter = None
+
+    def note_letter(self, letter):  # pragma: no cover - 只有装了日报才会用到
+        return None

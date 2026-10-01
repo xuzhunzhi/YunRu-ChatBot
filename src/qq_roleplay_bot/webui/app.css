@@ -1,0 +1,1065 @@
+/* 云茹控制面板 · 界面样式
+ *
+ * ============================================================================
+ * 取值来源：**小米官方组件库 Miuix 0.9.4 的源码**（不是我自己编的）
+ *   miuix-ui/src/commonMain/.../theme/Colors.kt      → lightColorScheme / darkColorScheme
+ *   miuix-ui/src/commonMain/.../theme/TextStyles.kt  → 字号阶（32/24/20/18/17/16/14/13/11）
+ *   miuix-ui/src/commonMain/.../basic/*.kt           → 各组件 Defaults（圆角与内边距）
+ *   miuix-squircle/.../SquirclePath.kt               → 连续圆角：Extension=1.1、CONTROL=0.643
+ * 下面每个变量后面都标了它在源码里的名字，方便以后对着改。
+ *
+ * 仍然遵守面板的约束：**不引入任何依赖**（离线可用），所以这里是用那套 token
+ * 自己写的 CSS，而不是把 Kotlin 组件搬过来。
+ * ============================================================================
+ */
+
+/* --- 浅色（Colors.kt: lightColorScheme） ----------------------------------- */
+:root {
+  color-scheme: light dark;
+
+  --primary: #3482ff;              /* primary */
+  --on-primary: #ffffff;           /* onPrimary */
+  --primary-variant: #3482ff;      /* primaryVariant */
+  --primary-container: #5d9bff;    /* primaryContainer */
+
+  --error: #e94634;                /* error */
+  --error-container: #fdf6f4;      /* errorContainer */
+  --on-error-container: #410002;   /* onErrorContainer */
+
+  --secondary: #e6e6e6;            /* secondary */
+  --on-secondary: #ffffff;         /* onSecondary */
+  --secondary-variant: #f0f0f0;    /* secondaryVariant */
+  --on-secondary-variant: #303030; /* onSecondaryVariant */
+  --secondary-container: #f0f0f0;  /* secondaryContainer */
+  --on-secondary-container: #a9a9a9; /* onSecondaryContainer */
+
+  --disabled-primary: #c2d9ff;      /* disabledPrimary（主色降饱和） */
+  --tertiary-container: #eaf2ff;   /* tertiaryContainer */
+  --on-tertiary-container: #3482ff;/* onTertiaryContainer */
+
+  --background: #ffffff;           /* background */
+  --on-background: #000000;        /* onBackground */
+  --on-background-variant: #8c93b0;/* onBackgroundVariant */
+
+  --surface: #f7f7f7;              /* surface */
+  --on-surface: #000000;           /* onSurface */
+  --surface-variant: #ffffff;      /* surfaceVariant */
+  --surface-container-high: #e8e8e8;  /* surfaceContainerHigh */
+  --outline: #d9d9d9;              /* outline */
+  --divider: #e0e0e0;              /* dividerLine */
+  --window-dimming: rgba(0, 0, 0, 0.3);   /* windowDimming */
+
+  /* 文字层级：Miuix 用 onSurfaceSecondary / VariantSummary / VariantActions */
+  --text-2: rgba(0, 0, 0, 0.8);    /* onSurfaceSecondary 0xCC000000 */
+  --text-3: rgba(0, 0, 0, 0.6);    /* onSurfaceVariantSummary 0x99000000 */
+  --text-4: rgba(0, 0, 0, 0.4);    /* onSurfaceVariantActions 0x66000000 */
+
+  --good: #4cc38a;                 /* 语义色：Miuix 只有 primary/error，这里自定一个"正常" */
+  --warn: #f2a33c;
+
+  /* 侧边栏与"浮在页面上的面板"用的大阴影（Miuix 的 surface 没有现成的 elevation 色，
+     用一层很淡的阴影把栏体从内容里抬起来，而不是靠换底色——换底色会破坏
+     surface 这一档的语义）。 */
+  --rail-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 8px 24px rgba(0, 0, 0, 0.05);
+
+  /* 圆角与尺寸：basic/*.kt 的 Defaults */
+  --radius-card: 16px;             /* CardDefaults.CornerRadius / TextFieldDefaults */
+  --radius-control: 16px;          /* ButtonDefaults.CornerRadius */
+  --radius-tab: 12px;              /* TabRowDefaults.TabRowCornerRadius */
+  --radius-inner: 12px;            /* 卡片**内部**那层小容器的圆角（比卡片小一档） */
+  --radius-pill: 999px;            /* Snackbar ActionCornerRadius 50dp 等"胶囊" */
+  --min-control-h: 40px;           /* ButtonDefaults.MinHeight */
+  --min-control-w: 58px;           /* ButtonDefaults.MinWidth */
+  --pad-control: 13px 16px;        /* ButtonDefaults.InsideMargin */
+
+  --font: "MiSans", "MiSans VF", "HarmonyOS Sans SC", "PingFang SC",
+          "Microsoft YaHei UI", "Microsoft YaHei", -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", monospace;
+}
+
+/* --- 深色（Colors.kt: darkColorScheme） ------------------------------------
+   两处都要给：① 跟随系统；② 手动切到深色。
+   原来我想"统一到一条规则里避免漂移"，结果两段都是空的——直接写两遍更实在。 */
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --primary: #277af7;              /* primary */
+    --on-primary: #ffffff;
+    --primary-variant: #0073dd;      /* primaryVariant */
+    --primary-container: #338fe4;    /* primaryContainer */
+    --error: #f12522;                /* error */
+    --error-container: #2e0603;      /* errorContainer */
+    --on-error-container: #ffdad6;   /* onErrorContainer */
+    --secondary: #505050;
+    --on-secondary: #ffffff;
+    --secondary-variant: #434343;
+    --on-secondary-container: #7c7c7c;
+    --on-secondary-variant: #d9d9d9;
+    --secondary-container: #434343;
+    --disabled-primary: #253e64;   /* disabledPrimary */
+    --tertiary-container: #2b3b54;
+    --on-tertiary-container: #4788ff;
+    --background: #242424;           /* background */
+    --on-background: rgba(255, 255, 255, 0.9);   /* onBackground 0xE6FFFFFF */
+    --on-background-variant: #787e96;
+    --surface: #000000;              /* surface */
+    --on-surface: #f2f2f2;
+    --surface-variant: #242424;
+    --surface-container-high: #2d2d2d;
+    --outline: #404040;
+    --divider: #393939;
+    --window-dimming: rgba(0, 0, 0, 0.6);
+    --text-2: rgba(255, 255, 255, 0.8);
+    --text-3: rgba(255, 255, 255, 0.5);
+    --text-4: rgba(255, 255, 255, 0.4);
+    --rail-shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 10px 28px rgba(0, 0, 0, 0.35);
+  }
+}
+
+:root[data-theme="dark"] {
+  --primary: #277af7;
+  --on-primary: #ffffff;
+  --primary-variant: #0073dd;
+  --primary-container: #338fe4;
+  --error: #f12522;
+  --error-container: #2e0603;
+  --on-error-container: #ffdad6;
+  --secondary: #505050;
+  --on-secondary: #ffffff;
+  --secondary-variant: #434343;
+  --on-secondary-container: #7c7c7c;
+  --on-secondary-variant: #d9d9d9;
+  --secondary-container: #434343;
+  --disabled-primary: #253e64;
+  --tertiary-container: #2b3b54;
+  --on-tertiary-container: #4788ff;
+  --background: #242424;
+  --on-background: rgba(255, 255, 255, 0.9);
+  --on-background-variant: #787e96;
+  --surface: #000000;
+  --on-surface: #f2f2f2;
+  --surface-variant: #242424;
+  --surface-container-high: #2d2d2d;
+  --outline: #404040;
+  --divider: #393939;
+  --window-dimming: rgba(0, 0, 0, 0.6);
+  --text-2: rgba(255, 255, 255, 0.8);
+  --text-3: rgba(255, 255, 255, 0.5);
+  --text-4: rgba(255, 255, 255, 0.4);
+  --rail-shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 10px 28px rgba(0, 0, 0, 0.35);
+}
+
+/* --- 动效 token（全部来自 Miuix 源码，不是手感猜的） ------------------------
+ *
+ * Compose 用的是弹簧，CSS 没有弹簧，只能**把弹簧采样成缓动曲线**。
+ * `folmeSpring`（anim/MiuixEasing.kt）给的是换算公式：`stiffness = (2π/response)²`，
+ * 所以 response 直接就是"特征时间"，用它可以估出采样区间：
+ *
+ *   spring(0.8, 600)   → response = 2π/√600 ≈ 0.256s   （按压反馈）
+ *   folmeSpring(0.88, 450) → 0.296s                     （弹窗）
+ *   spring(0.82, 362.5)    → 0.330s                     （菜单）
+ *
+ * 下面的 `--spring-*` 就是用各自 (damping, stiffness) 数值积分采样 100 段得到的
+ * 缓动；浏览器不支持 `linear()` 时自动回落到 `--ease-*` 里的贝塞尔近似。
+ */
+:root {
+  /* 时长 */
+  --dur-10: 10ms;      /* Checkbox/RadioButton 的描边起点 */
+  --dur-50: 50ms;      /* TopAppBar 滚动时的联动 */
+  --dur-100: 100ms;    /* 底栏图标按下时放大到 1.15 */
+  --dur-press: 260ms;  /* 按压反馈弹簧的特征时间（response） */
+  --dur-150: 150ms;    /* 退出、淡出、滑块末端 */
+  --dur-200: 200ms;    /* TabRow 指示条、菜单位移、popup 淡入 */
+  --dur-250: 250ms;    /* 菜单淡出 */
+  --dur-300: 300ms;    /* 勾选、导航栏、遮罩淡入、弹窗位移 */
+  --dur-260: 260ms;    /* 对话框内容位移 */
+
+  /* 缓动 */
+  --ease-fast-out-slow-in: cubic-bezier(0.4, 0, 0.2, 1);   /* FastOutSlowInEasing */
+  --ease-sin-out: cubic-bezier(0.36, 0.66, 0.04, 1);       /* SinOutEasing = sin(f·π/2) */
+  --ease-decelerate: cubic-bezier(0.24, 0.72, 0.16, 1);    /* DecelerateEasing(1.5) 近似 */
+
+  /* 弹簧（`linear()` 采样；不支持的浏览器用上面的贝塞尔兜底）。
+     数值由 `data/tmp_spring.py` 按 Compose 那个二阶系统积分生成：
+     x'' = -k(x-1) - 2ζ√k·x'，**一直积到稳定**再均匀重采样成 100 段。
+     （第一版我按 response 截断，对话框那条只走到 0.97，是错的。） */
+  --spring-press: linear(0, 0.0058, 0.0155, 0.0346, 0.0529, 0.0816, 0.1144, 0.1411, 0.1789, 0.2085, 0.2491, 0.2905, 0.3218, 0.3634, 0.3944, 0.4351, 0.475, 0.5041, 0.5418, 0.5691, 0.6043, 0.6378, 0.6618, 0.6924, 0.7142, 0.7417, 0.7675, 0.7857, 0.8085, 0.8245, 0.8445, 0.8629, 0.8758, 0.8917, 0.9027, 0.9162, 0.9285, 0.9369, 0.9472, 0.9543, 0.9628, 0.9704, 0.9755, 0.9816, 0.9857, 0.9906, 0.9949, 0.9977, 1.0009, 1.0031, 1.0055, 1.0075, 1.0088, 1.0102, 1.0111, 1.012, 1.0126, 1.013, 1.0133, 1.0134, 1.0135, 1.0134, 1.0132, 1.013, 1.0127, 1.0123, 1.0119, 1.0115, 1.011, 1.0106, 1.01, 1.0095, 1.0091, 1.0085, 1.0081, 1.0075, 1.007, 1.0066, 1.0061, 1.0057, 1.0053, 1.0048, 1.0045, 1.0041, 1.0038, 1.0034, 1.0031, 1.0028, 1.0025, 1.0023, 1.0021, 1.0018, 1.0016, 1.0014, 1.0013, 1.0011, 1.0009, 1.0008, 1.0007, 1.0006, 1.0005);
+  --spring-dialog: linear(0, 0.0043, 0.0183, 0.0352, 0.0621, 0.0873, 0.1153, 0.153, 0.1849, 0.2262, 0.2599, 0.2939, 0.3364, 0.3701, 0.4115, 0.4439, 0.4755, 0.5137, 0.5432, 0.5786, 0.6056, 0.6315, 0.6623, 0.6856, 0.7132, 0.7339, 0.7535, 0.7765, 0.7937, 0.8138, 0.8287, 0.8427, 0.8589, 0.871, 0.8848, 0.895, 0.9045, 0.9155, 0.9234, 0.9326, 0.9393, 0.9454, 0.9524, 0.9575, 0.9632, 0.9674, 0.9712, 0.9754, 0.9785, 0.9819, 0.9844, 0.9866, 0.989, 0.9908, 0.9927, 0.994, 0.9952, 0.9965, 0.9974, 0.9984, 0.9991, 0.9997, 1.0003, 1.0007, 1.0011, 1.0014, 1.0017, 1.0019, 1.002, 1.0021, 1.0022, 1.0023, 1.0023, 1.0023, 1.0023, 1.0022, 1.0022, 1.0021, 1.0021, 1.002, 1.0019, 1.0018, 1.0017, 1.0017, 1.0016, 1.0015, 1.0014, 1.0013, 1.0012, 1.0012, 1.0011, 1.001, 1.0009, 1.0009, 1.0008, 1.0008, 1.0007, 1.0006, 1.0006, 1.0005, 1.0005);
+  --spring-menu: linear(0, 0.0052, 0.0181, 0.0332, 0.0569, 0.0852, 0.1104, 0.1447, 0.1812, 0.2193, 0.2584, 0.2902, 0.3301, 0.3698, 0.4012, 0.4399, 0.4777, 0.5144, 0.5498, 0.5772, 0.6101, 0.6415, 0.6655, 0.6941, 0.7211, 0.7465, 0.7703, 0.7883, 0.8094, 0.829, 0.8436, 0.8607, 0.8765, 0.891, 0.9043, 0.9141, 0.9254, 0.9357, 0.9433, 0.9519, 0.9596, 0.9666, 0.9728, 0.9773, 0.9823, 0.9867, 0.9899, 0.9934, 0.9964, 0.9991, 1.0013, 1.0029, 1.0045, 1.0059, 1.0069, 1.0078, 1.0085, 1.0091, 1.0095, 1.0097, 1.0099, 1.0099, 1.0099, 1.0098, 1.0096, 1.0094, 1.0091, 1.0089, 1.0085, 1.0082, 1.0079, 1.0075, 1.0071, 1.0067, 1.0063, 1.006, 1.0056, 1.0052, 1.005, 1.0046, 1.0043, 1.0039, 1.0036, 1.0034, 1.0031, 1.0028, 1.0026, 1.0024, 1.0021, 1.0019, 1.0017, 1.0016, 1.0014, 1.0013, 1.0011, 1.001, 1.0009, 1.0008, 1.0007, 1.0006, 1.0005);
+}
+
+/* --- 尊重系统设置：不接受动效的人一切从简 ---------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* --- 基础 ------------------------------------------------------------------ */
+
+* { box-sizing: border-box; }
+
+/* --- 动效：按压、进入、切换 -------------------------------------------------
+ *
+ * 全部用上面那组来自 Miuix 源码的时长 / 缓动 / 弹簧。要点：
+ *
+ *   1. **按压反馈**是 Miuix 最有辨识度的一处：`SinkFeedback(sinkAmount = 0.94)`
+ *      + `spring(0.8, 600)`，按下缩到 0.94、松开用同一条弹簧弹回来（会轻微过冲）。
+ *      Button / Checkbox / RadioButton / Slider 都是这一套，所以这里所有可点元素统一。
+ *   2. **进入**用 `--dur-300` + SinOut（菜单是 200ms 淡入 / 150ms 淡出，Dialog 是
+ *      260ms 位移），所以换页签时内容淡入 + 轻微上移，卡片再接一个错开的延迟。
+ *   3. 悬停只做亮度变化、时长取 `--dur-150`，不抢按压那一下的戏。
+ */
+button, nav button, input, select, textarea, .tag {
+  transition: transform var(--dur-press) var(--spring-press),
+              background var(--dur-150) var(--ease-fast-out-slow-in),
+              color var(--dur-150) var(--ease-fast-out-slow-in),
+              box-shadow var(--dur-200) var(--ease-fast-out-slow-in);
+}
+button:active, nav button:active {
+  transform: scale(0.94);        /* SinkFeedback.sinkAmount */
+  transition-duration: 90ms;     /* 按下要快；弹回才走整条弹簧 */
+  transition-timing-function: var(--ease-fast-out-slow-in);
+}
+
+/* 页签指示：TabRow 的指示条是 `tween(200)` */
+nav button.on {
+  transition: background var(--dur-200) var(--ease-fast-out-slow-in),
+              color var(--dur-200) var(--ease-fast-out-slow-in);
+}
+
+/* 卡片：进入时淡入 + 上移；后面的依次晚一点（错开，别一起蹦出来） */
+section.card {
+  animation: card-in var(--dur-300) var(--ease-sin-out) backwards;
+  transition: background var(--dur-200) var(--ease-fast-out-slow-in);
+}
+section.card:nth-of-type(2) { animation-delay: 40ms; }
+section.card:nth-of-type(3) { animation-delay: 80ms; }
+section.card:nth-of-type(4) { animation-delay: 120ms; }
+section.card:nth-of-type(5) { animation-delay: 160ms; }
+
+@keyframes card-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* 换页签时整块重放一次进入（JS 加 `is-entering`，下一帧移除） */
+#view.is-entering { animation: view-in var(--dur-300) var(--ease-sin-out); }
+@keyframes view-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* 加载态：一条会呼吸的提示（Miuix 的 ProgressIndicator 是来回扫的条） */
+.loading {
+  color: var(--text-3);
+  animation: breathe 1.6s var(--ease-sin-out) infinite;
+}
+@keyframes breathe { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
+
+/* 表格行悬停 */
+tbody tr { transition: background var(--dur-150) var(--ease-fast-out-slow-in); }
+
+/* 错误条：从上方落下（它是"出事"的信号，值得一点注意） */
+.error { animation: drop-in var(--dur-250) var(--ease-decelerate); }
+@keyframes drop-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* --- 滚动条：整页不显示，滚动照常 ------------------------------------------
+ *
+ * 两个原因（2026-10-01 用户："能改掉webui里面的翻页滚动条吗，现在页面是相对居中
+ * 而非绝对居中"）：
+ *
+ *   1. Windows 上经典滚动条会占 ~15px，挤在右边，于是 `margin: 0 auto` 的居中
+ *      是"把内容 + 滚动条一起居中"——看起来就是往左偏了一点，不是绝对居中；
+ *   2. MIUI / HyperOS 的界面本来也几乎不露滚动条（`ListPopup`、`NavigationRail`
+ *      这些容器都是内容溢出就滑，没有可见滑块）。
+ *
+ * 注意保留滚动能力与键盘可达性：`scrollbar-width: none`（Firefox）与
+ * `::-webkit-scrollbar`（Chromium/WebKit）只隐藏**外观**，滚轮、触摸板、
+ * 键盘 PageUp/PageDown、Home/End 都照旧。内层容器（日志预览、代码块、表格）同样处理，
+ * 免得"页面没有滚动条、小块里却冒出一根"这种不一致。
+ */
+html, body {
+  /* 主题切换时颜色平滑过渡（取 Miuix 的 200ms 档） */
+  transition: background-color var(--dur-200) var(--ease-fast-out-slow-in),
+              color var(--dur-200) var(--ease-fast-out-slow-in);
+  scrollbar-width: none;        /* Firefox */
+  -ms-overflow-style: none;     /* 旧 Edge / IE */
+}
+::-webkit-scrollbar {           /* Chromium / WebKit */
+  width: 0;
+  height: 0;
+}
+* {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+body {
+  margin: 0;
+  background: var(--surface);        /* 浅色 #F7F7F7 / 深色 #000000 */
+  color: var(--on-background);
+  font: 17px/1.5 var(--font);       /* main = 17sp */
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 连续圆角（squircle）：Miuix 的招牌。CSS 支持时直接用，不支持就退回普通圆角。
+   源码里的参数是 tile = r × 1.1、控制柄比例 0.643（SquirclePath.kt）。 */
+@supports (corner-shape: squircle) {
+  section.card, .kv, .dialog, .card-inline, textarea, button, input, select {
+    corner-shape: squircle;
+  }
+}
+
+/* --- 布局：左侧侧边栏 + 右侧详情 --------------------------------------------
+ *
+ * 用户 2026-10-01："实际上这种宽屏就应该做左侧侧边栏+右侧详情，你去参考小米平板的
+ * 设置页"。所以不再是"顶部一排页签 + 居中单栏"，而是：
+ *
+ *   ┌──────────┬────────────────────────────┐
+ *   │ 侧栏 240 │ 内容（独立滚动）           │
+ *   │ 品牌     │ 大标题 + 副标题            │
+ *   │ 页签列表 │ 卡片                       │
+ *   │ 状态/令牌│                            │
+ *   └──────────┴────────────────────────────┘
+ *
+ * 侧栏自己也是一块"浮起来的表面"（圆角 16dp + 一层淡阴影），而不是给整页换底色——
+ * Miuix 的 surface 有语义，靠改底色做分区会把层级搞乱（这也是之前"按钮和背景
+ * 糊在一起"的同一个根因）。
+ *
+ * 尺寸取自 Miuix `NavigationRailDefaults`：ExpandedWidth 240dp、VerticalPadding 24dp、
+ * ExpandedItemHorizontalMargin 12dp、ExpandedItemContentHorizontalPadding 14dp、
+ * ExpandedItemCornerRadius 16dp。
+ */
+
+body {
+  display: flex;
+  align-items: flex-start;
+  gap: 18px;
+  padding: 18px;
+  min-height: 100vh;
+  box-sizing: border-box;
+}
+
+.rail {
+  position: sticky;
+  top: 18px;
+  flex: 0 0 240px;                  /* NavigationRailDefaults.ExpandedWidth */
+  max-height: calc(100vh - 36px);
+  display: flex;
+  flex-direction: column;
+  padding: 24px 0 16px;             /* VerticalPadding */
+  background: var(--surface-variant);
+  border-radius: var(--radius-card);
+  box-shadow: var(--rail-shadow);
+  box-sizing: border-box;
+}
+
+.rail-brand { padding: 0 20px 20px; }
+.rail-brand h1 {
+  margin: 0;
+  font-size: 24px;                  /* title3 */
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: 0.5px;
+}
+.rail-sub { margin: 2px 0 0; color: var(--text-3); font-size: 13px; }
+
+/* 页签列表：就是 NavigationRail 的条目——选中态是一枚 surfaceContainerHigh 药丸 */
+nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 12px;                  /* ExpandedItemHorizontalMargin */
+  overflow-y: auto;
+  flex: 1 1 auto;
+}
+/* --- 图标（图形来自 Miuix 官方图标库，见 app.js 的 ICONS） ------------------ */
+.icon {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  display: block;
+}
+/* 侧栏条目的图标：NavigationRailDefaults.IconSize = 28dp */
+nav button .icon { width: 22px; height: 22px; }
+
+.rail-label { flex: 1 1 auto; }
+
+nav button {
+  display: flex;
+  align-items: center;
+  gap: 10px;                        /* IconTextSpacing 是 4dp，文字前再留一点更透气 */
+  width: 100%;
+  text-align: left;
+  padding: 12px 14px;               /* ExpandedItemContent*Padding（简化成更贴文字的一档）*/
+  min-height: 0;                    /* 不受 ButtonDefaults.MinHeight 约束，条目要更矮 */
+  min-width: 0;
+  border-radius: var(--radius-tab);
+  background: transparent;
+  color: var(--on-surface);
+  font-size: 15px;
+  font-weight: 500;
+}
+nav button:hover { background: var(--secondary-container); }
+nav button.on { background: var(--surface-container-high); color: var(--on-surface); }
+nav button.on:hover { background: var(--surface-container-high); }
+
+.rail-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 20px 4px;
+  border-top: 1px solid var(--divider);
+  margin-top: 14px;
+}
+.rail-actions { display: flex; gap: 8px; }
+.rail-actions button { flex: 1 1 0; min-width: 0; }
+
+/* --- 右侧内容 -------------------------------------------------------------- */
+
+.content {
+  flex: 1 1 auto;
+  min-width: 0;                     /* 关键：不然里面的长表格会把侧栏挤扁/整页横向滚动 */
+  display: flex;
+  flex-direction: column;
+  color: var(--on-background);
+}
+
+.page-head { margin-bottom: 16px; }
+.page-head h2 {
+  margin: 0;
+  font-size: 32px;                  /* title1 */
+  font-weight: 700;
+  line-height: 1.2;
+}
+.page-nav {
+  margin: 6px 0 0;
+  color: var(--text-3);
+  font-size: 13px;
+  min-height: 20px;
+}
+
+.bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+
+.badge {
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 12px;
+  border-radius: var(--radius-pill);
+  background: var(--secondary-container);
+  color: var(--on-secondary-container, var(--text-3));
+  font-size: 13.5px;                /* body2 */
+}
+.badge.ok { background: rgba(76, 195, 138, 0.18); color: var(--good); }
+.badge.bad { background: var(--error-container); color: var(--error); }
+.badge.warn { background: rgba(242, 163, 60, 0.18); color: var(--warn); }
+.badge.dim { background: var(--secondary-container); color: var(--text-3); }
+
+.token {
+  display: flex; gap: 8px; align-items: center;
+  color: var(--text-4); font-size: 13px;
+}
+.token input { flex: 1 1 auto; min-width: 0; padding: 8px 12px; font-size: 13.5px; min-height: 36px; }
+.token button { flex: 0 0 auto; padding: 8px 12px; min-height: 36px; min-width: 0; font-size: 13.5px; }
+
+input[type=password], input[type=text], input[type=number], textarea, select {
+  background: var(--secondary-variant);
+  color: var(--on-secondary-variant);
+  border: none;
+  border-radius: var(--radius-control);
+  padding: 10px 16px;
+  font: inherit;
+  font-size: 15px;
+  min-height: var(--min-control-h);
+  min-width: 0;
+  transition: background 0.18s ease, box-shadow 0.18s ease;
+}
+input[type=password]:focus, input[type=text]:focus, input[type=number]:focus,
+textarea:focus, select:focus {
+  outline: none;
+  background: var(--secondary);
+  box-shadow: 0 0 0 2px var(--tertiary-container);
+}
+textarea {
+  border-radius: var(--radius-control);
+  width: 100%;
+  min-height: 96px;
+  padding: 12px 14px;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.7;
+  resize: vertical;
+}
+select {
+  appearance: none;
+  padding-right: 36px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-3) 50%),
+                    linear-gradient(135deg, var(--text-3) 50%, transparent 50%);
+  background-position: calc(100% - 19px) 50%, calc(100% - 14px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+
+button {
+  min-height: var(--min-control-h);
+  min-width: var(--min-control-w);
+  padding: var(--pad-control);
+  /* 默认按钮 = Miuix 的 `secondary`（浅色 #E6E6E6 / 深色 #505050），
+     悬停 / 按下用 `secondaryVariant`（浅色 #F0F0F0 / 深色 #434343）。
+     **不能像之前那样反过来写**：原来默认是 secondaryVariant、悬停是 secondary，
+     与源码相反，而且这两个值都太接近卡片底色，按钮会糊进卡片里。
+     再加一圈 outline 描边，让它在同色系表面上也有边界。 */
+  background: var(--secondary);
+  color: var(--on-secondary-variant);
+  border: 1px solid var(--outline);
+  border-radius: var(--radius-control);
+  font: inherit;
+  font-size: 16px;                  /* button = 16sp */
+  cursor: pointer;
+  transition: transform 0.12s ease, background 0.18s ease, opacity 0.18s ease;
+}
+button:hover { background: var(--secondary-variant); }
+button:active { transform: scale(0.97); }
+/* 强调按钮用 primary（Miuix 里 primary 给 Switch/Slider/强调按钮），
+   `buttonColorsPrimary` 是 primary + onPrimary，所以这里也去掉描边。 */
+button.primary {
+  background: var(--primary); color: var(--on-primary); border-color: transparent;
+}
+button.primary:hover { background: var(--primary-container); border-color: transparent; }
+button.danger { background: var(--error-container); color: var(--error); border-color: transparent; }
+button.danger:hover { background: var(--error); color: var(--on-primary); }
+button:disabled { opacity: 0.38; cursor: not-allowed; transform: none; }
+
+/* --- 偏好行（照小米设置页：BasicComponent + *Preference） ------------------
+ *
+ * 关键认识（2026-10-01 用户："你去看看小米的设置页好不好"）：**设置页不是表格**。
+ * 它的结构是"偏好行"——每行左边是标题 + 下方灰色说明，右边是控件；若干行组成一张
+ * 卡片，卡片之间用小号灰标题分组。规格全部来自 Miuix 源码：
+ *
+ *   BasicComponent.kt   heightIn(min = 56.dp)、insideMargin = PaddingValues(16.dp)
+ *                       标题 headline1 / Medium，说明 body2 / onSurfaceVariantSummary
+ *                       控件在右端，且**硬上限 60% 宽**（endHardCap）
+ *   SmallTitle.kt       InsideMargin = PaddingValues(28.dp, 8.dp)、subtitle 字号、
+ *                       颜色 onBackgroundVariant
+ *   Card.kt             CornerRadius = 16dp
+ *   Switch.kt           轨道 49×28dp、滑块 20dp、选中滑块 x=25dp / 未选中 4dp、
+ *                       走 `spring(0.8, 400)`；选中轨道 primary、未选中 secondary
+ */
+
+.pref-group { margin-bottom: 6px; }
+.pref-group-title {
+  /* SmallTitle：左右 28dp、上下 8dp，颜色 onBackgroundVariant */
+  padding: 8px 28px;
+  color: var(--on-background-variant);
+  font-size: 14px;                  /* subtitle */
+}
+
+.pref-list {
+  /* Card：圆角 16dp，卡片之间留 12dp */
+  background: var(--surface-variant);
+  border-radius: var(--radius-card);
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+/* 分组卡片里的空状态 */
+.pref-empty { padding: 16px; margin: 0; }
+.pref-add-group { margin-bottom: 12px; }
+
+.pref {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;                 /* BasicComponent.heightIn(min = 56.dp) */
+  padding: 10px 16px;               /* BasicComponentDefaults.InsideMargin */
+}
+.pref + .pref { border-top: 1px solid var(--divider); }   /* 行间分隔线 */
+/* 行首图标：跟侧栏同一套图形（Miuix 官方），用次级色免得跟标题抢 */
+.pref > .icon.pref-icon {
+  width: 22px;
+  height: 22px;
+  color: var(--text-3);
+}
+.pref-main { flex: 1 1 auto; min-width: 0; }
+.pref-title {
+  color: var(--on-surface);
+  font-size: 17px;                  /* headline1 */
+  font-weight: 500;                 /* FontWeight.Medium */
+  line-height: 1.35;
+}
+.pref-summary {
+  margin-top: 2px;
+  color: var(--text-3);             /* onSurfaceVariantSummary */
+  font-size: 14px;                  /* body2 */
+  line-height: 1.45;
+}
+.pref-end {
+  /* 控件在右端，**宽了要收窄，不折行**（BasicComponent 给的是 maxWidth 上限，
+     不是把内容挤到下边） */
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 52%;
+}
+.pref-end select, .pref-end input[type=text], .pref-end input[type=password] {
+  max-width: 100%;
+}
+/* 值是一段文字（没有控件可放）时，右端用次级文字，不要跟标题抢 */
+.pref-value {
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: 13.5px;
+  overflow-wrap: anywhere;
+}
+/* 面板覆盖过的项：标题后面一个小蓝点（比在左边挂一道蓝条轻得多） */.pref-dot {
+  display: inline-block;
+  width: 6px; height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--primary);
+  vertical-align: 2px;
+}
+/* "清除这一项"：小一号的次要按钮，别跟主控件抢注意力 */
+.pref-clear {
+  flex: 0 0 auto;
+  min-width: 0;
+  min-height: 32px;
+  padding: 6px 10px;
+  font-size: 13px;
+  border-radius: 10px;
+}
+.pref-end input.is-clearing { opacity: 0.5; text-decoration: line-through; }
+
+/* --- Switch（Miuix basic/Switch.kt：49×28 轨道 + 20dp 滑块） ---------------
+ *
+ * 用 `<input type=checkbox class=switch>`，滑块走 `::before`——不用额外加 DOM。
+ * 这就是小米设置页里那个开关的样子，比默认的 checkbox 观感对得多。
+ */
+input.switch {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  flex: 0 0 auto;
+  width: 49px;
+  height: 28px;
+  min-width: 49px;
+  min-height: 28px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: var(--secondary);      /* uncheckedTrackColor */
+  cursor: pointer;
+  transition: background var(--dur-200) var(--ease-fast-out-slow-in);
+}
+input.switch::before {
+  content: "";
+  position: absolute;
+  top: 4px;
+  left: 4px;                         /* unchecked thumb x = 4.dp */
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--on-secondary);   /* uncheckedThumbColor */
+  /* 滑块滑动走 `spring(0.8, 400)`（Switch.kt 里那条） */
+  transition: transform var(--dur-press) var(--spring-press),
+              background var(--dur-200) var(--ease-fast-out-slow-in);
+}
+input.switch:checked {
+  background: var(--primary);        /* checkedTrackColor */
+}
+input.switch:checked::before {
+  transform: translateX(21px);       /* 25.dp - 4.dp */
+  background: var(--on-primary);     /* checkedThumbColor */
+}
+input.switch:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+/* "改了要重启才生效"的开关：主色降饱和，提醒它还没真正生效 */
+input.switch.is-pending { background: var(--disabled-primary, #c2d9ff); }
+input.switch.is-pending::before { background: var(--on-secondary); }
+/* 点一下整行也能切（BasicComponent 的 onClick 就是这个语义） */
+.pref:has(input.switch) { cursor: pointer; }
+
+/* --- 记忆页的状态筛选（和页签同一套观感，但小一号） -------------------------
+ *
+ * 页签本身的样式在上面布局那一段（侧栏里的 NavigationRail 条目）。
+ * 这两个按钮是**页内**的次级筛选，所以选中态用主色药丸，跟侧栏的
+ * surfaceContainerHigh 药丸区分开——不然"我在哪一页"和"我在看哪一类"会分不清。
+ */
+.mem-status { padding: 7px 15px; font-size: 13.5px; border-radius: var(--radius-tab); }
+.mem-status.on { background: var(--primary); color: var(--on-primary); }
+
+/* --- 主体与卡片（CardDefaults.CornerRadius = 16dp） ------------------------- */
+
+section.card {
+  /* Miuix 里 `background` 是 #FFFFFF、`surface` 是 #F7F7F7，只差一档。
+     这一档放在网页上"卡片"就看不出来了，所以按它的层级语义把两者**换过来**：
+     页面用 surface（L7）、卡片用 surfaceVariant（白）。深色下这两个值本来就是
+     一致的，所以只影响浅色，观感跟官方一致（卡片浮在浅灰底上）。 */
+  background: var(--surface-variant);
+  border-radius: var(--radius-card);
+  padding: 18px 20px;
+  margin-bottom: 14px;
+}
+section.card h2 {
+  margin: 0 0 12px;
+  font-size: 18px;                  /* title5 档（在 title4 与 subtitle 之间） */
+  font-weight: 600;
+  color: var(--on-surface);
+}
+
+.grid {
+  /* 原来是 `auto-fill minmax(180px, 1fr)`：列数由宽度自己算，于是 9 格排成 5+4，
+   * 第二行右边空一截、最后那个格子孤零零挂着（截图核对时看到的）。
+   * 固定 3 列后 9 格 = 3×3、6 格 = 3×2，都排满；格子也宽了，号码/时间不容易折行。
+   * 窄屏在下面的媒体查询里降到 2 列。 */
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.kv {
+  background: var(--surface-container-high);   /* #E8E8E8，比卡片深一档 */
+  border-radius: var(--radius-control);
+  padding: 11px 14px;
+}
+/* 内容需要整行铺开的那一格（比如"启用群"那一串号码） */
+.kv.span-all { grid-column: 1 / -1; }
+.kv .k { color: var(--text-3); font-size: 12px; margin-bottom: 2px; }
+.kv .v { font-size: 16px; font-weight: 500; overflow-wrap: anywhere; }
+
+/* --- 表格（按 Miuix 的 dividerLine） --------------------------------------- */
+
+/* `table-layout: fixed` 是这里的关键：默认 auto 会让"参数"这类长内容把列越撑越宽，
+ * 最终**顶出卡片右边界被裁掉**（实测"操作记录"页就是：`{"confirm":true,...}` 那一段
+ * 直接溢到卡片外面看不见）。fixed 让所有列严格待在 100% 宽度里，靠下面的换行规则
+ * 决定内容怎么折。
+ *
+ * 代价：auto 模式会按内容分配列宽，fixed 是等分。所以需要宽窄不同的表格用
+ * `col` 显式给宽度（见 .cols-time / .cols-json 等）。
+ */
+table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 15px; }
+th, td {
+  text-align: left;
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--divider);
+  vertical-align: top;
+  /* 长段落要在列内折行；`break-word` 只在**实在放不下**时才断，不会把
+     "800000002" 这种正常词从中间劈开（原来 `break-all` 就会那样，很难读）。 */
+  overflow-wrap: break-word;
+}
+th {
+  color: var(--text-3);
+  font-weight: 500;
+  font-size: 13px;                  /* footnote1 */
+  /* 中文表头（"关于谁" / "版本"）在窄列里会被折成两行，看着像排版坏了 */
+  white-space: nowrap;
+}
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:hover td { background: var(--secondary-variant); }
+td.mono, .mono { font-family: var(--mono); font-size: 12.5px; }
+/* 数字/时间/号码这类**不该折行**的单元格：折了就读不出来了 */
+td.nowrap, th.nowrap { white-space: nowrap; }
+/* 长 JSON、长名单：允许在任意位置断开，否则会把列撑爆 */
+td.wrap-anywhere { overflow-wrap: anywhere; }
+
+
+/* --- 标签 / 提示 / 错误 ----------------------------------------------------- */
+
+.tag {
+  display: inline-block;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 8px;               /* RichTooltipDefaults.ActionCornerRadius */
+  background: var(--secondary-container);
+  color: var(--text-3);
+}
+.tag.live { background: rgba(76, 195, 138, 0.18); color: var(--good); }
+.tag.restart { background: rgba(242, 163, 60, 0.18); color: var(--warn); }
+
+.hint { color: var(--text-3); font-size: 13px; }
+.error {
+  color: var(--error);
+  background: var(--error-container);
+  padding: 12px 16px;
+  border-radius: var(--radius-control);
+  white-space: pre-wrap;
+  font-size: 14px;
+}
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.preview {
+  white-space: pre-wrap;
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-family: var(--mono);
+  background: var(--secondary-variant);
+  border-radius: var(--radius-control);
+  padding: 10px 12px;
+  margin-top: 6px;
+  max-height: 200px;
+  overflow: auto;
+  line-height: 1.6;
+}
+.card-inline {
+  background: var(--secondary-variant);
+  border-radius: var(--radius-control);
+  padding: 14px 16px;
+  margin-bottom: 10px;
+}
+ul.picks { list-style: none; margin: 0; padding: 0; }
+ul.picks li { padding: 10px 2px; border-bottom: 1px solid var(--divider); }
+ul.picks li:last-child { border-bottom: none; }
+ul.picks label { display: block; }
+ul.picks input[type=checkbox] {
+  width: 18px; height: 18px; margin-right: 8px;
+  accent-color: var(--primary); vertical-align: -3px;
+}
+
+/* 表单里那些"至少要有多宽"的输入（原来写成行内 style，现在收到这里） */
+.wide { min-width: 220px; }
+.wider { min-width: 240px; }
+textarea.tall { min-height: 260px; }
+
+/* --- 各表的列宽（`table-layout: fixed` 之后必须显式给，否则等分很难看 -------
+ *
+ * 规则：**列宽只写在这里**。表格那边用 `class="cols-xxx"` 认领一组宽度，
+ * `col` 元素由 CSS 的 `nth-child` 控制——不用在 JS 里再写一遍内联 style
+ * （两处都写就是两个真相来源，改一处忘一处）。
+ *
+ * 为什么必须显式给：`fixed` 模式下浏览器按等分排，而面板里各列需要的最窄宽度
+ * 差得很远（"时间"要 130px 不折行、"含义"是一整句解释、"改成"只放个下拉）。
+ */
+
+/* 调参页：键窄、含义宽（一整句解释）、当前窄、改成窄（只放个下拉） */
+.cols-settings col:nth-child(1) { width: 24%; }
+.cols-settings col:nth-child(2) { width: 44%; }
+.cols-settings col:nth-child(3) { width: 14%; }
+.cols-settings col:nth-child(4) { width: 18%; }
+
+/* 群管理页三张表 */
+.cols-groups col:nth-child(1) { width: 40%; }
+.cols-groups col:nth-child(2) { width: 24%; }
+.cols-groups col:nth-child(3) { width: 36%; }
+.cols-join col:nth-child(1) { width: 14%; }
+.cols-join col:nth-child(2) { width: 15%; }
+.cols-join col:nth-child(3) { width: 18%; }
+.cols-join col:nth-child(4) { width: 29%; }
+.cols-join col:nth-child(5) { width: 24%; }
+.cols-actions col:nth-child(1) { width: 11%; }
+.cols-actions col:nth-child(2) { width: 15%; }
+.cols-actions col:nth-child(3) { width: 12%; }
+.cols-actions col:nth-child(4) { width: 18%; }
+.cols-actions col:nth-child(5) { width: 11%; }
+.cols-actions col:nth-child(6) { width: 11%; }
+.cols-actions col:nth-child(7) { width: 22%; }
+
+/* 动作页：会话、关系两轴 */
+.cols-sessions col:nth-child(1) { width: 26%; }
+.cols-sessions col:nth-child(2) { width: 12%; }
+.cols-sessions col:nth-child(3) { width: 10%; }
+.cols-sessions col:nth-child(4) { width: 36%; }
+.cols-sessions col:nth-child(5) { width: 16%; }
+
+/* 记忆页三张表：归档那张的"内容"要最宽 */
+.cols-records col:nth-child(1) { width: 8%; }
+.cols-records col:nth-child(2) { width: 13%; }
+.cols-records col:nth-child(3) { width: 10%; }
+.cols-records col:nth-child(4) { width: 15%; }
+.cols-records col:nth-child(5) { width: 28%; }
+.cols-records col:nth-child(6) { width: 14%; }
+.cols-records col:nth-child(7) { width: 12%; }
+.cols-archive col:nth-child(1) { width: 14%; }
+.cols-archive col:nth-child(2) { width: 18%; }
+.cols-archive col:nth-child(3) { width: 14%; }
+.cols-archive col:nth-child(4) { width: 14%; }
+.cols-archive col:nth-child(5) { width: 40%; }
+.cols-memory col:nth-child(1) { width: 16%; }
+.cols-memory col:nth-child(2) { width: 56%; }
+.cols-memory col:nth-child(3) { width: 14%; }
+.cols-memory col:nth-child(4) { width: 14%; }
+
+/* 操作记录：一条一块（不用表格，六列在 1180px 里平摊必然撑爆） */
+.audit-item { padding: 12px 14px; }
+.audit-head {
+  display: flex; flex-wrap: wrap; gap: 8px 12px;
+  align-items: center; margin-bottom: 8px;
+}
+.audit-item .preview { margin-top: 0; max-height: 120px; }
+
+/* 调参页：面板覆盖过的项在左边留一道主色条，一眼看得出"这几个是面板改的" */
+.cols-settings tbody tr.overridden td:first-child { box-shadow: inset 3px 0 0 var(--primary); }
+/* 键名和"立即生效"标签分两行：并排会把 `compaction_enabled` 这种长键名挤断 */
+.cols-settings .set-key { display: block; overflow-wrap: anywhere; }
+.cols-settings .tag { margin-top: 4px; font-size: 11.5px; padding: 2px 8px; }
+
+/* 一串号码/标签：**在号码之间**折行，不在号码内部断。 */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chips .chip {
+  background: var(--secondary-container);
+  border-radius: 8px;
+  padding: 3px 9px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+
+/* 表格行里的小输入框（动作表单） */
+td input[type=text], td input[type=number], td select {
+  padding: 8px 12px;
+  min-height: 36px;
+  min-width: 90px;
+  font-size: 13.5px;
+  border-radius: 12px;
+}
+td button { padding: 8px 16px; min-height: 36px; min-width: 0; font-size: 14px; border-radius: 12px; }
+
+.bar-chart { display: flex; align-items: center; gap: 8px; }
+.bar-chart .fill { height: 8px; background: var(--primary); border-radius: 4px; }
+
+footer {
+  padding: 14px 2px 8px;
+  color: var(--text-4);
+  font-size: 12.5px;
+}
+code {
+  background: var(--secondary-container);
+  padding: 2px 7px;
+  border-radius: 7px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+/* --- Markdown 渲染（知识库）--------------------------------------------------
+ * 知识库的块本来就是 markdown；`.preview` 是给日志用的等宽块，不能拿来渲染正文。
+ */
+.md { font-size: 14px; line-height: 1.7; color: var(--on-surface); }
+.md p { margin: 0 0 8px; }
+.md p:last-child { margin-bottom: 0; }
+.md .md-h { margin: 12px 0 6px; font-size: 15px; font-weight: 600; }
+.md ul, .md ol { margin: 0 0 8px; padding-left: 22px; }
+.md li { margin: 2px 0; }
+.md blockquote {
+  margin: 8px 0; padding: 4px 12px;
+  border-left: 3px solid var(--outline);
+  color: var(--text-2);
+}
+.md hr { border: none; border-top: 1px solid var(--divider); margin: 12px 0; }
+.md code {
+  font-family: var(--mono); font-size: 12.5px;
+  background: var(--surface-container-high); padding: 1px 6px; border-radius: 6px;
+}
+.md .md-code {
+  background: var(--surface-container-high);
+  border-radius: var(--radius-inner);
+  padding: 10px 12px; margin: 8px 0;
+  overflow-x: auto; font-family: var(--mono); font-size: 12.5px;
+}
+.md-table {
+  width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 13px;
+}
+.md-table th, .md-table td {
+  border: 1px solid var(--divider);
+  padding: 6px 10px; vertical-align: top; text-align: left;
+}
+.md-table th { background: var(--surface-container-high); font-weight: 600; }
+/* 浏览列表里只给个大概，不撑爆表格 */
+.md.clamp { max-height: 180px; overflow: hidden; }
+.md.clamp .md-table { font-size: 12.5px; }
+
+/* --- 确认弹窗（用 windowDimming，圆角与卡片一致） -------------------------- */
+
+.scrim {
+  position: fixed; inset: 0; z-index: 50;
+  background: var(--window-dimming);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  animation: scrim-in var(--dur-300) var(--ease-sin-out);   /* tween(300, SinOutEasing) */
+}
+.dialog {
+  background: var(--surface-variant);
+  border-radius: 20px;
+  padding: 24px 24px 16px;
+  width: min(420px, 100%);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+  /* folmeSpring(0.88, 450)：淡入 + 从 0.9 放大 + 轻微下移，带一点回弹 */
+  animation: dialog-in var(--dur-300) var(--spring-dialog);
+}
+.dialog h3 { margin: 0 0 8px; font-size: 18px; font-weight: 600; }
+.dialog p { margin: 0 0 18px; color: var(--text-2); font-size: 14px; white-space: pre-wrap; }
+.dialog .actions { display: flex; justify-content: flex-end; gap: 10px; }
+
+@keyframes scrim-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes dialog-in {
+  from { opacity: 0; transform: scale(0.9) translateY(-8px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* 小块浮起：用 ListPopup 那条 spring(0.82, 362.5)——它本就是"菜单/弹层"的曲线。
+   直接给 `.preview` 这种展开式内容用，展开时有点回弹但不夸张。 */
+.card-inline, .preview {
+  animation: layer-in var(--dur-200) var(--spring-menu);
+}
+@keyframes layer-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.995); }
+  to { opacity: 1; transform: none; }
+}
+
+/* --- 窄屏：侧栏收成顶部一条横向页签 ----------------------------------------
+ *
+ * 240px 的侧栏在窄屏（手机 / 分屏）上会把详情挤没，所以这一档把侧栏横过来：
+ * 品牌一行、页签一行横滚、状态与令牌收在下面。仍然不引入图标资源。
+ */
+@media (max-width: 900px) {
+  body {
+    flex-direction: column;
+    padding: 12px;
+    gap: 12px;
+  }
+  .rail {
+    position: static;
+    flex: 0 0 auto;
+    width: 100%;
+    max-height: none;
+    padding: 16px 0 12px;
+  }
+  .rail-brand { padding: 0 16px 12px; }
+  .rail-brand h1 { font-size: 20px; }
+  nav {
+    flex-direction: row;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding: 0 12px 4px;
+    gap: 6px;
+  }
+  nav button {
+    width: auto;
+    flex: 0 0 auto;
+    white-space: nowrap;
+    padding: 9px 14px;
+  }
+  .rail-foot {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px 0;
+  }
+  .token { flex: 1 1 200px; }
+  .rail-actions { flex: 0 0 auto; }
+  .page-head h2 { font-size: 26px; }
+  section.card { padding: 16px; }
+  .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

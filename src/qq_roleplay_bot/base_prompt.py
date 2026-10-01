@@ -39,7 +39,7 @@
   最后才是生成回复），因为群聊注意力判定直接读它。
 """
 
-BASE_PROMPT = """你是一个住在群聊里的角色。这一份是**人格模板**——把它换成你的人设再跑。
+_BASE_PROMPT_TEMPLATE = """你是一个住在群聊里的角色。这一份是**人格模板**——把它换成你的人设再跑。
 
 ## 你是谁
 
@@ -192,3 +192,42 @@ BASE_PROMPT = """你是一个住在群聊里的角色。这一份是**人格模�
 
 篇幅 1000~1400 字。
 """
+
+
+def _load_base_prompt() -> str:
+    """人设正文优先，模板兜底。
+
+    顺序：
+
+      1. `QQBOT_BASE_PROMPT_FILE` 指到的文件（部署时把正文放仓库外，就指它）；
+      2. `data/private_docs/base_prompt.REAL.py`（本地副本，`data/` 不进仓库）；
+      3. 上面那份模板。
+
+    第 2 条读的是**一个完整的模块**（里面有一个赋给 `BASE_PROMPT` 的三引号字符串），
+    不是裸文本——这样它跟本文件格式一致，复制粘贴就能用。读失败一律回落到模板：
+    人格链路绝不能因为一个文件不在就断。
+    """
+
+    import os
+    import re
+    from pathlib import Path
+
+    candidates: list[Path] = []
+    explicit = os.environ.get("QQBOT_BASE_PROMPT_FILE", "").strip()
+    if explicit:
+        candidates.append(Path(explicit))
+    candidates.append(Path(__file__).resolve().parents[2] / "data" / "private_docs"
+                      / "base_prompt.REAL.py")
+    for path in candidates:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (FileNotFoundError, OSError):
+            continue
+        found = re.search(r'BASE_PROMPT\s*=\s*"""(.*?)"""', text, re.S)
+        if found and found.group(1).strip():
+            return found.group(1)
+    return _BASE_PROMPT_TEMPLATE
+
+
+#: 实际用的那份（模块加载时定一次——它在可信 system 前缀里，内容不能每轮都变）。
+BASE_PROMPT = _load_base_prompt()

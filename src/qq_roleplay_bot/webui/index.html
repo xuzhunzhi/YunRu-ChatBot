@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>云茹 · 控制面板</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<!-- 宽屏布局照小米平板的设置页：**左边侧栏、右边详情**（用户 2026-10-01：
+     "实际上这种宽屏就应该做左侧侧边栏+右侧详情，你去参考小米平板的设置页"）。
+     侧栏那一套尺寸取自 Miuix 的 NavigationRail（ExpandedWidth 240dp、
+     选中药丸圆角 16dp、条目左右外边距 12dp、内边距 14dp）。 -->
+<aside class="rail">
+  <div class="rail-brand">
+    <h1>云茹</h1>
+    <p class="rail-sub">控制面板</p>
+  </div>
+  <nav id="tabs" aria-label="页面导航"></nav>
+  <div class="rail-foot">
+    <span id="health" class="badge">连接中…</span>
+    <span id="source" class="badge dim"></span>
+    <label class="token">
+      <input id="token" type="password" placeholder="面板令牌" autocomplete="off">
+      <button id="save-token" type="button">记住</button>
+    </label>
+    <div class="rail-actions">
+      <button id="refresh" type="button">刷新</button>
+      <button id="theme" class="icon-btn" type="button" title="切换浅色 / 深色">深色</button>
+    </div>
+  </div>
+</aside>
+
+<main class="content">
+  <header class="page-head">
+    <h2 id="page-title">总览</h2>
+    <p id="page-nav" class="page-nav"></p>
+  </header>
+  <p id="error" class="error" hidden></p>
+  <section id="view">加载中…</section>
+  <footer>
+    <span>数据来源与口径：运行中取活快照，不在运行取文件；用量与 <code>/super apicheck</code> 同一账本。</span>
+  </footer>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>

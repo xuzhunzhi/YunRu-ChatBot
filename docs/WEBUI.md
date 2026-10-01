@@ -49,9 +49,9 @@ DialogueDecision  ──> OneBot send_msg
 | `capabilities.py` / `conversation_context.py` | 能力闸门与由 SnowLuma 提供背景时的受限读取 |
 | `typing_sim.py` | 出站拟人化节奏（分段与字符数停顿） |
 | `feature_log.py` | 按功能分开的输入输出日志（判定/回复/记忆/规则/汇报），各留最近 1000 次 |
-| `mail_client.py` ※ | Agent Mail CLI 的封装：固定子命令白名单、正文走文件、argv 防注入、失败分类（Stage 4） |
-| `mail_state.py` ※ | 邮箱侧状态：上次汇报时间、当天重试次数、送信流水（`data/mail_state.json`） |
-| `daily_report.py` ※ | 每日汇报：素材（只有计数与编号）、写信 prompt、解析、发送（Stage 4） |
+| `mail_client.py` | Agent Mail CLI 的封装：固定子命令白名单、正文走文件、argv 防注入、失败分类（Stage 4） |
+| `mail_state.py` | 邮箱侧状态：上次汇报时间、当天重试次数、送信流水（`data/mail_state.json`） |
+| `daily_report.py` | 每日汇报：素材（只有计数与编号）、写信 prompt、解析、发送（Stage 4） |
 | `model_trace.py` | **旧**模型 I/O 追踪（单文件、30 条、默认关闭）；引擎已改用 `feature_log.py`，此模块待删 |
 | `control.py` | 脱敏运行快照与控制协议（不是认证层） |
 | `metrics.py` | 脱敏运行指标：固定类别计数与耗时滑窗 |
