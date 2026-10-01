@@ -167,90 +167,72 @@ classDef host fill:#fce9d2,stroke:#96540f,color:#321
 | `memory_store` | `memory_config` |
 | `prompt_library` | `memory_maintenance_agent` |
 
-## 三、整体：谁依赖谁（全部模块）
+## 三、按功能的分解图
 
-> 这张图密（59 个节点），只用来看"有没有不该有的边"（比如 Stage 3 指向插件的）。
+## 入口与装配（谁把东西接起来）
 
 ```mermaid
 flowchart TD
-    subgraph bottom["底层：服务与这台机器"]
-        n_api_usage["api_usage"]
-        n_background_plugins["background_plugins"]
-        n_capabilities["capabilities"]
-        n_command_plugins["command_plugins"]
-        n_control["control"]
-        n_control_audit["control_audit"]
-        n_dev_config["dev_config"]
-        n_feature_log["feature_log"]
-        n_llm_client["llm_client"]
-        n_media_segments["media_segments"]
-        n_metrics["metrics"]
-        n_model_trace["model_trace"]
-        n_onebot_client["onebot_client"]
-        n_onebot_ws["onebot_ws"]
-        n_operator_config["operator_config"]
-        n_outbox["outbox"]
-        n_provider_registry["provider_registry"]
-        n_runtime["runtime"]
-        n_runtime_diagnostics["runtime_diagnostics"]
-        n_runtime_flags["runtime_flags"]
-        n_snapshots["snapshots"]
-        n_state_store["state_store"]
-        n_transport["transport"]
-    end
-    subgraph stage3["Stage 3：对话 / 记忆 / 防护 / 直接管它们的命令"]
-        n_admin_control["admin_control"]
-        n_attention["attention"]
-        n_balance_client["balance_client"]
-        n_base_prompt["base_prompt"]
-        n_builtin_balance_command["builtin_balance_command"]
-        n_builtin_commands["builtin_commands"]
-        n_conversation_context["conversation_context"]
-        n_dialogue_compaction["dialogue_compaction"]
-        n_dialogue_judge["dialogue_judge"]
-        n_extensions["extensions"]
-        n_focus["focus"]
-        n_memory_config["memory_config"]
-        n_memory_filters["memory_filters"]
-        n_memory_inbox["memory_inbox"]
-        n_memory_maintenance_agent["memory_maintenance_agent"]
-        n_memory_model["memory_model"]
-        n_memory_ops["memory_ops"]
-        n_memory_service["memory_service"]
-        n_memory_store["memory_store"]
-        n_memory_view["memory_view"]
-        n_prompt_guard["prompt_guard"]
-        n_security["security"]
-        n_stage3_main["stage3_main"]
-        n_stage3_runtime["stage3_runtime"]
-        n_style_reviewer["style_reviewer"]
-        n_trigger["trigger"]
-    end
-    subgraph host["宿主与可插能力"]
-        n__host["_host"]
-        n__host_adapters["_host_adapters"]
-        n_embeddings["embeddings"]
-        n_help_card["help_card"]
-        n_knowledge_base["knowledge_base"]
-        n_knowledge_operator["knowledge_operator"]
-        n_prompt_library["prompt_library"]
-        n_qq_roles["qq_roles"]
-        n_typing_sim["typing_sim"]
-        n_vision["vision"]
-    end
+    n__host["_host"]
+    n__host_adapters["_host_adapters"]
+    n_background_plugins["background_plugins"]
+    n_capabilities["capabilities"]
+    n_command_plugins["command_plugins"]
+    n_onebot_client["onebot_client"]
+    n_onebot_ws["onebot_ws"]
+    n_outbox["outbox"]
+    n_runtime["runtime"]
+    n_stage3_main["stage3_main"]
+    n_state_store["state_store"]
+    n_transport["transport"]
 
     n__host_adapters --> n__host
-    n_attention --> n_transport
-    n_builtin_balance_command --> n_balance_client
-    n_builtin_balance_command --> n_transport
-    n_builtin_commands --> n_transport
     n_command_plugins --> n_transport
-    n_control --> n_snapshots
-    n_conversation_context --> n_capabilities
-    n_conversation_context --> n_media_segments
-    n_conversation_context --> n_onebot_client
+    n_onebot_client --> n_onebot_ws
+    n_onebot_client --> n_transport
+    n_onebot_ws --> n_transport
+    n_outbox --> n_transport
+    n_runtime --> n__host_adapters
+    n_runtime --> n_background_plugins
+    n_runtime --> n_capabilities
+    n_runtime --> n_onebot_client
+    n_runtime --> n_outbox
+    n_runtime --> n_stage3_main
+    n_runtime --> n_state_store
+    n_runtime --> n_transport
+    n_stage3_main --> n__host
+    n_stage3_main --> n_onebot_ws
+    n_stage3_main --> n_transport
+
+classDef bottom fill:#dbe9f8,stroke:#1f5691,color:#123
+classDef stage3 fill:#def2de,stroke:#246a34,color:#132
+classDef host fill:#fce9d2,stroke:#96540f,color:#321
+```
+
+| 模块 | 函数内 import（可插：删掉只是少一项能力） |
+| --- | --- |
+| `stage3_main` | `_host_adapters`, `capabilities`, `command_plugins`, `runtime` |
+
+## 对话：判定、压缩、注意力、人格
+
+```mermaid
+flowchart TD
+    n_attention["attention"]
+    n_base_prompt["base_prompt"]
+    n_conversation_context["conversation_context"]
+    n_dialogue_compaction["dialogue_compaction"]
+    n_dialogue_judge["dialogue_judge"]
+    n_extensions["extensions"]
+    n_focus["focus"]
+    n_prompt_library["prompt_library"]
+    n_security["security"]
+    n_stage3_main["stage3_main"]
+    n_stage3_runtime["stage3_runtime"]
+    n_transport["transport"]
+    n_trigger["trigger"]
+
+    n_attention --> n_transport
     n_conversation_context --> n_transport
-    n_dialogue_compaction --> n_memory_filters
     n_dialogue_compaction --> n_security
     n_dialogue_compaction --> n_transport
     n_dialogue_judge --> n_security
@@ -260,80 +242,22 @@ flowchart TD
     n_extensions --> n_stage3_runtime
     n_extensions --> n_transport
     n_focus --> n_transport
-    n_knowledge_base --> n_extensions
-    n_knowledge_base --> n_security
-    n_knowledge_operator --> n_extensions
-    n_knowledge_operator --> n_prompt_guard
-    n_memory_inbox --> n_memory_model
-    n_memory_inbox --> n_memory_store
-    n_memory_inbox --> n_security
-    n_memory_inbox --> n_transport
-    n_memory_maintenance_agent --> n_memory_model
-    n_memory_maintenance_agent --> n_memory_store
-    n_memory_model --> n_security
-    n_memory_service --> n_memory_config
-    n_memory_service --> n_memory_inbox
-    n_memory_service --> n_memory_maintenance_agent
-    n_memory_service --> n_memory_model
-    n_memory_service --> n_memory_store
-    n_memory_store --> n_memory_filters
-    n_memory_store --> n_memory_model
-    n_memory_store --> n_security
-    n_onebot_client --> n_onebot_ws
-    n_onebot_client --> n_transport
-    n_onebot_ws --> n_media_segments
-    n_onebot_ws --> n_transport
-    n_outbox --> n_transport
-    n_prompt_library --> n_prompt_guard
-    n_runtime --> n__host_adapters
-    n_runtime --> n_api_usage
-    n_runtime --> n_background_plugins
-    n_runtime --> n_capabilities
-    n_runtime --> n_conversation_context
-    n_runtime --> n_extensions
-    n_runtime --> n_llm_client
-    n_runtime --> n_memory_config
-    n_runtime --> n_memory_ops
-    n_runtime --> n_memory_service
-    n_runtime --> n_onebot_client
-    n_runtime --> n_outbox
-    n_runtime --> n_stage3_main
-    n_runtime --> n_state_store
-    n_runtime --> n_style_reviewer
-    n_runtime --> n_transport
-    n_runtime_diagnostics --> n_security
     n_security --> n_transport
-    n_stage3_main --> n__host
-    n_stage3_main --> n_admin_control
     n_stage3_main --> n_attention
-    n_stage3_main --> n_builtin_commands
-    n_stage3_main --> n_dev_config
     n_stage3_main --> n_dialogue_compaction
     n_stage3_main --> n_dialogue_judge
     n_stage3_main --> n_extensions
-    n_stage3_main --> n_feature_log
     n_stage3_main --> n_focus
-    n_stage3_main --> n_llm_client
-    n_stage3_main --> n_memory_model
-    n_stage3_main --> n_memory_service
-    n_stage3_main --> n_memory_view
-    n_stage3_main --> n_metrics
-    n_stage3_main --> n_onebot_ws
-    n_stage3_main --> n_runtime_diagnostics
     n_stage3_main --> n_security
-    n_stage3_main --> n_snapshots
     n_stage3_main --> n_stage3_runtime
     n_stage3_main --> n_transport
     n_stage3_main --> n_trigger
     n_stage3_runtime --> n_base_prompt
     n_stage3_runtime --> n_extensions
-    n_stage3_runtime --> n_memory_filters
-    n_stage3_runtime --> n_memory_model
     n_stage3_runtime --> n_prompt_library
     n_stage3_runtime --> n_security
     n_stage3_runtime --> n_transport
     n_trigger --> n_transport
-    n_vision --> n_media_segments
 
 classDef bottom fill:#dbe9f8,stroke:#1f5691,color:#123
 classDef stage3 fill:#def2de,stroke:#246a34,color:#132
@@ -342,17 +266,116 @@ classDef host fill:#fce9d2,stroke:#96540f,color:#321
 
 | 模块 | 函数内 import（可插：删掉只是少一项能力） |
 | --- | --- |
-| `_host_adapters` | `control_audit`, `help_card`, `runtime_diagnostics`, `typing_sim` |
-| `builtin_commands` | `builtin_balance_command`, `command_plugins` |
 | `dialogue_judge` | `prompt_library` |
+| `prompt_library` | `base_prompt`, `dialogue_judge`, `stage3_runtime` |
+
+## 命令：/admin、公开命令、动作执行
+
+```mermaid
+flowchart TD
+    n_admin_control["admin_control"]
+    n_balance_client["balance_client"]
+    n_builtin_balance_command["builtin_balance_command"]
+    n_builtin_commands["builtin_commands"]
+    n_capabilities["capabilities"]
+    n_command_plugins["command_plugins"]
+    n_stage3_main["stage3_main"]
+    n_transport["transport"]
+
+    n_builtin_balance_command --> n_balance_client
+    n_builtin_balance_command --> n_transport
+    n_builtin_commands --> n_transport
+    n_command_plugins --> n_transport
+    n_stage3_main --> n_admin_control
+    n_stage3_main --> n_builtin_commands
+    n_stage3_main --> n_transport
+
+classDef bottom fill:#dbe9f8,stroke:#1f5691,color:#123
+classDef stage3 fill:#def2de,stroke:#246a34,color:#132
+classDef host fill:#fce9d2,stroke:#96540f,color:#321
+```
+
+| 模块 | 函数内 import（可插：删掉只是少一项能力） |
+| --- | --- |
+| `builtin_commands` | `builtin_balance_command`, `command_plugins` |
+| `stage3_main` | `balance_client`, `builtin_balance_command`, `capabilities`, `command_plugins` |
+
+## 底层：传输、模型、配置、状态、日志
+
+```mermaid
+flowchart TD
+    n_api_usage["api_usage"]
+    n_control["control"]
+    n_control_audit["control_audit"]
+    n_dev_config["dev_config"]
+    n_feature_log["feature_log"]
+    n_llm_client["llm_client"]
+    n_media_segments["media_segments"]
+    n_metrics["metrics"]
+    n_onebot_client["onebot_client"]
+    n_onebot_ws["onebot_ws"]
+    n_operator_config["operator_config"]
+    n_outbox["outbox"]
+    n_provider_registry["provider_registry"]
+    n_runtime["runtime"]
+    n_runtime_diagnostics["runtime_diagnostics"]
+    n_runtime_flags["runtime_flags"]
+    n_snapshots["snapshots"]
+    n_state_store["state_store"]
+    n_transport["transport"]
+
+    n_control --> n_snapshots
+    n_onebot_client --> n_onebot_ws
+    n_onebot_client --> n_transport
+    n_onebot_ws --> n_media_segments
+    n_onebot_ws --> n_transport
+    n_outbox --> n_transport
+    n_runtime --> n_api_usage
+    n_runtime --> n_llm_client
+    n_runtime --> n_onebot_client
+    n_runtime --> n_outbox
+    n_runtime --> n_state_store
+    n_runtime --> n_transport
+
+classDef bottom fill:#dbe9f8,stroke:#1f5691,color:#123
+classDef stage3 fill:#def2de,stroke:#246a34,color:#132
+classDef host fill:#fce9d2,stroke:#96540f,color:#321
+```
+
+| 模块 | 函数内 import（可插：删掉只是少一项能力） |
+| --- | --- |
+| `runtime` | `control_audit`, `provider_registry` |
+
+## 宿主与可插能力
+
+```mermaid
+flowchart TD
+    n__host["_host"]
+    n__host_adapters["_host_adapters"]
+    n_embeddings["embeddings"]
+    n_help_card["help_card"]
+    n_knowledge_base["knowledge_base"]
+    n_knowledge_operator["knowledge_operator"]
+    n_prompt_library["prompt_library"]
+    n_qq_roles["qq_roles"]
+    n_stage3_main["stage3_main"]
+    n_typing_sim["typing_sim"]
+    n_vision["vision"]
+
+    n__host_adapters --> n__host
+    n_stage3_main --> n__host
+
+classDef bottom fill:#dbe9f8,stroke:#1f5691,color:#123
+classDef stage3 fill:#def2de,stroke:#246a34,color:#132
+classDef host fill:#fce9d2,stroke:#96540f,color:#321
+```
+
+| 模块 | 函数内 import（可插：删掉只是少一项能力） |
+| --- | --- |
+| `_host_adapters` | `help_card`, `typing_sim` |
 | `knowledge_operator` | `knowledge_base` |
-| `memory_maintenance_agent` | `feature_log`, `prompt_library` |
-| `memory_store` | `memory_config` |
-| `prompt_library` | `base_prompt`, `dialogue_judge`, `memory_maintenance_agent`, `stage3_runtime`, `style_reviewer`, `vision` |
-| `qq_roles` | `onebot_client` |
-| `runtime` | `control_audit`, `knowledge_base`, `knowledge_operator`, `provider_registry`, `qq_roles`, `vision` |
-| `stage3_main` | `_host_adapters`, `balance_client`, `builtin_balance_command`, `capabilities`, `command_plugins`, `help_card`, `runtime`, `vision` |
-| `style_reviewer` | `prompt_library` |
+| `prompt_library` | `vision` |
+| `stage3_main` | `_host_adapters`, `help_card`, `vision` |
 | `vision` | `prompt_library` |
 
 ## 四、四个契约（接口）
@@ -472,22 +495,30 @@ sequenceDiagram
 
 ---
 
-## 渲染好的图（PNG，直接点开就能看）
+## 渲染好的图（PNG）
 
-| 图 | 文件 |
-| --- | --- |
-| 主干调用链（27 个模块） | [`docs/graph/spine.png`](graph/spine.png) |
-| 记忆子系统（15 个模块） | [`docs/graph/memory.png`](graph/memory.png) |
-| 整体依赖（59 个模块） | [`docs/graph/overall.png`](graph/overall.png) |
-| 四个契约与接口 | [`docs/graph/interfaces.png`](graph/interfaces.png) |
-| 一条消息的路径（时序） | [`docs/graph/sequence.png`](graph/sequence.png) |
+九张图都在 [`docs/graph/`](graph/)。**按功能拆开**，每张 8~27 个节点——整张 59 节点的图会被
+mermaid 排成一大排（实测 1784x236），每个框只剩十几像素宽，没法看。
 
-> 为什么用 PNG 而不是 SVG：mermaid 渲染的 SVG 里文字是 `<foreignObject>`（HTML 文本），
-> 很多查看器不画它，打开就是"有框没字"。PNG 是像素，哪儿都能看。
-> 需要矢量图时自己渲染：`npx --yes @mermaid-js/mermaid-cli@11 -i x.mmd -o x.svg`（用浏览器看）。
+| 图 | 文件 | 规模 |
+| --- | --- | --- |
+| 主干调用链 | [`spine.png`](graph/spine.png) | 27 节点 / 57 边 |
+| 记忆子系统 | [`memory.png`](graph/memory.png) | 15 节点 / 25 边 |
+| 入口与装配 | [`entry.png`](graph/entry.png) | 12 节点 / 17 边 |
+| 对话（判定/压缩/注意力/人格） | [`dialogue.png`](graph/dialogue.png) | 13 节点 / 27 边 |
+| 命令（/admin、公开命令、动作执行） | [`commands.png`](graph/commands.png) | 8 节点 / 7 边 |
+| 底层（传输/模型/配置/状态/日志） | [`bottom.png`](graph/bottom.png) | 19 节点 / 12 边 |
+| 宿主与可插能力 | [`hostcap.png`](graph/hostcap.png) | 11 节点 |
+| 四个契约与接口 | [`interfaces.png`](graph/interfaces.png) | classDiagram |
+| 一条消息的路径 | [`sequence.png`](graph/sequence.png) | sequenceDiagram |
 
-重渲染：
+> SVG 里文字是 `<foreignObject>`（HTML 文本），很多查看器不画它，打开是"有框没字"，
+> 所以这里用 PNG。要矢量图自己渲染：`npx --yes @mermaid-js/mermaid-cli@11 -i x.mmd -o x.svg`。
+
+重渲染（改完代码跑这两条，图和代码就不会分家）：
 
 ```powershell
-.\\.venv\\Scripts\\python.exe data\\tmp_mermaid.py     # 重新生成 docs/GRAPH.md
+.\\.venv\\Scripts\\python.exe data\\tmp_mermaid.py        # 重新生成 docs/GRAPH.md
+# 每个 mermaid 块导出成 .mmd 后：
+npx --yes @mermaid-js/mermaid-cli@11 -i x.mmd -o docs/graph/x.png -b white -s 3
 ```
