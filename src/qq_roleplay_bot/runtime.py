@@ -23,6 +23,7 @@ from . import dev_config
 from . import operator_config
 from . import prompt_library
 from . import runtime_flags
+from ._host_adapters import FileAuditSink, LocalMachineProbe, build_host_services
 from .api_usage import ApiUsageStore
 from .background_plugins import (
     build_background_plugins,
@@ -332,6 +333,11 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
         prompt_sources=PromptSources(knowledge_base=build_knowledge_base()),
         style_reviewer=style_reviewer,
         vision=vision,
+        # 宿主能力：出站表现（分段与停顿）、帮助卡片、审计。
+        # **实现都在 `_host_adapters` 里延迟 import**——核心模块顶部不再认识
+        # `typing_sim` / `help_card` / `control_audit`，于是把它们删掉时核心仍然起得来。
+        # 机器诊断要等引擎自己造出来（`engine.runtime_diagnostics`），所以在下面补。
+        host=build_host_services(audit=FileAuditSink(audit)),
     )
     # 诊断命令的延迟回发通道：`/super processes cpu` 先回一句、采完 5 秒再单独发结果。
     # 命令回复不走拟人化节奏，也不进会话状态——它就是一条工具性回执。
@@ -382,6 +388,10 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
     diagnostics = engine.runtime_diagnostics
     if hasattr(diagnostics, "ensure_sampler"):
         diagnostics.ensure_sampler()
+    # 机器诊断也是宿主能力（`_host.MachineProbe`）：这里补上，因为它依赖引擎自己
+    # 造出来的 `runtime_diagnostics`。**引擎只认 `host.machine.sample()`**，
+    # 不认这个对象——换一个采样实现不需要改引擎。
+    engine.host.machine = LocalMachineProbe(diagnostics)
     return engine
 
 

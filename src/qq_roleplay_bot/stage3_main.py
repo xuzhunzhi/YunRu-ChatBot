@@ -31,7 +31,7 @@ from .builtin_commands import (
     build_command_registry,
     build_help_text,
 )
-from .typing_sim import delay_plan, split_segments
+from ._host import HostServices
 from .dialogue_judge import JudgeVerdict, build_judge_messages, parse_judge_output
 from .dialogue_compaction import (
     build_compaction_messages,
@@ -133,6 +133,27 @@ def _typing_sim_enabled() -> bool:
     return os.environ.get("QQBOT_TYPING_SIM", "1").strip().lower() not in {
         "0", "false", "no", "off",
     }
+
+
+def default_host() -> HostServices:
+    """不传 `host` 时的默认：**这一侧现成的实现**（`typing_sim` 分段与停顿等）。
+
+    为什么不给空实现：`QQBOT_TYPING_SIM` 默认是**开**的，也就是说"拟人化停顿"
+    是当前的正常行为。如果默认给空实现，所有直接造引擎的调用点（测试、干跑）
+    都会静默变成"一次发出去"——那是**改了行为**，不是"拆了接口"。
+    拆接口的这一步必须行为不变。
+
+    所以默认 = 现状。要"没有这项能力"的效果，显式传 `host=HostServices()`
+    （全空实现）；装配点也可以只覆盖其中几项。
+
+    import 放在函数内：否则又把 `typing_sim` 拴在核心模块顶上了，那正是要拆的。
+    """
+
+    from ._host_adapters import build_host_services
+
+    return build_host_services()
+
+
 # 上下文补全：拉多少条历史、单次超时、同一群多久最多补一次。
 CONTEXT_HISTORY_COUNT = 30
 CONTEXT_TIMEOUT_SECONDS = 5.0
@@ -783,8 +804,16 @@ class DialogueEngine:
         feature_logs: FeatureLogs | None = None,
         style_reviewer=None,
         vision=None,
+        host: HostServices | None = None,
     ) -> None:
         self.client = client
+        # **宿主能力**（出站表现、卡片渲染、机器探测、审计、余额、角色、检索）。
+        # 引擎只说"我需要什么"，谁实现的由装配点给进来；见 `_host/__init__.py`。
+        #
+        # 不传时用 `default_host()`：它是**这一侧现成的实现**（`typing_sim` 等），
+        # 而不是空实现——理由见那个函数。装配点（`runtime.build_engine`）会传完整的
+        # 一包进来，所以生产路径走的是它自己那一份。
+        self.host = host if host is not None else default_host()
         # 判定 agent 的 client。为 None 时退回单 agent（判定与回复同一次调用），
         # 这样双 agent 结构可以随时回退，也让既有测试不必全部改造。
         self.judge_client = judge_client
@@ -3207,7 +3236,7 @@ class DialogueEngine:
             # 第一条按原接口返回；后续几条放进 follow-up 队列，由发送方取走。
             # 这样 handle() 的返回类型不变，命令类回复与既有调用点都不受影响。
             # 只有引用挂第一条：引用是"在回应哪一句"，不是每句都要挂。
-            segments = split_segments(decision.text)
+            segments = self.host.styler.split(decision.text)
             self._stats["reply_segments"] += len(segments)
             if len(segments) > 1:
                 logger.info(
@@ -3690,7 +3719,7 @@ async def _deliver_reply(
     # 只有角色回复才加节奏。命令类回复（ping / help / #bot …）的 paced 为 False，
     # 必须立刻送出——工具性响应等一秒反而显得迟钝。
     paced = engine.typing_sim and bool(outgoing[0].paced) and not backlog
-    pauses = delay_plan([item.text for item in outgoing]) if paced else ()
+    pauses = engine.host.styler.delay_plan([item.text for item in outgoing]) if paced else ()
     # 收着他的时候先搁一下：这是"不情愿"的信号，所以要落在**她真的开口**的时候。
     # 命令回复不掺这个；上限见 `STANCE_DELAY_SECONDS`（最慢 12 秒）。
     if paced:
