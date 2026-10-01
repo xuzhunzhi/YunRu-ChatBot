@@ -31,7 +31,6 @@ from .background_plugins import (
     run_background_plugin,
 )
 from .capabilities import CapabilityRegistry
-from .control_audit import ControlAudit
 from .conversation_context import ConversationContextProvider
 from .extensions import PromptSources
 from .llm_client import OpenAICompatibleClient, apply_client_overrides
@@ -40,11 +39,8 @@ from .memory_ops import MemoryOps
 from .memory_service import MemoryService
 from .onebot_client import SnowLumaHttpClient
 from .outbox import Outbox
-from .provider_registry import base_url_of, known as provider_known
-from .qq_roles import SelfRoleCache
 from .state_store import RuntimeStateStore
 from .style_reviewer import StyleReviewer
-from .vision import ImageDescriber
 from .stage3_main import (
     BATCH_SIZE,
     COOLDOWN_SECONDS,
@@ -189,6 +185,10 @@ def apply_overrides(engine, payload: dict[str, object], *,
             applied[str(key)] = {"applied": "live", "detail": "已生效"}
     # 供应商 → 地址（放在循环之后，让显式地址赢）
     if "provider" in payload and not explicit_url:
+        # 本地 import：`provider_registry` 是面板的接入面，**不是底层的必需品**。
+        # 放模块顶部就等于"删掉它核心起不来"，那正是不该有的拴缚。
+        from .provider_registry import base_url_of, known as provider_known
+
         if provider_known(chosen_provider) and chosen_provider != "custom":
             url = base_url_of(chosen_provider)
             config.values["api_base_url"] = url
@@ -299,8 +299,10 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
     prompts.backfill_all()
     flags = runtime_flags.build_flags(operator)
     runtime_flags.install(flags)
-    audit = ControlAudit(enabled=state_persistence_enabled())
+    # 审计（可插：`_host.AuditSink`）。本地 import——没有它就不记审计，核心照样跑。
+    from .control_audit import ControlAudit
 
+    audit = ControlAudit(enabled=state_persistence_enabled())
     # 跨重启的累计账本（2026-09-30）：`/super apicheck` 与 `/super status` 默认看它，
     # 而不是"这次重启之后"。关掉状态持久化（测试/干跑）时它只活在内存里。
     usage_store = ApiUsageStore(enabled=state_persistence_enabled())
@@ -375,6 +377,10 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
     # 搬进 `background_plugins.py` 时**只搬了用法、没搬创建**，于是 `self_roles`
     # 一直是 None——群主命令全变成"我在这个群里是查不到"，而入群审批因为拿不到角色，
     # 静默地什么都不批。所以创建放在这里（装配点），并加了测试钉住。
+    # **她自己在每个群的 QQ 角色**（可插能力：`_host.RoleLookup`）。
+    # 本地 import——它是"查得到才谈得上群主动作"的前置能力，不是底层必需品。
+    from .qq_roles import SelfRoleCache
+
     engine.self_roles = SelfRoleCache(transport, ttl=dev_config.SELF_ROLE_TTL_SECONDS)
     # 面板要用的四样东西挂到引擎上（插件拿不到引擎，只拿得到装配点给的闭包）：
     # 覆盖层、prompt 库、记忆人工操作、操作审计。
@@ -497,6 +503,9 @@ def _build_vision(usage_store=None):
         return None
     logger.info("识图已启用：model=%s user_id=%s（有图的消息在判定前先看一眼）",
                 dev_config.VISION_MODEL, dev_config.VISION_USER_ID)
+    # 本地 import：识图是**可插能力**，不是底层必需品（删掉它，她只会说"看不到图"）。
+    from .vision import ImageDescriber
+
     return ImageDescriber(
         OpenAICompatibleClient(
             dev_config.API_BASE_URL,

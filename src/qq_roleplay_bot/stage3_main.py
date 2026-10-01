@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from collections import deque
 from enum import Enum
 from pathlib import Path
-from typing import Awaitable, Callable, Protocol
+from typing import Awaitable, Callable, Protocol, TYPE_CHECKING
 
 from . import dev_config
 from .dev_config import (    BATCH_SIZE,
@@ -62,7 +62,7 @@ from .transport import (
     QQTransport,
 )
 from .security import check_message_security, sanitize_chat_text
-from .control import EngineSnapshot, SessionSnapshot
+from .snapshots import EngineSnapshot, SessionSnapshot
 from .metrics import RuntimeMetrics, process_memory_bytes
 from .feature_log import FeatureLogs, log_capacity, request_parts
 from .memory_view import (
@@ -77,11 +77,18 @@ from .memory_view import (
     build_records_view,
 )
 from .extensions import PromptContext, PromptMaterial, PromptSources
+# `/admin` 是 **Stage 3 自己的命令**（直接管理聊天：开关群、清会话、转告），
+# 这个模块就是它的解析器，自身零依赖（只有 `re` + enum + dataclass）。
+# 所以这是**合法的 stage3 依赖**，不是要拆掉的拴缚。
 from .admin_control import AdminCommand, AdminCommandKind, parse_admin_command
-from .runtime_diagnostics import LocalRuntimeDiagnostics, RuntimeDiagnostics
 from .memory_model import MemoryMaterial
 from .memory_service import MemoryService
 from . import runtime_flags
+
+if TYPE_CHECKING:
+    # 只为类型标注：机器诊断是**可插能力**，运行时由 `_host_adapters.HostMachineProbe`
+    # 兜底（采不到就如实回"采不到"），所以这里绝不 import 真的实现。
+    from .runtime_diagnostics import RuntimeDiagnostics
 
 # 短期语境的**硬上限**（deque 容量）。它只作为兜底，不是压缩阈值——
 # 设得足够高，让压缩先发生，避免 deque 悄悄丢弃最旧一条（那会打断缓存前缀）。
@@ -321,7 +328,7 @@ def _sorted_qq(user_ids: object) -> list[str]:
     )
 
 
-def _admin_command_target_group(command: AdminCommand) -> str:
+def _admin_command_target_group(command: "AdminCommand") -> str:
     """这条管理员命令点名了哪个**群**；没点名就返回空串。
 
     enable/disable/clear **不在其列**：它们只作用于发命令的那个群，本来就不可能
@@ -790,7 +797,7 @@ class DialogueEngine:
         super_admin_user_ids: frozenset[str] = SUPER_ADMIN_USER_IDS,
         enabled_group_ids: frozenset[str] | None = None,
         relay_target_resolver: RelayTargetResolver | None = None,
-        runtime_diagnostics: RuntimeDiagnostics | None = None,
+        runtime_diagnostics: "RuntimeDiagnostics | None" = None,
         memory_service: MemoryService | None = None,
         state_store=None,
         context_provider=None,
@@ -855,7 +862,13 @@ class DialogueEngine:
         self.super_admin_user_ids: set[str] = set(super_admin_user_ids)
         self.enabled_group_ids = set(enabled_group_ids) if enabled_group_ids is not None else {target_group_id}
         self.relay_target_resolver = relay_target_resolver
-        self.runtime_diagnostics = runtime_diagnostics or LocalRuntimeDiagnostics()
+        # 机器诊断（进程/网卡/风扇）。**可插能力**：没接上时 `_HostMachineProbe()`
+        # 是个空壳，`/super processes|lan|fan` 会如实回"采不到"，而不是让核心起不来。
+        if runtime_diagnostics is None:
+            from ._host_adapters import HostMachineProbe
+
+            runtime_diagnostics = HostMachineProbe()
+        self.runtime_diagnostics = runtime_diagnostics
         # 最近被拒的 admin 命令：超管**引用**它再发 `/super permit` 时，用来绑定"就那一条"。
         # 键是**消息 id**（引用给的也是消息 id），值是整条消息——放行时要按原样重放它。
         self._denied_admin: dict[str, tuple[IncomingMessage, float]] = {}

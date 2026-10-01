@@ -97,6 +97,56 @@ class LocalMachineProbe:
             return MachineSample()
 
 
+class HostMachineProbe:
+    """机器诊断的**可插默认值**：有 `runtime_diagnostics` 就用它，没有就采不到。
+
+    与 `LocalMachineProbe` 的区别：那个是"拿到了诊断对象、把它的取数方法包一层"；
+    这个是"连诊断模块都可能在别处"。引擎默认用它——所以删掉 `runtime_diagnostics.py`
+    时，`/super processes|lan|fan` 会如实回"采不到"，而不是让核心起不来。
+
+    接口与 `runtime_diagnostics.LocalRuntimeDiagnostics` 一致（`processes` / `network`
+    / `fans`），这样命令那一侧不用改。
+    """
+
+    def __init__(self) -> None:
+        self._inner = None
+        self._tried = False
+
+    def _probe(self):
+        if not self._tried:
+            self._tried = True
+            try:
+                from .runtime_diagnostics import LocalRuntimeDiagnostics
+
+                self._inner = LocalRuntimeDiagnostics()
+            except Exception:  # noqa: BLE001 - 没有这项能力就采不到，不是错误
+                self._inner = None
+        return self._inner
+
+    async def processes(self, mode: str = "") -> object:
+        probe = self._probe()
+        if probe is None:
+            return []
+        return await probe.processes(mode)
+
+    async def network(self) -> object:
+        probe = self._probe()
+        if probe is None:
+            return {}
+        return await probe.network()
+
+    async def fans(self) -> object:
+        probe = self._probe()
+        if probe is None:
+            return []
+        return await probe.fans()
+
+    def ensure_sampler(self) -> None:
+        probe = self._probe()
+        if probe is not None and hasattr(probe, "ensure_sampler"):
+            probe.ensure_sampler()
+
+
 class FileAuditSink:
     """`AuditSink` 的现有实现：`control_audit.ControlAudit`（落 `data/`）。"""
 
