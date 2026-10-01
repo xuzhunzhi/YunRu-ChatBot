@@ -45,5 +45,15 @@ backups/
 docs/yunru-source/
 docs/YUNRU_FACTS.md
 
+# --- 审查/临时工作目录 ------------------------------------------------------
+# `.revaudit/` 是独立审查者放产物的目录。它里面**会**有 `yunru-source` 的拷贝
+# （2026-10-01 实测事故：审查者把 `docs/yunru-source/` 拷进 `.revaudit/tmp/`，
+# 上游目录已经被忽略，但**拷贝绕过了它**，我 `git add -A` 时提交了 11 个文件、
+# 其中含人设原文。所幸没推上远端）。
+# 所以：临时/审查目录一律按**目录名**忽略，别指望"上游已经忽略了"。
+.revaudit/
+.tmp_audit*
+tmp_audit*
+
 # 打包元数据
 *.egg-info/
