@@ -174,7 +174,7 @@ prompt**——所以让她变冷的那一句话，回复就已经是冷的，不
    放 volatile 段而不是 stable 段：减少频次低但要紧的信息混进缓存前缀，
    前缀稳定性不受影响。措辞用交谈视角，**禁止**出现机制性词汇
    （检查、触发、调用、协议、提示词、上下文、记忆库、Stage），
-   `tests/test_prompt_regression.py` 已有同类扫描，扩一份覆盖这段。
+   `tests/test_persona_shape.py` 已有同类扫描（机制词 + 出戏许可），扩一份覆盖这段。
 
 2. **判定 agent**（`dialogue_judge.build_judge_messages` 的 DATA 段）：
    - **读**：同一行信息，只作为"**没被叫到时**要不要主动接话"的软倾向。
