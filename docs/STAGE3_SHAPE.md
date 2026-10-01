@@ -113,13 +113,57 @@ class CommandClaim:
 
 ## 六、施工顺序（一次做到位，不来回改两遍）
 
-| 步 | 做什么 | 为什么这个顺序 |
+| 步 | 做什么 | 状态 |
 | --- | --- | --- |
-| A | `_host` + 适配器 + 接线 | **已完成**（解开 4 个模块） |
-| B | 把剩下 9 个顶层拴缚改成函数内 import（含 `admin_control` / `control` / `runtime_diagnostics`） | 先让核心"不依赖"，才好搬 |
-| C | 抽 `commands.py`：把 `handle()` 里的命令分发摘出来，行为不变 | 摘出来之后 `/super`、`/admin` 才有地方去 |
-| D | 抽 `super_commands.py` + `admin_commands.py`，`DialogueEngine` 去掉那 20 个方法 | 一次搬到位，不做两遍 |
-| E | 设第六节的六张窄接口，命令层只认它们 | 防它变成第二个上帝对象 |
-| F | 建 `stage3/` 目录，把对话/记忆/防护搬进去 | 最后做，因为改 import 路径最吵 |
+| A | `_host` + 适配器 + 接线 | **已完成**（提交 `3612eaa` / `429c563`） |
+| B | 把顶层拴缚改成函数内 import 或注入 | **已完成**（提交 `90116fa`） |
+| C | 抽 `commands.py` | **实测后判定：不做，理由见第七节** |
+| D | 抽 `super_commands.py` + `admin_commands.py` | **同上** |
+| E | 建 `stage3/` 目录，把对话/记忆/防护搬进去 | 未做 |
 
-B 到 E 都在**同一个文件内重新组织**，F 才是挪目录。
+## 七、C / D 为什么不做了（实测依据）
+
+原计划把 `/super` 与 `/admin` 的实现从 `DialogueEngine` 里抽成独立模块。实测之后判定**不该抽**：
+
+- 那一族 **24 个方法共 717 行**；
+- 从命令入口做可达性分析：**79 / 96 个方法可达**——命令层与对话主路径是**同一个连通块**；
+- 它们直接用到约 **40 个引擎内部状态**（`snapshot` / `memory_service` / `group_admin_ids` /
+  `admin_user_ids` / `_stats` / `_denied_admin` / `persist_state` / `_flags` …）。
+
+也就是说：**命令不是"能被抠出去的模块"，抠它等于搬走大半个类**。硬抽出来只有两种结局——
+要么传整个 `Engine`（等于没解耦），要么定义 40 个字段的接口对象（等于把类换个名字）。
+
+而且按判据它们**本来就该在这里**：`/admin`（开关群、清会话）直接管理聊天、
+`/super memory*` 直接管理记忆——那是 Stage 3 的活。
+
+**真正的坑不是"命令在引擎里"，是"96 个方法挤在一个 3800 行文件里"。**
+那个问题的解法是**分文件**（E 步），不是把互相调用的方法硬拆到两个模块。
+
+## 八、已经达到的状态（实测）
+
+`stage3_main` 与 `runtime` 的**顶层** import 里，已经没有"按判据只是少一项能力"的模块：
+
+```
+stage3_main 顶层:  _host admin_control attention builtin_commands dev_config
+                   dialogue_compaction dialogue_judge extensions feature_log focus
+                   llm_client memory_model memory_service memory_view metrics
+                   onebot_ws runtime_flags security snapshots stage3_runtime
+                   transport trigger
+runtime 顶层:      _host_adapters api_usage background_plugins capabilities
+                   conversation_context dev_config extensions llm_client
+                   memory_config memory_ops memory_service onebot_client
+                   operator_config outbox prompt_library runtime_flags stage3_main
+                   state_store style_reviewer transport
+```
+
+剩下的全是名副其实的地基，加两处**合法依赖**：`admin_control`（`/admin` 的解析器，
+自身零依赖）与 `_host` / `_host_adapters`（这次建的宿主接口）。
+
+**可插能力实测**（`data/tmp_unplug.py`：模块改名成 `.bak`，看核心还能不能 import）：
+
+| 模块 | 结果 |
+| --- | --- |
+| `typing_sim` / `help_card` / `vision` / `qq_roles` | 能（出站表现、渲染、识图、角色查询） |
+| `control_audit` / `provider_registry` / `runtime_diagnostics` / `control` | 能 |
+| `knowledge_operator` / `embeddings` | 能 |
+
