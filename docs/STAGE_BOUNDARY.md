@@ -61,11 +61,19 @@ Stage 4 是**手脚**：它给大脑接上更多表达方式和动作能力。
 | `capabilities.py` | **194 个 SnowLuma action 的登记与调用闸门**（`read`/`interaction`/`send`/`admin` 四种用途） |
 | `data/snowluma_actions.json` | action 元数据目录 |
 | `onebot_client.py` | WS **客户端**模式传输 + SnowLuma 只读 HTTP 封装 |
-| `command_plugins.py` + `builtin_commands.py` + `builtin_group_commands.py` | 命令插件接口（含档位与动作意图，见 `docs/ADD_A_COMMAND.md`）|
-| `group_admin.py` / `group_owner.py` / `qq_roles.py` / `join_approval.py` / `help_card.py` | Stage 4 的群管理与群主能力、她自己角色的现查、入群审批策略、帮助卡片 |
-| `background_plugins.py` | Stage 4 **后台插件**的装配与节拍：入群审批 / 读信回信 / 每日汇报 / **WebUI 面板** 共用一份循环 |
+| `command_plugins.py` + `builtin_commands.py` | 命令插件接口（含档位与动作意图，见 `docs/ADD_A_COMMAND.md`）|
+| `background_plugins.py` | **后台插件**的装配点与节拍循环（协议在 main 上，具体插件在 `stage4-plugins`）|
+
+**以下几项在 `stage4-plugins` 分支上**（这条分支只放机制，不放 Stage 4 的功能扩展）：
+
+| 模块 | 职责 |
+| --- | --- |
+| `builtin_group_commands.py` / `group_admin.py` / `group_owner.py` | 群管理与群主命令（档位 `super`）：踢 / 禁言 / 撤回 / 头衔 / 公告 / 改名片 |
+| `qq_roles.py` / `join_approval.py` | 她自己角色的现查、入群审批策略 |
 | `webui_panel.py` / `webui_access.py` / `webui_data.py` | **WebUI 面板**（2026-10-01 用户："面板属于 stage4 内容，本质插件"）：HTTP 与路由、本地/远程两套接入、只读数据层。它拿不到 `transport` 也拿不到引擎，只能调装配点注入的闭包 |
-| `operator_config.py` / `prompt_library.py` / `prompt_guard.py` / `knowledge_operator.py` / `memory_ops.py` / `runtime_flags.py` / `control_audit.py` / `provider_registry.py` | 面板的**接入面**：配置覆盖层、六套 prompt 的可编辑层、机制词扫描共用一份、知识库面板块、记忆只删不加、运行期开关、审计、供应商表。权限判定与动作执行仍在核心 |
+| `mail_client.py` / `mail_state.py` / `mail_channel.py` / `daily_report.py` / `letter_writer.py` | 邮件通道：读信回信、每日汇报 |
+| `vision.py` | 识图（图片描述） |
+| `operator_config.py` / `prompt_library.py` / `prompt_guard.py` / `knowledge_operator.py` / `memory_ops.py` / `runtime_flags.py` / `control_audit.py` / `provider_registry.py` | 面板的**接入面**：配置覆盖层、六套 prompt 的可编辑层、机制词扫描共用一份、知识库面板块、记忆只删不加、运行期开关、审计、供应商表。权限判定与动作执行仍在核心。**这些留在 main 上**——它们是接缝，不是功能 |
 
 ### 共用（不属于任何一侧，改动要同时服务两边）
 

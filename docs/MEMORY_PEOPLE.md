@@ -204,7 +204,7 @@ CREATE TABLE person_aliases (            -- 操作者认定的"这个号也是�
 
 **群名片没有被丢掉**，以下场景照旧用它（那是它的正当用途）：
 
-- `set_group_card` / 改群名片命令（`group_owner.py`、builtin 命令表）；
+- `set_group_card` / 改群名片命令（`group_owner.py`，在 `stage4-plugins` 分支）；
 - 按名字找人的匹配：`stage3_main` 的 `/admin relay` 同时拿
   `nickname` / `remark` / `card` 去比，**任何名字能对上就找到人**。
 

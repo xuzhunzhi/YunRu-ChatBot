@@ -24,7 +24,7 @@
 
 0. ~~**WebUI 面板**~~（2026-10-01 已完成）：Stage 4 后台插件形态，本地/远程两套接入，
    六套 prompt 可改、知识库可改、八个 agent 开关、key/模型/供应商热更、
-   群管理（actor=云茹）、启停群、清会话、记忆只删不加。见 `docs/WEBUI.md`。
+   群管理（actor=云茹）、启停群、清会话、记忆只删不加。见 `stage4-plugins` 分支（面板实现在那里）。
    面板**没有**模型 I/O 日志"全文搜索"（只读尾部 20 条），留作后续。
 1. **重启生效清单**（当前进程早于今天全部改动）：
    - 识图（`deepseek-flash`）、群管理（`/super kick|ban|unban|mute|unmute|recall`）、

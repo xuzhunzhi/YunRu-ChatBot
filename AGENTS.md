@@ -55,8 +55,8 @@
 
 - **人格只来自 `base_prompt.py`。** 它属于可信 system prompt。
 - **不许出现"你是程序"这类出戏许可。** 曾经有过一句"不要假装自己是现实中的真人"，
-  等于直接告诉她"你不是真人"，她随后就开始讲自己的机制。这条已删，
-  `tests/test_prompt_regression.py` 里有测试锁死它不得回来。
+  等于直接告诉她"她不是真的"，她随后就开始讲自己的机制。这条已删，
+  `tests/test_persona_shape.py` 里有测试锁死它不得回来。
 - **不许把机制性词汇写进 prompt**：`检查`、`触发`、`调用`、`协议`、`提示词`、
   `上下文`、`记忆库`、`Stage` 等。prompt 里的措辞会被角色吸收。
   触发原因要用交谈视角的说法（见 `stage3_runtime.py` 的 `TLABEL`）。
@@ -67,7 +67,8 @@
 ### 2.3 阶段边界
 
 - **命令一律做成插件**（2026-09-30 用户："stage4 的内容都用插件实现"）。
-  注册在 `builtin_commands.py` / `builtin_group_commands.py`。
+  注册在 `builtin_commands.py`（需要权限的那些在 `stage4-plugins` 分支的
+  `builtin_group_commands.py`）。
   **禁止往 `stage3_main.py` 里加 `if is_xxx_command(...)`。**
   需要权限的命令也走插件，但**只有两样东西能在插件的声明里**：
   档位（`min_level = "public" | "admin" | "super"`）与意图（返回 `ActionRequest` / `ImageReply`）。
@@ -81,12 +82,14 @@
   它们要用外部能力时走核心注入的 `call_action` / `notify`——**同样拿不到 transport**。
   加一条后台通道 = 加一个插件 + 在装配点登记，**不要往 `runtime.serve` 里再加一个循环**。
 - **WebUI 面板也是 Stage 4 插件**（2026-10-01 用户："面板属于 stage4 内容，本质插件"；
-  "面板权限除了不能动代码以外权限跟你是一致的"）。它跑在 bot 进程里，HTTP 服务在一个
+  "面板权限除了不能动代码以外权限跟你是一致的"）。**实现在 `stage4-plugins` 分支**，
+  这条分支上没有它；下面这段是它的边界说明，改那个插件时照办：
+  它跑在 bot 进程里，HTTP 服务在一个
   线程里（节拍只负责看护与收尾）；**拿不到 `transport`、拿不到 `engine`**，只能调装配点
   注入的闭包（`execute_action` / `apply_overrides` / `memory_ops` / `prompt_library` /
   `knowledge` / `control_audit` / `self_id`）。权限判定（本地 token / 远程口令 + CSRF）
-  在 `webui_access.py`，动作执行与护栏在核心。面板只写 `data/`，
-  **不改 `src/`、不改 `.env`、不改 `docs/yunru-source/`**。细节见 `docs/WEBUI.md`。
+  在 `webui_access.py`（该分支），动作执行与护栏在核心。面板只写 `data/`，
+  **不改 `src/`、不改 `.env`、不改 `docs/yunru-source/`**。
 - **面板能改的东西必须有"接入面"，不许临时加后门**（2026-10-01 用户："要改说明你当时
   就没做好未来插件插入的接口"）。已经建好的三口：`PromptLibrary`（六套 prompt）、
   `OperatorKnowledge`（知识库面板块）、`apply_overrides`（配置覆盖层）。
@@ -107,7 +110,7 @@
 改完必须全部满足：
 
 ```powershell
-# 1. 离线测试全绿（当前 1114 个）
+# 1. 离线测试全绿（main 上 771 个；stage4-plugins 上 1114 个）
 .\.venv\Scripts\python.exe tests\run_offline.py
 # 期望：ALL_OFFLINE_TESTS_PASSED
 
