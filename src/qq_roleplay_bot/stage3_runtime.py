@@ -55,6 +55,10 @@ class DialogueDecision:
     reply_to_message_id: str = ""
 
 
+#: 每个别名最多记几个"另外见过的名字"（别称）。定 3 够用，又不让名册膨胀。
+ALIAS_ALSO_LIMIT = 3
+
+
 @dataclass(slots=True)
 class ConversationState:
     history_limit: int = 50
@@ -82,6 +86,17 @@ class ConversationState:
     # 别名 → 昵称（显示用）。昵称变了就更新：名册在稳定前缀里，改名会让前缀断一次，
     # 但改名很少见，换来的是"名字始终是新的"。
     alias_names: dict[int, str] = field(default_factory=dict)
+    # 别名 → **另外见过的名字**（别称，最近优先，最多 `ALIAS_ALSO_LIMIT` 个）。
+    #
+    # 为什么要它（2026-10-02 实测的真实错认）：QQ 昵称会变，而**摘要和长期记忆里
+    # 写的是旧名**。于是同一份 prompt 里同一个人有两个名字——
+    #   历史 `who="19"` ／ 名册 `19=云边孤雁丶水上浮萍（QQ1912600950）`
+    #   ／ 记忆 `<memory subject="1912600950">自称"蛋挞"，群昵称为蛋挞。</memory>`
+    # 模型要把"蛋挞"对到 `who="19"`，得走"名字→QQ号→编号→说话人"**三跳**；
+    # 跳不过去就退回"眼前这个说话人"。实测就是这样把 `who="19"` 问的
+    # "你是接了豆包吗"算到了 `who="1"` 头上，而两条都在她眼前的 6 条历史里。
+    # 名册里带上别称之后，这件事变成**一跳**。
+    alias_also: dict[int, tuple[str, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.history = deque(maxlen=self.history_limit)
@@ -105,8 +120,19 @@ class ConversationState:
             alias = len(self.aliases) + 1
             self.aliases[message.user_id] = alias
         name = (message.sender_name or "某人").strip() or "某人"
-        if self.alias_names.get(alias) != name:
+        current = self.alias_names.get(alias)
+        if current != name:
+            if current and current != "某人":
+                # 改名前那个名字留着当别称：摘要/记忆里还写着它。
+                others = tuple(n for n in self.alias_also.get(alias, ()) if n != name)
+                self.alias_also[alias] = (current, *others)[:ALIAS_ALSO_LIMIT]
             self.alias_names[alias] = name
+        # **群名片也记进别称**：身份以 QQ 昵称为准（见 `transport.display_name_from_sender`），
+        # 但群里人是用名片上的名字指代他的（"@蛋挞"、"蛋挞说的"）——不留下就没人能对上号。
+        card = (message.sender_card or "").strip()
+        if card and card != name:
+            others = tuple(n for n in self.alias_also.get(alias, ()) if n != card)
+            self.alias_also[alias] = (card, *others)[:ALIAS_ALSO_LIMIT]
         return alias
 
     def alias_of(self, message: IncomingMessage) -> int | None:
@@ -122,12 +148,20 @@ class ConversationState:
         """
 
         present = {self.aliases.get(m.user_id) for m in self.history if not m.is_bot_message}
-        return [
-            f"{alias}={escape(sanitize_chat_text(self.alias_names.get(alias, '某人'), max_length=128), quote=False)}"
-            f"（QQ{escape(sanitize_chat_text(user_id, max_length=128), quote=False)}）"
-            for user_id, alias in sorted(self.aliases.items(), key=lambda item: item[1])
-            if alias in present
-        ]
+        lines: list[str] = []
+        for user_id, alias in sorted(self.aliases.items(), key=lambda item: item[1]):
+            if alias not in present:
+                continue
+            name = escape(sanitize_chat_text(self.alias_names.get(alias, "某人"), max_length=128),
+                          quote=False)
+            also = [escape(sanitize_chat_text(item, max_length=128), quote=False)
+                    for item in self.alias_also.get(alias, ()) if item]
+            # 别称写在这行里：记忆/摘要里的旧名于是**一跳**就能对上这个编号。
+            suffix = f"；别称：{'、'.join(also)}" if also else ""
+            lines.append(
+                f"{alias}={name}{suffix}"
+                f"（QQ{escape(sanitize_chat_text(user_id, max_length=128), quote=False)}）")
+        return lines
 
     def topic_history(self) -> list[IncomingMessage]:
         """当前话题的消息：话题起点之后（含起点）的全部消息。
@@ -141,7 +175,20 @@ class ConversationState:
         return [m for m in messages if (self.seq_of(m) or 0) >= self.topic_start_seq]
 
     def advance_topic_start(self, seq: int | None) -> bool:
-        """把话题起点往前推（只许前进）；返回是否真的变了。"""
+        """把话题起点往前推（只许前进）；返回是否真的变了。
+
+        **为什么保留"只许前进"**（2026-10-02 实测，`run/data/logs/judge.jsonl` 1464 条判定）：
+        判定**一次都没请求过后退**——88% 原地确认、12% 前进、**0% 后退**。
+        因为每一轮都把它当前的起点告诉它（"这段谈话目前的起点：第 N 条"），
+        它照着确认就行。所以单向棘轮**没有代价**：它挡掉的那个动作根本不发生。
+        而放开后退则会白送一份缓存风险（真退一次就换一次 prompt 前缀）。
+
+        要区分两件事：
+
+        * 这是**视图**：哪一段交给回复段看。它**不销毁任何消息**。
+        * 消息本体只在**满 500 条**时被压缩收走（进摘要、留最近 50 条）——
+          `live_history()`（压缩的取数口）**不按起点过滤**。
+        """
 
         if seq is None:
             return False
@@ -149,6 +196,28 @@ class ConversationState:
         if current is not None and seq <= current:
             return False
         self.topic_start_seq = seq
+        return True
+
+    def drop_summary_if_stale(self, topic_start: int | None) -> bool:
+        """话题换了之后，摘要若已与当前话题脱节就丢掉；返回是否丢了。
+
+        **判据**（用户 2026-10-02 的设计："话题换了是清空压缩"）：摘要覆盖到
+        `summary_through` 为止。若新的话题起点**比它还晚**，说明摘要里全是更早
+        话题的内容、与当前话题没有一脉相承的东西——留着只会把旧话题拖进新话题。
+
+        反过来，话题起点落在摘要覆盖范围之内、或摘要还没建，说明这个话题是
+        **跨过压缩边界延续下来的**，摘要里就有它的前文——**留着**。
+
+        频率自限：丢过一次之后要等下一次压缩才会再产生摘要，所以最多一个压缩
+        周期丢一次。丢的只是**摘要那段文字**；消息从来不在它管辖范围内。
+        """
+
+        if not self.summary or self.summary_through is None:
+            return False
+        if topic_start is None or topic_start <= self.summary_through:
+            return False
+        self.summary = ""
+        self.summary_through = None
         return True
 
     def recent(self) -> list[IncomingMessage]:
@@ -296,6 +365,8 @@ class ConversationState:
             # 别名表丢了会让同一个人拿到新编号（模型张冠李戴）。
             "topic_start_seq": self.topic_start_seq,
             "aliases": dict(self.aliases),
+            # 别称也要持久化：摘要/记忆里的旧名在重启后仍然要能对得上人。
+            "alias_also": {str(alias): list(names) for alias, names in self.alias_also.items()},
             "alias_names": {str(k): v for k, v in self.alias_names.items()},
         }
 
@@ -342,6 +413,16 @@ class ConversationState:
                 int(alias): sanitize_chat_text(str(name), max_length=128).strip() or "某人"
                 for alias, name in names.items()
                 if str(alias).isdigit()
+            }
+        also = raw.get("alias_also")
+        if isinstance(also, dict):
+            state.alias_also = {
+                int(alias): tuple(
+                    cleaned for item in items[:ALIAS_ALSO_LIMIT]
+                    if (cleaned := sanitize_chat_text(str(item), max_length=128).strip())
+                )
+                for alias, items in also.items()
+                if str(alias).isdigit() and isinstance(items, (list, tuple))
             }
         for item in history[-history_limit:]:
             message = _message_from_state(item)

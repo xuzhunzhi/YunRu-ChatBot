@@ -18,6 +18,7 @@ from .transport import (
     MessageNotDelivered,
     MessageTarget,
     display_name_from_sender,
+    card_from_sender,
 )
 
 logger = logging.getLogger(__name__)
@@ -190,6 +191,8 @@ def parse_message_event(event: dict[str, object]) -> IncomingMessage | None:
     # 显示名统一用 QQ 昵称（群名片跨群不一致、还会随时改）——口径见
     # `transport.display_name_from_sender` 的说明。
     sender_name = display_name_from_sender(sender)
+    # 群名片单独带一份：它是**别称**，群里人用它指代这个人（@、转述）。
+    sender_card = card_from_sender(sender)
 
     message_id = str(event.get("message_id") or uuid.uuid4().hex)
     return IncomingMessage(
@@ -201,6 +204,7 @@ def parse_message_event(event: dict[str, object]) -> IncomingMessage | None:
         is_bot_mentioned=is_bot_mentioned,
         sender_role=sender_role,
         sender_name=sender_name,
+        sender_card=sender_card,
         is_bot_message=user_id == str(event.get("self_id", "")),
         reply_to_message_id=extract_reply_target(raw_message),
         mentioned_user_ids=extract_mentions(raw_message, str(event.get("self_id", ""))),

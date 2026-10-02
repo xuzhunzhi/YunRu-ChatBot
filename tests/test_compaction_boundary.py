@@ -220,7 +220,13 @@ def test_compact_rendering_keeps_the_bot_marker() -> None:
 
 
 def test_topic_start_only_moves_forward() -> None:
-    """话题起点只许前进：往后退会让前缀来回断，也说明模型在乱填。"""
+    """话题起点只许前进。
+
+    2026-10-02 一度改成"往前往后都允许"，随后从 `judge.jsonl` 的 1464 条判定里
+    数出：88% 原地确认、12% 前进、**0% 后退**——判定从不请求后退，
+    所以"只许前进"挡掉的动作根本不发生，而放开它会白送一份缓存风险。
+    改回单向。理由与实测数字写在 `stage3_runtime.advance_topic_start` 的 docstring 里。
+    """
 
     state = build_state(20)
     assert state.advance_topic_start(5) is True

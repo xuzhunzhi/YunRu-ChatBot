@@ -10,6 +10,9 @@ node_modules/
 # `dev_config.py` 上未提交的真实超管号还原成了占位号（用户当场失去 /super）。
 /testenv/
 
+# A/B、回放这类实验的输出（`ab_topic_start.py` 的 --tag 目录）。是过程产物。
+/ab_out/
+
 # 凭据：只保留 .env.example / .env.bot.example，真实配置永不提交
 .env
 .env.local

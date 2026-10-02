@@ -3613,12 +3613,26 @@ class DialogueEngine:
             seq for seq in (state.seq_of(m) for m in state.topic_history()) if seq is not None
         )
         verdict = parse_judge_output(raw, known_seqs=visible, must_reply=must_reply)
+        # 判定这一轮说了两件事：**回不回**（route）+ **把哪一段交给回复段**（话题起点）。
+        #
+        # ⚠️ 这个起点**只裁剪视图，不销毁消息**：`topic_history()` 只是给模型的视图，
+        # `live_history()`（压缩的取数口）**不按起点过滤**——被排除在视图之外的消息
+        # 仍在窗口里，下一次满 500 条压缩时照旧进摘要。
+        #
+        # "只许前进"保留（2026-10-02 实测 1464 条判定：88% 原地确认、12% 前进、
+        # **0% 后退**——所以这条限制挡掉的动作根本不发生，没有代价）。
         if state.advance_topic_start(verdict.topic_start):
             logger.info(
                 "Stage 3 topic start advanced: session=%s start=%s",
                 message.session_id,
                 state.topic_start_seq,
             )
+            # 话题往前挪了（= 换话题了）→ 摘要若已与当前话题脱节就丢掉，
+            # 别把旧话题拖进新话题。话题起点落在摘要覆盖范围内时不丢
+            # （那是跨压缩边界延续下来的同一个话题，摘要里有它的前文）。
+            if state.drop_summary_if_stale(state.topic_start_seq):
+                logger.info(
+                    "Stage 3 旧摘要已丢弃（与当前话题脱节）: session=%s", message.session_id)
         logger.info(
             "Stage 3 judge: session=%s trigger=%s verdict=%s",
             message.session_id, trigger, verdict.describe(),
