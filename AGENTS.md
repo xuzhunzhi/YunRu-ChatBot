@@ -77,6 +77,14 @@
   > 要落实就把它挪进 `plugins/vision/`，挪之前先确认：核心没有顶层引用它
   > （按判据，删掉它只该丢掉识图这个功能——这条已在 2026-10-02 修好并有测试守，
   > 见 `tests/test_optional_capabilities.py`）；它不依赖任何 SnowLuma action。
+  >
+  > **"预装"不等于进核心**（2026-10-03 用户："有几个插件我建议是做成预装的，
+  > 但是记住一定得按插件包装"）。预装只是**随代码发布 + 装配点默认注册**，
+  > 包装方式一个字都不能变：仍然是 `plugins/<名字>/plugin.py` 导出
+  > `register(registry)`，仍然必须满足判据"**删掉它，Stage 3 照样跑得起来**"。
+  > "装在这里但先别启用"用 `ENABLED = False`；有前置插件用 `REQUIRES = ("roles",)`
+  > （`plugins/__init__.py::discover()` 会先装前置，前置装不上就跳过自己）。
+  > **"它总归要装 / 别人依赖它"不是把它塞进核心的理由**——依赖用 `REQUIRES` 表达。
   **禁止往 `stage3_main.py` 里加 `if is_xxx_command(...)`。**
   插件**只有两样东西能在声明里**：
   档位（`min_level = "public" | "admin" | "super"`）与意图（返回 `ActionRequest` / `ImageReply`）。
