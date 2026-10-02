@@ -3,6 +3,13 @@ __pycache__/
 *.pyc
 node_modules/
 
+# --- 测试副本（**开发环境与测试环境分开**）-----------------------------------
+# `run_tests.py` 建的独立副本：它有自己的合成 `.env` 与自己的 `data/`，
+# 所以"跑测试"永远不会读这台机器的真凭据、也不会写开发树的 `data/`。
+# 2026-10-02 加：在那之前测试直接在开发树里跑，一次 `git checkout` 就把
+# `dev_config.py` 上未提交的真实超管号还原成了占位号（用户当场失去 /super）。
+/testenv/
+
 # 凭据：只保留 .env.example / .env.bot.example，真实配置永不提交
 .env
 .env.local

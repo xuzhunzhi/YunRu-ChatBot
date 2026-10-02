@@ -139,8 +139,41 @@ API_KEY = get("QQBOT_API_KEY", os.environ.get("API_KEY", ""))
 JUDGE_API_KEY = agent_api_key("QQBOT_JUDGE_API_KEY")
 MEMORY_API_KEY = agent_api_key("QQBOT_MEMORY_API_KEY")
 TARGET_GROUP_ID = "717151356"
-SUPER_ADMIN_USER_IDS = frozenset({"900000001"})
-ADMIN_USER_IDS = frozenset({"900000001"}) | SUPER_ADMIN_USER_IDS
+
+
+def _csv_ids(name: str) -> frozenset[str]:
+    """把一个逗号分隔的环境变量读成 id 集合（空 → 空集合）。
+
+    ⚠️ **必须定义在本文件靠前的位置。** 这个文件的助手函数都是"用到之前先定义"，
+    2026-10-02 我把 `_csv_ids` 的**使用**写在了它的定义之前，`import` 直接
+    `NameError: name '_csv_ids' is not defined`——而这个文件 L218 附近那条注释
+    记的正是同一个坑（"踩过一次"）。我踩了第二次，所以把定义搬到使用点之前。
+    """
+
+    raw = get(name, "")
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
+
+
+# 谁能用 `/super` 与 `/admin`。
+#
+# ## ⚠️ 为什么改成读环境（2026-10-02，一次真实的权限丢失）
+#
+# 这两行原来是**硬编码**的（`frozenset({"900000001"})`），而这是个**被 git 跟踪**的文件。
+# 于是部署机上唯一能让真号生效的办法是**改这个文件**——一处未提交的本地修改。
+# 后果在 2026-10-02 真实发生：一次 `git checkout`（换分支）把它**还原成仓库里的占位号**，
+# 超管当场失去全部 `/super` 权限，而且**没有任何告警**（`900000001` 谁也不是）。
+# 证据：`dev_config.py` 的修改时间与那条 `checkout` 的 reflog 时间**同一秒**。
+#
+# 现在真号放 `.env`（`.gitignore:7` 忽略、永不进仓库、**换分支冲不掉**）：
+#
+#     QQBOT_SUPER_ADMIN_USER_IDS=你的号[,第二个号...]
+#     QQBOT_ADMIN_USER_IDS=你的号[,第二个号...]
+#
+# 兜底仍是那个占位号：**测试与干净 clone 的行为一个字节都没变**
+# （很多测试拿 `900000001` 当 owner；`run_offline.py` 也会显式钉住它，
+# 免得测试跟着这台机器的 `.env` 跑）。
+SUPER_ADMIN_USER_IDS = _csv_ids("QQBOT_SUPER_ADMIN_USER_IDS") or frozenset({"900000001"})
+ADMIN_USER_IDS = (_csv_ids("QQBOT_ADMIN_USER_IDS") or frozenset({"900000001"})) | SUPER_ADMIN_USER_IDS
 BATCH_SIZE = 20
 COOLDOWN_SECONDS = 60.0
 
@@ -175,11 +208,7 @@ SNOWLUMA_WS_URL = get("QQBOT_SNOWLUMA_WS_URL", "ws://127.0.0.1:3001")
 # --- 余额命令 --------------------------------------------------------------
 # 余额是账号资金信息，默认只在超管私聊可用（fail-closed：不配就查不到）。
 # 要放开到群，显式写 QQBOT_BALANCE_GROUP_IDS（逗号分隔）。
-def _csv_ids(name: str) -> frozenset[str]:
-    raw = get(name, "")
-    return frozenset(part.strip() for part in raw.split(",") if part.strip())
-
-
+# （`_csv_ids` 定义在本文件靠前的位置——它现在也被超管名单用着。）
 BALANCE_PRIVATE_USER_IDS = _csv_ids("QQBOT_BALANCE_PRIVATE_USER_IDS") or SUPER_ADMIN_USER_IDS
 BALANCE_GROUP_IDS = _csv_ids("QQBOT_BALANCE_GROUP_IDS")
 BALANCE_CACHE_SECONDS = _float("QQBOT_BALANCE_CACHE_SECONDS", 60.0)
