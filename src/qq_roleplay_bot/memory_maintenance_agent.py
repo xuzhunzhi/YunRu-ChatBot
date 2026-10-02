@@ -256,7 +256,19 @@ class MemoryMaintenanceAgent:
                     self.metrics.maintenance_runs += 1
                     completed += 1
                     batch = None
-                    logger.info("memory_maintenance_committed operations=%s", len(ops))
+                    # ⚠️ 这行原来只打 `operations=len(ops)`，**会骗人**（2026-10-02 实测踩到）：
+                    # `ops` 里**包含 `IGNORE`**——那是模型明确说"不用记"的**空操作**，
+                    # 而 `commit` 把"真正生效的操作"返回给调用方（见 `memory_store.commit`），
+                    # `IGNORE` 也算生效（它确实被处理了，只是没写东西）。
+                    # 于是最常见的正常情况（复查一条旧会话、结论"不动"）会打成
+                    # `memory_maintenance_committed operations=1`——读起来像"写了一条记忆"。
+                    # 我就这么误读了一次，跟用户报了"记忆维护真的提交了一条"。
+                    # 现在把**种类**和**真正写入的条数**都打出来，`written=0 kinds=IGNORE`
+                    # 一眼就能看懂。
+                    kinds = ",".join(op.op for op in ops) or "none"
+                    written = sum(1 for op in ops if op.op != "IGNORE")
+                    logger.info("memory_maintenance_committed operations=%s written=%s kinds=%s",
+                                len(ops), written, kinds)
                 except Exception as exc:
                     self.metrics.failures += 1
                     logger.warning("memory_maintenance_failed category=%s", type(exc).__name__)
