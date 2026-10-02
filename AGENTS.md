@@ -132,9 +132,16 @@
 # 期望：无输出
 
 # 3.（动了"可插能力"的 import 时）核心**能不能跑起来**——不只是能不能 import
-.\.venv\Scripts\python.exe data\tmp_unplug.py vision qq_roles control_audit typing_sim help_card
-# 期望：build_engine 那一列全是"能（已解耦）"
+.\.venv\Scripts\python.exe tests\check_module_removal.py
+# 期望：7 个可插能力的 build_engine 那一列全是"能（已解耦）"，退出码 0
+# 不通过时退出码 1 并指名哪个模块还被拴着。
 ```
+
+> **门槛必须在仓库里。** 这条脚本原来放在 `data/tmp_unplug.py`（忽略范围、未跟踪），
+> 于是**干净 clone 拿不到它**——写在文档里的门槛如果不在仓库里，它就不是门槛
+> （2026-10-02 外部审查者指出）。现在它在 `tests/check_module_removal.py`，
+> 而且换成了 **meta-path 拦截**（不改文件名、不需要写权限，只读沙箱里也能跑）。
+> 它的**敏感度也验过**：把任一处降级改回裸 `import`，它会以退出码 1 指名那个模块。
 
 ### 3.1 每次运行都会留痕——"全绿"必须有凭证
 
