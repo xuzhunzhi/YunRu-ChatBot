@@ -20,6 +20,9 @@ from qq_roleplay_bot.stage3_main import DialogueEngine
 from qq_roleplay_bot.stage3_runtime import ContextState, ConversationMode, build_dialogue_messages
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 
+# 本机配置在不在的判定（干净 clone 只有 `.env.example`）——见 `tests/config_support.py`
+from config_support import skip_unless_memory_enabled
+
 GROUP = "717151356"
 OTHER = "999999999"
 
@@ -808,8 +811,11 @@ class MemoryAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         组装（客户端、记忆服务）在 `runtime.serve` 里，所以 patch 目标是 runtime；
         传输层由 stage3 的 `run()` 决定，patch 目标是 stage3_main。
+
+        前提是本机开了记忆服务（干净 clone 只有 `.env.example`）→ 没开就跳过。
         """
 
+        skip_unless_memory_enabled()
         import qq_roleplay_bot.runtime as runtime
         import qq_roleplay_bot.stage3_main as main
         sent = []

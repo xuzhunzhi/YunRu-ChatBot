@@ -12,6 +12,9 @@ from qq_roleplay_bot.style_reviewer import (REVIEW_SYSTEM_PROMPT, StyleReviewer,
                                             within_growth_limit)
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 
+# 本机配置在不在的判定（干净 clone 只有 `.env.example`）——见 `tests/config_support.py`
+from config_support import skip_unless_review_enabled
+
 GROUP = "717151356"
 TARGET = MessageTarget(group_id=GROUP)
 
@@ -150,6 +153,8 @@ class StyleReviewerTests(unittest.TestCase):
 
 class EngineReviewWiringTests(unittest.TestCase):
     def test_engine_sends_the_reviewed_line(self) -> None:
+        # 前提是本机的风格审核配置在场（干净 clone 只有 .env.example）。
+        skip_unless_review_enabled()
         reviewer = StyleReviewer(_Client("不是。"))
         engine = DialogueEngine(_Reply("不是。纱布吸水，我不吸。"), style_reviewer=reviewer)
         outgoing = asyncio.run(engine.handle(message(text="@YunRu 你是纱布")))

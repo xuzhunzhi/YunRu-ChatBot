@@ -18,6 +18,9 @@ from qq_roleplay_bot.llm_client import (
 from qq_roleplay_bot.operator_config import OperatorConfig
 from qq_roleplay_bot.runtime import apply_overrides
 
+# 本机配置在不在的判定（干净 clone 只有 `.env.example`）——见 `tests/config_support.py`
+from config_support import skip_without_env
+
 
 class _Engine:
     """面板热更要碰的那几个属性（真引擎上也就是这几个）。"""
@@ -184,8 +187,12 @@ def test_clearing_the_main_key_falls_back_or_is_refused() -> None:
 
     这条是 2026-10-01 事故的回归测试：当时清空 `api_key` 会在环境里留下空串，
     而 `.env` 的填充因为"键已存在"被挡住 → 回复 agent 的 key 变空 → 模型全 401。
+
+    前提是本机有主 key——公开仓库只发布 `.env.example`，所以干净 clone 上跳过
+    （2026-10-02 加，见 `tests/config_support.py`），而不是红着喊代码坏了。
     """
 
+    skip_without_env("API_KEY", "这条验的是'清空后回落 .env 那一把'，需要 .env 里有主 key")
     with tempfile.TemporaryDirectory() as tmp:
         runtime_flags.install(runtime_flags.build_flags())
         client = _client("dialogue", key="sk-from-env")
