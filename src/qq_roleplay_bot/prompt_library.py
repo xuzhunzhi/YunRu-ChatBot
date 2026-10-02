@@ -164,10 +164,41 @@ class PromptLibrary:
 
             return REVIEW_SYSTEM_PROMPT
         if name == "vision":
-            from .vision import VISION_SYSTEM_PROMPT
+            # 识图是**可插能力**：`vision` 模块可以整份不在这次的部署里。
+            # 它不在时这一套 prompt 也就不存在——**明确拒绝**，不要放
+            # `ModuleNotFoundError` 出去：那会在启动期炸掉整个 `build_engine`。
+            # （2026-10-02 外部审查第四轮实测：修之前 `build_engine` →
+            #  `prompts.backfill_all()` → `backfill()` → 就到了这一行。
+            #  也就是说"删掉识图不影响说话"这句话当时是假的。）
+            try:
+                from .vision import VISION_SYSTEM_PROMPT
+            except ImportError as exc:
+                # 抓 `ImportError` 而不只是 `ModuleNotFoundError`：`vision` 在、
+                # 但它自己的依赖缺失时，同样"这次部署没有识图能力"。
+                raise PromptRejected(
+                    f"识图不在这次部署里（{type(exc).__name__}）") from None
 
             return VISION_SYSTEM_PROMPT
         raise PromptRejected(f"不认识的 prompt：{name}")
+
+    @classmethod
+    def available(cls) -> tuple[str, ...]:
+        """这次部署里**真的存在**的那几套 prompt。
+
+        可插能力缺席（例如没有 `vision` 模块）时对应的那一套会被滤掉——
+        调用方（`backfill_all`、面板列表）应该照这个结果遍历，而不是照 `PROMPTS`
+        硬遍历：`text("vision")` 在那种部署里会抛 `PromptRejected`，
+        面板列表会整个 500。
+        """
+
+        names: list[str] = []
+        for name in PROMPTS:
+            try:
+                cls.builtin(name)
+            except PromptRejected:
+                continue
+            names.append(name)
+        return tuple(names)
 
     # --- 读 ---------------------------------------------------------------
 
@@ -291,17 +322,27 @@ class PromptLibrary:
 
         这样"恢复内置默认"不会导致历史里丢掉原稿（那正是最想拿回来的一版）。
         幂等：已经有覆盖或已经有历史时什么都不做。
+
+        返回是否真的补了一版。**可插能力缺席的那一套直接跳过**（返回 False）：
+        不伪造占位 prompt——伪造一份会让面板看起来"有识图这套"，
+        而它其实不在这次部署里。
         """
 
         key = str(name)
         if not self.enabled or key in self._cache:
-            return
+            return False
         try:
             if any(self._versions_dir(key).glob(f"{key}.*.json")):
-                return
+                return False
         except OSError:  # pragma: no cover
-            return
-        self._stash(key, self.builtin(key))
+            return False
+        try:
+            builtin = self.builtin(key)
+        except PromptRejected as exc:
+            logger.info("prompt_backfill_skipped name=%s reason=%s", key, exc)
+            return False
+        self._stash(key, builtin)
+        return True
 
     def reset(self, name: str, *, source: str = "") -> str:
         """恢复内置默认（把覆盖文件挪进版本目录，而不是删掉）。"""
@@ -324,14 +365,18 @@ class PromptLibrary:
         return self.builtin(key)
 
     def backfill_all(self) -> int:
-        """启动时给六套都补一份"原稿"版本。返回实际补了几套。"""
+        """启动时给每一套**存在**的 prompt 补一份"原稿"版本。返回实际补了几套。
+
+        遍历的是 `available()` 而不是 `PROMPTS`：可插能力缺席的那几套会被跳过
+        （见 `backfill`），所以"识图删掉之后核心照样起得来"这句话才成立。
+        """
 
         if not self.enabled:
             return 0
         if not self._loaded:
             self.load()
         added = 0
-        for name in PROMPTS:
+        for name in self.available():
             if name in self._cache:
                 continue
             try:
@@ -340,8 +385,8 @@ class PromptLibrary:
                 continue
             if existed:
                 continue
-            self.backfill(name)
-            added += 1
+            if self.backfill(name):
+                added += 1
         if added:
             logger.info("已为 %s 套 prompt 留下原稿版本（%s）", added, self.directory)
         return added

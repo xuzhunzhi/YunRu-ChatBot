@@ -300,9 +300,24 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
     flags = runtime_flags.build_flags(operator)
     runtime_flags.install(flags)
     # 审计（可插：`_host.AuditSink`）。本地 import——没有它就不记审计，核心照样跑。
-    from .control_audit import ControlAudit
+    #
+    # 2026-10-02 修：原来只有"本地 import"、**没有兜住 ImportError**，所以这句
+    # "核心照样跑"是假的——删掉 `control_audit` 之后 `build_engine` 直接抛
+    # `ModuleNotFoundError`（外部审查第四轮实测，我在冻结的提交上复现）。现在真的降级：
+    # 用 `_host.NoAudit`（**同一个协议的空实现**，`record` / `tail` 都在），
+    # 而不是让审计变成 `None` 再在别处 `AttributeError`。
+    # 这也是 `_host` 目前唯一一处"马上就用上"的协议。
+    try:
+        from .control_audit import ControlAudit
 
-    audit = ControlAudit(enabled=state_persistence_enabled())
+        audit = ControlAudit(enabled=state_persistence_enabled())
+    except ImportError as exc:
+        # 抓 `ImportError` 而不只是 `ModuleNotFoundError`：模块在、但它自己的依赖
+        # 缺失（或 `sys.modules` 里被置 None）时同样是"这次没有审计能力"。
+        from ._host import NoAudit
+
+        logger.warning("审计模块不可用（%s），本次不记审计流水", type(exc).__name__)
+        audit = NoAudit()
     # 跨重启的累计账本（2026-09-30）：`/super apicheck` 与 `/super status` 默认看它，
     # 而不是"这次重启之后"。关掉状态持久化（测试/干跑）时它只活在内存里。
     usage_store = ApiUsageStore(enabled=state_persistence_enabled())
@@ -379,9 +394,20 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
     # 静默地什么都不批。所以创建放在这里（装配点），并加了测试钉住。
     # **她自己在每个群的 QQ 角色**（可插能力：`_host.RoleLookup`）。
     # 本地 import——它是"查得到才谈得上群主动作"的前置能力，不是底层必需品。
-    from .qq_roles import SelfRoleCache
+    #
+    # 2026-10-02 修：这里原来也是**裸 import**，所以"不是底层必需品"这句话不成立
+    # ——删掉 `qq_roles` 会让 `build_engine` 抛 `ModuleNotFoundError`（实测）。
+    # 现在真的降级成**"没有这项能力"**（`self_roles = None`），并且**出声**：
+    # 群主那一族动作随之不可用（它们的代码本来就容忍 `None`），而不是核心起不来。
+    # 注意这与 2026-09-30 那个回归**不是一回事**：那次是模块在、创建漏了，
+    # 于是静默地什么都不批；这次是能力**确实不在**，且日志里说得清。
+    try:
+        from .qq_roles import SelfRoleCache
 
-    engine.self_roles = SelfRoleCache(transport, ttl=dev_config.SELF_ROLE_TTL_SECONDS)
+        engine.self_roles = SelfRoleCache(transport, ttl=dev_config.SELF_ROLE_TTL_SECONDS)
+    except ImportError as exc:
+        engine.self_roles = None
+        logger.warning("角色查询模块不可用（%s），本次没有群主/审批能力", type(exc).__name__)
     # 面板要用的四样东西挂到引擎上（插件拿不到引擎，只拿得到装配点给的闭包）：
     # 覆盖层、prompt 库、记忆人工操作、操作审计。
     engine.operator_config = operator
@@ -504,7 +530,15 @@ def _build_vision(usage_store=None):
     logger.info("识图已启用：model=%s user_id=%s（有图的消息在判定前先看一眼）",
                 dev_config.VISION_MODEL, dev_config.VISION_USER_ID)
     # 本地 import：识图是**可插能力**，不是底层必需品（删掉它，她只会说"看不到图"）。
-    from .vision import ImageDescriber
+    #
+    # 2026-10-02 修：这里原来是裸 import。**这一处**其实还排不上先炸——真正的
+    # 第一处炸点在 `prompt_library.builtin("vision")`（`build_engine` 里的
+    # `prompts.backfill_all()` 会遍历到它），见那个文件里的说明。两处都兜住。
+    try:
+        from .vision import ImageDescriber
+    except ImportError as exc:
+        logger.warning("识图模块不可用（%s），有图的消息只留占位符", type(exc).__name__)
+        return None
 
     return ImageDescriber(
         OpenAICompatibleClient(

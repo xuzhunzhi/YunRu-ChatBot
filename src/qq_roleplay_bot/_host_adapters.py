@@ -16,11 +16,14 @@
 ```python
 from ._host_adapters import build_host_services
 
-engine = DialogueEngine(
-    client,
-    host=build_host_services(call_action=call_action, transport=transport),
-)
+engine = DialogueEngine(client, host=build_host_services())
 ```
+
+要"这次故意不接某一项"，给它传 `False`（三态见 `build_host_services` 的 docstring）。
+
+> 2026-10-02 修：这里原来写的是
+> `build_host_services(call_action=call_action, transport=transport)`——
+> **那两个参数在签名里根本不存在**（是更早一版的写法残留）。照它写会 `TypeError`。
 
 **注意**：适配器里的 import 全在函数内。放模块顶部就等于又把原模块拴回底层了，
 那正是这次要拆掉的东西。
@@ -72,29 +75,36 @@ class HelpCardRenderer:
 
 
 class LocalMachineProbe:
-    """`MachineProbe` 的现有实现：`runtime_diagnostics.LocalRuntimeDiagnostics`。
+    """`MachineProbe` 的现有实现。
 
-    采不到就返回空样本——**不编数字**。
+    ## ⚠️ 它现在**采不到东西**，而且这是显式的（2026-10-02 修）
+
+    `MachineProbe.sample()` 是**同步**方法，而 `runtime_diagnostics` 的取数方法是
+    `async def`（`processes` / `network` / `fans`）。同步方法里 await 不了，
+    所以原来那版这样写：
+
+        processes=tuple(probe.processes())     # 拿到的是**协程对象**，不是数据
+
+    后果是**永远返回空样本**，并且在垃圾回收时留一条
+    `RuntimeWarning: coroutine '...' was never awaited`。
+    也就是它**假装在采**——那正是这个仓库反复栽过的"代码/文档撒谎"。
+
+    与其继续假装，不如显式返回空样本，并把桥接留成待办：
+    真要用 `host.machine` 时，得把 `MachineProbe.sample` 改成 `async`，
+    或者让装配点接到一个**同步**的取样器上。
+    `AGENTS.md` §3.3 记着 `host.machine` 目前**没有消费者**
+    （`runtime.py` 里只有一处赋值、零处读取），所以现在没人会读到这个空样本。
+
+    `diagnostics` 参数保留，是为了让已有的装配行（`runtime.py` 里那句）继续成立；
+    **它目前不被使用**——不要以为传进来就会采到东西。
     """
 
     def __init__(self, diagnostics=None) -> None:
         self._diagnostics = diagnostics
 
     def sample(self) -> MachineSample:
-        from .runtime_diagnostics import LocalRuntimeDiagnostics
-
-        probe = self._diagnostics
-        if probe is None:
-            probe = LocalRuntimeDiagnostics()
-            self._diagnostics = probe
-        try:
-            return MachineSample(
-                processes=tuple(probe.processes()),
-                network=dict(probe.network()),
-                fans=tuple(probe.fans()),
-            )
-        except Exception:  # noqa: BLE001 - 诊断挂了不该带走对话
-            return MachineSample()
+        # 显式空样本：不调用那些 async 取数方法（调了只会拿到没 await 的协程）。
+        return MachineSample()
 
 
 class HostMachineProbe:
@@ -168,21 +178,51 @@ class FileAuditSink:
         return self._sink().tail(count)
 
 
+def _choose(value, default_factory, empty_factory):
+    """三态选择：**没指定 / 故意不接 / 用这个**。
+
+    这个形状是为了让 `build_host_services` docstring 里那句"显式传 `False` 表示
+    这次故意不接"**变成真的**。2026-10-02 之前代码是
+    `TypingStyler() if styler is None else styler`，于是传 `False` 会把 `False`
+    **原样装进** `HostServices`（之后 `self.host.styler.split(...)` 就
+    `AttributeError`），而只有 `balance` / `roles` / `knowledge` 走 `x or None`
+    才被归一。外部审查第四轮点的就是这处"文档与实参矛盾"。
+    """
+
+    if value is None:
+        return default_factory()
+    if value is False:
+        return empty_factory()
+    return value
+
+
 def build_host_services(*, styler=None, cards=None, machine=None, audit=None,
                         balance=None, roles=None, knowledge=None) -> HostServices:
     """装配点的**唯一入口**：决定接哪些能力上去。
 
-    **每一项都是可选参数**，不传就用现有的实现；显式传 `False` 表示"这次故意不接"
-    （用来验证"没有它也能跑"）。`balance` / `roles` / `knowledge` 三项默认不接——
-    它们各自有开关（`QQBOT_BALANCE_*`、角色插件在不在、知识库配没配），
-    由调用方判断后传进来，而不是在这里硬编码。
+    **每一项都可选，三种取值**：
+
+    | 传什么 | 结果 |
+    | --- | --- |
+    | 不传 / `None` | 用**这一侧现成的实现**（`TypingStyler` / `HelpCardRenderer` / `LocalMachineProbe` / `FileAuditSink`） |
+    | 显式 `False` | **这次故意不接**，换成空实现（`_host.NoStyler` 等）——用来验证"没有它也能跑" |
+    | 一个对象 | 就用它 |
+
+    `balance` / `roles` / `knowledge` 三项**缺省是"没有这项能力"**（`None`），
+    而不是空实现——`HostServices` 的类 docstring 讲了为什么要分开：
+    有 `BalanceSource` 才注册 `/balance`，空实现会让调用方以为"能做但结果为空"。
+    这三项传 `False` 同样归一到 `None`。它们各自有开关
+    （`QQBOT_BALANCE_*`、角色查询在不在、知识库配没配），由调用方判断后传进来，
+    不在这里硬编码。
     """
 
+    from ._host import NoAudit, NoCards, NoMachine, NoStyler
+
     return HostServices(
-        styler=TypingStyler() if styler is None else styler,
-        cards=HelpCardRenderer() if cards is None else cards,
-        machine=LocalMachineProbe() if machine is None else machine,
-        audit=FileAuditSink() if audit is None else audit,
+        styler=_choose(styler, TypingStyler, NoStyler),
+        cards=_choose(cards, HelpCardRenderer, NoCards),
+        machine=_choose(machine, LocalMachineProbe, NoMachine),
+        audit=_choose(audit, FileAuditSink, NoAudit),
         balance=balance or None,
         roles=roles or None,
         knowledge=knowledge or None,

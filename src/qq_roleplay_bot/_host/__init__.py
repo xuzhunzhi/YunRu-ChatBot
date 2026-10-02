@@ -18,8 +18,9 @@
 哪怕删掉的只是"帮助卡片长什么样"。
 
 现在翻转过来：**引擎只说"我需要一个 `MachineProbe`"，实现由装配点给进来**；
-谁都不给的时候用 `stubs.py` 里的空实现，引擎退化成"没这项能力"，
-而**不是 ImportError**。
+谁都不给的时候用**本文件里的空实现**（`NoStyler` / `NoCards` / `NoMachine` /
+`NoAudit`，就在下面几十行——**没有叫 `stubs.py` 的文件**），引擎退化成
+"没这项能力"，而**不是 ImportError**。
 
 ## 判据仍然只有一条
 
@@ -28,17 +29,42 @@
 按这条判据，本文件里的东西**都不是底层的必需品**，它们是**可插的能力**。
 反过来也成立：任何一个 `_host` 实现被删掉，Stage 3 都必须照跑。
 
+> ⚠️ **这条曾经是假的（2026-10-02 外部审查第四轮实测，我在冻结的提交上复现）**：
+> `runtime.py` 与 `prompt_library.py` 里那几处"局部 import 可选能力"
+> **没有兜住 `ImportError`**——`vision` / `qq_roles` / `control_audit` 删掉之后
+> `build_engine()` 直接抛 `ModuleNotFoundError`。**"能不能 import"过得了，
+> "能不能跑起来"过不了**，而判据问的是后者。现在三处都真降级了
+> （审计→`NoAudit`、角色查询→`None` 并出声、可插能力那套 prompt→跳过），
+> `data/tmp_unplug.py` **两件事都测**（它原来只测 `import`，
+> 于是给过误导性的"已解耦"）。
+
 ## 怎么用
 
 ```python
 class DialogueEngine:
     def __init__(self, ..., host: HostServices | None = None) -> None:
-        self.host = host or HostServices()      # 全空实现
+        # `None`（没指定）→ **这一侧现成的实现**（`stage3_main.default_host()`，
+        # 真有拟人化停顿）。要"没有这项能力"就**显式**传 `HostServices()`（全空实现）。
+        self.host = host if host is not None else default_host()
 
 # 要用的时候
 for delay in self.host.styler.delay_plan(segments):
     await asyncio.sleep(delay)
 ```
+
+> ⚠️ **这里原来写的是 `self.host = host or HostServices()  # 全空实现`——文档撒谎
+> （2026-10-02 外部审查第四轮实测）。** 生产的 `DialogueEngine.__init__` 走
+> `default_host()`，而它与 `HostServices()` **行为不同**：
+>
+> | | `default_host()` | `HostServices()` |
+> | --- | --- | --- |
+> | `styler.delay_plan(...)` | `(6.0,)`（有停顿） | `(0.0,)`（一次发出去） |
+> | `cards.available` | `True` | `False` |
+> | `styler` | `TypingStyler` | `NoStyler` |
+>
+> 照原来那句读，人会得出"不传 host = 没有拟人化停顿"，而生产里**有**停顿。
+> `default_host()` 的 docstring 也解释了为什么默认不给空实现：
+> `QQBOT_TYPING_SIM` 默认是开的，"拆接口"这一步必须**行为不变**。
 
 **不要**在核心模块顶部 `from qq_roleplay_bot.typing_sim import …`——
 那样又把它拴回底层了。

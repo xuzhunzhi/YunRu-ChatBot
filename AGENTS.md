@@ -70,6 +70,13 @@
   你好像直接加到 super 的底层里去了"）。范围就是 stage4：**对外功能扩展**。
   每个插件一个文件夹（2026-10-01 用户："每个插件一个文件夹。比如群管理功能算
   一个文件夹，识图算一个文件夹"），目录里必须有 `plugin.py` 导出 `register(registry)`。
+  > **注（2026-10-02 核对）：识图这条还没做。** 这条分支上**连 `plugins/` 目录都没有**
+  > （插件实现在 `stage4-plugins`）；即便在那条分支上，`plugins/vision/` 也**不存在**，
+  > `vision.py` 还在包根。上面那句是**用户当时的要求**，不是已完成的事实——
+  > 把引用直接摆在那里，读的人会以为它已经是插件文件夹了。
+  > 要落实就把它挪进 `plugins/vision/`，挪之前先确认：核心没有顶层引用它
+  > （按判据，删掉它只该丢掉识图这个功能——这条已在 2026-10-02 修好并有测试守，
+  > 见 `tests/test_optional_capabilities.py`）；它不依赖任何 SnowLuma action。
   **禁止往 `stage3_main.py` 里加 `if is_xxx_command(...)`。**
   插件**只有两样东西能在声明里**：
   档位（`min_level = "public" | "admin" | "super"`）与意图（返回 `ActionRequest` / `ImageReply`）。
@@ -115,14 +122,76 @@
 改完必须全部满足：
 
 ```powershell
-# 1. 离线测试全绿（main 上 771 个；stage4-plugins 上 1114 个）
+# 1. 离线测试全绿（这条分支 793 个；`stage4-plugins` 上 1162 个）
+#    干净 clone（只有 .env.example、模板人格）：会多几条跳过，其余全过
 .\.venv\Scripts\python.exe tests\run_offline.py
 # 期望：ALL_OFFLINE_TESTS_PASSED
 
 # 2. 静态检查干净
 .\.venv\Scripts\python.exe -m pyflakes src tests
 # 期望：无输出
+
+# 3.（动了"可插能力"的 import 时）核心**能不能跑起来**——不只是能不能 import
+.\.venv\Scripts\python.exe data\tmp_unplug.py vision qq_roles control_audit typing_sim help_card
+# 期望：build_engine 那一列全是"能（已解耦）"
 ```
+
+### 3.1 每次运行都会留痕——"全绿"必须有凭证
+
+`tests/run_offline.py` 每次跑（**包括失败那次**）都会通过底层的
+`qq_roleplay_bot/verify_log.py` 记两样东西：
+
+| 文件 | 内容 |
+| --- | --- |
+| `data/logs/verify_runs.log` | **一行一次**：时间 · `sha` · 分支 · 工作区脏不脏 · `ran/failed/errors/skipped` · `result=PASS\|FAIL` |
+| `data/logs/verify_last.txt` | 最近一次的**完整终端输出**（失败时能直接看 traceback，不必让人重跑——重跑会碰真实 `data/`） |
+
+```powershell
+# 核对"上次全绿"到底是不是绿的、跑的是哪个提交
+Get-Content data\logs\verify_runs.log | Select-Object -Last 3
+```
+
+**为什么这是底层能力而不是"测试脚本里的几行"**：2026-10-02 的一次外部观察指出，
+文档里写着"1139 个全绿"，但**磁盘上找不到那次运行的记录**——于是那句话无法被独立核对，
+读者只能选择相信我，或者自己重跑一遍。留痕不该靠"下次记得存一下"。
+写在 `data/` 下是故意的：那里被忽略，所以这些日志（可能含本机路径与合成 prompt）
+**不会进公开仓库**。
+
+`dirty=yes` 时**那次运行的凭证效力不同**：工作区脏意味着跑的内容不等同于任何提交，
+字段如实标出来，别当成"某个提交是绿的"。
+（这条设施当天就抓到了一次自己的破坏：切分支时 git 把被跟踪的能力白名单带走了，
+留痕记下 `FAILED ... failed=6 errors=1`，存档里能直接看到是哪 7 条。）
+
+### 3.2 报告测试数时注意口径
+
+`grep -c "def test_"` 得到的数**小于** `unittest` 实际收集的数——`TestCase` 类里的方法
+不叫 `def test_`，所以两个数天然对不上（2026-10-02 一位外部审查者按 1129 质疑
+"1139 全绿"，就是这个口径差）。**报数请用 `verify_runs.log` 里的 `ran=`**，
+那是真正跑过的数量。
+
+### 3.3 `_host` 那七个协议，目前只有 1 个有消费者（别以为它们都通了）
+
+2026-10-02 外部审查实测（我复核过）——引擎里 `host.<字段>` 的调用点：
+
+| 协议 | 调用点 |
+| --- | --- |
+| `styler` | **3 处**（分段与停顿） |
+| `machine` | **1 处赋值、0 处读取**（`runtime.py` 里 `engine.host.machine = …`，没人读） |
+| `cards` / `audit` / `balance` / `roles` / `knowledge` | **各 0 处** |
+
+也就是说：**`_host` 现在不是"解开的拴缚"，而是"把 `import` 挪进函数体"**——
+真正解开拴缚的是那些函数内的延迟 import（以及上面要求的降级），跟 `_host` 这一层
+没关系。`help_card` / `balance` 至今是在 `stage3_main` 里**直接 import** 的。
+
+按 §一.2"**不为 Stage 4 的功能预先建接口**"，这六个协议目前的定位是"先画好的插座"
+——判据上它们确实"删掉不影响 Stage 3"，所以不算越界，但**不要**把它们当成
+"已经接好的线"。要么等真实需求把它们接上，要么在文档里标"预留、未接线"。
+
+`LocalMachineProbe.sample()` 原来**假装在采**（同步方法里调 `async def`，拿到的是
+协程对象）→ 永远返回空样本 + 一条"协程从没被 await"的 `RuntimeWarning`。
+2026-10-02 改成**显式返回空样本**并写明桥接是待办（要真采数据得把
+`MachineProbe.sample` 改成 `async`）；`tests/test_host_services.py` 里
+`test_the_machine_probe_explicitly_samples_nothing` 钉住"显式空、且不留协程残骸"。
 
 补充要求：
 
@@ -146,7 +215,13 @@
   （"你也被忽略了"、"没有 stage4 代码"），都是靠用户指出才纠正的。
 - **自己制造的问题要主动说。** 例如一度留下重复实现（`_state_persistence_enabled`
   两处都有）、写了 32 个测试会因为接口变更而报错。这些都要讲清楚。
-- **删文件、改记忆库、动运行中的进程，必须先问。** 删除不可逆，这个仓库没有 git。
+- **删文件、改记忆库、动运行中的进程，必须先问。**
+  **代码在 git 里**（`git@github.com:xuzhunzhi/YunRu-ChatBot.git`），误删被跟踪的文件
+  可以用 `git restore <path>` 找回来——所以"删代码"不是不可逆的。
+  但**这四样不在 git 里**：`data/`（含**记忆库**）、`backups/`、`docs/yunru-source/`、`.env`
+  ——删它们就真没了，`backups/` 也只兜住其中一部分。
+  （2026-10-02 更正：这里原来写"删除不可逆，这个仓库没有 git"，**是假的**——
+  那句话会让人对代码过度保守、对 `data/` 又可能不够保守。）
 
 ---
 
@@ -156,7 +231,7 @@
 | --- | --- |
 | `docs/yunru-source/` 下的原始素材 | 用户要求原文一字不动。尤其 `02-核心设定/云茹官方设定.md` |
 | `data/memory/` 里的记录 | 删记忆必须用户点头 |
-| `backups/` | 是回退手段。这个仓库**没有 git**，备份是唯一的后悔药 |
+| `backups/` | **运行数据**（记忆库快照、邮件 jsonl、各阶段源码压缩包）的退路——这些**不在 git 里**（`data/` 与 `backups/` 都被忽略），所以它是那部分的唯一后悔药；**代码另有 git** |
 | `.env` | 含真实凭据，不要提交、不要写入日志 |
 | 运行中的 Bot 进程 | 停/重启前先问——之前未经同意停过一次，导致线上中断 |
 
