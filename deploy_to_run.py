@@ -39,7 +39,13 @@ PROTECTED = ("data", "backups", ".env", ".tmp_test_run")
 
 
 def fingerprint(path: Path) -> tuple[int, str]:
-    """`(文件数, 内容哈希)`——用来证明部署没动过它。"""
+    """`(文件数, 内容哈希)`。
+
+    ⚠️ **只对"部署不该碰且不会被 bot 写"的东西用哈希**。对 `data/` 用它是错的：
+    2026-10-03 实测踩到——bot 正在跑、正在追加 `data/logs/*.jsonl`，于是部署期间
+    哈希必变，脚本报"生产数据被动过"并退出码 1，**而其实一个字节都不是部署改的**
+    （复制只发生在 `src/` 与那几个启动脚本上）。那次误报差点让人以为部署把数据搞坏了。
+    """
 
     if path.is_file():
         return 1, hashlib.sha256(path.read_bytes()).hexdigest()
@@ -49,6 +55,20 @@ def fingerprint(path: Path) -> tuple[int, str]:
         digest.update(p.relative_to(path).as_posix().encode())
         digest.update(p.read_bytes())
     return len(files), digest.hexdigest()
+
+
+def count_files(path: Path) -> int:
+    """只数文件数——**部署能保证的东西**，且不受"bot 正在追加日志"干扰。
+
+    部署的白名单只有 `src/` 与四个启动脚本，所以它能破坏的东西只有一种：
+    **删掉** `data/`、`backups/`、`.env` 里的东西。文件数只增不减就是这条保证的证据。
+    """
+
+    if not path.exists():
+        return -1
+    if path.is_file():
+        return 1
+    return sum(1 for p in path.rglob("*") if p.is_file())
 
 
 def changed_files(src: Path, dst: Path) -> list[str]:
@@ -90,8 +110,9 @@ def main(argv: list[str] | None = None) -> int:
             print("   ", line)
         print("  确认没问题就加 --force；或者先提交。")
 
-    # 部署前的生产数据指纹
-    before = {name: fingerprint(RUN / name) for name in PROTECTED if (RUN / name).exists()}
+    # 部署前的生产数据**文件数**（不哈希：bot 正在跑时 data/ 一直在被追加，
+    # 哈希必变、必然误报——原因见 `fingerprint` 的说明）
+    before = {name: count_files(RUN / name) for name in PROTECTED if (RUN / name).exists()}
 
     print(f"\n=== 将要部署（{'dry-run' if args.dry_run else '复制'}）")
     total = 0
@@ -127,18 +148,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n（dry-run：没有写任何东西；共 {total} 个文件会变）")
         return 0
 
-    print("\n=== 核对：生产数据一个字节都没动")
+    print("\n=== 核对：部署没删掉生产数据里的任何东西")
     ok = True
     for name, was in before.items():
-        now = fingerprint(RUN / name)
-        same = now == was
+        now = count_files(RUN / name)
+        # 只增不减才算安全：bot 在跑时这些目录本来就会长（日志、记忆库）。
+        same = now >= was
         ok = ok and same
-        print(f"  {'✓' if same else '✗'} {name}: {now[0]} 个文件"
-              f"{'' if same else '  ← 变了！'}")
+        delta = now - was
+        note = f"（+{delta}，bot 运行中的正常写入）" if delta > 0 else ""
+        print(f"  {'✓' if same else '✗'} {name}: {now} 个文件"
+              f"{note}{'' if same else '  ← 少了文件！'}")
     if not ok:
-        print("\n!! 生产数据被动过——立刻停下查原因")
+        print("\n!! 有文件消失——立刻停下查原因")
         return 3
-    print(f"\n部署完成；共 {total} 个文件变化。run/ 的 data/、backups/、.env 未改动。")
+    print(f"\n部署完成；共 {total} 个文件变化。"
+          f"复制只发生在 src/ 与启动脚本上，run/ 的 data/、backups/、.env 没被写。")
     print("提示：bot 要**重启**才会用上新代码。")
     return 0
 

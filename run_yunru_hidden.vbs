@@ -52,8 +52,9 @@ If running > 0 Then
 End If
 
 q = Chr(34)
-' 显式指明包在哪：共用 venv 的 .pth 指向**部署树**（run\src），
-' 所以这一侧必须自己说清用我这份 src，否则会静默 import 到另一边。
+' State the package path explicitly. The shared venv's .pth points at the
+' deployment tree (run\src), so each side must name its own src -- otherwise
+' it silently imports the other tree.
 command = "cmd.exe /c cd /d " & q & root & q & " && " & _
           "set " & q & "PYTHONPATH=" & root & "\src" & q & " && " & _
           q & ".venv\Scripts\python.exe" & q & " -m qq_roleplay_bot.stage3_main " & _
