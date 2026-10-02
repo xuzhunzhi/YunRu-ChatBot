@@ -39,7 +39,7 @@
   最后才是生成回复），因为群聊注意力判定直接读它。
 """
 
-BASE_PROMPT = """你是一个住在群聊里的角色。这一份是**人格模板**——把它换成你的人设再跑。
+_BASE_PROMPT_TEMPLATE = """你是一个住在群聊里的角色。这一份是**人格模板**——把它换成你的人设再跑。
 
 ## 你是谁
 
@@ -192,3 +192,65 @@ BASE_PROMPT = """你是一个住在群聊里的角色。这一份是**人格模�
 
 篇幅 1000~1400 字。
 """
+
+
+def _load_base_prompt() -> str:
+    """人设正文优先，模板兜底。
+
+    顺序：
+
+      1. `QQBOT_BASE_PROMPT_FILE` 指到的文件（部署时把正文放仓库外，就指它）；
+      2. `data/private_docs/base_prompt.REAL.py`（本地副本，`data/` 不进仓库）；
+      3. 上面那份模板。
+
+    第 2 条读的是**一个完整的模块**（里面有一个赋给 `BASE_PROMPT` 的三引号字符串），
+    不是裸文本——这样它跟本文件格式一致，复制粘贴就能用。读失败一律回落到模板：
+    人格链路绝不能因为一个文件不在就断。
+
+    ## 回落到模板时**必须出声**
+
+    渲染成什么很要紧：模板的第一句就是"你是一个住在群聊里的角色。这一份是**人格模板**
+    ——把它换成你的人设再跑。"，而且含 4 个机制词（协议/提示词/上下文/记忆库）。
+    没有告警的话，真文件被改名或丢失时**日志里一个字都没有**，线上直接换成一份
+    "告诉她自己是模板"的 prompt；而本机因为有真文件、内容级测试还是绿的，**查不出来**。
+
+    这与"公开版 clone 下来能跑"不冲突：能跑，但要**在日志里说清它跑的是模板**。
+
+    ## 为什么这个函数在 Stage 3 这条线上（2026-10-02）
+
+    它原来**只存在于 `stage4-plugins`**（随 `07d6a0a` 引入）——于是 `main` 与
+    `stage3-core-fixes` 上，真人格**根本没有入口**，跑起来是模板。而人格属于
+    Stage 3 的可信 system 前缀，本该在这一侧。补上之后两条线的行为一致。
+    """
+
+    import logging
+    import os
+    import re
+    from pathlib import Path
+
+    candidates: list[Path] = []
+    explicit = os.environ.get("QQBOT_BASE_PROMPT_FILE", "").strip()
+    if explicit:
+        candidates.append(Path(explicit))
+    candidates.append(Path(__file__).resolve().parents[2] / "data" / "private_docs"
+                      / "base_prompt.REAL.py")
+    for path in candidates:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (FileNotFoundError, OSError):
+            continue
+        found = re.search(r'BASE_PROMPT\s*=\s*"""(.*?)"""', text, re.S)
+        if found and found.group(1).strip():
+            return found.group(1)
+    logging.getLogger(__name__).warning(
+        "人格正文回落到**模板**：没找到真人格文件（试过 %s）。"
+        "模板正文里写着'这一份是人格模板'、并且含机制词，"
+        "**不要用它上线**——把真人设放到 data/private_docs/base_prompt.REAL.py "
+        "或用 QQBOT_BASE_PROMPT_FILE 指过去。",
+        "、".join(str(p) for p in candidates) or "（一个候选路径都没有）",
+    )
+    return _BASE_PROMPT_TEMPLATE
+
+
+#: 实际用的那份（模块加载时定一次——它在可信 system 前缀里，内容不能每轮都变）。
+BASE_PROMPT = _load_base_prompt()
