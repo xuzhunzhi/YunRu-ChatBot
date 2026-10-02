@@ -90,9 +90,9 @@ class ConversationState:
     #
     # 为什么要它（2026-10-02 实测的真实错认）：QQ 昵称会变，而**摘要和长期记忆里
     # 写的是旧名**。于是同一份 prompt 里同一个人有两个名字——
-    #   历史 `who="19"` ／ 名册 `19=云边孤雁丶水上浮萍（QQ1912600950）`
-    #   ／ 记忆 `<memory subject="1912600950">自称"蛋挞"，群昵称为蛋挞。</memory>`
-    # 模型要把"蛋挞"对到 `who="19"`，得走"名字→QQ号→编号→说话人"**三跳**；
+    #   历史 `who="19"` ／ 名册 `19=新名甲（QQ900000007）`
+    #   ／ 记忆 `<memory subject="900000007">自称"旧名甲"，群昵称为旧名甲。</memory>`
+    # 模型要把"旧名甲"对到 `who="19"`，得走"名字→QQ号→编号→说话人"**三跳**；
     # 跳不过去就退回"眼前这个说话人"。实测就是这样把 `who="19"` 问的
     # "你是接了豆包吗"算到了 `who="1"` 头上，而两条都在她眼前的 6 条历史里。
     # 名册里带上别称之后，这件事变成**一跳**。
@@ -128,7 +128,7 @@ class ConversationState:
                 self.alias_also[alias] = (current, *others)[:ALIAS_ALSO_LIMIT]
             self.alias_names[alias] = name
         # **群名片也记进别称**：身份以 QQ 昵称为准（见 `transport.display_name_from_sender`），
-        # 但群里人是用名片上的名字指代他的（"@蛋挞"、"蛋挞说的"）——不留下就没人能对上号。
+        # 但群里人是用名片上的名字指代他的（"@旧名甲"、"旧名甲说的"）——不留下就没人能对上号。
         card = (message.sender_card or "").strip()
         if card and card != name:
             others = tuple(n for n in self.alias_also.get(alias, ()) if n != card)
