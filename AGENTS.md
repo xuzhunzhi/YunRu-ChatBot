@@ -122,8 +122,12 @@
 改完必须全部满足：
 
 ```powershell
-# 1. 离线测试全绿（这条分支 793 个；`stage4-plugins` 上 1162 个）
-#    干净 clone（只有 .env.example、模板人格）：会多几条跳过，其余全过
+# 1. 离线测试全绿（这条分支 797 个；`stage4-plugins` 上 1162+ 个）
+#    本机（配好了）：0 跳过。干净 clone（只有 .env.example、模板人格）：4 跳过，其余全过
+#    （那 4 条 = 主 key / 风格审核 / 记忆 key 三条前提不在，加我新加的守卫自检
+#      `test_the_memory_guard_lets_a_configured_machine_run` 在没有记忆 key 时跳过自己）
+#    **本机跳过数应当是 0**——2026-10-02 之前它是 1，那 1 条是"记忆服务接上了组装路径"
+#    那个唯一用例，被一道读错属性的守卫永久跳过了（见 tests/config_support.py）。
 .\.venv\Scripts\python.exe tests\run_offline.py
 # 期望：ALL_OFFLINE_TESTS_PASSED
 
@@ -169,6 +173,16 @@ Get-Content data\logs\verify_runs.log | Select-Object -Last 3
 （这条设施当天就抓到了一次自己的破坏：切分支时 git 把被跟踪的能力白名单带走了，
 留痕记下 `FAILED ... failed=6 errors=1`，存档里能直接看到是哪 7 条。）
 
+> **它的效力边界（别当防篡改证据）**：留痕由**被验证的这套代码自己写**、
+> 且落在被忽略的 `data/` 下。它证明"某次运行发生过、报了什么数"，
+> **不是独立证据**，也不是防篡改的——想改它的人当然能改。
+> 真正独立的那一份是**别人自己跑一次**（例如 `pyflakes`，或按 §三 跑套件）。
+
+> ⚠️ **落点可以被环境变量挪走**：`QQBOT_VERIFY_LOG_DIR` 一旦设置，
+> 留痕就写到那里，**不再是 `data/logs/`**（离线测试自己就用它把留痕导到临时目录）。
+> 所以"写在 `data/` 下"这句话的前提是**没设这个变量**；核对时如果找不到文件，
+> 先看它有没有被设过。
+
 ### 3.2 报告测试数时注意口径
 
 `grep -c "def test_"` 得到的数**小于** `unittest` 实际收集的数——`TestCase` 类里的方法
@@ -182,9 +196,19 @@ Get-Content data\logs\verify_runs.log | Select-Object -Last 3
 
 | 协议 | 调用点 |
 | --- | --- |
-| `styler` | **3 处**（分段与停顿） |
+| `styler` | **2 处**（`stage3_main` 的分段 `split` 与停顿 `delay_plan`） |
 | `machine` | **1 处赋值、0 处读取**（`runtime.py` 里 `engine.host.machine = …`，没人读） |
 | `cards` / `audit` / `balance` / `roles` / `knowledge` | **各 0 处** |
+
+> 2026-10-02 更正：这里原来写 `styler` **3 处**——多数了一处。第 3 处是
+> `_host/__init__.py` 的 **docstring 示例**（`for delay in self.host.styler.delay_plan(...)`），
+> 第 4 处在 `docs/GRAPH.md` 的流程图里。**数"调用点"不该把文档示例算进去**——
+> 这正是"把看着像的东西当成实测"的又一次（外部审查第五轮用 AST 数出 2 处）。
+
+另外 `runtime.py` 里那句注释原来写着"**引擎只认 `host.machine.sample()`**"——
+那是假的：`DialogueEngine` 源码里 `host.machine` 出现 **0 次**、
+`self.runtime_diagnostics` 出现 **9 次**，`/super processes|lan|fan` 读的是后者。
+已改成实话（那处赋值现在只是"挂上去、没有消费者"）。
 
 也就是说：**`_host` 现在不是"解开的拴缚"，而是"把 `import` 挪进函数体"**——
 真正解开拴缚的是那些函数内的延迟 import（以及上面要求的降级），跟 `_host` 这一层

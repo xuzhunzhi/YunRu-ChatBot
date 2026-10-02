@@ -187,6 +187,21 @@ def _choose(value, default_factory, empty_factory):
     **原样装进** `HostServices`（之后 `self.host.styler.split(...)` 就
     `AttributeError`），而只有 `balance` / `roles` / `knowledge` 走 `x or None`
     才被归一。外部审查第四轮点的就是这处"文档与实参矛盾"。
+
+    ## ⚠️ 只认**字面** `False`，别的假值一律原样使用
+
+    判据是 `value is False`，所以 `0` / `""` / `[]` / `False` 的字面量以外，
+    那些"看着像不接"的假值会被**原样装进去**：
+
+        传 0      → host.styler is 0      → 之后 .split(...) AttributeError
+        传 ""     → host.styler is ""
+        传 []     → host.styler is []
+
+    这不是文档撒谎（docstring 只承诺三态），但**是个能炸的写法**，
+    所以写在这里明说。要"不接"就写 `False`，别写 `0`。
+    外部审查第五轮实测过这四种输入，报告里要求"任选一个修法，但别留着不说"——
+    这里选了"说清楚"，因为收紧成 `value is False or value is None` 会把
+    "两态"和"三态"混起来，反而更容易误用。
     """
 
     if value is None:

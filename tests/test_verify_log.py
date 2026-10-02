@@ -33,7 +33,11 @@ def test_records_a_line_that_can_be_read_back() -> None:
 
         os.environ["QQBOT_VERIFY_LOG_DIR"] = tmp
         try:
-            path = V.record_run(root, label="unit", ran=1139, failures=0, errors=0,
+            # 用**明显是合成的**数字：这条测试自己造 run 数据（不读本机），
+            # 所以具体数字无关紧要。2026-10-02 之前这里写的是 1139——
+            # 那是当时真实套件的规模，后来变成了一个与任何真实运行都对不上的
+            # 陈旧魔术数（这条分支是 793、stage4 是 1162）。合成数据就该长得像合成的。
+            path = V.record_run(root, label="unit", ran=4242, failures=0, errors=0,
                                 skipped=1, ok=True, output="saved output\n")
             assert path is not None and path.is_file()
             run = V.last_run(root, label="unit")
@@ -42,7 +46,7 @@ def test_records_a_line_that_can_be_read_back() -> None:
             for key in ("at", "sha", "branch", "dirty", "ran", "failed",
                         "errors", "skipped", "result"):
                 assert key in run, f"摘要里缺 {key}：{run}"
-            assert run["ran"] == 1139 and run["skipped"] == 1
+            assert run["ran"] == 4242 and run["skipped"] == 1
             assert run["result"] == "PASS"
             assert len(str(run["sha"])) == 7 or run["sha"] == "unknown"
             assert run["dirty"] in {"yes", "no", "?"}
@@ -66,7 +70,7 @@ def test_a_failed_run_is_recorded_as_fail() -> None:
 
         os.environ["QQBOT_VERIFY_LOG_DIR"] = tmp
         try:
-            V.record_run(root, label="unit", ran=1139, failures=2, errors=1,
+            V.record_run(root, label="unit", ran=4242, failures=2, errors=1,
                          skipped=0, ok=False, output="boom\n")
             run = V.last_run(root, label="unit")
             assert run is not None

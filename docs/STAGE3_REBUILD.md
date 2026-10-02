@@ -57,8 +57,9 @@
 ```
 src/qq_roleplay_bot/
 ├── _host/                    宿主：引擎要用、但**自己不实现**的能力
-│   ├── __init__.py           Protocol 定义（共 6 个）
-│   └── stubs.py              全空实现（谁都装上时的默认）
+│   ├── __init__.py           Protocol 定义 + 空实现（`NoStyler` / `NoCards` /
+│   │                         `NoMachine` / `NoAudit`，都在这个文件里）
+│   └── （**没有** `stubs.py`）
 │
 ├── stage3/                   **Stage 3 本体**（对话 / 记忆 / 防护）
 │   ├── dialogue/             说不说、说什么

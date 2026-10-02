@@ -420,9 +420,16 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
     diagnostics = engine.runtime_diagnostics
     if hasattr(diagnostics, "ensure_sampler"):
         diagnostics.ensure_sampler()
-    # 机器诊断也是宿主能力（`_host.MachineProbe`）：这里补上，因为它依赖引擎自己
-    # 造出来的 `runtime_diagnostics`。**引擎只认 `host.machine.sample()`**，
-    # 不认这个对象——换一个采样实现不需要改引擎。
+    # 机器诊断"也是宿主能力"——**这句注释原来写着"引擎只认 `host.machine.sample()`"，
+    # 那是假的**（2026-10-02 外部审查第五轮三行代码证伪）：`DialogueEngine` 源码里
+    # `host.machine` 出现 **0 次**，而 `self.runtime_diagnostics` 出现 9 次——
+    # `/super processes|lan|fan` 读的是**后者**。
+    #
+    # 这批赋值现在只是"把诊断对象也挂到宿主接口上"，**没有消费者**
+    # （见 `AGENTS.md` §3.3 那张表：`machine` 一处赋值、零处读取）。
+    # 而且 `LocalMachineProbe.sample()` 已于同日改成**显式返回空样本**
+    # （它原来是同步方法里调 async 取数，拿到的是协程对象）——所以即便有人接了
+    # 它，也只会拿到空。要真用 `host.machine`，得先把 `sample` 改成 async。
     engine.host.machine = LocalMachineProbe(diagnostics)
     return engine
 
