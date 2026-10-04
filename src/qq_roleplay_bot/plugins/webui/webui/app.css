@@ -1202,3 +1202,87 @@ nav { padding: 0 12px; }
 }
 .rail-brand { padding: 0 12px 16px; }
 .rail-brand h1 { font-size: 26px; }
+
+/* --- 登录页（2026-10-04 用户："打开webui首先打开登录页而非在左下角输入令牌"）---
+ *
+ * 格局照小米的登录/账号页：**灰底 + 居中一张白卡**，卡里只有品牌、一个输入、
+ * 一个主色按钮。没登录时**面板整个不出现**（`body.is-locked` 把两栏都藏掉）。
+ */
+body.is-locked .rail,
+body.is-locked .content { display: none; }
+
+.login {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  box-sizing: border-box;
+}
+.login-card {
+  width: min(360px, 100%);
+  background: var(--surface-variant);
+  border-radius: calc(var(--radius-card) + 8px);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.10);
+  padding: 32px 28px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  box-sizing: border-box;
+}
+.login-brand {
+  margin: 0;
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-align: center;
+}
+.login-sub {
+  margin: -10px 0 10px;
+  text-align: center;
+  color: var(--text-3);
+  font-size: 14px;
+}
+.login-field { display: flex; flex-direction: column; gap: 6px; }
+.login-label { font-size: 13px; color: var(--text-3); }
+.login-field input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  font-size: 16px;
+  border-radius: 12px;
+}
+.login-btn {
+  margin-top: 4px;
+  padding: 13px 16px;
+  font-size: 16px;
+  font-weight: 600;
+  border-radius: 12px;
+  background: var(--primary);
+  color: var(--on-primary);
+  border: 0;
+}
+.login-btn:hover { filter: brightness(1.06); }
+.login-hint {
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-3);
+  text-align: center;
+}
+.login-hint code { font-size: 12px; }
+.login-error {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--error-container);
+  color: var(--on-error-container);
+  font-size: 13px;
+}
+
+/* `[hidden]` 必须压得住 `.login { display: grid }`：不然登录卡和面板会同时出现
+   （2026-10-04 截图抓到——这是"看起来生效了其实没生效"的经典坑）。 */
+.login[hidden] { display: none; }
+
+/* 没登录时 ody 不能还是 flex：.login 会变成 flex 子项、收缩到左边贴边
+   （2026-10-04 截图抓到：登录卡没居中）。改成块级，让 .login 自己撑满整屏居中。 */
+body.is-locked { display: block; padding: 0; }

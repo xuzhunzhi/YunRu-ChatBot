@@ -155,7 +155,10 @@ const TAB_NOTES = {
 };
 
 const state = {
-  tab: location.hash.replace("#", "") || "overview",
+  // ⚠️ `token=` / `theme=` 是保留段，**不能**当页签名——否则令牌会被拿去渲染标题
+  // （2026-10-04 截图抓到的真 bug：页面上直接显示出了令牌）。
+  tab: (location.hash.replace("#", "").split("&")
+    .find((part) => part && !/^(token|theme)/.test(part))) || "overview",
   token: localStorage.getItem("yunru_panel_token") || "",
   last: {},
   //: 插件清单（`/api/plugins`）。初值是空数组——卡片据此退回占位口。
@@ -1343,6 +1346,35 @@ function applyTheme(mode) {
   }
 }
 
+/* ---- 登录门（2026-10-04 用户："打开webui首先打开登录页而非在左下角输入令牌"）----
+ *
+ * 面板权限很大（能重启 bot、清会话、改提示词），所以"先确认你是谁"该是一道**门**，
+ * 而不是塞在侧栏左下角的一个输入框。
+ */
+function lock(on) {
+  document.body.classList.toggle("is-locked", on);
+  const box = $("login");
+  if (box) box.hidden = !on;
+  if (on) {
+    const field = $("login-token");
+    if (field) { field.value = ""; field.focus(); }
+  }
+}
+
+//: 拿一个令牌去问一次**受保护**的接口：只有 200 才算过。
+//: 连不上也当没过——宁可让人停在登录页，也不放进去看到一个 401 的空面板。
+async function tokenWorks(value) {
+  if (!value) return false;
+  try {
+    const response = await fetch("/api/overview", {
+      headers: { Authorization: `Bearer ${value}`, Accept: "application/json" },
+    });
+    return response.ok;
+  } catch (error) {
+    return false;
+  }
+}
+
 function init() {
   // 支持 `#token=xxxx` 这种打开方式：**先收下令牌再把它从地址栏抹掉**，
   // 这样可以直接把带令牌的地址发给自己（手机、另一台机器），不用手打。
@@ -1378,11 +1410,27 @@ function init() {
     localStorage.setItem("yunru_panel_theme", next);
     applyTheme(next);
   });
-  $("token").value = state.token;
-  $("save-token").addEventListener("click", () => {
-    state.token = $("token").value.trim();
-    localStorage.setItem("yunru_panel_token", state.token);
+  // 登录门（2026-10-04 用户："打开webui首先打开登录页而非在左下角输入令牌"）。
+  // 令牌存在浏览器本地；**先验一次**再放人进去，验不过就停在登录页。
+  $("login-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const value = $("login-token").value.trim();
+    if (!value) return;
+    if (!(await tokenWorks(value))) {
+      const box = $("login-error");
+      box.hidden = false;
+      box.textContent = "这个令牌不对（或者 bot 没在跑）。再看一眼 data/webui_token。";
+      return;
+    }
+    state.token = value;
+    localStorage.setItem("yunru_panel_token", value);
+    lock(false);
     render();
+  });
+  $("signout").addEventListener("click", () => {
+    localStorage.removeItem("yunru_panel_token");
+    state.token = "";
+    lock(true);
   });
   $("refresh").addEventListener("click", render);
   // 窄屏（手机）是"左栏 / 内容"二选一：点卡内 tab 进内容态，「返回」退回卡片列表。
@@ -1413,10 +1461,15 @@ function init() {
   });
   bind();
   drawTabs();
-  render();
-  // 插件清单要联网取；拿到之后**重画一次侧栏**，插件卡里才会长出每个插件的 tab。
-  // 先画一次是为了"一进来就有东西"，不是等网络。
-  loadPlugins().then(() => { drawTabs(); });
+  // 登录门（2026-10-04 用户："打开webui首先打开登录页而非在左下角输入令牌"）：
+  // **先验一次本地令牌**，过了才画面板；没过就停在登录页，不浪费一次 401 渲染。
+  tokenWorks(state.token).then((ok) => {
+    lock(!ok);
+    if (!ok) return;
+    render();
+    // 插件清单要联网取；拿到之后**重画一次侧栏**，插件卡里才会长出每个插件的 tab。
+    loadPlugins().then(() => { drawTabs(); });
+  });
   // 页脚读数：初始化时一次，之后改窗口大小（或手机转屏）跟着更新。
   showViewport();
   window.addEventListener("resize", () => {

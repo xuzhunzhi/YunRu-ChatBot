@@ -7,6 +7,28 @@
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
+
+<!-- 登录页（2026-10-04 用户："我强烈建议打开webui首先打开登录页而非在左下角输入令牌"）。
+     没有有效令牌时只有这一屏；令牌存在浏览器本地，验过才进面板。
+     它**不是**装饰：面板权限很大（能重启 bot、清会话、改提示词），
+     所以"先确认你是谁"该是一道门，而不是塞在侧栏角落的一个输入框。 -->
+<div id="login" class="login" hidden>
+  <form class="login-card" id="login-form">
+    <h1 class="login-brand">云茹</h1>
+    <p class="login-sub">控制面板</p>
+    <label class="login-field">
+      <span class="login-label">面板令牌</span>
+      <input id="login-token" type="password" autocomplete="current-password"
+             placeholder="粘贴面板令牌" autofocus>
+    </label>
+    <button id="login-submit" class="login-btn" type="submit">进入</button>
+    <p id="login-hint" class="login-hint">
+      令牌在 bot 那边的 <code>data/webui_token</code> 里（只有本机能读）。
+    </p>
+    <p id="login-error" class="login-error" hidden></p>
+  </form>
+</div>
+
 <!-- 宽屏布局照小米平板的设置页：**左边侧栏、右边详情**（用户 2026-10-01：
      "实际上这种宽屏就应该做左侧侧边栏+右侧详情，你去参考小米平板的设置页"）。
      侧栏那一套尺寸取自 Miuix 的 NavigationRail（ExpandedWidth 240dp、
@@ -20,13 +42,10 @@
   <div class="rail-foot">
     <span id="health" class="badge">连接中…</span>
     <span id="source" class="badge dim"></span>
-    <label class="token">
-      <input id="token" type="password" placeholder="面板令牌" autocomplete="off">
-      <button id="save-token" type="button">记住</button>
-    </label>
     <div class="rail-actions">
       <button id="refresh" type="button">刷新</button>
       <button id="theme" class="icon-btn" type="button" title="切换浅色 / 深色">深色</button>
+      <button id="signout" class="icon-btn" type="button" title="退出登录">退出</button>
     </div>
   </div>
 </aside>
