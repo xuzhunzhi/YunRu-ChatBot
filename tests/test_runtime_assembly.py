@@ -11,7 +11,7 @@
 import asyncio
 
 from qq_roleplay_bot import runtime
-from qq_roleplay_bot.qq_roles import ROLE_OWNER
+from qq_roleplay_bot.plugins.roles.roles import ROLE_OWNER
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 
 GROUP = "717151356"
@@ -52,5 +52,25 @@ def test_build_engine_wires_the_role_cache() -> None:
     engine = runtime.build_engine(transport)
     assert engine.self_roles is not None, "装配漏了 SelfRoleCache（真机踩过：命令全变'查不到'）"
     assert asyncio.run(engine.self_roles.role(GROUP)) == ROLE_OWNER
+
+
+def test_the_core_and_the_plugins_share_one_role_cache() -> None:
+    """**单一来源**（2026-10-04 对齐）：核心与插件用的是**同一个**角色查询对象。
+
+    改之前是两份：`runtime` 自己 `SelfRoleCache(transport, ...)`，
+    `roles` 插件又照核心给的 `call_action` 造一份给 `registry.shared_roles()`。
+    两份带各自 TTL 的缓存意味着"她在这个群里是不是群主"有**两个答案**，
+    而群主动作读核心那份、入群审批读插件那份（真机踩过的形状：
+    一边说能批、另一边说查不到）。现在只有一份：插件造、经
+    `registry.provide_roles()` → `chat.roles_sink()` 填回 `engine.self_roles`。
+    """
+
+    engine = runtime.build_engine(FakeTransport())
+    shared = engine.plugin_registry.shared_roles()
+    assert shared is not None, "roles 插件没把角色查询放上注册表"
+    assert shared is engine.self_roles, (
+        "核心与插件必须是**同一个**角色查询对象，否则'她是不是群主'就有两个真相")
+    # 而且它确实在用核心注入的那个通道（走 `call_action`，不是活的 transport）
+    assert asyncio.run(shared.role(GROUP)) == ROLE_OWNER
 
 

@@ -93,13 +93,22 @@ class PromptSources:
     def __init__(
         self,
         *,
-        plugins: tuple[PromptPlugin, ...] = (),
+        plugins: "tuple[PromptPlugin, ...] | list[PromptPlugin]" = (),
         knowledge_base: KnowledgeBase | None = None,
         extra_prompt_provider: ExtraPromptProvider | None = None,
     ) -> None:
-        self.plugins = plugins
+        # **用 list 而不是 tuple**：插件是装配之后才发现的（`attach_plugins` 跑在
+        # 引擎构造之后），所以这里是**同一份可变列表**，`add_plugins()` 往里追加，
+        # 引擎手上那份立刻就能看到。用 tuple 会逼出"再构造一次 PromptSources"的
+        # 别扭顺序（2026-10-01 改）。
+        self.plugins: list[PromptPlugin] = list(plugins)
         self.knowledge_base = knowledge_base
         self.extra_prompt_provider = extra_prompt_provider
+
+    def add_plugins(self, plugins: "tuple[PromptPlugin, ...] | list[PromptPlugin]") -> None:
+        """追加 prompt 扩展（`runtime.build_engine` 在发现插件之后调）。"""
+
+        self.plugins.extend(plugins)
 
     async def collect(self, context: PromptContext, *, knowledge_enabled: bool = True) -> PromptMaterial:
         """汇聚一次调用的扩展材料。

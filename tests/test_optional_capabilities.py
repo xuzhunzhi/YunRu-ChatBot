@@ -90,21 +90,45 @@ def test_build_engine_survives_a_missing_audit_module() -> None:
 
 
 def test_build_engine_survives_a_missing_role_module() -> None:
-    """没有 `qq_roles` 时也是**降级**，不是崩。
+    """**角色查询缺席**时是降级、不是崩；而且它的唯一来源是插件。
 
-    降级形态是"没有这项能力"（`self_roles is None`）——群主那一族动作随之不可用
-    （它们的代码本来就容忍 `None`），而不是核心起不来。
+    ## 这条在 2026-10-04 改了测的东西（改测的东西，不是因为红了才改）
 
-    注意这与 2026-09-30 那个真机回归**不是一回事**：那次是模块在、创建漏了，
-    于是**静默**地什么都不批（`/super qqadmin` 全回"我在这个群里是查不到"，
-    入群审批因为拿不到角色而不处理任何申请）；这次是能力**确实不在**，
-    而且日志里说得清。
+    原来它 `_Hidden("qq_roleplay_bot.qq_roles")` 再断言 `engine.self_roles is None`。
+    `qq_roles.SelfRoleCache` 是**核心自己那第二份**角色缓存——"单源"那一改之后，
+    核心不再 import 它（`runtime.build_engine` 里那个创建已删），于是藏起它
+    什么也证明不了（能力还在，是插件给的）。**这属于测试的前提变了，不是放宽断言。**
+
+    （函数名留着不改了：它是 `qq_roles` 那个模块第一次被抓到的现场，改名字会让
+    "这条守的是什么"的历史断掉。测的东西以本 docstring 为准。）
+
+    新的前提：角色查询归 `plugins/roles/`，由核心注入的 `call_action` 现造。
+    所以"这项能力不在"= **`call_action` 不在**。这条负向路径分两半验：
+
+    1. `roles.plugin.register` 在没有 `call_action` 时**明确抛错**，
+       不许"装上一个查不了角色的缓存"（那正是 2026-09-30 那次静默回归的形状）；
+    2. 核心这一侧：`build_engine` 装出来的机器**不再自己造**那份缓存——
+       `self_roles` 就是插件放进注册表的那一个对象（单源）。
     """
 
-    with _Hidden("qq_roleplay_bot.qq_roles"):
-        engine = runtime.build_engine(_FakeTransport())
+    from qq_roleplay_bot.plugins import PluginRegistry
+    from qq_roleplay_bot.plugins.roles import plugin as roles_plugin
 
-    assert engine.self_roles is None
+    registry = PluginRegistry()  # `call_action` 缺省就是 None
+    try:
+        roles_plugin.register(registry)
+    except RuntimeError:
+        # 明确拒绝是对的——**不许静默装一个查不了角色的缓存**。
+        pass
+    else:  # pragma: no cover - 不该走到
+        raise AssertionError("没有 call_action 时 roles 插件不该装上去")
+    assert registry.shared_roles() is None, "装失败了就不该留下半个共享角色"
+
+    # 核心照旧起得来（`build_engine` 跑通本身就是这条判据），
+    # 而且 `self_roles` 与注册表上那份**是同一个对象**：单源。
+    engine = runtime.build_engine(_FakeTransport())
+    assert engine.plugin_registry.shared_roles() is engine.self_roles, (
+        "角色的唯一来源必须是 roles 插件放进注册表的那一份（单源）")
 
 
 def test_build_engine_survives_a_missing_vision_module() -> None:

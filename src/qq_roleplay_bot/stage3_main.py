@@ -61,7 +61,14 @@ from .transport import (
     OutgoingMessage,
     QQTransport,
 )
-from .security import check_message_security, sanitize_chat_text
+from .security import (
+    check_message_security,
+    # 管理/超管命令的**形状判定**：定义在 `security.py`（插件那边也要用它，
+    # 放在这里会逼插件 import 核心模块，2026-10-01 搬）。这里再导出一次，
+    # 既有的调用方与测试仍然 `from .stage3_main import privileged_command_level`。
+    privileged_command_level,
+    sanitize_chat_text,
+)
 from .snapshots import EngineSnapshot, SessionSnapshot
 from .metrics import RuntimeMetrics, process_memory_bytes
 from .feature_log import FeatureLogs, log_capacity, request_parts
@@ -238,25 +245,10 @@ LETTER_ASK_RE = re.compile(r"信|邮件|邮箱|汇报|邮局|寄给|寄过来", 
 LETTER_BODY_CHARS = 600
 # 引擎内存里留几封（存储层留 5 封，这里多留一点给"往前翻"用）。
 LETTER_HISTORY_LIMIT = 10
-# 管理/超管命令的"形状"。未授权时**不落到模型那一侧**，连历史都不进：
-# 交给模型回一句话等于确认这个前缀存在（冷群的消息会进历史并被巡检捡回模型），
-# 所以这道闸必须在会话过滤之前。
-# 按层级分别判：管理员发 `/super ...` 同样是没权限。
-# 收尾（2026-09-28）：`/admin ...` 回一句说明，`/super ...` 完全静默。
-PRIVILEGED_COMMAND_PATTERN = re.compile(r"^[/#]\s*(?P<level>admin|super)\b", re.IGNORECASE)
+# 管理/超管命令的"形状"判定（`privileged_command_level`）已经搬到 `security.py`
+# ——插件侧的委托与核心的闸门都要用它，放在这里会逼插件 import 核心模块。
+# `PRIVILEGED_COMMAND_PATTERN` 跟着一起搬；这里只在顶部 import 里再导出那个函数。
 logger = logging.getLogger(__name__)
-
-
-def privileged_command_level(text: object) -> str | None:
-    """消息长得像哪一层的命令：`"super"` / `"admin"` / `None`。
-
-    只认前缀形状，**不要求能被解析出来**：`/admin 随便写点什么` 也该被挡住。
-    """
-
-    if not isinstance(text, str):
-        return None
-    match = PRIVILEGED_COMMAND_PATTERN.match(text.strip())
-    return match.group("level").casefold() if match else None
 
 
 def _unique_clients(clients) -> list[object]:
@@ -505,7 +497,23 @@ def is_admin_help_command(text: str) -> bool:
 
 # 公开帮助。不再是写死的常量：正文由各命令插件自述的行汇总而成，
 # 加命令不需要改这里，也不会出现"帮助里没有但命令存在"的漂移。
+#
+# 模块导入时先算一份**只有核心命令**的（那时候还没接插件）；`build_engine`
+# 接上插件之后会调 `_set_public_help(engine.commands)` 重算，让它反映
+# **这台机器实际装了什么**。测试里 `PUBLIC_HELP` 就是这么拿到最终值的。
 PUBLIC_HELP = build_help_text(build_command_registry().help_lines())
+
+
+def _set_public_help(commands) -> str:
+    """按**当前命令链**重算公开帮助，并更新模块常量。
+
+    为什么要更新常量而不是只给引擎一份：公开帮助必须和核心 `HelpCommand` 的输出
+    **逐字相同**（测试就是这么比的），两边只能有一个来源——就是这条命令链。
+    """
+
+    global PUBLIC_HELP
+    PUBLIC_HELP = build_help_text(commands.help_lines())
+    return PUBLIC_HELP
 
 
 @dataclass(frozen=True, slots=True)
@@ -1536,17 +1544,94 @@ class DialogueEngine:
         from .command_plugins import ActionRequest
 
         assert isinstance(request, ActionRequest)  # pragma: no cover - 调用方已经判过
+        # 群管理与群主动作的**执行端在插件目录里**（`plugins/group_admin/`）：它们只
+        # 解析与声明意图，护栏、权限、调用仍在这里。插件目录整个不在时（只要 Stage 3
+        # 的那份部署），下面两句 import 会失败 → **fail-closed**：不执行、记一行日志。
+        # 这条分支上不会有插件产出这两种 `ActionRequest`，真收到只能是装配错了。
         if request.group in {"group_admin", "group_owner"}:
-            # 群管理与群主动作的**执行端**不在 `main` 上：它们是 Stage 4 的功能扩展
-            # （`group_admin.py` / `group_owner.py`），跟命令插件一起在
-            # `stage4-plugins` 分支。这条分支上不会有插件产出这两种 `ActionRequest`，
-            # 真收到了也只能是装配错了——**fail-closed**：不执行、记一行日志。
-            # 注意护栏（`mentioned` 必须为真、她得是群主）留在执行端，不在这里放宽。
-            logger.warning("group_action_unavailable group=%s kind=%s",
-                           request.group, request.kind)
-            return "这条分支没有群管理能力。"
+            try:
+                if request.group == "group_admin":
+                    from .plugins.group_admin.group_admin import execute as run_group_action
+
+                    return await run_group_action(
+                        request.kind,
+                        # **一个已过闸门的调用函数**，不是活的 transport
+                        # （2026-10-01 适配：原来这里传 `transport=self.transport`，
+                        # 也就是插件目录里的函数拿到了传输层，而本函数的 docstring
+                        # 还写着"插件从头到尾没拿到 transport"——那句当时是假的）。
+                        call=self._group_action_caller("group_manage"),
+                        group_id=group_id,
+                        actor_id=actor_id,
+                        target_id=request.target_id,
+                        minutes=request.text,
+                        message_id=message_id or request.message_id,
+                        mentioned=mentioned or request.mentioned,
+                        protected_ids=frozenset(self._protected_group_ids()),
+                        enabled=dev_config.GROUP_MANAGE_ENABLED,
+                    )
+                from .plugins.group_admin.group_owner import execute as run_owner_action
+
+                return await run_owner_action(
+                    request.kind,
+                    call=self._group_action_caller("group_owner"),
+                    roles=getattr(self, "self_roles", None),
+                    group_id=group_id,
+                    actor_id=actor_id,
+                    target_id=request.target_id,
+                    text=request.text,
+                    mentioned=mentioned or request.mentioned,
+                    enabled=dev_config.GROUP_OWNER_ENABLED,
+                )
+            except ModuleNotFoundError:
+                logger.warning("group_action_unavailable group=%s kind=%s",
+                               request.group, request.kind)
+                return "这条部署没有群管理能力。"
         logger.warning("Stage 3 unknown plugin action group=%s", request.group)
         return "这个动作没有对应的执行通道，已拒绝。"
+
+    def _group_action_caller(self, purpose: str):
+        """造一个**已过 `capabilities` 闸门**的群动作调用函数，交给插件目录里的执行函数。
+
+        闸门在核心这条闭包里，插件侧只拿到 `(action, params) -> response`——
+        它没有 transport，也没有 `capabilities` 可以自己查，所以绕不过闸门。
+
+        两个来源，优先用装配点给的那个（`runtime._SeamBinder.action_caller`）：
+
+        1. `plugin_registry.action_caller`——生产走这条；
+        2. **没有注册表时在这里现造一个**（直接测引擎的用例是这样：它们只造一个
+           `DialogueEngine`，不走 `build_engine`）。现造的也在**核心这一侧**，
+           所以"插件拿不到 transport"这条性质不变。
+        """
+
+        registry = getattr(self, "plugin_registry", None)
+        maker = getattr(registry, "action_caller", None)
+        if callable(maker):
+            return maker(purpose)
+        transport = getattr(self, "transport", None)
+        caps = getattr(self, "capabilities", None)
+        if transport is None:
+            return None
+
+        async def call(action: str, params: dict[str, object] | None = None):
+            if caps is not None:
+                from .capabilities import CapabilityDenied
+                from .plugins import ActionDenied
+
+                # 与 `runtime._SeamBinder.call_action` 同一条规矩：
+                # 这一族写动作 + 任何只读动作（回读要用）。
+                try:
+                    caps.check(action, purpose=purpose)
+                except CapabilityDenied:
+                    try:
+                        caps.check(action, purpose="read")
+                    except CapabilityDenied as exc:
+                        raise ActionDenied(f"{action} 不允许用于 {purpose}") from exc
+            result = await transport.call_api(action, params or {})
+            from .onebot_client import unwrap_result
+
+            return unwrap_result(result)
+
+        return call
 
     def _protected_group_ids(self) -> set[str]:
         """群管理不许动的人：超管、配置级管理员、按群授权的管理员、以及她自己。

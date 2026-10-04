@@ -53,6 +53,18 @@ from .stage3_main import (
     _deliver_relay,
     _deliver_reply,
     _send_or_queue,
+    _set_public_help,
+    # "这条话长得像特权命令吗"——只认前缀形状，不要求能解析出来。
+    # 渠道注入的话要用它拒投（见 `_SeamBinder.deliver`）。
+    privileged_command_level,
+)
+from .plugins import (
+    ChatSeams,
+    PluginRegistry,
+    ReportSeams,
+    UiSeams,
+    attach_plugins,
+    inventory,
 )
 from .transport import IncomingMessage, MessageTarget, QQTransport
 
@@ -337,6 +349,10 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
         logger.info("判定与回复分离：两个 agent 各用独立 user_id 隔离缓存")
     style_reviewer = _build_style_reviewer(usage_store)
     vision = _build_vision(usage_store)
+    # **prompt 扩展的汇聚口**。这里先只放知识库；插件是装配之后才发现的，
+    # 所以下面 `attach_plugins()` 之后会 `add_plugins(registry.shared_prompts())`。
+    # 用**同一份可变列表**是有意的：不必为了"插件后到"再构造一次（2026-10-01 改）。
+    prompt_sources = PromptSources(knowledge_base=build_knowledge_base())
     # 再按**会话**分一层：每个群/私聊有自己的缓存空间，切走再回来时前缀还在。
     # 实测：切走一小段再回来，那一次仍命中 7424 tokens（稳态中位数 7168）。
     engine = DialogueEngine(
@@ -347,7 +363,7 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
         judge_client=judge_client,
         client_factory=_dialogue_client_factory,
         judge_client_factory=_judge_client_factory if judge_client is not None else None,
-        prompt_sources=PromptSources(knowledge_base=build_knowledge_base()),
+        prompt_sources=prompt_sources,
         style_reviewer=style_reviewer,
         vision=vision,
         # 宿主能力：出站表现（分段与停顿）、帮助卡片、审计。
@@ -385,29 +401,17 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
     # 群管理要能直接调 action（`/super ban` 之类）。传输层照样是唯一变量：
     # 引擎只拿着它调 `call_api`，不碰任何 QQ 细节。
     engine.transport = transport
-    # **她自己在每个群的 QQ 角色**：核心持有的基础设施（`qq_roles.py`），
-    # 群主命令（`/super qqadmin`、`/title` …）与入群审批都用它。
+    # **不再由核心创建"她自己的角色查询"**（原来这里 `SelfRoleCache(transport, ...)`）。
+    # 它是群管理与入群审批的前置能力，**删掉它 Stage 3 照样答话**——所以按判据它不是底层，
+    # 归插件：`plugins/roles/` 以核心注入的 `call_action` 造它，群管理与入群审批
+    # 用 `REQUIRES = ("roles",)` 声明依赖。核心这边留一个空位，插件装上了就填。
     #
-    # 2026-09-30 真机回归：这块原来由 `_start_join_approval` 顺手创建，后来那个函数
-    # 搬进 `background_plugins.py` 时**只搬了用法、没搬创建**，于是 `self_roles`
-    # 一直是 None——群主命令全变成"我在这个群里是查不到"，而入群审批因为拿不到角色，
-    # 静默地什么都不批。所以创建放在这里（装配点），并加了测试钉住。
-    # **她自己在每个群的 QQ 角色**（可插能力：`_host.RoleLookup`）。
-    # 本地 import——它是"查得到才谈得上群主动作"的前置能力，不是底层必需品。
-    #
-    # 2026-10-02 修：这里原来也是**裸 import**，所以"不是底层必需品"这句话不成立
-    # ——删掉 `qq_roles` 会让 `build_engine` 抛 `ModuleNotFoundError`（实测）。
-    # 现在真的降级成**"没有这项能力"**（`self_roles = None`），并且**出声**：
-    # 群主那一族动作随之不可用（它们的代码本来就容忍 `None`），而不是核心起不来。
-    # 注意这与 2026-09-30 那个回归**不是一回事**：那次是模块在、创建漏了，
-    # 于是静默地什么都不批；这次是能力**确实不在**，且日志里说得清。
-    try:
-        from .qq_roles import SelfRoleCache
-
-        engine.self_roles = SelfRoleCache(transport, ttl=dev_config.SELF_ROLE_TTL_SECONDS)
-    except ImportError as exc:
-        engine.self_roles = None
-        logger.warning("角色查询模块不可用（%s），本次没有群主/审批能力", type(exc).__name__)
+    # **单一来源**（2026-10-04 对齐）：插件那一个实例经
+    # `registry.provide_roles()` → `chat.roles_sink()`（`_SeamBinder.roles_sink`）
+    # 落到这里，同时留在 `registry.shared_roles()` 给别的插件用。
+    # 所以 `engine.self_roles is registry.shared_roles()` 恒真——"她在这个群里
+    # 是不是群主"只有一个真相，不会出现核心查到一套、插件查到另一套。
+    engine.self_roles = None
     # 面板要用的四样东西挂到引擎上（插件拿不到引擎，只拿得到装配点给的闭包）：
     # 覆盖层、prompt 库、记忆人工操作、操作审计。
     engine.operator_config = operator
@@ -431,27 +435,510 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
     # （它原来是同步方法里调 async 取数，拿到的是协程对象）——所以即便有人接了
     # 它，也只会拿到空。要真用 `host.machine`，得先把 `sample` 改成 async。
     engine.host.machine = LocalMachineProbe(diagnostics)
-    # **接插件**（发现只跑这一次，所以放在最后：引擎上该有的东西都已就位）。
+    # **接插件**（发现只跑这一次，所以放在最后：引擎上该有的东西都已经就位）。
+    # 命令插件进 `engine.commands`；后台插件留在 `engine.plugin_registry.backgrounds`
+    # 给 `serve` 的节拍用。
     #
-    # 命令插件进 `engine.commands`——那是 `DialogueEngine.__init__` 造的那份
-    # `CommandRegistry`（本体自己的 ping / help / 余额本来就在里面，见
-    # `builtin_commands.build_command_registry()`）；后台插件留在
-    # `registry.backgrounds`，由 `build_background_plugins(engine)` 取走交给
-    # `serve` 的同一条节拍循环。**装载点只有这一处**，加载失败的插件由
-    # `discover()` 逐个兜住（坏插件不许带走别的，也不许吃掉消息）。
-    #
-    # 接缝这次只接 `call_action` / `notify` 两个（核心已有的 `_plugin_action_seams`）。
-    # `ChatSeams` / `ReportSeams` / `UiSeams` **留缺省**：
-    # 它们要引擎内部的闭包（插件线的 `_SeamBinder`，+515 行），是下一步的事；
-    # 用到它们的插件会如实降级（日报拿不到 `letter_client` 就不启用、
-    # 面板拿不到动作入口就少一块），而不是静默半死。
-    from .plugins import PluginRegistry, attach_plugins
-
+    # **插件拿不到引擎**（2026-10-01 修掉的越界）：引擎上有 `transport` 与三份权限名单，
+    # 给出去就等于"插件能自己发消息、能读权限名单"。所以这里造两个**窄接缝对象**：
+    # `ChatSeams`（对话四件事）与 `ReportSeams`（写日报五件事），
+    # 它们内部持有引擎引用，但对插件只暴露**函数**。
     call_action, notify = _plugin_action_seams(engine, transport)
-    plugin_registry = PluginRegistry(call_action=call_action, notify=notify)
-    attach_plugins(plugin_registry, engine.commands)
-    engine.plugin_registry = plugin_registry
+    registry = PluginRegistry(call_action=call_action, notify=notify,
+                              roles=None, loop=None,
+                              chat=_chat_seams_for(engine),
+                              report=_report_seams_for(engine),
+                              ui=_ui_seams_for(engine),
+                              action_caller=_action_caller_for(engine, transport))
+    attach_plugins(registry, engine.commands)
+    engine.plugin_registry = registry
+    # **prompt 扩展**（恋人 / 剧情 / 关系那类）在这里并进汇聚口。
+    # 走 `PromptSources`：插件写的东西是不可信 DATA（过 sanitize + 长度上限 + 标来源），
+    # **碰不到 system 前缀**——那正是"人格稳定"的地基。
+    prompt_plugins = registry.shared_prompts()
+    if prompt_plugins:
+        prompt_sources.add_plugins(prompt_plugins)
+        logger.info("prompt 扩展已接上：%s",
+                    "、".join(getattr(p, "name", "?") for p in prompt_plugins))
+    # 公开帮助要反映**这台机器实际装了什么**：插件可能带来新命令（群管理那几条）。
+    _set_public_help(engine.commands)
     return engine
+
+
+def _chat_seams_for(engine: DialogueEngine) -> ChatSeams:
+    """把"对话那一侧"的四件事包成函数给插件。
+
+    | 接缝 | 给出去的是什么 |
+    | --- | --- |
+    | `reserved_user_ids` | **只读**一份"不该被冒充的号"；插件拿不到可变集合，改不了名单 |
+    | `allow_private` | 放行一个私聊号（邮件通道收信后要放行发件人） |
+    | `deliver` | 收 `DeliveredMessage`（渠道 + 发件人 + 正文），**核心盖章成一条消息** |
+    | `take_follow_ups` | 取走某个会话的续发段 |
+
+    **不给** `engine` 本身，也不给 `transport` / `capabilities` / 任何名单的可写引用。
+    换一套思维链路时，只要新的引擎能提供这四个函数，插件一行都不用改。
+
+    ## 身份与特权命令由**这一侧**决定（2026-10-01 审查后修的）
+
+    原来 `deliver` 直接吃一整条 `IncomingMessage`，于是**插件能自己填 `user_id`**。
+    审查者实测：只拿 `registry.chat` 的插件把 `user_id` 填成超管的号，
+    发 `/super addadmin @X`，**真的授了群管理员**——全程没碰 transport。
+
+    现在：插件只交 `DeliveredMessage`，`user_id` / `sender_role` / `target` /
+    `session_id` 都在**这里**算出来；并且**渠道注入的话永远拿不到特权命令**：
+    正文里出现 `/super` 或 `/admin` 一律拒投（`privileged_command_level`，核心那个函数）。
+
+    为什么必须在这里拒、而不是让每个插件自己记得拒：仓库里 `mail_channel` 原来就
+    自己写了一道 `is_privileged_command`，注释还写着"SMTP 的 From 可以伪造"——
+    **护栏写在插件里等于约定，不是边界**。现在它归核心，插件没有绕过的余地。
+    """
+
+    return _SeamBinder(engine).chat_seams()
+
+
+#: 哪些渠道**允许**声明"这条来自主人"。白名单，不是黑名单。
+#:
+#: 目前只有邮件：`MAIL_OWNER_FROM` 是配置里写死的主人的发件地址，
+#: 通道比对过发件地址才敢声明 `claims_owner`。别的渠道（以后新增的）默认**不在**这张表里，
+#: 也就是它们无论如何声明都只是普通发件人——要么在这里加一条（核心改动，看得见），
+#: 要么就没有主人权限。
+_OWNER_CHANNELS: tuple[str, ...] = ("mail",)
+
+#: 接缝用的"不透明令牌 → 引擎/传输层"私表。见 `_SeamBinder`。
+_ENGINES: dict[str, "DialogueEngine"] = {}
+_TRANSPORTS: dict[str, object] = {}
+
+
+def _exact_text(value: object) -> str:
+    """把一个不可信的值取成**精确的 `str`**（不是子类），用于"判一次、用一次"的闸门。
+
+    ## 为什么 `str(x)` 不够（2026-10-01 第三轮审查实测打穿）
+
+    CPython 的 `str(x)` 有三种行为：
+
+    * `x` 是**精确 str** → 原样返回；
+    * `x` 是 **str 子类** → 拷成精确 str（这一种是安全的）;
+    * `x` 是**非 str 对象** → 返回 `type(x).__str__(x)` 的结果，而**那结果只要是
+      str 实例（子类也算）就原样返回、不再拷**。
+
+    于是这个形状能穿过 `str(...)`：
+
+        class Flip(str):                      # 底层字串就是载荷
+            def strip(self, *a):              # 第一次给闸门看无害内容
+                return "/help" if first else self
+        class Wrap:
+            def __str__(self): return Flip("/super admin list")
+
+        str(Wrap())  →  type(...) is str  ==  False   # 还是那个会变脸的子类
+
+    闸门调 `strip()` 拿到 `/help` 放行，**同一个活对象**进了 `IncomingMessage`，
+    引擎再调 `strip()` 就拿到载荷 → 实测执行了 `/super admin list` 并把名单读出来。
+
+    ## 这里怎么取
+
+    `str(value or "")` 之后，如果不是精确 str 就 `text[:]`——切片产出新的精确 str
+    （`str.__getitem__` 不保留子类），返回的是底层真实字串。
+    附带好处：`or ""` 顺便把 `None` / 空串归一了。
+
+    ## ⚠️ 这一步是**类型契约**，别把它当成"某次攻击的修复"（2026-10-02 更正）
+
+    这个 docstring 原来写的是上面那个 `Flip` / `Wrap` 形状"靠 `text[:]` 挡住"。
+    **那是把推断写成了实测。** 外部审查第四轮做了突变实验（把 `text[:]` 拆掉、
+    其余一字不动）：**1139 条测试没有一条因此变红**，两条号称"守它"的端到端测试
+    也全绿（我自己用对照实验复核过：打/不打突变，红条数完全一样）。
+
+    实测到的机制是这样的（本机 CPython 3.14.6）：
+
+    * 闸门 `privileged_command_level` **自己**调了一次 `text.strip()`——那次调用
+      拿到的是**载荷**，所以判成特权命令、**直接拒投**；
+    * 而 CPython 3.14 的 `re.match` / `re.sub` **不会**去调 `str` 子类被覆盖的
+      `strip`（量到调用数 0），所以"闸门看 `/help`、引擎看载荷"那个形状
+      在当前解释器上**不可达**——闸门与引擎之间没有第二个 `.strip()` 消费者。
+
+    所以准确的表述是：**在这台解释器上、对现有这两个形状，`text[:]` 不是承重的。**
+    **不要**读成"它没用、可以删"：正则对子类的行为在别的 Python 版本上未必相同
+    （审查者只有 3.14，明确声明无法验证更早版本），而且它承担的是一份**接口契约**——
+    `_exact_text` 的调用方有权假设"拿到的就是精确 str"。
+
+    那份契约现在由 `tests/test_mail_channel.py` 里的
+    `test_exact_text_always_returns_a_plain_str` **直接钉住**（拆掉 `text[:]` 立刻红）。
+    它断言的是接口形状，不依赖任何具体攻击能不能成功——后者会随解释器变化。
+    """
+
+    text = str(value or "")
+    if type(text) is not str:  # noqa: E721 - **这里刻意用 type() 而不是 isinstance**：
+        # `isinstance(text, str)` 对子类是 True，而子类正是要挡的东西。
+        text = text[:]
+    return text
+
+
+class _SeamBinder:
+    """给插件造接缝。**注意：它挡不住恶意插件，这一点必须说清。**
+
+    ## 三次尝试，三次被审查者绕过（2026-10-01，都记下来）
+
+    1. `PluginRegistry` 持有 `engine` → `registry.engine.transport` 直接可用。
+    2. 改成"窄接缝"（闭包）→ `registry.report.snapshot.__self__`（绑定方法带 owner）
+       与 `registry.notify.__closure__[1].cell_contents` 照样拿回引擎与活 transport。
+    3. 改成"闭包只捕获不透明令牌"（就是下面这个 `_SeamBinder`）→ 审查者一步就到：
+       接缝是 `self` 的**绑定方法**，所以 `registry.chat.deliver.__self__._require()`
+       就是引擎；而且 `registry.chat.deliver.__globals__["_ENGINES"]`
+       **连 token 都不用**，直接拿到整张 token→引擎 表。
+
+    ## 结论：进程内隔离做不到，别再声称做到了
+
+    只要插件代码与核心在同一个进程、能执行 Python，它就能读任何函数的
+    `__globals__` / `__closure__` / `__self__`，或者 `import qq_roleplay_bot.runtime`、
+    `gc.get_objects()`、`sys.modules`。**纯 Python 里没有能挡住这件事的写法。**
+
+    所以这个类的定位是**架构与可审查性**，不是安全：
+
+    * 它让"插件需要引擎"这件事在代码里显式（`_require` 一抛就是 bug）；
+    * 它让 `grep engine` 在插件目录里查不到东西；
+    * 它把"能力"写成一个一个具体的函数，接新思维链路时知道要在哪对齐。
+
+    **真正的边界是：插件是受信任的代码。** 它们在同一个仓库里、走同一套代码审查。
+    核心侧另有三道**不依赖任何隐藏**的检查，各有独立测试：身份由核心盖章、
+    正文只取一次值（TOCTOU）、特权命令与动作执行在核心。
+    """
+
+    __slots__ = ("token",)
+
+    def __init__(self, engine: "DialogueEngine", transport: object = None) -> None:
+        import uuid
+
+        self.token = uuid.uuid4().hex
+        _ENGINES[self.token] = engine
+        if transport is not None:
+            _TRANSPORTS[self.token] = transport
+
+    def _require(self):
+        engine = _ENGINES.get(self.token)
+        if engine is None:
+            # 走到这里说明有人手工删了私表项，或者接缝被序列化到别的进程去了。
+            # **明确抛错**，不静默返回 None——静默会让"没有能力"和"能力丢了"分不清。
+            raise RuntimeError("plugin seam lost its engine binding")
+        return engine
+
+    def _require_transport(self):
+        transport = _TRANSPORTS.get(self.token)
+        if transport is None:
+            raise RuntimeError("plugin seam lost its transport binding")
+        return transport
+
+    # --- 动作接缝（`call_action` / `notify`）------------------------------
+
+    async def call_action(self, action: str, params: dict[str, object] | None = None,
+                          *, purpose: str | None = None):
+        """先过 `capabilities` 闸门，再调对面；插件绕不开闸门。
+
+        闸门规则：
+
+        - `purpose` 不明说时按 action 自己推（见下面那段"读用 read、写只放 join_approval"）；
+        - `purpose` 明说时（核心执行某类动作，`action_caller` 就是这么用的），
+          允许"**这一族写动作 + 任何只读动作**"：
+          `is_allowed(action, purpose=purpose) or is_allowed(action, purpose="read")`。
+          为什么要额外放行只读：`group_owner` 那族里有一步**回读**（设完头衔要现查一次，
+          因为 QQ 会静默截断），而 `get_group_member_info` 属 `READ_ACTIONS`、
+          不属 `GROUP_OWNER_ACTIONS`——只按写闸判会把回读一起拒掉（实测踩到）。
+          反过来这仍然**比旧代码紧得多**：旧代码把活的 transport 交给插件，
+          它能调**任意** action；现在最多是"它那一族写 + 只读"。
+
+        闸门拒绝会抛 `plugins.ActionDenied`（**不是**核心的 `CapabilityDenied`）：
+        插件不该认识 `capabilities.py`，所以这里翻译一次。
+        """
+
+        from .plugins import ActionDenied
+
+        engine = self._require()
+        transport = self._require_transport()
+        registry = getattr(engine, "capabilities", None)
+        if registry is not None:
+            # 读用 `read`、写只放这一条 `join_approval`——**不能一律按写的那道闸判**：
+            # `get_group_system_msg` 是只读 action，拿写入用途去查会被直接拒
+            # （踩过：接缝第一版就是这么写的，审批每轮都读不到申请）。
+            from .capabilities import JOIN_APPROVAL_ACTIONS, CapabilityDenied
+
+            if purpose is None:
+                purpose = "join_approval" if action in JOIN_APPROVAL_ACTIONS else "read"
+            # 用 `check()` 而不是 `is_allowed()`：`check` 是既有契约（替身与真实实现都有），
+            # 而且它同时挡住 `FORBIDDEN_ACTIONS`。只读那道闸作为**回退**再试一次。
+            try:
+                registry.check(action, purpose=purpose)
+            except CapabilityDenied:
+                try:
+                    registry.check(action, purpose="read")
+                except CapabilityDenied as exc:
+                    raise ActionDenied(f"{action} 不允许用于 {purpose}") from exc
+        call = getattr(transport, "call_api", None)
+        if not callable(call):
+            raise RuntimeError("这个通道不支持动作调用")
+        from .onebot_client import unwrap_result
+
+        return unwrap_result(await call(action, params or {}))
+
+    def action_caller(self, purpose: str):
+        """造一个**已绑好用途**的调用函数：`(action, params) -> response`。
+
+        给核心执行"插件声明的动作"用（`stage3_main._plugin_action_reply`）。
+        这样插件侧只需要一个 `call(action, params)`，拿不到 transport、也不需要
+        认识 `capabilities`——闸门在这条闭包里，它绕不过去。
+        """
+
+        async def call(action: str, params: dict[str, object] | None = None):
+            return await self.call_action(action, params, purpose=purpose)
+
+        return call
+
+    async def notify(self, text: str) -> None:
+        """通知超管——走补发队列，连接断了也不会把这条提示弄丢。"""
+
+        engine = self._require()
+        transport = self._require_transport()
+        targets = tuple(
+            str(item) for item in getattr(dev_config, "APPROVE_NOTIFY_USER_IDS", ()) if str(item)
+        )[:3]
+        for user_id in targets:
+            await _send_or_queue(
+                transport, getattr(engine, "outbox", None), MessageTarget(user_id=user_id), text
+            )
+
+    # --- ChatSeams -------------------------------------------------------
+
+    def reserved_user_ids(self) -> frozenset[str]:
+        engine = self._require()
+        merged = {str(item) for item in getattr(engine, "super_admin_user_ids", ()) or ()}
+        merged |= {str(item) for item in getattr(engine, "admin_user_ids", ()) or ()}
+        return frozenset(merged)
+
+    async def allow_private(self, user_id: str) -> None:
+        allowed = getattr(self._require(), "private_debug_user_ids", None)
+        if isinstance(allowed, set):
+            allowed.add(str(user_id))
+
+    async def deliver(self, parcel) -> object:
+        """把关卡全在这里过一遍，然后才交给对话流程。
+
+        ## 四条必须遵守的规矩（都来自 2026-10-01 三轮审查）
+
+        1. **正文取一次值，而且要取成"精确 str"**：`_exact_text(parcel.text)`，
+           之后判闸门与投递都用这一个值。
+           - 第一版是 `privileged_command_level(parcel.text)` 判完再把 `parcel.text`
+             （**同一个活对象**）放进 `IncomingMessage`：`str` 子类的 `strip()` 第一次
+             返回 `/help`、之后返回载荷 → 闸门看 `/help`、引擎执行 `/super admin list`。
+           - 第二版改成 `str(parcel.text or "")`——**只修好一半**。第三轮审查实测：
+             `str(x)` 对**非 str 对象**返回其 `__str__` 的结果，而那结果只要是 str 实例
+             （**子类也算**）就**原样返回、不再拷**。于是一个 `__str__` 返回"会变脸的
+             str 子类"的对象照样穿透。`_exact_text` 补上这一步。
+        2. **身份不是插件说了算**：`sender` 只是"渠道说这是谁"。主人那一档由
+           `_OWNER_CHANNELS` 白名单 + 渠道的 `claims_owner` 共同决定，而
+           **`claims_owner` 是插件给的布尔、不可信**——所以它只影响 `sender_role`
+           这个给模型看的标签，**不授予任何命令权限**（命令权限一律走 QQ 那条路，
+           见 `stage3_main._is_super_admin_control`）。
+        3. **每封必须有渠道内唯一的 id**：见 `DeliveredMessage.message_id`
+           （原来核心自己拼了个常量，导致同一个发件人的后续来信被去重器静默丢掉）。
+        4. **特权命令的形状判定要与引擎的解析口径一致**：`privileged_command_level`
+           现在会先剥掉开头的 @提及/CQ 段（`admin_control` 一直在剥）。
+           第三轮审查实测过不一致的后果：`"@x /admin relay group <群号> <内容>"`
+           **闸门放行、引擎按管理员命令执行** —— 伪造主人的邮件能让她以超管身份
+           往任意群发任意内容（`/admin relay` 两步可全自动）。
+        """
+
+        from .plugins import DeliveredMessage
+
+        engine = self._require()
+        if not isinstance(parcel, DeliveredMessage):
+            return None
+        # 1) **只取值一次，而且必须是精确 str**（TOCTOU 防护）。
+        text = _exact_text(parcel.text)
+        level = privileged_command_level(text)
+        if level is not None:
+            logger.warning("plugin_deliver_refused reason=privileged-command level=%s channel=%s",
+                           level, parcel.channel)
+            return None
+        # 2) 身份与画像是**这一侧**算的。
+        sender = _exact_text(parcel.sender)
+        channel = _exact_text(parcel.channel)
+        namespace = _exact_text(parcel.session_namespace) or channel
+        is_owner = bool(parcel.claims_owner) and channel in _OWNER_CHANNELS
+        # 3) 渠道内唯一的 id（渠道没给就退回"渠道+发件人"，至少不比以前差）。
+        inner = _exact_text(parcel.message_id) or f"{namespace}:{sender}"
+        message = IncomingMessage(
+            message_id=f"{channel}:{inner}",
+            session_id=f"{namespace}:{sender}",
+            user_id=sender,
+            text=text,
+            target=MessageTarget(user_id=sender),
+            sender_role="owner" if is_owner else "mailer",
+            sender_name=_exact_text(parcel.sender_name) or (sender or "主人" if is_owner else sender),
+        )
+        return await engine.handle(message)
+
+    def take_follow_ups(self, session_id: str):
+        taker = getattr(self._require(), "take_follow_ups", None)
+        return taker(session_id) if callable(taker) else []
+
+    def roles_sink(self, cache: object) -> None:
+        self._require().self_roles = cache
+
+    def reporter_sink(self, reporter: object) -> None:
+        self._require().daily_reporter = reporter
+
+    def chat_seams(self) -> ChatSeams:
+        return ChatSeams(reserved_user_ids=self.reserved_user_ids,
+                         allow_private=self.allow_private,
+                         deliver=self.deliver,
+                         take_follow_ups=self.take_follow_ups,
+                         roles_sink=self.roles_sink,
+                         reporter_sink=self.reporter_sink,
+                         owner_channels=_OWNER_CHANNELS)
+
+    # --- ReportSeams -----------------------------------------------------
+
+    def report_snapshot(self):
+        taker = getattr(self._require(), "snapshot", None)
+        return taker() if callable(taker) else None
+
+    def report_log_io(self, feature, request, raw, *, session_id="", trigger=""):
+        logger_fn = getattr(self._require(), "_log_model_io", None)
+        if callable(logger_fn):
+            logger_fn(feature, request, raw, session_id=session_id, trigger=trigger)
+
+    def report_note_letter(self, letter) -> None:
+        taker = getattr(self._require(), "note_letter", None)
+        if callable(taker):
+            taker(letter)
+
+    def report_seams(self) -> ReportSeams:
+        engine = self._require()
+        return ReportSeams(snapshot=self.report_snapshot,
+                           client=getattr(engine, "client", None),
+                           log_model_io=self.report_log_io,
+                           note_letter=self.report_note_letter,
+                           memory_service=getattr(engine, "memory_service", None),
+                           # **工厂**：写信 agent 自己那把通道（独立 user_id，
+                           # 与群聊不共用缓存隔离空间）。给工厂而不是给 client，
+                           # 因为装配点离写第一封信很远，client 要现造。
+                           letter_client=_build_letter_client)
+
+    # --- UiSeams ---------------------------------------------------------
+
+    def ui_execute_action(self, request):
+        return self._require().execute_action(request)
+
+    def ui_restart(self):
+        return self._require().request_restart()
+
+    def ui_session_clear(self, session_id: str):
+        return self._require().leave_session(session_id)
+
+    def ui_group_switch(self, group_id: str, enabled: bool):
+        engine = self._require()
+        enable, disable = engine.enable_group, engine.disable_group
+        return enable(group_id) if enabled else disable(group_id)
+
+    def ui_memory_ops(self):
+        return getattr(self._require(), "memory_ops", None)
+
+    def ui_state_reader(self):
+        engine = self._require()
+        return {"snapshot": engine.snapshot(), "usage_store": getattr(engine, "usage_store", None)}
+
+    def ui_self_id(self):
+        roles = getattr(self._require(), "self_roles", None)
+        return roles.self_id() if roles is not None else ""
+
+    def ui_apply_overrides(self, body, **kwargs):
+        from .runtime import apply_overrides as _apply_overrides
+
+        return _apply_overrides(self._require(), body, **kwargs)
+
+    def ui_seams(self) -> UiSeams:
+        engine = self._require()
+        groups = getattr(engine, "enable_group", None), getattr(engine, "disable_group", None)
+        return UiSeams(
+            control_audit=getattr(engine, "control_audit", None),
+            execute_action=self.ui_execute_action,
+            apply_overrides=self.ui_apply_overrides,
+            memory_ops=self.ui_memory_ops,
+            state_reader=self.ui_state_reader,
+            restart=self.ui_restart,
+            group_switch=self.ui_group_switch if all(callable(g) for g in groups) else None,
+            session_clear=self.ui_session_clear,
+            self_id=self.ui_self_id,
+            knowledge=_knowledge_for(engine),
+            # 插件清单（**只读**）：面板"插件"卡拿它列 tab。给的是函数 `inventory`，
+            # 不是某个对象——接缝一律是函数，理由见 `UiSeams` 的说明。
+            plugins=inventory,
+        )
+
+
+def _roles_sink_for(engine: DialogueEngine):
+    """前置插件把"她自己是什么角色"的查询放回核心（`provide_roles` 用它）。"""
+
+    def sink(cache: object) -> None:
+        engine.self_roles = cache
+
+    return sink
+
+
+def _reporter_sink_for(engine: DialogueEngine):
+    """插件把每日汇报器放回核心（`register_reporter` 用它，面板要读它判今天发没发）。"""
+
+    def sink(reporter: object) -> None:
+        engine.daily_reporter = reporter
+
+    return sink
+
+
+def _report_seams_for(engine: DialogueEngine) -> ReportSeams:
+    """写日报要用、但**不属于权限**的五样东西（见 `ReportSeams` 的说明）。
+
+    ⚠️ **每一样都必须经由 `_SeamBinder`，不能直接塞引擎的方法或属性。**
+    2026-10-01 审查抓到两轮：
+
+    1. `snapshot=getattr(engine, "snapshot", None)` 是**绑定方法**，
+       `registry.report.snapshot.__self__` 就是引擎；
+    2. 改成普通闭包之后，`registry.report.snapshot.__closure__[0].cell_contents`
+       **照样**是引擎——闭包在 CPython 里是可读的。
+
+    所以现在闭包只捕获**不透明令牌**（`_SeamBinder`），真身在模块私表里。
+    详见 `_SeamBinder` 的说明（含"这不是安全边界"那条限度）。
+    """
+
+    return _SeamBinder(engine).report_seams()
+
+
+def _ui_seams_for(engine: DialogueEngine) -> UiSeams:
+    """控制面板要的东西。
+
+    **面板权限最大，所以更不能拿引擎**：拿到就能顺着 `engine.transport` 发消息、
+    顺着 `engine.super_admin_user_ids` 读名单，绕开它自己那套 token/CSRF 认证。
+    这里逐项给**不受绑定方法与闭包泄漏影响**的接缝（`_SeamBinder`）。
+    """
+
+    return _SeamBinder(engine).ui_seams()
+
+
+def _group_switch_for(engine: DialogueEngine):
+    """面板的群开关：`(group_id, enabled) -> 是否真的变了`。"""
+
+    enable = getattr(engine, "enable_group", None)
+    disable = getattr(engine, "disable_group", None)
+    if not (callable(enable) and callable(disable)):
+        return None
+
+    def _switch(group_id: str, enabled: bool) -> bool:
+        return enable(group_id) if enabled else disable(group_id)
+
+    return _switch
+
+
+def _knowledge_for(engine: DialogueEngine):
+    """面板的知识库面板块要的知识源（没有就是 None，面板显示"没启用"）。"""
+
+    sources = getattr(engine, "prompt_sources", None)
+    return getattr(sources, "knowledge_base", None)
 
 
 def _factory_api_key(env_name: str, fallback: str) -> str:
@@ -612,35 +1099,20 @@ def _plugin_action_seams(engine: DialogueEngine, transport: QQTransport):
     - `notify(text)`：通知超管——走补发队列，连接断了也不会把这条提示弄丢。
 
     她们（后台插件）拿到的就是这两个函数，拿不到 transport 本身。
+
+    ⚠️ 经由 `_SeamBinder`：闭包只捕获不透明令牌。第一版这两个闭包**直接捕获了
+    `engine` 与 `transport`**，审查者用 `registry.notify.__closure__[1].cell_contents`
+    就拿到了**活的传输层**并真的发了消息（2026-10-01）。
     """
 
-    async def call_action(action: str, params: dict[str, object] | None = None):
-        registry = getattr(engine, "capabilities", None)
-        if registry is not None:
-            # 读用 `read`、写只放这一条 `join_approval`——**不能一律按写的那道闸判**：
-            # `get_group_system_msg` 是只读 action，拿写入用途去查会被直接拒
-            # （踩过：接缝第一版就是这么写的，审批每轮都读不到申请）。
-            from .capabilities import JOIN_APPROVAL_ACTIONS
+    binder = _SeamBinder(engine, transport)
+    return binder.call_action, binder.notify
 
-            purpose = "join_approval" if action in JOIN_APPROVAL_ACTIONS else "read"
-            registry.check(action, purpose=purpose)
-        call = getattr(transport, "call_api", None)
-        if not callable(call):
-            raise RuntimeError("这个通道不支持动作调用")
-        from .onebot_client import unwrap_result
 
-        return unwrap_result(await call(action, params or {}))
+def _action_caller_for(engine: DialogueEngine, transport: QQTransport):
+    """`(purpose) -> 已过闸门的调用函数`。核心执行插件声明的动作时用它。"""
 
-    async def notify(text: str):
-        targets = tuple(
-            str(item) for item in getattr(dev_config, "APPROVE_NOTIFY_USER_IDS", ()) if str(item)
-        )[:3]
-        for user_id in targets:
-            await _send_or_queue(
-                transport, getattr(engine, "outbox", None), MessageTarget(user_id=user_id), text
-            )
-
-    return call_action, notify
+    return _SeamBinder(engine, transport).action_caller
 
 
 def _start_memory(engine: DialogueEngine, client) -> MemoryService | None:
@@ -706,14 +1178,14 @@ async def serve(transport: QQTransport, *, stage_label: str = "Stage 3") -> None
     engine.memory_ops = MemoryOps(
         getattr(memory, "store", None) if memory is not None else None, source="webui",
     )
-    # Stage 4 的后台通道（读信回信、每日汇报、入群审批）**都从插件装配点拿**：
-    # 这里不再认识"邮箱""审批"这些名字，只拿到一串插件，给每个跑同一个节拍。
-    # `build_background_plugins(engine)` **只**从 `engine.plugin_registry` 取——那四个
-    # 接缝参数已于 2026-10-01 从它的签名里删掉（留着会让人以为"传了就会接上"，
-    # 实际一个都没读，独立审查点过两次）。
-    # 给插件的窄接缝（`call_action` / `notify`）由装配点 `build_engine` 注入：只能有一处，
-    # 否则这里算一份、那边发一份，"到底给了谁"就说不清——原来这两行在这里算完就丢掉
-    # （**没有任何消费者**）。见 docs/STAGE4_AS_PLUGINS.md。
+    # Stage 4 的插件（命令 + 后台通道）**已经由 `build_engine` 装好了**：
+    # 发现只跑一次，这里只是把它的后台那一半拿出来交给同一条节拍循环。
+    # 这里不再造 `call_action` / `notify`——那两个窄接缝在接插件时就注入给插件了。
+    plugin_registry = getattr(engine, "plugin_registry", None)
+    if plugin_registry is not None:
+        # 事件循环补上：`build_engine` 是同步的，那时候还没有运行中的循环。
+        # 跨线程往主循环丢协程的插件（面板）靠它。
+        plugin_registry.set_loop(asyncio.get_running_loop())
     background = build_background_plugins(engine)
     await transport.start()
     if memory is not None:

@@ -87,6 +87,34 @@ _TOKEN_PATTERN = re.compile(
 )
 
 
+#: 消息开头**可能带着一段 @ 或 CQ:at**（群里她被人 @ 时，OneBot 会把那个 at 段放在最前）。
+#: 解析命令前必须把它剥掉，否则"@ 她 + 命令"就认不出来。
+_LEADING_MENTION = re.compile(r"^\s*(?:\[CQ:at,[^\]]+\]\s*|@[^\s]+\s*)", re.IGNORECASE)
+
+
+def strip_leading_mentions(text: str) -> str:
+    """剥掉消息开头的 @提及 / `[CQ:at,…]` 段（只剥**一段**，与解析口径一致）。
+
+    ## 为什么把它拿出来单放（2026-10-01 第三轮审查抓到的一个真实越权）
+
+    `parse_admin_command` 一直在剥这一段，而 `stage3_main.privileged_command_level`
+    （"这条长得像不像特权命令"那道闸）**没有**。两处口径不一致的后果：
+
+        "@x /admin relay group <群号> <内容>"
+
+    闸门看到的是 `@x ...`，判成"不是特权命令"→ 放行；引擎剥掉 `@x ` 之后按管理员命令
+    执行。审查者实测（真 MailChannel + 真引擎）：伪造主人地址的来信靠这个
+    **以超管身份执行 `/admin relay`**，两步之后 `runtime.serve` 会真的把攻击者给的
+    内容发到任意群 —— 而 SMTP 的 From 可以伪造，这正是 `mail_channel` 自己点名的威胁模型。
+
+    所以**两边必须用同一个函数剥**，不许各写一套正则。
+    """
+
+    if not isinstance(text, str):
+        return ""
+    return _LEADING_MENTION.sub("", text, count=1)
+
+
 def parse_admin_command(text: str) -> AdminCommand | None:
     """只识别明确的管理命令，不把普通聊天内容当作控制请求。
 
@@ -96,7 +124,7 @@ def parse_admin_command(text: str) -> AdminCommand | None:
 
     if not isinstance(text, str):
         return None
-    text = re.sub(r"^\s*(?:\[CQ:at,[^\]]+\]\s*|@[^\s]+\s*)", "", text, count=1, flags=re.IGNORECASE)
+    text = strip_leading_mentions(text)
     relay_name = _RELAY_NAME_PATTERN.match(text)
     if relay_name:
         target_kind = relay_name.group("target_kind").casefold()

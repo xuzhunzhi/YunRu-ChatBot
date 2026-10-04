@@ -64,3 +64,43 @@ def check_message_security(message: IncomingMessage, admin_user_ids: frozenset[s
     is_admin = message.user_id in admin_user_ids and message.sender_role in {"admin", "owner"}
     reason = "sensitive_local_request_admin_not_implemented" if is_admin else "sensitive_local_request_non_admin"
     return SecurityDecision(True, reason, BLOCKED_REPLY)
+
+
+# --- 管理/超管命令的"形状"判定 ------------------------------------------------
+# 2026-10-01 从 `stage3_main.py` 搬到这里，原因：**插件侧的委托与核心的闸门都要用它**，
+# 放在 `stage3_main` 里会逼插件 `from ...stage3_main import privileged_command_level`
+# ——插件不该 import 核心模块。它是安全谓词，`security.py` 是它该在的地方。
+
+#: 管理/超管命令的"形状"。未授权时**不落到模型那一侧**，连历史都不进：
+#: 交给模型回一句话等于确认这个前缀存在（冷群的消息会进历史并被巡检捡回模型），
+#: 所以这道闸必须在会话过滤之前。
+#: 按层级分别判：管理员发 `/super ...` 同样是没权限。
+#: 收尾（2026-09-28）：`/admin ...` 回一句说明，`/super ...` 完全静默。
+PRIVILEGED_COMMAND_PATTERN = re.compile(r"^[/#]\s*(?P<level>admin|super)\b", re.IGNORECASE)
+
+
+def privileged_command_level(text: object) -> str | None:
+    """消息长得像哪一层的命令：`"super"` / `"admin"` / `None`。
+
+    只认前缀形状，**不要求能被解析出来**：`/admin 随便写点什么` 也该被挡住。
+
+    ## 必须先剥掉开头的 @提及 / CQ:at（2026-10-01 第三轮审查抓到的真实越权）
+
+    剥这一段原来只做在 `parse_admin_command` 里，**这里没做**，于是：
+
+        "@x /admin relay group <群号> <内容>"
+
+    闸门判成"不是特权命令"→ 放行 → 引擎剥掉 `@x ` 之后按管理员命令执行。
+    审查者用**真 MailChannel + 真引擎**实测：伪造主人地址的来信靠这个
+    **以超管身份执行 `/admin relay`**，两步之后能把攻击者给的内容发到任意群。
+
+    现在两边**共用** `admin_control.strip_leading_mentions`——同一个口径，
+    不许各写一套正则。
+    """
+
+    if not isinstance(text, str):
+        return None
+    from .admin_control import strip_leading_mentions
+
+    match = PRIVILEGED_COMMAND_PATTERN.match(strip_leading_mentions(text).strip())
+    return match.group("level").casefold() if match else None
