@@ -154,25 +154,29 @@ tests/run_offline.py       817 全绿、0 跳过（与改动前基线相同）
 tests/check_module_removal.py  7 个可插能力全"能拔掉而核心照跑"
 ```
 
-### 7.3 还没做的（下一步的准确清单）
+### 7.3 更正：这一节原来列的"没做"**大部分已经做完了**（2026-10-05）
 
-1. **三份接缝没移植**（`ChatSeams` / `ReportSeams` / `UiSeams` + `runtime._SeamBinder`，
-   插件线上是 **+515 行**，最敏感）。当前后果：
-   * 日报**不启用**（"写信 agent 没有模型通道（接缝没给 letter_client）"）；
-   * 面板缺 `execute_action` 等入口；
-   * `serve` 里没补 `registry.set_loop(loop)`，面板跨线程投协程会用 fallback。
-2. **群管理/群主动作的执行端**仍是本体 `stage3_main.py:1539-1547` 的 fail-closed 占位：
-   那几条命令**认得出、执行不了**，回"这条分支没有群管理能力。"——
-   要让它们真能用，得把动作执行那条接缝也接上。
-3. **两份角色缓存**：`engine.self_roles` 还是核心的（`runtime.py:404-410`），
-   roles 插件另造一份给 `registry.shared_roles()`（因为 `chat.roles_sink` 留空）。
-   Stage 3 行为因此不变，但接缝移植时要把单源建立起来。
-4. **插件测试**缺 5 个文件（`test_stage4_plugins` / `test_background_plugins` /
-   `test_plugin_prompts` / `test_plugin_inventory` / `plugin_support`），要搬过来。
-5. `_set_public_help` 没移植：`PUBLIC_HELP`（`stage3_main.py:508`）仍是静态的；
-   但 `/help` 卡片走注册表 `help_lines()`，**已包含**插件帮助行。
+原文在这里列了 5 条"还没做"，其中 1/2/3/5 现在**都不成立了**（文档不能撒谎，逐条更正）：
 
----
+| 原来写的 | 实际（实测） |
+| --- | --- |
+| ① 三份接缝没移植 | **已移植**（_SeamBinder / ChatSeams / ReportSeams / UiSeams / set_loop），日报、面板、prompt 汇聚口都启用 |
+| ② 群管理/群主动作"认得出、执行不了" | **执行端是通的**：真装配路径下 12 条写动作逐条真的发出去了（payload 见 	ests/test_group_action_execution.py）。那句 fail-closed 占位（stage3_main.py:1600-1603，文案已是"这条部署没有群管理能力。"）**只剩"装配错了"才会出现** |
+| ③ 两份角色缓存 | **已单源**：ngine.self_roles is registry.shared_roles() 恒真 |
+| ⑤ _set_public_help 没移植 | **已移植** |
+
+**仍然成立的一条**：④ 插件测试缺的那几个文件——已随接缝移植一起搬入。
+
+**新记的两件事（2026-10-05）**：
+
+* ⚠️ **备胎会掩盖断线**：把 uild_engine 里接 
+egistry.action_caller 那行去掉，
+  **只有新加的那 2 条测试会红**，既有的 	est_stage4_plugins.py 17 条全绿——因为那条退路
+  会静默兜住"装配漏接"。**动装配点时别只跑既有测试。**
+* **两条待用户拍**（实测发现，未改）：/super ban @某人 99999 里的 5 位数字**先被当成 QQ 号**，
+  分钟数落回默认 600（夹不到 30 天）；xecute_action **不过档位闸门**（面板路径传普通
+  ctor_id 照样真发 set_group_ban）——面板鉴权在 webui_access.py，这可能是**有意**的，
+  但与 docstring 的说法不一致，要么加一层调用方身份，要么把 docstring 写实。
 
 ## 八、以后要做：WebUI 内置「官方插件市场」（2026-10-05 用户提出，**先记着，不做**）
 
