@@ -31,11 +31,13 @@ FLAG_NOTES: dict[str, str] = {
     "letter_enabled": "写信 / 每日汇报。关掉＝当天不发信，读信回信不受影响。",
     "group_manage_enabled": "群管理动作（踢/禁言/撤回/全员禁言）的总开关。",
     "group_owner_enabled": "群主专属动作（设管理员/名片/群名/头衔/公告）的总开关。",
+    "ask_when_unsure": "不懂就问：没把握时先问一句、具体专业话题没有根据时不许断言。"
+                       "关掉＝退回从前：被叫到就直接答，问与不问不再由核心定。",
 }
 
 
 class RuntimeFlags:
-    """八个开关的可变容器。线程安全够用（面板线程写、asyncio 线程读）。"""
+    """九个开关的可变容器。线程安全够用（面板线程写、asyncio 线程读）。"""
 
     __slots__ = ("_values", "_lock")
 
@@ -94,6 +96,10 @@ class RuntimeFlags:
     def group_owner_enabled(self) -> bool:
         return self.get("group_owner_enabled")
 
+    @property
+    def ask_when_unsure(self) -> bool:
+        return self.get("ask_when_unsure")
+
 
 def _truthy(value: object) -> bool:
     return str(value).strip().casefold() in {"1", "true", "yes", "on"}
@@ -120,6 +126,8 @@ def build_flags(config=None) -> RuntimeFlags:
         "letter_enabled": bool(_cfg.MAIL_REPORT_ENABLED),
         "group_manage_enabled": bool(_cfg.GROUP_MANAGE_ENABLED),
         "group_owner_enabled": bool(_cfg.GROUP_OWNER_ENABLED),
+        # 不懂就问：默认开（用户点名要上的那条）。关掉即退回"被叫到就直接答"。
+        "ask_when_unsure": bool(_cfg.ASK_WHEN_UNSURE),
     }
     if config is not None:
         stored = getattr(config, "values", {}) or {}

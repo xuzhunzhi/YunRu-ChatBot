@@ -10,8 +10,17 @@
 4. **防出戏那一段必须写，而且不许写成反向许可**——"不要假装你是真人"等于直接
    告诉她你不是真人（早期踩过，她随后就开始讲自己的机制）；
 5. **正文进的是可信 system 前缀**，不是 DATA 段；
-6. **情绪许可与"不怼人"那条边界必须在**（2026-10-04），而且**风格审核不许被授权
-   去磨她的语气**——详见下面 `EMOTION_PERMISSION_ANCHORS` 那段注释。
+6. **风格审核不许被授权去磨她的语气**（2026-10-04）——它是每条回复发送前的最后一道，
+   详见下面 `test_review_prompt_keeps_emotion_and_only_blocks_four_kinds`。
+
+2026-10-04 第二次改动（**撤掉的一半**）：`45f3535` 那条人格审计往模板里加的"情绪许可 /
+不怼人边界 / `:68` 那条的限定"三处**已经撤回**（`git checkout 45f3535^ --
+src/qq_roleplay_bot/base_prompt.py`），所以守它们的三条断言也一起删了。理由不是"让它变绿"，
+而是**它们守的前提已经不存在**：生产上 `BASE_PROMPT` 整段来自
+`data/private_docs/base_prompt.REAL.py`（`base_prompt.py:249-251` 找到就整段返回），
+仓库模板里那两句在生产上**一个字都不生效**；留着断言只会让 `run/` 的守卫对着一份
+没人读的模板红。人格那两句等真人格的事定了、连同真人格一起做。
+**风格审核那一半保留**（它是每轮都真的跑的那一道），守卫也保留。
 
 **内容级断言**（情绪触发点是哪些、某个专有名词在不在）留在私有副本里——
 换人设就该一起换，放在公开仓库会让模板版必然失败。
@@ -35,29 +44,6 @@ REQUIRED_SECTIONS = (
 #: 太长会把记忆与群上下文挤出位置。
 MIN_CHARS = 3000
 MAX_CHARS = 6000
-
-#: **情绪许可**的两句锚点（2026-10-04 用户原话："你先看看 prompt 里有没有约束，
-#: 有的话改掉，**只要不是怼人就行，可以表达情绪**"）。
-#:
-#: 为什么要在这里钉住：这一轮的审计发现，她之所以"三无"，一部分是 prompt 在压
-#: （"这些不是要压住的缺陷"只说了情绪可以存在，**没给她表达它的许可**），
-#: 而更大一口在风格审核那边（它每条回复都跑一次，专删"冲"）。约束删掉之后必须留下守卫，
-#: 否则下一轮"她太吵了"一句反馈，就会有人把同一条约束悄悄加回来——**没有任何测试会红**。
-#:
-#: 锚点取的是"许可"与"边界"两句里最不可能被顺手改写的说法；改这两句时断言会红，
-#: 那是**故意的**：先回来读这段注释，再决定是改断言还是改回 prompt。
-EMOTION_PERMISSION_ANCHORS = (
-    "情绪出来的时候不要收着",
-    "情绪该出来就出来，不必收着",
-)
-NO_ATTACK_ANCHORS = (
-    "别拿它去砸人",
-    "不是砸向面前这个人",
-)
-#: `base_prompt.py:68` 那条（"不当裁判、不纠正别人"）压的是**纠正别人**，不是表达情绪。
-#: 用户点名要求保留它，只补一句限定说明它管不到情绪。
-NO_CORRECTING_ANCHOR = "不当裁判、不纠正别人"
-NO_CORRECTING_CLARIFIER = "你自己有什么反应、什么情绪，不在这一条里"
 
 
 def test_persona_keeps_its_sections() -> None:
@@ -111,41 +97,7 @@ def test_persona_is_actually_shipped_with_the_package() -> None:
     assert "BASE_PROMPT" in path.read_text(encoding="utf-8")
 
 
-# --- 情绪许可（2026-10-04）--------------------------------------------------
-
-
-def test_persona_lets_her_show_emotion() -> None:
-    """她**可以表达情绪**——这句许可必须在，而且分两处（说话方式 + 群聊里的分寸）。
-
-    缺了它，前面那句"这些不是要压住的缺陷"只是一句关于人设写法的说明，
-    并没有允许她真的把情绪放出来。
-    """
-
-    missing = [anchor for anchor in EMOTION_PERMISSION_ANCHORS if anchor not in BASE_PROMPT]
-    assert not missing, f"情绪许可被拿掉了（或改写了）：{missing}"
-
-
-def test_persona_keeps_the_only_boundary_about_people() -> None:
-    """许可的边界只有一条：**不对人发难**（用户："只要不是怼人就行"）。
-
-    这是"允许表达情绪"与"允许怼人"之间唯一的区别，所以两边都要钉住：
-    边界句子在，而且它说的是"攻击/羞辱/教训/阴阳怪气"，不是"不许有反应"。
-    """
-
-    missing = [anchor for anchor in NO_ATTACK_ANCHORS if anchor not in BASE_PROMPT]
-    assert not missing, f"不怼人那条边界不见了：{missing}"
-    assert "烦了、嫌弃、来劲、懒得理、被戳到了、突然没兴趣" in BASE_PROMPT, (
-        "情绪许可没有具体说清哪些情绪是被允许的"
-    )
-
-
-def test_persona_does_not_silence_emotion_while_forbidding_correction() -> None:
-    """`不当裁判、不纠正别人` 要留着（它压的是纠正别人，不是情绪），并带上那句限定。"""
-
-    assert NO_CORRECTING_ANCHOR in BASE_PROMPT, "这条是用户点名保留的，不许删"
-    assert NO_CORRECTING_CLARIFIER in BASE_PROMPT, (
-        "它读起来像'不许有反应'——要补一句限定，说明它管不到她自己的情绪"
-    )
+# --- 风格审核的授权范围（2026-10-04）----------------------------------------
 
 
 def test_review_prompt_keeps_emotion_and_only_blocks_four_kinds() -> None:

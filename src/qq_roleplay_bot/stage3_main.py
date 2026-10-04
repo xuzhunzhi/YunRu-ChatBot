@@ -32,6 +32,7 @@ from .builtin_commands import (
     build_help_text,
 )
 from ._host import HostServices
+from .ask_when_unsure import AskBudget, context_is_explicit, decide_grounding
 from .dialogue_judge import JudgeVerdict, build_judge_messages, parse_judge_output
 from .dialogue_compaction import (
     build_compaction_messages,
@@ -820,6 +821,7 @@ class DialogueEngine:
         style_reviewer=None,
         vision=None,
         host: HostServices | None = None,
+        ask_budget: AskBudget | None = None,
     ) -> None:
         self.client = client
         # **宿主能力**（出站表现、卡片渲染、机器探测、审计、余额、角色、检索）。
@@ -893,6 +895,14 @@ class DialogueEngine:
         # 识图（可选）：有图的消息在**进判定之前**先看一眼，把 `[图片]` 换成一句描述。
         # 它只改正文，不新增决策路径——"要不要回、回什么"照旧全在原来那套里。
         self.vision = vision
+        # 「不懂就问」的限量（2026-10-04）：同一话题最多一次、同一个群一段时间内最多几次。
+        # 计数只在内存里（见 `AskBudget`），默认值来自 `dev_config.QQBOT_ASK_*`；
+        # 测试可以直接塞一份自己的进来，把"十分钟"缩成"一秒"。
+        self.ask_budget = ask_budget if ask_budget is not None else AskBudget(
+            max_per_topic=dev_config.ASK_MAX_PER_TOPIC,
+            max_per_window=dev_config.ASK_MAX_PER_WINDOW,
+            window_seconds=dev_config.ASK_WINDOW_SECONDS,
+        )
         # 能力闸门（群管理要用它按用途校验 action）。默认自己建一份离线目录；
         # runtime 会把它自己的那份塞进来，保证与补上下文用的是同一份白名单。
         from .capabilities import CapabilityRegistry
@@ -952,6 +962,9 @@ class DialogueEngine:
             "reply_reviewed",
             # 识图成功几次（把 `[图片]` 换成描述的次数；没配识图时恒为 0）。
             "media_described",
+            # 「不懂就问」：以"问"回应的次数，以及"没把握/没根据所以没插话"的次数
+            # （关掉那条规则时两者恒为 0）。只有计数，没有正文。
+            "clarify_asked", "clarify_quiet",
         )}
         self._pending_relays: dict[str, PendingRelay] = {}
         self._pending_relay_selections: dict[str, PendingRelaySelection] = {}
@@ -3153,6 +3166,10 @@ class DialogueEngine:
         # 判定说"这一句在问她的世界吗"——只有 YES 才去翻世界观资料（单 agent 模式照旧查）。
         lore_wanted = True
         care_note: dict | None = None
+        # 「不懂就问」这一轮的现场提示（`ask_when_unsure`）：空串＝照旧说话。
+        # 它进的是**易变段**，所以不影响前缀缓存（见 `build_dialogue_messages`）。
+        clarify_note = ""
+        ask_rules = self._flags().ask_when_unsure
         # 双 agent 结构：先由判定 agent 决定"要不要接"。它的 prompt 与窗口都小得多，
         # 所以这次调用便宜；判定说 NO_REPLY 就直接结束，省掉回复那一次完整调用。
         if self._judge_on(message.session_id):
@@ -3172,6 +3189,17 @@ class DialogueEngine:
             self._refresh_context_from_verdict(state, verdict, session_id=message.session_id)
             verdict_related = bool(getattr(verdict, "related", True))
             lore_wanted = bool(getattr(verdict, "lore", True))
+            # 「不懂就问」的第一道确定性规则（2026-10-04）：**没听懂、又没被叫到 → 不插话**。
+            # 它放在取资料之前：这一轮本来就不出声，没必要为它去翻东西（翻要花钱）。
+            # **"被叫到时没有否决权"的原意保留**：这里唯一的沉默条件是"没被叫到"，
+            # 被叫到时她照样必须回应——只是允许她把"断言的答"换成"问"（见下面）。
+            if ask_rules and verdict.unsure and not (addressed or must_reply):
+                self._stats["clarify_quiet"] += 1
+                logger.info(
+                    "Stage 3 clarify: 没听懂、也没被叫到，不插话 session=%s topic=%s",
+                    message.session_id, state.context.topic or "-",
+                )
+                return None
             if not verdict.should_reply:
                 return None
         # 历史达到上限时先把旧对话压成摘要——它是回复段的稳定前缀。
@@ -3197,6 +3225,42 @@ class DialogueEngine:
                 message,
                 topic_shifted=bool(self._judge_on(message.session_id) and not verdict_related),
             )
+        # 「不懂就问」的第二道：**根据检查**（确定性，模型"觉得自己懂"绕不过它）。
+        # 三种根据——知识库命中 / 记忆命中 / 语境明确——一样都没有、判定又说这是具体的
+        # 专业·事实话题时，不许主动断言：被叫到就以"问"回应（问的次数还够的话），
+        # 没被叫到就干脆不出声。日常、情感、闲聊不受这条限制（`care=False` 就是照旧）。
+        #
+        # 放在这里（而不是判定刚回来时）是因为前两样根据**要等资料取完才知道**。
+        if ask_rules and self._judge_on(message.session_id):
+            grounding = decide_grounding(
+                verdict,
+                called=bool(addressed or must_reply),
+                has_knowledge=bool(prompt_material.knowledge_items),
+                has_memory=bool(memory_material.records),
+                context_explicit=context_is_explicit(message, state.recent()),
+                ask_allowed=self.ask_budget.allows(message.session_id, state.context.topic, now),
+            )
+            if not grounding.speak:
+                self._stats["clarify_quiet"] += 1
+                logger.info(
+                    "Stage 3 clarify: %s session=%s topic=%s specialist=%s grounded=%s",
+                    grounding.reason, message.session_id, state.context.topic or "-",
+                    grounding.specialist, grounding.grounded,
+                )
+                return None
+            # 只有"要当心"的那几种才拼提示、才记日志：照旧说话的绝大多数轮次
+            # 不该多一条日志（这条路上的每一轮都会跑到这里）。
+            if grounding.care:
+                clarify_note = grounding.turn_note
+                if grounding.ask:
+                    self.ask_budget.note(message.session_id, state.context.topic, now)
+                    self._stats["clarify_asked"] += 1
+                logger.info(
+                    "Stage 3 clarify: %s session=%s topic=%s understood=%s specialist=%s grounded=%s",
+                    grounding.reason, message.session_id, state.context.topic or "-",
+                    getattr(verdict, "understood", "clear"),
+                    grounding.specialist, grounding.grounded,
+                )
         request = build_dialogue_messages(
             history,
             current=message,
@@ -3231,6 +3295,8 @@ class DialogueEngine:
             # 也判断不了"昨天晚上""三天前"（2026-09-30 用户："云茹不能获取时间吗"）。
             # 它进的是**易变段**，不影响前缀缓存。
             now=now,
+            # 「不懂就问」的现场提示（空串＝照旧）。同样只进易变段。
+            clarify_note=clarify_note,
         )
         self._stats["model_calls"] += 1
         started_at = self.clock()

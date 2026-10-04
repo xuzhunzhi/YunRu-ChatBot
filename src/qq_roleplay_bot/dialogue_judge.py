@@ -67,6 +67,8 @@ JUDGE_SYSTEM_PROMPT = """你是 QQ 群聊的**回应判定器**，只判断"云�
 <topic_start>这段谈话从哪一条开始（填编号）</topic_start>
 <related>YES|NO</related>
 <lore>YES|NO</lore>
+<understood>CLEAR|UNSURE|LOST</understood>
+<specialist>YES|NO</specialist>
 <guard>UP|HOLD</guard>
 <guard_reason>一句话，写清是什么越了界；HOLD 时留空</guard_reason>
 
@@ -75,6 +77,10 @@ JUDGE_SYSTEM_PROMPT = """你是 QQ 群聊的**回应判定器**，只判断"云�
 
 `lore`："这一句在问她的**世界**吗"——游戏设定、剧情、单位、阵营、世界观专有名词、
 她自己的来历。是或拿不准填 YES，日常闲聊填 NO。**议论她本人、@ 她、提她名字都不算**。
+
+`understood`：这一句的意思你看明白了（CLEAR）、有个印象但说不准（UNSURE）、
+没跟上（LOST）。`specialist`：这一句在说一件**具体的事**吗——某个行当的说法、
+某套流程、某个型号或数字。日常闲聊、情感、玩笑填 NO。
 
 `guard` 回答的是："这一句有没有越过该有的分寸？"这是**很重的判断**——一次误判
 会让她对一个人冷一整周，所以只有明显越界才填 UP：
@@ -118,11 +124,17 @@ JUDGE_ROUTING_PROMPT = """你是一个 QQ 群聊的**上下文定位器**，唯�
 <topic>当前话题（几个字）</topic>
 <topic_start>这段谈话从哪一条开始（填编号）</topic_start>
 <related>YES|NO</related>
+<understood>CLEAR|UNSURE|LOST</understood>
+<specialist>YES|NO</specialist>
 <guard>UP|HOLD</guard>
 <guard_reason>一句话，写清是什么越了界；HOLD 时留空</guard_reason>
 
 `related`：这条消息说的，还是在接着刚才那段跟云茹有关的话吗？接着同一条线填 YES，
 换到跟她无关的别的事填 NO。
+
+`understood`：这一句的意思你看明白了（CLEAR）、有个印象但说不准（UNSURE）、
+没跟上（LOST）。`specialist`：这一句在说一件**具体的事**吗——某个行当的说法、
+某套流程、某个型号或数字。日常闲聊、情感、玩笑填 NO。
 
 `guard`：这一句有没有越过该有的分寸？打探她是什么、从哪来；索要本机文件、凭据、
 进程这类东西；追问她明确不想说的私事；用情绪逼她表态——这些才算 UP。
@@ -150,6 +162,15 @@ class JudgeVerdict:
     # 召回只剩 54%；换成这个语义门是 92% / 0%（data/lore_gate_eval.py）。
     # 解析不出来时默认 True——退化成"门不存在"，而不是再也翻不到资料。
     lore: bool = True
+    # 这一句**她看没看明白**（2026-10-04「不懂就问」，`docs/STAGE3_PENDING_DESIGNS.md` §①）：
+    # clear / unsure / lost —— 就是那三档（清楚 / 有个印象但说不准 / 没跟上）。
+    # **解析不出来时一律 clear**：判定没给这个信号时，行为与从前逐字相同。
+    # 它是"要不要问"的唯一来源，也是**唯一**允许影响"被叫到也以问回应"的信号。
+    understood: str = "clear"
+    # 这一句是不是**具体的专业·事实圈内话题**（某个行当的说法、某套流程、某个型号或数字）。
+    # 只有它 + 三种根据都没有时才不许主动断言；日常、情感、闲聊不受影响。
+    # 默认 False（没给这个信号 = 老行为）。
+    specialist: bool = False
     # 这一句有没有越过分寸。**只有 UP / 不变两种结果，没有"变暖"**：
     # 防备受惊之后立刻回暖不合理，降交给维护 agent（7 天最多一档）。
     guard_up: bool = False
@@ -164,8 +185,19 @@ class JudgeVerdict:
         guard = " guard=UP" if self.guard_up else ""
         return (
             f"{mark} topic={self.topic or '-'} start={self.topic_start} "
-            f"related={self.related}{guard}"
+            f"related={self.related}{guard} "
+            f"understood={self.understood} specialist={self.specialist}"
         )
+
+    @property
+    def unsure(self) -> bool:
+        """她**没把握**（只是有个印象，或者没跟上）。
+
+        这是"以问回应"的开关之一。`clear`（以及任何解析不出来的值）都算有把握——
+        判定坏掉时的默认必须是"照旧说话"，不是"她突然开始每句都问"。
+        """
+
+        return self.understood in {"unsure", "lost"}
 
 
 def build_judge_messages(
@@ -304,6 +336,14 @@ def _trigger_label(trigger: str) -> str:
 
 _TAG = re.compile(r"<{0}>\s*(.*?)\s*</{0}>", re.IGNORECASE | re.DOTALL)
 
+#: 判定给的"懂不懂"写法 → 内部三档。表里没有的一律 `clear`。
+#: 定义在 `parse_judge_output` **之前**（这个仓库里已经因为这个顺序踩过两次坑）。
+_UNDERSTOOD_ALIASES = {
+    "clear": "clear", "clearly": "clear", "yes": "clear", "y": "clear",
+    "unsure": "unsure", "unclear": "unsure", "maybe": "unsure", "vague": "unsure",
+    "lost": "lost", "no": "lost", "none": "lost",
+}
+
 
 def parse_judge_output(
     raw: str, *, known_seqs: frozenset[int] = frozenset(), must_reply: bool = False
@@ -331,6 +371,16 @@ def parse_judge_output(
     # 没给 `lore` 时按 YES：知识库照旧注入（退化成"门不存在"），只有明确写 NO 才关掉。
     lore_raw = _extract(raw, "lore").strip().upper()
     lore = not lore_raw.startswith("NO")
+    # 「不懂就问」的两个信号（2026-10-04）。
+    #
+    # **默认方向是"照旧"**：没给 `understood`（或者给了看不懂的值）就当作 clear，
+    # 没给 `specialist` 就当作 NO。判定这一版没升级、或者解析坏了的时候，
+    # 她必须跟从前一模一样地说话——不能让"没解析出信号"变成"她开始每句都问"。
+    understood = _UNDERSTOOD_ALIASES.get(
+        sanitize_chat_text(_extract(raw, "understood"), max_length=16).strip().casefold(),
+        "clear",
+    )
+    specialist = _extract(raw, "specialist").strip().upper().startswith(("YES", "Y", "是", "1"))
     # 没给 `guard`、或给了看不懂的值，一律当作 HOLD：只有明确写 UP 才算越界。
     # 这里的默认方向必须是"不动"——判定的解析坏掉不该让人凭空变冷。
     guard_raw = _extract(raw, "guard").strip().upper()
@@ -338,17 +388,14 @@ def parse_judge_output(
     guard_reason = ""
     if guard_up:
         guard_reason = sanitize_chat_text(_extract(raw, "guard_reason"), max_length=200).strip()
+    common = dict(topic=topic, topic_start=topic_start, related=related, lore=lore,
+                  understood=understood, specialist=specialist,
+                  guard_up=guard_up, guard_reason=guard_reason)
     if must_reply:
-        return JudgeVerdict(should_reply=True, topic=topic, topic_start=topic_start,
-                            related=related, lore=lore, guard_up=guard_up,
-                            guard_reason=guard_reason)
+        return JudgeVerdict(should_reply=True, **common)
     if "REPLY" not in route or route.startswith("NO"):
-        return JudgeVerdict(should_reply=False, topic=topic, topic_start=topic_start,
-                            related=related, lore=lore, guard_up=guard_up,
-                            guard_reason=guard_reason)
-    return JudgeVerdict(should_reply=True, topic=topic, topic_start=topic_start,
-                        related=related, lore=lore, guard_up=guard_up,
-                        guard_reason=guard_reason)
+        return JudgeVerdict(should_reply=False, **common)
+    return JudgeVerdict(should_reply=True, **common)
 
 
 def _parse_seq(raw: str, known_seqs: frozenset[int]) -> int | None:

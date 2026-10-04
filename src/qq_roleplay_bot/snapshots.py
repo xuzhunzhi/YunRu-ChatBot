@@ -70,6 +70,10 @@ class EngineSnapshot:
     reply_reviewed: int = 0
     # 识图成功把 `[图片]` 换成描述的条数（没配识图时恒为 0）。
     media_described: int = 0
+    # 「不懂就问」（2026-10-04）：以"问"回应的次数，以及"没把握/没根据所以没插话"的次数。
+    # 关掉 `ask_when_unsure` 开关时两者恒为 0。只有计数，没有正文。
+    clarify_asked: int = 0
+    clarify_quiet: int = 0
     # 当前当值状态：热群、当值多久、排队深度。只有数字与群号，没有正文。
     focus: dict[str, object] | None = None
     memory: dict[str, object] | None = None

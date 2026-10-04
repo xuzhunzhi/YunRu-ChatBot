@@ -47,6 +47,8 @@ SETTINGS: dict[str, dict[str, object]] = {
     "letter_enabled": {"kind": "bool", "applies": "live", "env": "QQBOT_MAIL_REPORT"},
     "group_manage_enabled": {"kind": "bool", "applies": "live", "env": "QQBOT_GROUP_MANAGE"},
     "group_owner_enabled": {"kind": "bool", "applies": "live", "env": "QQBOT_GROUP_OWNER"},
+    # 不懂就问（2026-10-04）：关掉即退回"被叫到就直接答"。
+    "ask_when_unsure": {"kind": "bool", "applies": "live", "env": "QQBOT_ASK_WHEN_UNSURE"},
     # --- 模型与供应商（live：client 是就地改属性的） ---
     "provider": {"kind": "str", "applies": "live", "env": "QQBOT_PROVIDER"},
     "api_base_url": {"kind": "str", "applies": "live", "env": "QQBOT_API_BASE_URL"},

@@ -344,6 +344,20 @@ REVIEW_ENABLED = _enabled("QQBOT_STYLE_REVIEW", "1" if REVIEW_API_KEY else "0")
 REVIEW_USER_ID = get("QQBOT_REVIEW_USER_ID", "qqbot-style-review")
 
 
+# --- 不懂就问（2026-10-04 用户："问问题那个也可以上线了"）----------------------
+# 她没把握的时候先问一句，而不是硬编一句"听起来合理"的话（设计见
+# `docs/STAGE3_PENDING_DESIGNS.md` §①）。**不多花一次调用**：
+# "懂不懂""是不是具体的专业话题"这两个信号由判定那趟顺带给出。
+#
+# 限量是必须的——没有它她会每句都问，那只是把一个问题换成另一个问题：
+# 同一话题最多一次、同一个群 10 分钟内最多 3 次。这里只是默认值；
+# 面板的运行期开关是 `ask_when_unsure`（见 `runtime_flags.py`）。
+ASK_WHEN_UNSURE = _enabled("QQBOT_ASK_WHEN_UNSURE")
+ASK_MAX_PER_TOPIC = _int("QQBOT_ASK_MAX_PER_TOPIC", 1)
+ASK_MAX_PER_WINDOW = _int("QQBOT_ASK_MAX_PER_WINDOW", 3)
+ASK_WINDOW_SECONDS = _float("QQBOT_ASK_WINDOW_SECONDS", 600.0)
+
+
 # --- WebUI 面板（2026-10-01 用户："该做webui了"；"面板属于 stage4 内容，本质插件"）---
 # 面板跑在 bot 进程里（Stage 4 后台插件），所以**默认只绑本机**：它等于这台机器上 bot
 # 的控制面（能改 prompt、换 key、踢人）。`local` 用 Bearer token；`remote` 用口令换会话

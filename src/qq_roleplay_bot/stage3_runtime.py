@@ -10,6 +10,7 @@ from html import escape
 from .transport import IncomingMessage, MessageTarget
 from .security import sanitize_chat_text, sanitize_reply_text
 from .memory_filters import scrub_system_self
+from .ask_when_unsure import UNSURE_ASK_RULE
 from .extensions import PromptMaterial
 from .base_prompt import BASE_PROMPT
 from .memory_model import MemoryMaterial
@@ -686,7 +687,12 @@ NO_REPLY 表示这次不发言但话题继续；EXIT_DIALOGUE 表示退出当前
 引用回复是例外而不是默认：普通接话、闲聊、回答当前这句时一律填 none。
 只有当回复必须挂到更早的某一句上才不至于产生歧义时，才引用那一句的编号。
 不要养成每条都引用的习惯。
-"""
+""" + UNSURE_ASK_RULE
+# 上面那份内置默认**已经带了代码层的「不懂就问」规矩**（`UNSURE_ASK_RULE`），所以
+# `prompt_library` 里 `reply` 那一套的默认值、以及面板"查看当前 prompt"看到的，
+# 都与真正生效的那一份一致（否则面板显示的和实际发的差一段规矩，改 prompt 的人会看错）。
+# 装配时 `compose_system_prompt` **还会再拼一次**（幂等）：那是为了面板保存的覆盖版
+# 也躲不掉这条规矩——它跟着代码走，不跟着人格或面板走。
 
 
 def _replace_once(text: str, old: str, new: str) -> str:
@@ -730,6 +736,27 @@ def resolve_system_prompt(*, must_reply: bool = False) -> str:
         return library.derived("reply", must_reply=must_reply)
     except Exception:  # noqa: BLE001 - 取不到就用内置的，这是降级不是失败
         return SYSTEM_PROMPT_MUST_REPLY if must_reply else SYSTEM_PROMPT
+
+
+def compose_system_prompt(persona_text: str) -> str:
+    """把**代码层的规矩**拼在人格（或面板保存的那一份）之后。
+
+    为什么要这一层（2026-10-04，人格那件事教给我们的）：生产上 `BASE_PROMPT` 是
+    **整段替换**的——`data/private_docs/base_prompt.REAL.py` 里找到 `BASE_PROMPT = \"\"\"…\"\"\"`
+    就整段返回（`base_prompt.py:249-251`），仓库模板写什么都不生效。所以"不懂就问"
+    这类规矩**不能写进人格文件**：写在那儿等于只在 `dev/` 生效、在生产一个字都不算数。
+    放在这里之后它跟着代码走：面板换人格、部署换真人格，规矩都在。
+
+    `persona_text` 用参数传进来（而不是在这里 import `BASE_PROMPT`）是为了让
+    "换一份人格，规矩还在不在"能被直接测出来。
+
+    幂等：已经拼过就不再拼（面板保存的 prompt 里若已经带了这一段，不会出现两遍）。
+    """
+
+    body = persona_text or ""
+    if UNSURE_ASK_RULE in body:
+        return body
+    return body + UNSURE_ASK_RULE
 
 
 # 触发类型的自然语言说法。这些词会出现在 user 消息里，所以必须是交谈视角的
@@ -1152,6 +1179,7 @@ def build_dialogue_messages(
     letter_note: dict | None = None,
     now: float | None = None,
     system_text: str | None = None,
+    clarify_note: str = "",
 ) -> list[dict[str, str]]:
     """构造单次模型请求。
 
@@ -1263,6 +1291,10 @@ def build_dialogue_messages(
         # 也不知道邮件是发给我了"）。这段只在**收信人本人**说话时才会出现
         # （判断在引擎的 `_letter_note` 里），这里只负责把信递给他看。
         + _letter_block(letter_note)
+        # 「不懂就问」的**现场**提示（2026-10-04）：这一轮她有没有把握、该不该先问一句，
+        # 由引擎按判定的信号 + 三种根据确定性地定（`ask_when_unsure.decide_grounding`），
+        # 这里只把结论递给她。**只进易变段**：system 段每轮变一个字，前缀缓存整段作废。
+        + clarify_note
         + "<current_event>\n"
         # 当前这条**同样要有** at / reply_to：她要不要接、接谁的话，先看的就是这一条。
         + _format_message(
@@ -1278,9 +1310,14 @@ def build_dialogue_messages(
     return [
         # system 段**每次现取**：面板保存的覆盖版下一条消息就生效（热更）。
         # `system_text` 只给测试与显式调用方用；不传就是当前生效的那一份。
+        #
+        # **代码层的规矩在 `compose_system_prompt` 里拼上去**（见它的说明）：生产上人格是
+        # 整段替换的，写进人格文件的规矩进不了她的 prompt。拼的是**常量**，所以 system
+        # 段逐轮稳定、前缀缓存不受影响。
         {"role": "system",
-         "content": system_text if system_text is not None
-         else resolve_system_prompt(must_reply=must_reply)},
+         "content": compose_system_prompt(
+             system_text if system_text is not None
+             else resolve_system_prompt(must_reply=must_reply))},
         {"role": "user", "content": stable_content},
         {"role": "user", "content": volatile_content},
     ]

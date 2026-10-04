@@ -54,6 +54,20 @@ JudgeVerdict（dialogue_judge.py:137）的字段只有：
 * 禁令措辞存在且**不含机制词**（照 `tests/test_persona_shape.py` 的做法）；
 * 不回归：`understood` 默认 True，正常话题照旧回答。
 
+### 落地（2026-10-04）——与上面设计的差别，逐条写清
+
+| 设计里的说法 | 实际落地 | 为什么 |
+| --- | --- | --- |
+| 判定加字段 `understood` | `JudgeVerdict.understood`（`clear`/`unsure`/`lost`）+ `JudgeVerdict.specialist`，另有 `verdict.unsure` | "专业·事实话题"这个门也要判定来给，不然核心没法只凭消息正文判断 |
+| 人格三条禁令 | 三条禁令写进 **`ask_when_unsure.UNSURE_ASK_RULE`**，由 `stage3_runtime.compose_system_prompt` 拼进回复 prompt | 生产上 `BASE_PROMPT` 整段来自真人格文件（`base_prompt.py:249-251`），写进人格等于只在 `dev/` 生效。`tests/test_ask_when_unsure.py::test_the_rule_survives_a_replaced_persona` 拿假人格钉住这条 |
+| 限量（同一话题一次、10 分钟 3 次） | `dev_config.ASK_MAX_PER_TOPIC` / `ASK_MAX_PER_WINDOW` / `ASK_WINDOW_SECONDS`（`QQBOT_ASK_*`）+ 运行期开关 `ask_when_unsure` | 照既有配置写法，不硬编码 |
+| 根据检查（知识库 / 记忆 / 语境） | `ask_when_unsure.decide_grounding`（纯函数）+ `context_is_explicit` | 第三样"语境明确"是**粗判据**：只认"挂在眼前某一句上"与"对方正在解释这件事"；判不准就当作不明确（宁可问，不许编） |
+| 没被叫到且没懂 → 不插话 | 在取资料**之前**就返回，不额外翻知识库 | 这一轮本来就不出声，翻资料白花钱 |
+
+判定那两个标签加进 `JUDGE_SYSTEM_PROMPT` 与 `JUDGE_ROUTING_PROMPT` 之后，判定的 prompt 从
+1916 字到 2121 字（`tests/test_dialogue_judge.py` 要求它小于回复 prompt 的三分之一）。
+**不多花一次调用**：那两个信号由原本那趟判定顺带吐出。
+
 ---
 
 ## ② 问 → 解释 → 词条（"黑话"就是它的第一个受益者）
@@ -137,6 +151,9 @@ JudgeVerdict（dialogue_judge.py:137）的字段只有：
 
 ### A 做完了（2026-10-04，`45f3535`）——审计结果与落地位置
 
+> ⚠️ **下面这张表里"人格"那三行已经作废**（2026-10-04 撤回，见本节的"更正"）：
+> 表里记的是当时的改动，不代表现在树里的样子。**风格审核那一行仍然有效。**
+
 **结论先说**：压情绪的最大一口**不在人格，在风格审核**（它每条回复跑一次）。人格那边只有
 一处真问题：第 5 条只写"情绪不是要压住的缺陷"，**没给她表达它的许可**。
 
@@ -156,14 +173,27 @@ JudgeVerdict（dialogue_judge.py:137）的字段只有：
 
 ### 守卫（原先没有任何测试会发现"情绪又被悄悄压回去"）
 
-* `tests/test_persona_shape.py`：`EMOTION_PERMISSION_ANCHORS` / `NO_ATTACK_ANCHORS` 三类断言
-  （许可在 + 不怼人边界在 + `:68` 那条保留且带限定），外加
-  `test_review_prompt_keeps_emotion_and_only_blocks_four_kinds` 钉住审核的授权范围；
+* `tests/test_persona_shape.py`：`test_review_prompt_keeps_emotion_and_only_blocks_four_kinds`
+  钉住审核的授权范围（四类 + "不许改短改客气改平稳" + 上一版那套"去冲"的说法不许回来）；
 * `tests/test_style_reviewer.py`：说教那条的锚点从"第 6 条"改到"越权/站到讲台上"。
-* **突变验证过**（不然守卫是不是摆设无从判断）：把许可改成"要收着"→ 相关断言红；
-  删掉"只改这四类"或把"写得冲也不改"改成"写得冲就改成温的"→ 审核断言红。
+* **突变验证过**（不然守卫是不是摆设无从判断）：删掉"只改这四类"或
+  把"写得冲也不改"改成"写得冲就改成温的"→ 审核断言红。
 * 实测：`pyflakes` 干净；套件 899 / OK / skipped=0（基线 895，+4 条新守卫）；
   `check_module_removal` 7 个可插能力全"能"。
+
+### ⚠️ 2026-10-04 更正：人格那一半**已经撤回**，只剩风格审核
+
+原来这条分支上人格正文的三处改动（情绪许可两句、不怼人边界、`:68` 那条的限定）在
+`git checkout 45f3535^ -- src/qq_roleplay_bot/base_prompt.py` 之后**没了**；
+`tests/test_persona_shape.py` 里守它们的三条断言也一起删了。原因就是上面"部署注意"那段：
+
+> 生产上 `BASE_PROMPT` 是**整段替换**的（`base_prompt.py:249-251`：找到真人格就整段返回），
+> 仓库模板里的人格的改动**在生产上一个字都不生效**——只改了 `dev/` 看到的，
+> 还让 `run/` 那边的守卫对着一份没人读的模板红。
+
+所以这一轮**只上风格审核**（它每条回复都真的跑一次，是压情绪最大的一口）；
+人格那两句等真人格的事定了、连同真人格一起做。**删掉那三条断言不是"为了绿灯删断言"**：
+它们守的前提（模板里那两句许可）已经不存在了，留着就是守一个不存在的前提。
 
 ### 部署注意（`dev/` ≠ `run/`）
 
