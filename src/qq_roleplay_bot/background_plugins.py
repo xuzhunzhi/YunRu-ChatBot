@@ -101,37 +101,46 @@ async def run_background_plugin(plugin: BackgroundPlugin, *, first_delay: float 
                 logger.exception("后台插件收尾出错 name=%s", getattr(plugin, "name", "?"))
 
 
-
-
-# --- 具体插件 ---------------------------------------------------------------
+# --- 具体插件：把已有的通道包成同一形状 -------------------------------------
 #
-# 这里原来是"把已有的 Stage 4 通道包成同一形状"的那几个类（邮件通道、每日汇报、
-# 入群审批、WebUI 面板）。**它们不在这条分支上**：本仓库的 `main` 只放 Stage 3 的
-# 对话/记忆/防护与底层，Stage 4 的功能扩展整体在 `stage4-plugins` 分支
-# （见 README 的「分支」一节）。
+# 这些类**只做装配与节拍**，业务逻辑还在各自的模块里（`mail_channel.py`、
+# `daily_report.py`、`join_approval.py`）。搬进来的原因是"Stage 4 的东西怎么接上"
+# 应当集中在一处，而不是散在 `runtime.serve` 里三个 `create_task`。
+
+
+# --- 装配：只做"把插件装起来"，不认识任何具体插件 ---------------------------
 #
-# 机制留在 main 的原因：加后台能力的**接口**属于底层，谁都能照它加自己的插件——
-# 这正是 `docs/STAGE_BOUNDARY.md` 里"不许为 Stage 4 预先建接口"的例外：接口不是
-# 预先设计的，是从这三个真实通道里长出来的，现在已经稳定，所以留在这里当契约。
+# 这一段是**薄壳**：它不认识"邮件""审批""面板"这些名字，只问 `plugins` 包
+# 要一串插件，然后把它们交给 `runtime.serve` 的同一条节拍循环。
+# 加一个新的后台能力 = 在 `plugins/` 下加一个目录，**不改这里**。
+#
+# 2026-10-01 修：装配入口收成一个。以前这里是 `build_background_plugins()`
+# ——它自己造一个 `PluginRegistry` 跑 `discover()`，于是**命令插件登记的命令
+# 没人收**（群管理命令"装上了但认不出"）。现在发现只在 `build_engine` 里跑一次，
+# 命令与后台各归各位；这里只把已经装好的后台插件递出来。
 
 
-def build_background_plugins(engine, *, call_action=None, notify=None, roles=None,
-                             loop=None) -> tuple[BackgroundPlugin, ...]:
-    """装配后台插件。**唯一的入口**。
+def build_background_plugins(engine):
+    """返回**已经装配好**的后台插件（`build_engine` 接插件时登记的）。
 
-    `runtime.serve` 不认识任何具体通道：它只问这里拿一串插件，给每个跑同一个节拍。
-    加一个后台能力 = 加一个插件 + 在这里登记，**不要往主循环里再加一个循环**。
+    `engine.plugin_registry` 是 `build_engine` 留下的那一份——命令与后台同源，
+    所以这里不再自己 `discover()`（跑第二次会把同一条命令认两遍）。
+    没有注册表时（测试直接造引擎、不走 `build_engine`）返回空：宁可不跑后台，
+    也不要在这里偷偷装一份不一样的。
 
-    这条分支上没有任何后台插件，所以返回空元组——bot 照常跑，只是没有那些
-    "隔一会儿干一件事"的能力。要看完整的四个（邮件通道、每日汇报、入群审批、
-    WebUI 面板）怎么写的，切到 `stage4-plugins` 分支。
+    ## 签名里**故意没有**那五个参数（2026-10-01 删）
 
-    各参数是核心注入的窄接缝，插件**拿不到 `transport`**：
-      engine        只读引擎视图（它自己也是窄的）
-      call_action   走 capabilities 闸门后调对面，回执拆成 data
-      notify        核心统一发送（走补发队列）
-      roles         "她在这个群里是不是群主"的只读查询
-      loop          后台插件要往 asyncio 主循环上投任务时用（面板的 HTTP 线程要用）
+    它原来是 `(engine, *, call_action=None, notify=None, roles=None, loop=None,
+    transport=None)`，而**函数体一个都没读**。那种签名会让人以为"传了就会接上"——
+    独立审查两次都点了这条（第一次我说了要删、只改了别处）。接缝现在只有
+    `build_engine` 一个注入点；要传参就从那里传，别在这里留一排假开关。
     """
 
-    return ()
+    registry = getattr(engine, "plugin_registry", None)
+    if registry is None:
+        logger.warning("后台插件未装配：引擎上没有 plugin_registry（没有走 build_engine？）")
+        return ()
+    loaded = getattr(registry, "loaded", ())
+    if loaded:
+        logger.info("后台插件已装配：%s", "、".join(loaded))
+    return tuple(registry.backgrounds)

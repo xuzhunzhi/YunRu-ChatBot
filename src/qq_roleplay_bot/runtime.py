@@ -690,13 +690,11 @@ async def serve(transport: QQTransport, *, stage_label: str = "Stage 3") -> None
     # 这里不再认识"邮箱""审批"这些名字，只拿到一串插件，给每个跑同一个节拍。
     # 权限与动作执行仍在核心：下面这两个闭包就是注入给插件的窄接缝。
     call_action, notify = _plugin_action_seams(engine, transport)
-    background = build_background_plugins(
-        engine,
-        call_action=call_action,
-        notify=notify,
-        roles=getattr(engine, "self_roles", None),
-        loop=asyncio.get_running_loop(),
-    )
+    # 签名对齐（2026-10-04）：插件线的 `build_background_plugins(engine)` **只**从
+    # `engine.plugin_registry` 里拿已经装好的后台插件，不再吃注入的四个接缝——
+    # 那四个参数原样保留在签名里时"看着像传了就会接上"，实际一个都没读（审查点过两次）。
+    # 接缝改由装配点（`plugins.attach_plugins`）交给插件，见 docs/STAGE4_AS_PLUGINS.md。
+    background = build_background_plugins(engine)
     await transport.start()
     if memory is not None:
         await memory.start()
