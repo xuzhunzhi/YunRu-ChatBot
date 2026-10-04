@@ -70,13 +70,14 @@
   你好像直接加到 super 的底层里去了"）。范围就是 stage4：**对外功能扩展**。
   每个插件一个文件夹（2026-10-01 用户："每个插件一个文件夹。比如群管理功能算
   一个文件夹，识图算一个文件夹"），目录里必须有 `plugin.py` 导出 `register(registry)`。
-  > **注（2026-10-02 核对）：识图这条还没做。** 这条分支上**连 `plugins/` 目录都没有**
-  > （插件实现在 `stage4-plugins`）；即便在那条分支上，`plugins/vision/` 也**不存在**，
-  > `vision.py` 还在包根。上面那句是**用户当时的要求**，不是已完成的事实——
-  > 把引用直接摆在那里，读的人会以为它已经是插件文件夹了。
-  > 要落实就把它挪进 `plugins/vision/`，挪之前先确认：核心没有顶层引用它
-  > （按判据，删掉它只该丢掉识图这个功能——这条已在 2026-10-02 修好并有测试守，
-  > 见 `tests/test_optional_capabilities.py`）；它不依赖任何 SnowLuma action。
+  > **已落实（2026-10-05）：识图已经是插件了。** ision.py 已从包根搬进
+  > plugins/vision/（plugin.py 导出 
+egister(registry)，用 
+egistry.vision 交一个
+  > 工厂、并 provide_prompt("vision", …) 登记它的那套 prompt）；核心**不再 import 插件**。
+  > 判据由两处守：	ests/check_module_removal.py（名单保留 ision，改成能按
+  > plugins/<名字>/plugin.py 定位并拦整棵子树）与 	ests/test_optional_capabilities.py。
+  > 上面那句"识图算一个文件夹"的要求，到这里才真的成立。
   >
   > **"预装"不等于进核心**（2026-10-03 用户："有几个插件我建议是做成预装的，
   > 但是记住一定得按插件包装"）。预装只是**随代码发布 + 装配点默认注册**，
