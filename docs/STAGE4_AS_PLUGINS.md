@@ -117,31 +117,57 @@ def build_background_plugins(engine)      # 只从 registry.backgrounds 里拿�
 
 ---
 
-## 七、下一步的落点（2026-10-04 实测发现）
+## 七、装载点：实况与更正（2026-10-04）
 
-移植到 `35d0a29` 时量出来的事实：**本体的命令插件层是半成品**。
+### 7.1 更正：我先前这一节写错了
 
-| | 本体（stage3 线） | 插件线（stage4） |
+我原来在这里写"**本体的命令插件层是半成品**：`CommandRegistry` / `default_command_plugins()`
+没有任何地方调用，`DialogueEngine.commands` **不存在**"——**这是错的**，被实测证伪：
+
+```
+stage3_main.py:508   PUBLIC_HELP = build_help_text(build_command_registry().help_lines())
+stage3_main.py:846   self.commands = command_registry if command_registry is not None \
+                                      else build_command_registry()
+```
+
+本体**本来就有**命令分发路径（`handle()` 在 `stage3_main.py:2678` 匹配 → `:2683` 判档位
+→ `:2703` 执行 → `:2706/:2711` 分派），`DialogueEngine.commands` 一直在。
+**我错在 grep 的名字**：我搜 `CommandRegistry(` 与 `default_command_plugins`，
+漏了真正的调用者 `build_command_registry()`——于是把"没搜到"当成了"不存在"。
+（`default_command_plugins()` 确实是死代码，但那不代表命令层是半成品。）
+
+### 7.2 真正缺的是什么（`d768c95` 已补）
+
+| 缺的东西 | 后果 | 现在 |
 | --- | --- | --- |
-| `CommandRegistry` / `CommandPlugin` | `command_plugins.py` **有** | 有 |
-| `default_command_plugins()` | `builtin_commands.py` **有** | 有 |
-| **谁调用它们** | **没有任何地方调**（`git grep` 只有定义处） | `build_engine` 里装配 |
-| `DialogueEngine.commands` | **不存在** | 有（插件登记命令的地方） |
-| `engine.plugin_registry` | 不存在 | 有（后台插件从它取） |
+| `CommandRegistry.add()` | `PluginRegistry.command()` 调它，缺了 `attach_plugins` 直接抛 | 已加 |
+| `build_engine` 里的装配 | 插件从来没人 `discover()` | 已加 |
+| `engine.plugin_registry` | `build_background_plugins(engine)` 永远返回空 | 已挂 |
 
-所以插件线的 `attach_plugins(registry, engine.commands)` 在本体上**没有落点**。
-剩下的移植顺序应当是：
+装配后的实测（探针跑出来的）：
 
-1. **给引擎建落点**：`engine.commands`（一个 `CommandRegistry`），并把本体的
-   `default_command_plugins()`（ping 等）装进去——**先让本体自己那条路通**，
-   再谈插件；
-2. 在 `build_engine` 里造 `PluginRegistry` → `attach_plugins(registry, engine.commands)`
-   → `engine.plugin_registry = registry`（**这三行就是接口对齐的核心**）；
-3. 接缝（`ChatSeams` / `ReportSeams` / `UiSeams` + `runtime._SeamBinder`）——
-   插件线那块是 **+515 行**，最敏感（AGENTS 2.1 那三条"核心内的规矩"就在里面）；
-   可以先留空让相关插件优雅降级，再逐块接；
-4. 补插件测试（缺 5 个文件），跑五条判据。
+```
+registry.loaded   = ('roles', 'group_admin', 'join_approval', 'mail', 'webui')   ← 5 个全装上
+engine.commands   = ['ping', 'help', 'balance', 'group_manage', 'group_owner', 'title']
+registry.backgrounds = ['join-approval', 'mail-channel']
+tests/run_offline.py       817 全绿、0 跳过（与改动前基线相同）
+tests/check_module_removal.py  7 个可插能力全"能拔掉而核心照跑"
+```
 
-**不要**跳过第 1 步直接抄第 2 步：本体没有 `engine.commands`，`attach_plugins`
-会直接抛（或静默装不上），而"装上了但认不出"这个坑 AGENTS 里已经记过一次。
+### 7.3 还没做的（下一步的准确清单）
 
+1. **三份接缝没移植**（`ChatSeams` / `ReportSeams` / `UiSeams` + `runtime._SeamBinder`，
+   插件线上是 **+515 行**，最敏感）。当前后果：
+   * 日报**不启用**（"写信 agent 没有模型通道（接缝没给 letter_client）"）；
+   * 面板缺 `execute_action` 等入口；
+   * `serve` 里没补 `registry.set_loop(loop)`，面板跨线程投协程会用 fallback。
+2. **群管理/群主动作的执行端**仍是本体 `stage3_main.py:1539-1547` 的 fail-closed 占位：
+   那几条命令**认得出、执行不了**，回"这条分支没有群管理能力。"——
+   要让它们真能用，得把动作执行那条接缝也接上。
+3. **两份角色缓存**：`engine.self_roles` 还是核心的（`runtime.py:404-410`），
+   roles 插件另造一份给 `registry.shared_roles()`（因为 `chat.roles_sink` 留空）。
+   Stage 3 行为因此不变，但接缝移植时要把单源建立起来。
+4. **插件测试**缺 5 个文件（`test_stage4_plugins` / `test_background_plugins` /
+   `test_plugin_prompts` / `test_plugin_inventory` / `plugin_support`），要搬过来。
+5. `_set_public_help` 没移植：`PUBLIC_HELP`（`stage3_main.py:508`）仍是静态的；
+   但 `/help` 卡片走注册表 `help_lines()`，**已包含**插件帮助行。
