@@ -49,7 +49,15 @@ def build_daily_report(report, *, registry=None):
     # `from ...runtime import _build_letter_client` ——那是核心的**私有**函数，
     # 插件 import 它等于把"核心必须叫这个名字"写死进了插件；
     # 换一套思维链路时那个名字未必还在。见 `plugins.ReportSeams`。
-    letter_client = report.letter_client if callable(getattr(report, "letter_client", None)) else None
+    #
+    # 2026-10-05：接缝给的是**工厂**（`() -> client`），**不是 client 本身**，
+    # 所以这里必须**调用**它。原来直接把工厂塞给 `LetterWriter`，`writer.client`
+    # 拿到的是个函数，真去写信时炸在 `await self.client.complete(...)`——
+    # 生产日志实测：`letter_draft_failed category=AttributeError`，而且只在
+    # 到点写第一封信时才炸，装配阶段一点异常都看不出来。
+    # 变量名照着接缝叫 `make_letter_client`，免得下一个读的人再把它当成 client。
+    make_letter_client = getattr(report, "letter_client", None)
+    letter_client = make_letter_client() if callable(make_letter_client) else None
     if letter_client is None:
         logger.warning("写信 agent 没有模型通道（接缝没给 letter_client），本次不启用日报")
         return None

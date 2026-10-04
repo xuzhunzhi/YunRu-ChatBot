@@ -12,6 +12,8 @@
 `call_action` / `notify`）、以及关掉开关就整个不存在。
 """
 import asyncio
+import contextlib
+import logging
 
 from qq_roleplay_bot import background_plugins as bp
 # `JoinApprovalPlugin` 的实现**在插件目录里**（2026-10-04：插件自包含，
@@ -330,3 +332,122 @@ def test_core_seams_gate_and_unwrap() -> None:
         pass
     else:  # pragma: no cover - 不该走到
         raise AssertionError("入群审批的接缝不该放行发送类 action")
+
+
+# --- 日报装配：接缝给的是**工厂**，不是 client ---------------------------------
+#
+# 2026-10-05 修的 bug：`build_daily_report` 把 `report.letter_client`（**工厂**，
+# 契约见 `plugins.ReportSeams.letter_client`）原样塞给了 `LetterWriter`，
+# 于是 `writer.client` 是个函数；真去写信时炸在 `await self.client.complete(...)`。
+# 生产日志里只剩一行 `letter_draft_failed category=AttributeError`——装配阶段
+# 一点异常都没有，它能一路溜到"到点写第一封信"才现形。
+#
+# 它能溜过去，就是因为**没有测试钉这条契约**。下面两条是补上的守卫：
+# 一条钉"工厂被调用、拿到的 client 是对象"，一条钉"没给通道就优雅关闭"。
+
+
+class LetterClientStub:
+    """冒充写信通道：契约只有一个 `async complete(request)`。"""
+
+    def __init__(self, reply: str = "<subject>标题</subject><body>正文</body>") -> None:
+        self.reply = reply
+        self.requests: list[object] = []
+
+    async def complete(self, request):
+        self.requests.append(request)
+        return self.reply
+
+
+@contextlib.contextmanager
+def _warnings_of(module_name: str):
+    """抓某个 logger 的 warning 文本（离线入口不用 pytest 的 caplog）。"""
+
+    records: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = _Collect()
+    logger = logging.getLogger(module_name)
+    previous_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.WARNING)  # 显式压到这里，免得被别处调高的级别吞掉
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+
+
+def _report_seam(factory):
+    """用**生产那一份** `ReportSeams`（不在测试里另写一个形状）。"""
+
+    from qq_roleplay_bot.plugins import ReportSeams
+
+    return ReportSeams(letter_client=factory, note_letter=lambda letter: None)
+
+
+def test_the_report_seam_letter_client_is_a_factory_and_gets_called() -> None:
+    """**契约**：`report.letter_client` 是工厂，装配必须**调用**它。
+
+    三件事一起断言，缺一条都抓不住这个 bug（实测：改回"传工厂"这条立刻变红）：
+
+    1. 工厂被调用**恰好一次**；
+    2. 交给 `LetterWriter` 的 client **就是**工厂返回的那个对象（不是工厂本身）；
+    3. 那个对象上有 `.complete`——写信要用的就是它。
+    """
+
+    from qq_roleplay_bot.plugins.mail import wire as mail_wire
+
+    client = LetterClientStub()
+    calls: list[str] = []
+
+    def make_letter_client():
+        calls.append("called")
+        return client
+
+    with _Patch(MAIL_REPORT_ENABLED=True):
+        reporter = mail_wire.build_daily_report(_report_seam(make_letter_client),
+                                                registry=_registry())
+
+    assert reporter is not None, "开关开着、工厂也给了 client，就该装配出汇报器"
+    assert calls == ["called"], f"工厂必须被调用**恰好一次**，实际 {len(calls)} 次"
+    writer = reporter.writer
+    assert writer.client is client, (
+        "`LetterWriter.client` 必须是工厂**返回的那个对象**；拿到工厂本身的话，"
+        "写信时 `await self.client.complete(...)` 会抛 AttributeError")
+    assert callable(getattr(writer.client, "complete", None)), (
+        "写信走的是 `await client.complete(request)`：这个对象上必须有 complete")
+    assert getattr(writer, "enabled", False) is True
+
+
+def test_a_missing_letter_client_factory_shuts_the_report_down_gracefully() -> None:
+    """**优雅关闭**：工厂缺失 / 不是 callable / 返回 None → 那条 warning、不装配、不崩。
+
+    "接缝没给模型通道就别启用日报"这条行为是原来就有的（不是这次 bug 的一部分），
+    所以它也要有守卫；顺手把"调了工厂之后还要看返回值"这一半也钉住——
+    工厂返回 None 时同样该走关闭路径，而不是把 `None` 当通道配下去。
+    """
+
+    from unittest.mock import patch
+
+    from qq_roleplay_bot.plugins import ReportSeams
+    from qq_roleplay_bot.plugins.mail import wire as mail_wire
+
+    class NotCallable:
+        """像"有人把 client 本体填进了工厂字段"：是对象，但不可调用。"""
+
+    cases = {
+        "工厂缺失": ReportSeams(),
+        "工厂不是 callable": ReportSeams(letter_client=NotCallable()),
+        "工厂返回 None": ReportSeams(letter_client=lambda: None),
+    }
+    with _Patch(MAIL_REPORT_ENABLED=True):
+        for label, seam in cases.items():
+            with patch("qq_roleplay_bot.plugins.mail.letter_writer.LetterWriter") as maker:
+                with _warnings_of(mail_wire.__name__) as warnings:
+                    reporter = mail_wire.build_daily_report(seam, registry=_registry())
+            assert reporter is None, f"{label}：这次不该启用日报"
+            assert maker.call_count == 0, f"{label}：不该构造 LetterWriter"
+            assert any("没有模型通道" in text for text in warnings), (label, warnings)
