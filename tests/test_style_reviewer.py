@@ -3,6 +3,11 @@
 由来（2026-09-29）：用户报"说话很冲、喜欢怼、很人机"。离线实测（data/style_reviewer_ab.py）
 显示光靠 prompt 压不住，而一次窄职责校对能把冲的尾巴删掉；同时又实测到"重写型"审核
 会改坏事实（3.11 → 0.11）。这个文件锁的就是这两条结论：能删尾巴，但不能动事实、不能挡住回复。
+
+2026-10-04 边界更正（用户："只要不是怼人就行，可以表达情绪"）：审核**不再**负责把话改短、
+改客气、去冲——它的授权只有四类（事实错误/越权/出戏/伤人）。所以这个文件里"能删尾巴"
+的用例仍然成立（删掉的那半句同时命中"越权/伤人"），而**"审核不许磨掉情绪"那条**由
+`tests/test_persona_shape.py` 里的 `test_review_prompt_keeps_emotion_and_only_blocks_four_kinds` 守。
 """
 import asyncio
 import unittest
@@ -73,7 +78,8 @@ class StyleReviewerTests(unittest.TestCase):
         self.assertTrue(keeps_the_facts("负 0.69，不是 0.69", "负 0.69"))
 
     def test_deleting_a_clause_with_a_number_is_allowed(self) -> None:
-        """审核的活就是删掉冲的尾巴，而那些句子常带数字——不能因此把合法改写也毙掉。
+        """审核要能删掉带数字的多余半句（这里那半句同时越权：替对方定该比什么），
+        不能因为"原稿有数字"就把合法改写也毙掉。
 
         （第一版兜底要求"原稿每个数字都要出现在定稿里"，实测把
         `0.8 大。你要的是小数比大小，3.11 那个是版本号。` → `0.8 大。` 也判成了不合格。）
@@ -125,20 +131,25 @@ class StyleReviewerTests(unittest.TestCase):
         assert "不要解释" in REVIEW_SYSTEM_PROMPT
 
     def test_prompt_covers_the_preaching_criterion(self) -> None:
-        """第 6 条：说教/上课（2026-09-30 用户："增加对说教语气的审核"）。
+        """说教/上课（2026-09-30 用户："增加对说教语气的审核"）。
 
         样本是她自己的真实回复（`data/style_preach_ab.py` 里那批），
         所以这条判据必须点名"给建议""讲道理""评价对方该怎么想""科普讲解""大道理"，
         并且给出**照着删**的改写例子 + 一条自检——只写"不要说教"实测不够
         （第一版 8 条里只改掉 5 条，加了例子才 8/8）。
+
+        2026-10-04：这一条原来在 prompt 里是独立的"第 6 条"；用户同日定了新边界
+        （"只要不是怼人就行，可以表达情绪"），判据收成四类（事实/越权/出戏/伤人），
+        说教并进第 2 类"越权"，**例子与自检逐字保留**，所以这里的锚点改成了那一处。
+        四类的授权范围另有守卫：`tests/test_persona_shape.py` 里
+        `test_review_prompt_keeps_emotion_and_only_blocks_four_kinds`。
         """
 
-        assert "说教/上课" in REVIEW_SYSTEM_PROMPT
-        assert "第 6 条怎么改" in REVIEW_SYSTEM_PROMPT
-        assert "站在讲台上" in REVIEW_SYSTEM_PROMPT
+        assert "越权" in REVIEW_SYSTEM_PROMPT
+        assert "站到讲台上了" in REVIEW_SYSTEM_PROMPT
         for marker in ("我建议你", "其实", "你想多了", "早晚会", "别想太多"):
             assert marker in REVIEW_SYSTEM_PROMPT, marker
-        assert "改完再自检一遍" in REVIEW_SYSTEM_PROMPT
+        assert "在教对方" in REVIEW_SYSTEM_PROMPT, "自检那句被拿掉了"
 
     def test_deleting_the_preaching_but_keeping_the_number_is_accepted(self) -> None:
         """删掉说教、留下事实（含数字）——这正是新判据想要的结果，不能被兜底毙掉。"""
