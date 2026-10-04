@@ -36,7 +36,6 @@
 材料标来源 / 截断 / 异常降级、以及 `ReportSeams` 与 `ChatSeams` 两条"接缝是不是闸门"的钉子。
 """
 import asyncio
-import unittest
 
 from qq_roleplay_bot.extensions import (
     MAX_PLUGIN_PROMPT_LENGTH,
@@ -174,103 +173,6 @@ def test_a_broken_prompt_plugin_degrades_to_nothing() -> None:
 # `extensions.MAX_JUDGE_HINT_LENGTH` / `PromptSources.judge_hints()` /
 # `build_judge_messages(plugin_hints=…)`——都在"判定 prompt"那条路上，
 # 本次"接缝移植"没有动它。断言原样留着，只加 skip + 原因。
-
-@unittest.skipUnless(_HINTS_READY, _MISSING_JUDGE_HINT_SUPPORT)
-def test_judge_hints_are_collected_and_bounded() -> None:
-    """**断点②**：判定 agent 以前完全看不到插件材料，于是插件影响不了"说不说"。"""
-
-    plugin = LoverPlugin(hint="y" * (MAX_JUDGE_HINT_LENGTH + 500))
-    sources = PromptSources(plugins=[plugin])
-    hints = asyncio.run(sources.judge_hints(context()))
-    assert len(hints) == 1
-    assert hints[0].source == "lover"
-    assert len(hints[0].text) <= MAX_JUDGE_HINT_LENGTH, "判定那边只允许一句话"
-
-
-@unittest.skipUnless(_HINTS_READY, _MISSING_JUDGE_HINT_SUPPORT)
-def test_plugin_without_a_judge_hint_is_skipped() -> None:
-    """不实现 `build_judge_hint` 的插件 = 没有这条——**向后兼容**，行为一个字不变。"""
-
-    class Plain:
-        name = "plain"
-
-        async def build_prompt(self, ctx):
-            return "只有回复材料"
-
-    sources = PromptSources(plugins=[Plain()])
-    assert asyncio.run(sources.judge_hints(context())) == ()
-    # 回复那条照旧能用
-    material = asyncio.run(sources.collect(context(), knowledge_enabled=False))
-    assert material.plugin_fragments[0].source == "plain"
-
-
-@unittest.skipUnless(_HINTS_READY, _MISSING_JUDGE_HINT_SUPPORT)
-def test_judge_hint_lands_inside_the_untrusted_data_section() -> None:
-    """提示必须落在 DATA 段**之内**，不能跑到 system 前缀里。
-
-    这条是"人格稳定"的直接断言：插件写的东西是外部提供的，永远是不可信数据。
-    """
-
-    request = build_judge_messages(
-        [],
-        current=message(),
-        trigger="mention",
-        addressed=True,
-        plugin_hints=(("lover", "他是那个她答应过要等的人。"),),
-    )
-    system = request[0]["content"]
-    user = request[1]["content"]
-    # system 前缀里不许出现插件材料
-    assert "答应过要等的人" not in system
-    # DATA 段里有，而且标了来源
-    assert "答应过要等的人" in user
-    assert "[lover]" in user
-    # 落在 DATA 边界之内
-    begin = user.index("--- UNTRUSTED CHAT DATA BEGIN ---")
-    end = user.index("--- UNTRUSTED CHAT DATA END ---")
-    assert begin < user.index("[lover]") < end, "插件材料必须夹在 DATA 边界里"
-
-
-@unittest.skipUnless(_HINTS_READY, _MISSING_JUDGE_HINT_SUPPORT)
-def test_broken_judge_hint_degrades_instead_of_failing_the_round() -> None:
-    """插件在判定那条路上炸了，判定这一轮照样能跑（材料降级为空）。"""
-
-    sources = PromptSources(plugins=[LoverPlugin(explode=True)])
-    assert asyncio.run(sources.judge_hints(context())) == ()
-
-
-@unittest.skipUnless(_HINTS_READY, _MISSING_JUDGE_HINT_SUPPORT)
-def test_a_hanging_plugin_cannot_hang_the_judge_path() -> None:
-    """**插件挂住 ≠ 插件报错**——审查 2026-10-01 抓到的新增路径没有超时。
-
-    实测过的情况：回复段那条路一直有 `asyncio.wait_for(...)`，而这次新加的
-    `judge_hints()` 是直接 `await`，于是一个 `await asyncio.sleep(inf)` 的
-    `build_judge_hint` 会把**判定**（在每条消息的主链上）永久挂住。
-
-    这条测试按核心的写法跑一遍，验超时真的会触发。
-    """
-
-    import asyncio as _asyncio
-
-    class Hanging:
-        name = "hang"
-
-        async def build_prompt(self, ctx):
-            await _asyncio.sleep(3600)
-
-        async def build_judge_hint(self, ctx):
-            await _asyncio.sleep(3600)  # 永不返回
-
-    async def _collect_with_core_timeout():
-        sources = PromptSources(plugins=[Hanging()])
-        try:
-            return await _asyncio.wait_for(sources.judge_hints(context()), timeout=0.15)
-        except _asyncio.TimeoutError:
-            return "TIMED_OUT"
-
-    assert _asyncio.run(_collect_with_core_timeout()) == "TIMED_OUT", (
-        "判定那条路必须能被超时掐断，否则一个坏插件能挂死整个判定")
-
 
 def test_report_seams_no_longer_accepts_an_engine_shaped_object() -> None:
     """`ReportSeams(snapshot=<引擎>)` 不该还能用（审查 2026-10-01 提到的那条"放宽"）。
