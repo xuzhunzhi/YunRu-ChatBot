@@ -70,13 +70,11 @@
   你好像直接加到 super 的底层里去了"）。范围就是 stage4：**对外功能扩展**。
   每个插件一个文件夹（2026-10-01 用户："每个插件一个文件夹。比如群管理功能算
   一个文件夹，识图算一个文件夹"），目录里必须有 `plugin.py` 导出 `register(registry)`。
-  > **已落实（2026-10-05）：识图已经是插件了。** ision.py 已从包根搬进
-  > plugins/vision/（plugin.py 导出 
-egister(registry)，用 
-egistry.vision 交一个
-  > 工厂、并 provide_prompt("vision", …) 登记它的那套 prompt）；核心**不再 import 插件**。
-  > 判据由两处守：	ests/check_module_removal.py（名单保留 ision，改成能按
-  > plugins/<名字>/plugin.py 定位并拦整棵子树）与 	ests/test_optional_capabilities.py。
+  > **已落实（2026-10-05）：识图已经是插件了。** `vision.py` 已从包根搬进
+  > `plugins/vision/`（`plugin.py` 导出 `register(registry)`，用 `registry.vision` 交一个
+  > 工厂、并 `provide_prompt("vision", …)` 登记它的那套 prompt）；核心**不再 import 插件**。
+  > 判据由两处守：`tests/check_module_removal.py`（名单保留 `vision`，改成能按
+  > `plugins/<名字>/plugin.py` 定位并拦整棵子树）与 `tests/test_optional_capabilities.py`。
   > 上面那句"识图算一个文件夹"的要求，到这里才真的成立。
   >
   > **"预装"不等于进核心**（2026-10-03 用户："有几个插件我建议是做成预装的，
