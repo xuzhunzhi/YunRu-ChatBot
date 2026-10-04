@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 
 from ... import dev_config
-from ...background_plugins import JoinApprovalPlugin
+from .background import JoinApprovalPlugin
 
 logger = logging.getLogger(__name__)
 

@@ -9,7 +9,7 @@
 """
 from __future__ import annotations
 
-from ...background_plugins import DailyReportPlugin, MailChannelPlugin
+from .background import DailyReportPlugin, MailChannelPlugin
 from . import wire
 
 

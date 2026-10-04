@@ -387,3 +387,16 @@ def session_user_id(base: str, session_id: str) -> str:
     prefix = "g" if kind == "group" else "p"
     safe = re.sub(r"[^A-Za-z0-9_-]", "", raw)[:64] or "unknown"
     return f"{base}-{prefix}-{safe}"[:512]
+
+
+def data_dir() -> Path:
+    """运行数据的根目录（默认 `<项目根>/data`，可用 `QQBOT_DATA_DIR` 搬走）。
+
+    **唯一的算法**。以前十来处各自写 `Path(__file__).resolve().parents[N] / "data"`，
+    `N` 是按当时那个文件的深度手写的——文件一搬家（面板从 `qq_roleplay_bot/`
+    挪进 `plugins/webui/`）就静默指到 `src/data`，令牌、邮箱状态、记忆库全落到别处，
+    而且**不报错**。所以：谁要这个路径就调这里，不要再自己数层数。
+    """
+
+    base = os.environ.get("QQBOT_DATA_DIR", "").strip()
+    return Path(base).resolve() if base else _PROJECT_ROOT / "data"
