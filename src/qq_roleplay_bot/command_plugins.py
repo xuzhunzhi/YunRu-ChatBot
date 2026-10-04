@@ -121,6 +121,22 @@ class CommandRegistry:
     def __init__(self, plugins: tuple[CommandPlugin, ...] = ()) -> None:
         self.plugins: tuple[CommandPlugin, ...] = tuple(plugins)
 
+    def add(self, plugin: object) -> None:
+        """把一条插件挂到链尾。
+
+        命令链**只能有一份**（`resolve()` 按注册顺序取第一个命中的），
+        所以插件是往这里加，而不是各攒一份列表再拼——拼的时候漏一处就是
+        "命令装上了、链上却没有"。挂到链尾 = 优先级低于核心自己的命令
+        （`ping` / `help` 先匹配），这正是我们要的：特权命令不与它们抢。
+
+        **它是装载点的落点**：`plugins.PluginRegistry.command()` / `install()` 都调
+        这个方法（装配见 `runtime.build_engine`）。2026-10-04 之前本体没有它，
+        于是插件的命令无处可挂；这一条是从插件线 `stage4-plugins` 原样搬来的。
+        """
+
+        if plugin is not None:
+            self.plugins = self.plugins + (plugin,)
+
     def resolve(self, message: IncomingMessage) -> CommandPlugin | None:
         """**只匹配、不执行**：返回认领这条消息的插件（或其档位不允许而回落时 None）。
 

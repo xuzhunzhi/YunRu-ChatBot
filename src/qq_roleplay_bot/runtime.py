@@ -431,6 +431,26 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
     # （它原来是同步方法里调 async 取数，拿到的是协程对象）——所以即便有人接了
     # 它，也只会拿到空。要真用 `host.machine`，得先把 `sample` 改成 async。
     engine.host.machine = LocalMachineProbe(diagnostics)
+    # **接插件**（发现只跑这一次，所以放在最后：引擎上该有的东西都已就位）。
+    #
+    # 命令插件进 `engine.commands`——那是 `DialogueEngine.__init__` 造的那份
+    # `CommandRegistry`（本体自己的 ping / help / 余额本来就在里面，见
+    # `builtin_commands.build_command_registry()`）；后台插件留在
+    # `registry.backgrounds`，由 `build_background_plugins(engine)` 取走交给
+    # `serve` 的同一条节拍循环。**装载点只有这一处**，加载失败的插件由
+    # `discover()` 逐个兜住（坏插件不许带走别的，也不许吃掉消息）。
+    #
+    # 接缝这次只接 `call_action` / `notify` 两个（核心已有的 `_plugin_action_seams`）。
+    # `ChatSeams` / `ReportSeams` / `UiSeams` **留缺省**：
+    # 它们要引擎内部的闭包（插件线的 `_SeamBinder`，+515 行），是下一步的事；
+    # 用到它们的插件会如实降级（日报拿不到 `letter_client` 就不启用、
+    # 面板拿不到动作入口就少一块），而不是静默半死。
+    from .plugins import PluginRegistry, attach_plugins
+
+    call_action, notify = _plugin_action_seams(engine, transport)
+    plugin_registry = PluginRegistry(call_action=call_action, notify=notify)
+    attach_plugins(plugin_registry, engine.commands)
+    engine.plugin_registry = plugin_registry
     return engine
 
 
@@ -688,12 +708,12 @@ async def serve(transport: QQTransport, *, stage_label: str = "Stage 3") -> None
     )
     # Stage 4 的后台通道（读信回信、每日汇报、入群审批）**都从插件装配点拿**：
     # 这里不再认识"邮箱""审批"这些名字，只拿到一串插件，给每个跑同一个节拍。
-    # 权限与动作执行仍在核心：下面这两个闭包就是注入给插件的窄接缝。
-    call_action, notify = _plugin_action_seams(engine, transport)
-    # 签名对齐（2026-10-04）：插件线的 `build_background_plugins(engine)` **只**从
-    # `engine.plugin_registry` 里拿已经装好的后台插件，不再吃注入的四个接缝——
-    # 那四个参数原样保留在签名里时"看着像传了就会接上"，实际一个都没读（审查点过两次）。
-    # 接缝改由装配点（`plugins.attach_plugins`）交给插件，见 docs/STAGE4_AS_PLUGINS.md。
+    # `build_background_plugins(engine)` **只**从 `engine.plugin_registry` 取——那四个
+    # 接缝参数已于 2026-10-01 从它的签名里删掉（留着会让人以为"传了就会接上"，
+    # 实际一个都没读，独立审查点过两次）。
+    # 给插件的窄接缝（`call_action` / `notify`）由装配点 `build_engine` 注入：只能有一处，
+    # 否则这里算一份、那边发一份，"到底给了谁"就说不清——原来这两行在这里算完就丢掉
+    # （**没有任何消费者**）。见 docs/STAGE4_AS_PLUGINS.md。
     background = build_background_plugins(engine)
     await transport.start()
     if memory is not None:
