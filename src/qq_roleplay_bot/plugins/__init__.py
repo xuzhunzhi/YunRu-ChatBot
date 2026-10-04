@@ -34,6 +34,8 @@ plugins/
     registry.background(plugin)       # 一条后台节拍（有 name/interval_seconds/poll_once）
     registry.provide_roles(cache)     # 前置插件：把共享能力放上来
     registry.provide_prompts(plugin)  # prompt 扩展（恋人/剧情那类）
+    registry.provide_prompt(name, t)  # 某套 prompt 的**内置原稿**（识图那套走这里）
+    registry.vision = factory         # 一个"看一眼图"的工厂（`(usage_store) -> 识图器`）
 
 **这里没有 `engine`**（2026-10-01 改）：引擎上有 `transport` 与三份权限名单，
 给出去就等于插件能自己发消息、能读名单。要什么能力就由接缝一个一个列。
@@ -47,6 +49,9 @@ plugins/
 ## 为什么这样切
 
 - **可单独拿走**：不想要识图，删掉 `vision/` 就行；核心对它的引用都是"没有就降级"。
+  2026-10-05 起这句是**结构上**成立的：核心连"识图"这个模块名都不提了——识图器由
+  `vision` 插件经 `registry.vision` 给一个工厂、它的 prompt 由
+  `registry.provide_prompt("vision", …)` 登记，删掉那个文件夹就是"这次部署没有识图"。
 - **依赖方向清楚**：插件 import 核心；核心**不 import 具体插件**，只调 `discover()`。
 - **`roles/` 也是插件**（2026-10-01 用户）："一个东西搬进插件另一个插件失效不代表
   前者不能作为插件，只需要把前者作为前置插件就行。" 群管理与入群审批都要它，
@@ -62,6 +67,21 @@ import pkgutil
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+#: 进程里那一份注册表（`build_engine` 装完插件后放上来）。
+#:
+#: 为什么要它：核心有一处必须**按名字**问"某套 prompt 的原稿在不在"
+#: （`prompt_library.builtin("vision")`），而那次调用拿不到注册表对象
+#: （它可能在 `build_engine` 之前就被调用）。所以留一个进程级的读口，
+#: 与 `prompt_library.shared()` / `runtime_flags.shared()` 同一套路。
+#: 测试里反复 `build_engine` 只会把它换成最新那一份——它只是活引用，没有副本。
+_REGISTRY: "PluginRegistry | None" = None
+
+
+def registry() -> "PluginRegistry | None":
+    """取进程里那份注册表；还没有就是 `None`（调用方按"没有插件"降级）。"""
+
+    return _REGISTRY
 
 
 class ActionDenied(Exception):
@@ -374,18 +394,25 @@ class PluginRegistry:
     """
 
     __slots__ = ("call_action", "notify", "roles", "loop", "chat", "report", "ui",
-                 "action_caller", "commands", "backgrounds", "_shared_roles", "_commands",
-                 "_prompts", "loaded")
+                 "vision", "action_caller", "commands", "backgrounds", "_shared_roles",
+                 "_commands", "_prompts", "_prompt_defaults", "loaded")
 
     def __init__(self, *, call_action=None, notify=None, roles=None,
                  loop=None, chat: ChatSeams | None = None,
                  report: "ReportSeams | None" = None,
                  ui: "UiSeams | None" = None,
+                 vision=None,
                  action_caller=None) -> None:
         self.call_action = call_action
         self.notify = notify
         self.roles = roles
         self.loop = loop
+        #: 识图器的**工厂**：`(usage_store) -> 有 describe()/enabled 的对象 | None`。
+        #: 由 `vision` 插件在 `register()` 里放上来，核心只问"有没有"——
+        #: `runtime.build_engine` 因此不再 import 任何插件模块（见
+        #: `plugins/vision/plugin.py`）。缺省 `None` = 这次部署没有识图，
+        #: 有图的消息只留 `[图片]` 占位符。
+        self.vision = vision
         #: 对话那一侧的全部能力（四个函数）。缺省是"什么都没有"。
         self.chat: ChatSeams = chat if chat is not None else ChatSeams()
         #: 写日报/写信要的东西（快照、模型 client、记账、写信给人）。
@@ -408,6 +435,11 @@ class PluginRegistry:
         #: **prompt 扩展**（`extensions.PromptPlugin`）。恋人/剧情这类插件靠它
         #: 往两处 prompt 里放**不可信材料**——见 `provide_prompts` 的说明。
         self._prompts: list[object] = []
+        #: **某套 prompt 的内置原稿**：`{名字: 文本}`，由插件经 `provide_prompt()` 登记。
+        #: 与上面那份分得很清：`_prompts` 是"往 prompt 里加不可信材料"（扩展），
+        #: 这里登记的是"整套 prompt 的默认文本"（识图那一套），`prompt_library.builtin()`
+        #: 读它。**它替代了核心原来那句 `from .vision import VISION_SYSTEM_PROMPT`**。
+        self._prompt_defaults: dict[str, str] = {}
         #: 装上了哪些插件（`discover()` 的返回值）。**发现只跑一次**：
         #: 跑两次会让同一个插件被登记两遍（同一条命令认两次、两份角色缓存）。
         self.loaded: tuple[str, ...] = ()
@@ -493,6 +525,32 @@ class PluginRegistry:
 
         return tuple(self._prompts)
 
+    def provide_prompt(self, name: str, text: str) -> None:
+        """登记**某一套 prompt 的内置原稿**：`{名字: 文本}`，供核心的 `prompt_library` 读。
+
+        与 `provide_prompts`（扩展）不是一回事，别混：
+
+        | | 登记的是什么 | 谁读 |
+        | --- | --- | --- |
+        | `provide_prompts(plugin)` | 往 prompt 里加的**不可信材料** | `PromptSources` → user 段 |
+        | `provide_prompt(name, text)` | **整套** prompt 的默认文本 | `prompt_library.builtin(name)` |
+
+        为什么要这条口（2026-10-05 搬识图时加）：识图那一套 prompt 原来是核心
+        `prompt_library.builtin("vision")` 里 `from .vision import VISION_SYSTEM_PROMPT`——
+        核心于是必须知道插件模块叫什么、放在哪。现在反过来：**插件把自己的原稿放上来**，
+        核心只按名字取（`registry.provided_prompt`），删掉插件就自然"这次部署没有这一套"。
+
+        **同名后到者覆盖先到者**：不报错是刻意的——发现机制本来就是"一个名字一个目录"，
+        同名只可能出现在测试里手造两个注册表或插件被热重载的情形，那里覆盖比抛错有用。
+        """
+
+        self._prompt_defaults[str(name)] = str(text)
+
+    def provided_prompt(self, name: str) -> str | None:
+        """取插件登记的某套 prompt 原稿；没人登记就返回 `None`（调用方自己决定怎么降级）。"""
+
+        return self._prompt_defaults.get(str(name))
+
     def register_reporter(self, reporter: object) -> None:
         """登记"每日汇报器"（面板要读它判断今天发没发）。同 `provide_roles` 的道理。"""
 
@@ -565,6 +623,12 @@ def discover(registry: PluginRegistry, *, only: tuple[str, ...] = ()) -> tuple[s
     loaded: list[str] = []
     loading: set[str] = set()
     failed: set[str] = set()
+    # 记下"进程里那一份"：核心有一处要**按名字**读插件登记的 prompt 原稿
+    # （`prompt_library.builtin("vision")`），那次调用拿不到这个对象——见 `registry()`。
+    # 放在这里而不是 `attach_plugins()`：`discover()` 是那个"登记发生了"的时刻，
+    # 而 `attach_plugins` 只是它的一个调用方（测试会直接调 `discover`）。
+    global _REGISTRY
+    _REGISTRY = registry
 
     def _load(name: str, *, required_by: str = "") -> bool:
         if name in loaded:

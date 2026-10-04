@@ -22,6 +22,11 @@
 `import` 时抛 `ModuleNotFoundError`。**不碰磁盘、不改任何文件、只读也能跑**，
 而且更接近"这个模块真的不在"这件事。
 
+拦哪个模块名由 `_block_target()` 现算：包根那个文件在就拦 `qq_roleplay_bot.<名字>`，
+`plugins/<名字>/plugin.py` 在就拦 `qq_roleplay_bot.plugins.<名字>` **整棵子树**
+（2026-10-05 加的后一种：识图那时从包根搬成了插件，而判据问的正是它——
+**不能因为"文件不在包根了"就把它从名单里去**，那等于把这道门槛悄悄关掉）。
+
 ## 两列都要看（这是它存在的第二个理由）
 
 **判据问的是"能不能跑起来"，不是"能不能 import"。**
@@ -52,6 +57,11 @@ TESTS = ROOT / "tests"
 PY = ROOT / ".venv" / "Scripts" / "python.exe"
 
 #: 默认检查哪些"可插能力"。判据上它们都不该是底层必需品。
+#:
+#: 2026-10-05：识图从包根 `vision.py` 搬成了插件 `plugins/vision/`——这条判据
+#: 问的正是它，所以**不能**因为"文件不在包根了"就把它从名单里去（那等于把这道
+#: 门槛悄悄关掉）。名字保持 `vision`，拦截的模块名由 `probe()` 现算
+#: （见 `_block_target`）。
 DEFAULT_MODULES = ("vision", "qq_roles", "control_audit", "typing_sim", "help_card",
                    "provider_registry", "runtime_diagnostics")
 
@@ -129,10 +139,29 @@ def test_files_importing(name: str) -> list[str]:
     return hits
 
 
+def _block_target(name: str) -> str | None:
+    """`name` 这个可插能力**在哪**、拦哪个模块名；两处都没有就返回 `None`。
+
+    两种情况（2026-10-05 加第二种，因为识图搬进了插件）：
+
+    - 包根模块：`src/qq_roleplay_bot/<name>.py` → 拦 `qq_roleplay_bot.<name>`；
+    - 插件：`src/qq_roleplay_bot/plugins/<name>/plugin.py` → 拦
+      `qq_roleplay_bot.plugins.<name>`（**整棵子树**：连它自己的 `vision.py` 一起拦掉，
+      等价于"这个文件夹整个不在"）。拦整棵子树而不是只拦 `plugin.py`：核心就算
+      绕过插件去 import 里面的模块，也必须能降级——那正是判据要问的。
+    """
+
+    if (PKG / f"{name}.py").exists():
+        return f"qq_roleplay_bot.{name}"
+    if (PKG / "plugins" / name / "plugin.py").is_file():
+        return f"qq_roleplay_bot.plugins.{name}"
+    return None
+
+
 def probe(module: str) -> tuple[bool, bool, str]:
     """拦掉 `module` 之后探一次：`(能不能 import 核心, build_engine 能不能起, 原因)`。"""
 
-    full = f"qq_roleplay_bot.{module}"
+    full = _block_target(module) or f"qq_roleplay_bot.{module}"
     env = {**os.environ, "PYTHONPATH": str(ROOT / "src"), "PYTHONIOENCODING": "utf-8",
            # 干跑：别碰真实的运行状态文件
            "QQBOT_STATE_PERSIST": "0"}
@@ -162,8 +191,10 @@ def main(argv: list[str]) -> int:
     names = argv or list(DEFAULT_MODULES)
     verdicts = []
     for name in names:
-        if not (PKG / f"{name}.py").exists():
-            print(f"跳过 {name}：{PKG / f'{name}.py'} 不存在")
+        if _block_target(name) is None:
+            print(f"跳过 {name}：包根与 plugins/ 下都没有它"
+                  f"（找过 {PKG / f'{name}.py'} 与 "
+                  f"{PKG / 'plugins' / name / 'plugin.py'}）")
             continue
         core_ok, engine_ok, reason = probe(name)
         verdicts.append((name, core_ok, engine_ok, reason, test_files_importing(name)))

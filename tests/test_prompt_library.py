@@ -19,6 +19,24 @@ def _library(tmp: str, **kwargs) -> PromptLibrary:
     return PromptLibrary(Path(tmp) / "prompts", **kwargs)
 
 
+def _load_plugins() -> None:
+    """按运行时那条路装一次插件（`discover` 是"登记发生了"的时刻）。
+
+    **为什么这两个用例需要它**（2026-10-05，前提变了不是放宽断言）：识图从包根
+    搬进了插件 `plugins/vision/`，它那一套 prompt 不再是核心里的一句
+    `from .vision import …`，而是插件在 `register()` 里
+    `registry.provide_prompt("vision", …)` 放上来的。"六套都有原稿"这件事于是
+    在插件装配**之后**才成立——运行时的顺序本来就是"先 `discover()`、面板才来问"
+    （`build_engine` 里 `attach_plugins()` 在 `prompts.backfill_all()` 之前）。
+    插件不在时的样子由 `tests/test_optional_capabilities.py` 那两个用例守
+    （`available()` 少一套、`backfill_all()` 只写五份）。
+    """
+
+    from qq_roleplay_bot.plugins import PluginRegistry, discover
+
+    discover(PluginRegistry())
+
+
 def test_builtin_derivation_matches_the_shipped_prompt() -> None:
     """派生算法与内置那一份必须逐字相同——否则面板一保存就漂移。"""
 
@@ -27,6 +45,8 @@ def test_builtin_derivation_matches_the_shipped_prompt() -> None:
 
 
 def test_all_six_prompts_have_builtin_defaults() -> None:
+
+    _load_plugins()
     for name in PROMPTS:
         text = PromptLibrary.builtin(name)
         assert len(text) > 100, name
@@ -164,6 +184,7 @@ def test_resolve_falls_back_and_never_raises() -> None:
     from qq_roleplay_bot import prompt_library
     from qq_roleplay_bot.prompt_library import resolve
 
+    _load_plugins()
     resolved = resolve("vision", "兜底文本")
     assert resolved in {prompt_library.PromptLibrary.builtin("vision"), "兜底文本"}
     assert resolve("nope", "兜底文本") == "兜底文本"

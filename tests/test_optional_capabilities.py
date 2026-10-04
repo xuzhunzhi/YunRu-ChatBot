@@ -45,25 +45,54 @@ class _FakeTransport:
 
 
 class _Hidden:
-    """临时让某个模块"看起来不存在"。
+    """临时让某个模块（**连子树**）"看起来不存在"。
 
-    `sys.modules[name] = None` 之后，`from ... import ...` 会抛 `ImportError`——
-    这正好走我们要守的那条 `except` 分支。
+    `sys.modules[name] = None` 之后，`import name` 会抛
+    `ImportError: import of ... halted; None in sys.modules`——这正是我们要守的降级分支。
+
+    ## 为什么还要做另外两件事（2026-10-05 搬识图时被全量套件抓到）
+
+    光置 `sys.modules` 只对"**第一次** import"有效：`plugin.py` 一旦被执行过，它就把
+    `vision.vision` 绑进了自己的命名空间，`discover()` 走的是那个**旧引用**，插件照样
+    注册得上。这个用例单跑是绿的、进了全量套件就红（实测 `loaded` 里躺着 `vision`、
+    `engine.vision` 是个真 `ImageDescriber`）。所以 `__enter__` 里：
+
+    1. 把子树里已经加载的模块从 `sys.modules` 摘掉（跑完原样放回）→ 逼 `plugin.py`
+       重新 import，那时才会撞上第 2 条；
+    2. 父包上那个属性置 `None`（`from 父包 import 兄弟模块` 这条捷径一起堵掉），
+       `__exit__` 里恢复。
     """
 
     def __init__(self, *names: str) -> None:
         self._names = names
         self._saved: dict[str, object] = {}
+        self._attrs: list[tuple[object, str, object]] = []
 
     def __enter__(self):
+        import importlib
+
         for name in self._names:
-            self._saved[name] = sys.modules.get(name, "absent")
+            for cached in [key for key in sys.modules
+                           if key == name or key.startswith(name + ".")]:
+                self._saved[cached] = sys.modules.pop(cached)
+            self._saved[name] = None
             sys.modules[name] = None
+            parent_name, _, leaf = name.rpartition(".")
+            try:
+                parent = importlib.import_module(parent_name) if parent_name else None
+            except ImportError:
+                parent = None
+            if parent is not None and hasattr(parent, leaf):
+                self._attrs.append((parent, leaf, getattr(parent, leaf)))
+                setattr(parent, leaf, None)
         return self
 
     def __exit__(self, *exc):
+        for parent, leaf, value in self._attrs:
+            setattr(parent, leaf, value)
+        self._attrs.clear()
         for name, value in self._saved.items():
-            if value == "absent":
+            if value is None:
                 sys.modules.pop(name, None)
             else:
                 sys.modules[name] = value
@@ -132,30 +161,53 @@ def test_build_engine_survives_a_missing_role_module() -> None:
 
 
 def test_build_engine_survives_a_missing_vision_module() -> None:
-    """没有 `vision` 时 `build_engine` 也必须起得来。
+    """识图那套 prompt 缺席时**受控降级**，而且"插件不给识图"时引擎照起。
 
-    失败点不在 `runtime.py`，而在 `prompt_library.builtin("vision")`——
-    `backfill_all()` 会在启动期遍历到它。所以降级要落在 prompt 那一侧：
-    `available()` 得把识图滤掉，而不是让 `ModuleNotFoundError` 冒出去。
+    ## 2026-10-05 改了它测的东西（前提变了，不是放宽断言）
+
+    识图从包根 `qq_roleplay_bot/vision.py` 搬进了插件 `plugins/vision/`。原来
+    `_Hidden("qq_roleplay_bot.vision")` 打的是 `prompt_library.builtin("vision")` 那句
+    `from .vision import VISION_SYSTEM_PROMPT`；搬完**核心不再 import 插件**，那一套
+    prompt 改由插件在 `register()` 里 `registry.provide_prompt("vision", …)` 登记。
+    所以分两半验，各用**可靠**的那个手段：
+
+    1. **prompt 那一侧**（藏模块）：`builtin("vision")` 必须给 `PromptRejected`、
+       `available()` 必须把识图滤掉。这条只依赖插件模块本身，`_Hidden` 挡得住。
+    2. **核心那一侧**（把插件的登记撤掉）：`engine.vision` 的唯一来源是插件经
+       `registry.vision` 放上来的工厂——工厂不在就该是 `None`。**不藏模块**是因为
+       "藏模块"在进程内不可靠：`plugin.py` 一旦被执行过就把 `vision.vision` 绑进了自己
+       的命名空间，而且另一个测试文件（`test_group_action_execution.py`，2026-10-05
+       与这条同时出现）会重新绑父包属性，实测能把 `_Hidden` 整套绕过去。
+       撤掉登记直接验的是**核心的契约**：没有那个工厂 = 没有识图。
     """
 
-    from qq_roleplay_bot.prompt_library import PromptLibrary
+    from qq_roleplay_bot.prompt_library import PromptLibrary, PromptRejected
 
-    with _Hidden("qq_roleplay_bot.vision"):
+    with _Hidden("qq_roleplay_bot.plugins.vision.vision"):
         # builtin 必须给一个**受控**的拒绝，而不是放 ModuleNotFoundError 出去
-        from qq_roleplay_bot.prompt_library import PromptRejected
-
         try:
             PromptLibrary.builtin("vision")
         except PromptRejected:
             pass
         else:
-            raise AssertionError("vision 不在时 builtin('vision') 应该抛 PromptRejected")
+            raise AssertionError("识图插件装不上时 builtin('vision') 应该抛 PromptRejected")
 
         assert "vision" not in PromptLibrary.available(), PromptLibrary.available()
-        # 真正的判据：整台机器装得起来
+
+    # 真正的判据：**没有人提供识图**时整台机器装得起来，而且能力真的没了。
+    from qq_roleplay_bot.plugins.vision import plugin as vision_plugin
+
+    original = vision_plugin.build
+    vision_plugin.build = lambda usage_store=None: None
+    try:
         engine = runtime.build_engine(_FakeTransport())
-        assert engine is not None
+    finally:
+        vision_plugin.build = original
+    assert engine is not None
+    # 能力真的没了：引擎上没有识图器 → 有图的消息只留 `[图片]` 占位符。
+    # （插件文件夹被整个删掉时走的也是这条路，由 `tests/check_module_removal.py`
+    #   在**全新解释器**里验，那里没有"模块已经被 import 过"这层干扰。）
+    assert engine.vision is None
 
 
 def test_every_available_prompt_is_readable() -> None:
@@ -167,7 +219,7 @@ def test_every_available_prompt_is_readable() -> None:
 
     from qq_roleplay_bot.prompt_library import PromptLibrary
 
-    with _Hidden("qq_roleplay_bot.vision"):
+    with _Hidden("qq_roleplay_bot.plugins.vision.vision"):
         library = PromptLibrary()
         names = library.available()
         assert "persona" in names and "vision" not in names, names
@@ -188,7 +240,7 @@ def test_backfill_all_skips_a_missing_capability_without_faking_a_prompt() -> No
     from qq_roleplay_bot.prompt_library import PromptLibrary
 
     with tempfile.TemporaryDirectory() as tmp:
-        with _Hidden("qq_roleplay_bot.vision"):
+        with _Hidden("qq_roleplay_bot.plugins.vision.vision"):
             library = PromptLibrary(Path(tmp))
             added = library.backfill_all()
         # 五套真的存在，识图那套被跳过

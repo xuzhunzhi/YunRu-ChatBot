@@ -8,10 +8,13 @@
 """
 import asyncio
 
+from qq_roleplay_bot.media_segments import replace_media_placeholder
 from qq_roleplay_bot.stage3_main import DialogueEngine
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
-from qq_roleplay_bot.vision import (MAX_DESCRIPTION_CHARS, ImageDescriber,
-                                    replace_media_placeholder)
+# 识图那一块现在是插件（2026-10-05 从包根 `qq_roleplay_bot.vision` 搬去
+# `plugins/vision/`）；`replace_media_placeholder` 因为只是拼媒体标签而留在核心的
+# `media_segments` 里（见 `plugins/vision/plugin.py` 末尾那条说明）。
+from qq_roleplay_bot.plugins.vision.vision import MAX_DESCRIPTION_CHARS, ImageDescriber
 
 GROUP = "717151356"
 TARGET = MessageTarget(group_id=GROUP)

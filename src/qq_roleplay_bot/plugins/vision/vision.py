@@ -1,5 +1,10 @@
 """识图：让判定 agent 知道"这张图里是什么"（2026-09-30 用户要求）。
 
+**这是插件（2026-10-05 从包根 `qq_roleplay_bot/vision.py` 搬来）**：装配点在
+`plugin.py`——它把这一套的 prompt 原稿与识图器工厂交给核心的注册表。核心
+（`runtime` / `stage3_main` / `prompt_library`）**没有一处 import 这个包**，
+所以删掉 `plugins/vision/` 只会丢掉"识图"这个功能，Stage 3 其它一切照旧。
+
 用户原话："加入多模态能力，调用 deepseek 的 deepseek-flash 模型进行识图，统一走判定 agent，
 但是单开 userid 避免污染缓存，这个不用分群聊，反正识图没法命中缓存。"
 
@@ -32,7 +37,8 @@ import logging
 import time
 from collections import OrderedDict
 
-from .media_segments import IMAGE_LABEL, STICKER_LABEL
+# `replace_media_placeholder` 已搬回**核心**（`media_segments.py`，2026-10-05）：
+# 它只用媒体标签，不需要插件。这里不再转出——用它的两处测试直接 import 核心那一份。
 
 logger = logging.getLogger(__name__)
 
@@ -161,24 +167,13 @@ class ImageDescriber:
         content: list[dict[str, object]] = [{"type": "text", "text": question}]
         content.extend({"type": "image_url", "image_url": {"url": url}} for url in urls)
         # prompt 每次现取：面板保存的覆盖版下一次识图就用新的（热更，2026-10-01）。
-        from .prompt_library import resolve as _resolve_prompt
+        # 兜底值用**本模块自己的** `VISION_SYSTEM_PROMPT`，不再从包根 import——
+        # 那个模块 2026-10-05 已经搬进这个包里了（原来这里是
+        # `from .prompt_library import resolve` + 包根那个常量）。
+        from qq_roleplay_bot.prompt_library import resolve as _resolve_prompt
 
         return [{"role": "system", "content": _resolve_prompt("vision", VISION_SYSTEM_PROMPT)},
                 {"role": "user", "content": content}]
 
     def snapshot(self) -> dict[str, object]:
         return {**self.stats, "cache": len(self._cache), "last_latency": round(self.last_latency, 2)}
-
-
-def replace_media_placeholder(text: str, description: str) -> str:
-    """把正文里的媒体占位符换成描述（只换**最先出现的那个**，其余原样留着）。
-
-    图片与表情包各换各的标记：`[图片：…]` / `[表情包：…]`——她得看得出这是个贴图。
-    """
-
-    if not description:
-        return text
-    for label in (IMAGE_LABEL, STICKER_LABEL):
-        if label in text:
-            return text.replace(label, f"{label[:-1]}：{description}]", 1)
-    return f"{text}[{IMAGE_LABEL[1:-1]}：{description}]" if text else f"{IMAGE_LABEL[:-1]}：{description}]"

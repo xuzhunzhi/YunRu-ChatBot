@@ -22,11 +22,14 @@ from qq_roleplay_bot.media_segments import (
     image_refs,
     media_label,
     media_markers,
+    replace_media_placeholder,
 )
 from qq_roleplay_bot.onebot_ws import extract_media_kinds, parse_message_event
 from qq_roleplay_bot.stage3_main import DialogueEngine
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
-from qq_roleplay_bot.vision import ImageDescriber, VISION_SYSTEM_PROMPT, replace_media_placeholder
+# 识图那一块现在是插件（2026-10-05 从包根 `qq_roleplay_bot.vision` 搬去
+# `plugins/vision/`）：这个文件用它来验"表情包按表情包问"。
+from qq_roleplay_bot.plugins.vision.vision import ImageDescriber, VISION_SYSTEM_PROMPT
 
 GROUP = "717151356"
 ME = "900000001"

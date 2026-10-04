@@ -41,6 +41,10 @@ from .dialogue_compaction import (
     split_compaction_batches,
 )
 from .onebot_ws import OneBotWebSocketTransport
+# 识图把描述塞回正文用的那一句替换。**它现在是核心的**（原来在 `vision.py`）：
+# 只用媒体标签，不需要插件；这样"有图的消息"这条路径不再从插件 import
+# （原来 `_apply_vision` 里是 `from .vision import replace_media_placeholder`）。
+from .media_segments import replace_media_placeholder
 from .trigger import IdleTrigger, MessageDeduplicator
 from .stage3_runtime import (
     CLOSENESS_LABELS,
@@ -997,8 +1001,6 @@ class DialogueEngine:
         `media_kinds` 说这一条是贴图还是照片；整条都是贴图时才按贴图去描述，
         混着两种就当一个普通画面问，免得把照片也讲成梗图。
         """
-
-        from .vision import replace_media_placeholder
 
         kinds = tuple(getattr(message, "media_kinds", ()) or ())
         sticker = bool(kinds) and all(kind == "sticker" for kind in kinds)

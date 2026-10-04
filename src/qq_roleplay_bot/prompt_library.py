@@ -9,7 +9,14 @@
 | `judge` | `dialogue_judge.JUDGE_SYSTEM_PROMPT` | 判定 agent |
 | `memory` | `memory_maintenance_agent.MEMORY_SYSTEM_PROMPT` | 记忆维护 agent |
 | `review` | `style_reviewer.REVIEW_SYSTEM_PROMPT` | 风格审核 agent |
-| `vision` | `vision.VISION_SYSTEM_PROMPT` | 识图 agent |
+| `vision` | **`plugins/vision/` 插件登记的原稿**（原来是 `vision.VISION_SYSTEM_PROMPT`） | 识图 agent |
+
+**`vision` 那一套为什么由插件给**（2026-10-05 搬识图时改）：识图是 Stage 4 插件，
+核心不该知道那个模块叫什么、在哪。插件在 `register()` 里用
+`registry.provide_prompt("vision", …)` 把原稿放上来，这里只按名字取——
+**删掉 `plugins/vision/` 就自然变成"这次部署没有这一套"**，不再靠 `except ImportError`
+兜底（那正是这个文件原来那句 `from .vision import …` 的写法）。其余的解析、
+校验、版本、回滚一个字没动。
 
 三条设计决定，每条都是为了"面板不能成为绕过边界的口子"：
 
@@ -43,6 +50,11 @@ MAX_CHARS = 20000
 MAX_VERSIONS = 20
 
 #: 六个名字，面板与测试都用这份。
+#:
+#: `vision` 这一套**由 `plugins/vision/` 插件登记原稿**（见 `builtin`）——
+#: 名字留在这里是为了面板的列表顺序与"保存/回滚某一套"的入参校验
+#: （`webui_panel` 用 `name not in PROMPTS` 判合法性）；插件不在时
+#: `available()` 会把它滤掉，面板那一行就自然消失。
 PROMPTS = ("persona", "reply", "judge", "memory", "review", "vision")
 
 #: 需要"必须回"派生版的 prompt（目前只有回复那一套用双 agent 分支）。
@@ -124,6 +136,41 @@ def derive_must_reply(text: str) -> str:
     return result
 
 
+def _plugin_prompts() -> dict[str, str]:
+    """插件登记上来的 prompt 原稿（`{名字: 文本}`）。取不到就返回空字典。
+
+    **为什么在这里 import 插件注册表**：这是唯一一处"读插件登记的东西"的地方，
+    而 `plugins` 自己不 import `prompt_library`（它只在方法体里延迟取），所以没有环。
+    做成函数、每次现取：注册表在 `build_engine` 里才被造出来，而 `builtin()` 可能在
+    它之前就被调用（例如某个测试直接问内置默认）。
+    """
+
+    from .plugins import registry as _registry
+
+    table = _registry()
+    if table is None:
+        return {}
+    return dict(getattr(table, "_prompt_defaults", {}) or {})
+
+
+def _vision_plugin_present() -> bool:
+    """识图插件此刻**在不在**这次部署里（模块能不能找到）。
+
+    为什么光看注册表不够：注册表是进程级活引用，测试里"藏掉插件模块 → 问一遍 →
+    还原 → 再问一遍"时它还留着上一轮登记的原稿，`available()` 于是会**撒谎**
+    （明明插件不在，面板上却列出"识图"那一套）。这里问的是当下的事实：
+    找不到那个模块 = 这次部署没有识图。找不到本身不是错误，返回 `False`。
+    """
+
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec("qq_roleplay_bot.plugins.vision.vision") is not None
+    except (ImportError, ValueError):
+        # 模块被置成 `None`（"看起来不存在"）、或父包状态异常——都按"没有"处理。
+        return False
+
+
 class PromptLibrary:
     """六套 prompt 的读、写、版本、回滚。线程安全够用（文件操作是原子的）。"""
 
@@ -164,21 +211,20 @@ class PromptLibrary:
 
             return REVIEW_SYSTEM_PROMPT
         if name == "vision":
-            # 识图是**可插能力**：`vision` 模块可以整份不在这次的部署里。
-            # 它不在时这一套 prompt 也就不存在——**明确拒绝**，不要放
-            # `ModuleNotFoundError` 出去：那会在启动期炸掉整个 `build_engine`。
+            # 识图是**可插能力**：`plugins/vision/` 整个文件夹可以不在这次的部署里。
+            # 所以它的原稿**由插件登记**（`registry.provide_prompt("vision", …)`），
+            # 这里只按名字取——核心不知道那个模块叫什么、在哪。
+            #
+            # 没人登记、或者插件此刻根本不在时**明确拒绝**（`PromptRejected`），不要放
+            # `ModuleNotFoundError` 出去：那会在启动期炸掉整个 `build_engine`
             # （2026-10-02 外部审查第四轮实测：修之前 `build_engine` →
-            #  `prompts.backfill_all()` → `backfill()` → 就到了这一行。
-            #  也就是说"删掉识图不影响说话"这句话当时是假的。）
-            try:
-                from .vision import VISION_SYSTEM_PROMPT
-            except ImportError as exc:
-                # 抓 `ImportError` 而不只是 `ModuleNotFoundError`：`vision` 在、
-                # 但它自己的依赖缺失时，同样"这次部署没有识图能力"。
-                raise PromptRejected(
-                    f"识图不在这次部署里（{type(exc).__name__}）") from None
+            #  `prompts.backfill_all()` → `backfill()` 就到了这一行，也就是说
+            #  "删掉识图不影响说话"这句话当时是假的）。
+            provided = _plugin_prompts().get("vision") if _vision_plugin_present() else None
+            if not provided:
+                raise PromptRejected("识图不在这次部署里（没有插件登记这一套）")
 
-            return VISION_SYSTEM_PROMPT
+            return provided
         raise PromptRejected(f"不认识的 prompt：{name}")
 
     @classmethod

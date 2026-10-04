@@ -131,3 +131,24 @@ def image_refs(message: object, *, limit: int = 8) -> tuple[tuple[str, str], ...
         if len(refs) >= limit:
             break
     return tuple(refs)
+
+
+def replace_media_placeholder(text: str, description: str) -> str:
+    """把正文里的媒体占位符换成描述（只换**最先出现的那个**，其余原样留着）。
+
+    图片与表情包各换各的标记：`[图片：…]` / `[表情包：…]`——她得看得出这是个贴图。
+
+    **为什么这个函数在核心（2026-10-05 从 `vision.py` 搬来）**：它一行插件都不需要
+    ——只用这个模块自己的两个标签。原来放在识图插件里，于是 `stage3_main` 那条
+    "把描述塞回正文"的路径得**从插件 import**；而 `stage3_main` 与这个模块本来就
+    在顶层互相认识（同一层的派生 key：媒体标记 ↔ 媒体渲染），放这里"谁都不用动"。
+    插件那个文件夹（`plugins/vision/`）里不再有它，用它的两处测试直接 import 这里，
+    **对外接口一个字没变**（只是换了个家）。
+    """
+
+    if not description:
+        return text
+    for label in (IMAGE_LABEL, STICKER_LABEL):
+        if label in text:
+            return text.replace(label, f"{label[:-1]}：{description}]", 1)
+    return f"{text}[{IMAGE_LABEL[1:-1]}：{description}]" if text else f"{IMAGE_LABEL[:-1]}：{description}]"

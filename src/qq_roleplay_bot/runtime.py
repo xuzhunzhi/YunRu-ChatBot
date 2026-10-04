@@ -348,7 +348,6 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
     if judge_client is not None:
         logger.info("判定与回复分离：两个 agent 各用独立 user_id 隔离缓存")
     style_reviewer = _build_style_reviewer(usage_store)
-    vision = _build_vision(usage_store)
     # **prompt 扩展的汇聚口**。这里先只放知识库；插件是装配之后才发现的，
     # 所以下面 `attach_plugins()` 之后会 `add_plugins(registry.shared_prompts())`。
     # 用**同一份可变列表**是有意的：不必为了"插件后到"再构造一次（2026-10-01 改）。
@@ -365,7 +364,10 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
         judge_client_factory=_judge_client_factory if judge_client is not None else None,
         prompt_sources=prompt_sources,
         style_reviewer=style_reviewer,
-        vision=vision,
+        # 识图（`vision`）**不在这里**：它是 Stage 4 插件，`attach_plugins()` 之后
+        # 由 `registry.vision` 那个工厂现造（见下面那一行）。`engine.vision` 缺省
+        # 是 `None` = 有图的消息只留 `[图片]` 占位符。
+        vision=None,
         # 宿主能力：出站表现（分段与停顿）、帮助卡片、审计。
         # **实现都在 `_host_adapters` 里延迟 import**——核心模块顶部不再认识
         # `typing_sim` / `help_card` / `control_audit`，于是把它们删掉时核心仍然起得来。
@@ -452,6 +454,19 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
                               action_caller=_action_caller_for(engine, transport))
     attach_plugins(registry, engine.commands)
     engine.plugin_registry = registry
+    # **识图**：能力由插件给（`plugins/vision/`），核心只问"有没有"。
+    #
+    # 为什么不在这里 import 那个模块（2026-10-05 搬它时改）：`plugins/__init__.py`
+    # 的规矩是"核心**不 import 具体插件**，只调 `discover()`"。原来是
+    # `_build_vision()` 里一句 `from .vision import ImageDescriber` 兜 `ImportError`——
+    # 那是"核心知道插件模块叫什么"，搬完就删了。现在插件经 `registry.vision`
+    # 放一个**工厂**上来，核心把用量账本递进去（识图的账要记在核心账本上，
+    # 与 `_build_judge_client(usage_store)` 同一形状）。
+    #
+    # 没有插件（删掉 `plugins/vision/`）= 工厂是 `None` = 有图的消息只留占位符，
+    # **其余一切照旧**。这正是判据"删掉它，Stage 3 照样跑得起来"。
+    build_vision = getattr(registry, "vision", None)
+    engine.vision = build_vision(usage_store) if callable(build_vision) else None
     # **prompt 扩展**（恋人 / 剧情 / 关系那类）在这里并进汇聚口。
     # 走 `PromptSources`：插件写的东西是不可信 DATA（过 sanitize + 长度上限 + 标来源），
     # **碰不到 system 前缀**——那正是"人格稳定"的地基。
@@ -1022,46 +1037,6 @@ def _build_style_reviewer(usage_store=None):
             user_id=dev_config.REVIEW_USER_ID,
             usage_store=usage_store if usage_store is not None else _USAGE_STORE,
             usage_role="review",
-        )
-    )
-
-
-def _build_vision(usage_store=None):
-    """识图（多模态）。没开开关、也没有 key 时返回 None（有图的消息照旧只留占位符）。
-
-    独立 client 与 user_id（默认 `qqbot-vision`），而且**不分群**：识图每次带的图都不同，
-    前缀注定命中不了缓存，按群拆只会把一份缓存拆散（用户 2026-09-30 的要求）。
-    模型默认 `deepseek-flash`——实测它能看图，不给图时也不会编。
-    """
-
-    if not dev_config.VISION_ENABLED:
-        logger.info("识图未启用（QQBOT_VISION=0）")
-        return None
-    key = dev_config.VISION_API_KEY or dev_config.API_KEY
-    if not key:
-        logger.warning("识图已开启但没有任何可用 key，本次不启用")
-        return None
-    logger.info("识图已启用：model=%s user_id=%s（有图的消息在判定前先看一眼）",
-                dev_config.VISION_MODEL, dev_config.VISION_USER_ID)
-    # 本地 import：识图是**可插能力**，不是底层必需品（删掉它，她只会说"看不到图"）。
-    #
-    # 2026-10-02 修：这里原来是裸 import。**这一处**其实还排不上先炸——真正的
-    # 第一处炸点在 `prompt_library.builtin("vision")`（`build_engine` 里的
-    # `prompts.backfill_all()` 会遍历到它），见那个文件里的说明。两处都兜住。
-    try:
-        from .vision import ImageDescriber
-    except ImportError as exc:
-        logger.warning("识图模块不可用（%s），有图的消息只留占位符", type(exc).__name__)
-        return None
-
-    return ImageDescriber(
-        OpenAICompatibleClient(
-            dev_config.API_BASE_URL,
-            key,
-            dev_config.VISION_MODEL,
-            user_id=dev_config.VISION_USER_ID,
-            usage_store=usage_store if usage_store is not None else _USAGE_STORE,
-            usage_role="vision",
         )
     )
 
