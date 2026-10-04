@@ -153,6 +153,20 @@ class QQTransport(Protocol):
         不分类地抛一个笼统异常，会让"能不能安全重发"这个判断落到猜上面。
         """
 
+    async def send_segmented(self, target: MessageTarget, text: str, *, reply_to: str = "",
+                             part: int | None = None, total: int | None = None,
+                             origin: str = "") -> None:
+        """与 `send` 一样发一条，额外告诉传输层"这是第几段 / 共几段 / 从哪一轮来"。
+
+        **这三个事实只有调用方知道**：传输层看到的是一条独立的消息，拆成几段是
+        上游（`stage3_main._deliver_reply`）干的。对话日志（`chat_log.py`）要的正是
+        它们——不然"群里实际收到的那三条"在日志里分不出来，也跟 `reply.jsonl` 对不上。
+
+        这是**可选能力**：没有这个方法的传输层照样能用，调用方必须自己退回 `send`
+        （`_deliver_reply` 就是这么做的，与 `send_typing` 同一套规矩）。
+        日志信息少一点可以接受，**消息发不出去不行**。
+        """
+
     async def send_typing(self, target: MessageTarget, notice: str = "typing") -> None:
         """尽力而为地广播一次"正在输入"状态。
 

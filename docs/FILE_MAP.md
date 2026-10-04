@@ -73,10 +73,11 @@
 | `dev_config` | 全部环境变量常量与 `data_dir()` `load_env_file()` | 被 11 个模块顶层依赖 |
 | `llm_client` | `OpenAICompatibleClient` `LLMError` `apply_client_overrides()` | 被 `runtime` `stage3_main` `dialogue_judge` 等 |
 | `capabilities` | `CapabilityRegistry` `CapabilityDenied` `Capability` `load_catalog()` + 6 组 action 名单 | （不依赖包内） |
-| `onebot_ws` | `OneBotWebSocketTransport` | `transport` `dev_config` `metrics` `llm_client` |
+| `onebot_ws` | `OneBotWebSocketTransport` | `transport` `dev_config` `metrics` `llm_client` `chat_log` |
 | `onebot_client` | `SnowLumaHttpClient` `call_channel()` `unwrap_result()` | `transport` |
 | `state_store` | `RuntimeStateStore` `state_path_default()` | `dev_config` `data_dir()` |
-| `feature_log` | `FeatureLogs` `logs_directory()` | `dev_config` |
+| `feature_log` | `FeatureLogs` `logs_directory()` `RollingJsonlFile` | `dev_config` |
+| `chat_log` | `ChatLog` `chat_log_capacity()` `session_id_of()`（**对话日志**：实际收发，挂在传输层上） | `dev_config` `feature_log`（共用轮转与单字段上限） |
 | `metrics` | 计数器与耗时分布 | （不依赖） |
 | `control_audit` | `ControlAudit` `token_fingerprint()` `default_path()` | `dev_config` |
 | `api_usage` | `ApiUsageStore` `default_path()` | `dev_config` |

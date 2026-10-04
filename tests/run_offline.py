@@ -31,6 +31,11 @@ os.environ["QQBOT_DEBUG_MODEL_IO"] = "0"
 # （实测一次 84 MB）。要测日志本身的用例会显式传 enabled=True。
 os.environ["QQBOT_FEATURE_LOG"] = "0"
 os.environ["QQBOT_FEATURE_LOG_DIR"] = str(root / ".tmp_test_run" / "logs")
+# 同理关掉**对话日志**（实际收发，`chat.jsonl`）：它默认也是开的，而一次全量测试会
+# 真的走"发送三段"这类路径，把成千上万条合成消息写进日志。要测日志本身的用例显式传
+# `enabled=True` + 自己的临时目录（见 tests/test_chat_log.py），不靠这个开关。
+os.environ["QQBOT_CHAT_LOG"] = "0"
+os.environ["QQBOT_CHAT_LOG_DIR"] = str(root / ".tmp_test_run" / "logs")
 
 sys.path.insert(0, str(root / "src"))
 sys.path.insert(0, str(root / "archive"))

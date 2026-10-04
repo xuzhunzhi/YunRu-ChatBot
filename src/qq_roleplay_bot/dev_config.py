@@ -389,6 +389,24 @@ FOCUS_REPLY_LIMIT = _int("QQBOT_FOCUS_REPLY_LIMIT", 50)
 FOCUS_ACK_COOLDOWN_SECONDS = _float("QQBOT_FOCUS_ACK_COOLDOWN_SECONDS", 120.0)
 
 
+# --- 对话日志（**实际收发**，与模型日志分开）---------------------------------
+# 2026-10-05 用户定的边界："对话日志和模型日志分开"。实现见 `chat_log.py`：
+# 它挂在**传输层**（`onebot_ws.py` 的收发边界），所以群里真正收到的每一条、
+# 以及她实际发出去的每一段（含插件发的图/文）都在里面；`feature_log.py` 那五个
+# 文件是模型日志（模型看到与生成了什么），两边文件、开关、容量各自独立。
+#
+# 为什么默认留 20000 条：这是**按条**的滚动窗口，不是按天。量级依据——一个活跃群
+# 一天几百条，收发两侧合计按 2000 条/天估，20000 条 ≈ 最近一周多；而且"一次回复拆成
+# 三段"会占 3 条，所以条数比"消息数"要多算一档。一条就是一行短记录（正文之外不存
+# base64、不存图片），2 万行约几 MB，滚动重写的代价可以忽略。
+# 文件是 `data/logs/chat.jsonl`（`data/` 已被 .gitignore 忽略），容量见
+# `chat_log.chat_log_capacity()`（范围兜在 [10, 1000000]，**不允许无限增长**）。
+CHAT_LOG_ENABLED = _enabled("QQBOT_CHAT_LOG")
+CHAT_LOG_MAX = _int("QQBOT_CHAT_LOG_MAX", 20000)
+# 默认空 = 与模型日志同一个 `data/logs/`（并列的两份）；要单独搬走就写路径。
+CHAT_LOG_DIR = get("QQBOT_CHAT_LOG_DIR", "")
+
+
 def session_user_id(base: str, session_id: str) -> str:
     """把会话 id 变成服务商能接受的 user_id 后缀。
 

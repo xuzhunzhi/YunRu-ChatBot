@@ -48,7 +48,8 @@ DialogueDecision  ──> OneBot send_msg
 | `extensions.py` | 插件 / 知识库 / 额外 prompt 三个受限端口 |
 | `capabilities.py` / `conversation_context.py` | 能力闸门与由 SnowLuma 提供背景时的受限读取 |
 | `typing_sim.py` | 出站拟人化节奏（分段与字符数停顿） |
-| `feature_log.py` | 按功能分开的输入输出日志（判定/回复/记忆/规则/汇报），各留最近 1000 次 |
+| `feature_log.py` | 按功能分开的输入输出日志（判定/回复/记忆/规则/汇报），各留最近 1000 次（**模型日志**） |
+| `chat_log.py` | **对话日志**（实际收发）：`data/logs/chat.jsonl`，由传输层在收发边界落盘，默认留最近 20000 条；**与模型日志分开**（2026-10-05 用户定的边界） |
 | `mail_client.py` ※ | Agent Mail CLI 的封装：固定子命令白名单、正文走文件、argv 防注入、失败分类（Stage 4） |
 | `mail_state.py` ※ | 邮箱侧状态：上次汇报时间、当天重试次数、送信流水（`data/mail_state.json`） |
 | `daily_report.py` ※ | 每日汇报：素材（只有计数与编号）、写信 prompt、解析、发送（Stage 4） |
@@ -509,13 +510,15 @@ DATA 区（`identity` 参数）。它不进 system 前缀——那是易变内�
 
 | 用途 | 入口 | 内容 |
 | --- | --- | --- |
-| 事后查"她当时看到/回了什么" | `data/logs/{judge,reply,memory,security,mail}.jsonl` | 每个功能各一份，各留最近 1000 次完整输入输出（`feature_log.py`） |
+| 事后查"她当时看到/回了什么"（**模型**那一半） | `data/logs/{judge,reply,memory,security,mail}.jsonl` | 每个功能各一份，各留最近 1000 次完整输入输出（`feature_log.py`，**模型日志**） |
+| 事后查"群里**实际**收到了什么、她到底发出去过什么" | `data/logs/chat.jsonl` | **实际收发**的每一条：拆开的每一段各一条（含插件发的图/文，图只记描述不记 base64）。由传输层落盘，默认留最近 20000 条（`chat_log.py`） |
 | 对账（成本） | `/super apicheck` | **按 key** 的命中率（回复/判定/记忆三条独立口径）+ 账户余额；主口径是**从开始使用到现在**（跨重启），本次启动的数字只附最后一行 |
 | 概览（现在正常吗） | `/super status` | 本次重启后的运行时长、内存占用、计数与日志大小（另有一行**全时累计**）；**不含命中率与余额** |
 
 - **跨重启的账本**（`api_usage.py`，2026-09-30 用户要求："默认展示从开始使用到现在的，而不是重启后的"）：以前这些数字只活在进程内存里（`OpenAICompatibleClient` 的用量、`engine._stats`），一重启就归零。现在落一份 `data/api_usage.json`，两块内容两种写法：**API 用量**每次调用累加（带节流落盘）；**引擎计数**存的是"之前几轮进程的累计"（baseline），展示时 `baseline + 本次`——这样不必去改引擎里每一处 `_stats[...] += 1`，结账点只有 `persist_state()` 一处。`QQBOT_STATE_PERSIST=0`（测试与干跑）时纯内存，不落盘。
 
-- `feature_log.py`：正文只落盘，内存里只有计数与 20 条预览——1000 条 × 4 个功能 × 几十 KB 全放内存会上百 MB。文件留 `capacity..capacity*2` 行，超过就重写成最近 `capacity` 条（顺序读一遍，内存里只留尾部若干行）。`request_parts()` 会把**所有** user 段收进来：回复请求是 system / 稳定段 / 易变段三段，旧实现只记第一段。
+- `feature_log.py`：正文只落盘，内存里只有计数与 20 条预览——1000 条 × 4 个功能 × 几十 KB 全放内存会上百 MB。文件留 `capacity..capacity*2` 行，超过就重写成最近 `capacity` 条（顺序读一遍，内存里只留尾部若干行）。`request_parts()` 会把**所有** user 段收进来：回复请求是 system / 稳定段 / 易变段三段，旧实现只记第一段。**这段轮转逻辑只有一份**（`RollingJsonlFile`），对话日志与它共用。
+- `chat_log.py`（2026-10-05）：模型日志答不了"群里实际收到了什么"——`reply.jsonl` 里只有模型生成的整段原文，而群里收到的是被拆开的几条，那几条当时**一条都没记**。所以实际收发另记一份 `data/logs/chat.jsonl`，落在传输层（`onebot_ws.py` 的收发边界）：只有那里看得见"真正出了门的那一条"，插件发的图/文也在里面。**发送成功与失败都记**（失败记 `outcome=failed` + 错误类别，不假装成功）；`message_id` 取传输层回执，取不到就留空（**不拿 echo 冒充**）；"第几段/共几段"由调用方（`_deliver_reply`）传进来，传输层不知道就不写。文件是聊天正文，只落 `data/`。
 - **命中率必须按 key 分开**：判定与回复的 prompt 形状完全不同，合成一个数既看不出谁在退化，也会掩盖"记忆的 key 一次都没命中"。`cache_report()` 分 dialogue / judge / memory 三栏，靠 `engine.memory_client` 这个引用把记忆维护的用量摘出来。
 - **一场交谈结束（`<dialogue>EXIT</dialogue>`）时自动对一次账**并记日志：这既不像每轮那样吵，也不像定时那样可能永远等不到。
 - 内存数字用标准库取（Windows `GetProcessMemoryInfo`、Linux `/proc/self/status`）。**ctypes 必须声明 argtypes/restype**：不声明时 HANDLE 被当 32 位传，函数返回 FALSE，界面上永远显示 `—`。

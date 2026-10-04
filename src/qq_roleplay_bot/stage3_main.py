@@ -3892,6 +3892,11 @@ async def _deliver_reply(
     （`DeliveryUncertain` 补发会造成重复，`DeliveryRejected` 是对面不要）。
     第一条确定送不出去之后，这一批剩下的段**不再逐条去撞 15 秒的连接等待**，
     直接按顺序排进队列。
+
+    **实际发出去的每一段由传输层记进对话日志**（`data/logs/chat.jsonl`，见
+    `chat_log.py`）：这里只把"第几段 / 共几段 / 从哪一轮来"这三个只有本函数知道的
+    事实交上去。模型原文在另一份日志里（`reply.jsonl`）——**两份是分开的**，
+    查"群里到底收到了什么"要去对话日志看。
     """
 
     # 只有角色回复才加节奏。命令类回复（ping / help / #bot …）的 paced 为 False，
@@ -3906,6 +3911,11 @@ async def _deliver_reply(
             logger.info("Stage 3 reply held back: %.1fs", stance_delay)
             await asyncio.sleep(stance_delay)
     typing_sender = getattr(transport, "send_typing", None)
+    # 分段信息（第几段 / 共几段 / 从哪一轮来）**只有这里知道**，所以由这里传给传输层，
+    # 让它记进对话日志（`chat_log.py`）。与 `send_typing` 同一套可选能力规矩：
+    # 传输层没有这个方法就退回普通 `send`——日志少一点可以，消息发不出去不行。
+    segmented_sender = getattr(transport, "send_segmented", None)
+    origin = f"message:{source.message_id}" if source.message_id else ""
     combined: list[str] = []
     connection_down = False
     for index, item in enumerate(outgoing):
@@ -3923,7 +3933,12 @@ async def _deliver_reply(
             # 只在"要分几条发"时先亮一次状态：单条短回复本来就该干脆。
             if item.typing_notice and len(outgoing) > 1 and callable(typing_sender):
                 await typing_sender(item.target, item.typing_notice)
-            await transport.send(item.target, item.text, reply_to=item.reply_to_message_id)
+            if callable(segmented_sender):
+                await segmented_sender(item.target, item.text,
+                                       reply_to=item.reply_to_message_id,
+                                       part=index + 1, total=len(outgoing), origin=origin)
+            else:
+                await transport.send(item.target, item.text, reply_to=item.reply_to_message_id)
             engine.metrics.send_latency.observe(engine.clock() - sent_at)
             combined.append(item.text)
             logger.info(

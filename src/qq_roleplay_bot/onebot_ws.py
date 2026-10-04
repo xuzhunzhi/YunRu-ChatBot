@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlparse
 
 from websockets.asyncio.server import ServerConnection, Server, serve
 
+from .chat_log import ChatLog
 from .media_segments import image_refs, media_markers
 from .transport import (
     DeliveryRejected,
@@ -214,6 +215,25 @@ def parse_message_event(event: dict[str, object]) -> IncomingMessage | None:
     )
 
 
+def receipt_message_id(result: object) -> str:
+    """从 OneBot 的回执里取 `message_id`；取不到就返回空串。
+
+    **不猜、也不拿 echo 冒充**：`echo` 是这次请求的编号（请求-回执配对用），
+    不是群里那条消息的编号。真拿它当 message_id 写进对话日志，等于给每条记录
+    编一个查不到对应消息的假 id——那比留空更坏。
+    """
+
+    if not isinstance(result, dict):
+        return ""
+    for holder in (result.get("data"), result):
+        if not isinstance(holder, dict):
+            continue
+        value = holder.get("message_id")
+        if isinstance(value, (str, int)) and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
 class OneBotWebSocketTransport:
     """OneBot v11 反向 WebSocket 的最小输入输出实现。"""
 
@@ -224,12 +244,17 @@ class OneBotWebSocketTransport:
         access_token: str = "",
         send_timeout: float = 15.0,
         connection_timeout: float = 15.0,
+        chat_log: ChatLog | None = None,
     ) -> None:
         self.host = host
         self.port = port
         self.access_token = access_token
         self.send_timeout = send_timeout
         self.connection_timeout = connection_timeout
+        # **对话日志**（实际收发）：默认就挂上——它是底层设施，不是可选装饰
+        # （见 `chat_log.py` 头部）。收发两头都在这一层记，所以插件发的图/文、
+        # 以及所有收到的消息都跑不掉。`QQBOT_CHAT_LOG=0` 可整体关掉（那时它是空操作）。
+        self.chat_log = chat_log if chat_log is not None else ChatLog()
         # None 是被 close() 放入的唤醒哨兵，不是消息。
         self._messages: asyncio.Queue[IncomingMessage | None] = asyncio.Queue()
         self._closed = False
@@ -294,14 +319,33 @@ class OneBotWebSocketTransport:
         return items
 
     async def send(self, target: MessageTarget, text: str, *, reply_to: str = "") -> None:
+        await self._send_text(target, text, reply_to=reply_to)
+
+    async def send_segmented(self, target: MessageTarget, text: str, *, reply_to: str = "",
+                             part: int | None = None, total: int | None = None,
+                             origin: str = "") -> None:
+        """与 `send` 相同，额外把"第几段 / 共几段 / 从哪一轮来"带进对话日志。
+
+        这三个事实**只有调用方知道**（传输层看到的是一条独立的消息），所以由调用方
+        传进来，不由传输层猜；拿不到就留空（`part=None` 时日志里不写这两个键）。
+        """
+
+        await self._send_text(target, text, reply_to=reply_to,
+                              part=part, total=total, origin=origin)
+
+    async def _send_text(self, target: MessageTarget, text: str, *, reply_to: str = "",
+                         part: int | None = None, total: int | None = None,
+                         origin: str = "") -> None:
         if not text:
+            # 空正文本来就没发出去，日志里也不该出现"发了条空的"。
             return
         params: dict[str, object] = {"message": self._compose_message(text, reply_to)}
         if target.group_id is not None:
             params.update(message_type="group", group_id=self._id_value(target.group_id))
         else:
             params.update(message_type="private", user_id=self._id_value(target.user_id or ""))
-        await self.call_api("send_msg", params)
+        await self._send_logged("send_msg", params, target, body=text, kind="text",
+                                reply_to=reply_to, part=part, total=total, origin=origin)
 
     async def send_image(self, target: MessageTarget, png: bytes, *, reply_to: str = "") -> None:
         """发一张图（帮助卡片用）。`png` 是本地字节，走 **base64** 消息段。
@@ -309,6 +353,9 @@ class OneBotWebSocketTransport:
         为什么用 `base64://` 而不是 `file://`：`file://` 要对面按路径去读文件，
         路径转义、相对/绝对、跨机器都会出问题；base64 把内容直接放进消息里，
         代价只是体积涨三分之一（帮助卡片一两百 KB，本机 WS 上无所谓）。
+
+        对话日志里**只记一句人能读的描述**（"图片 1 张、多少字节"），
+        **绝不记 base64**——否则一条日志几十万字符，翻都翻不动。
         """
 
         if not png:
@@ -325,7 +372,55 @@ class OneBotWebSocketTransport:
             params.update(message_type="group", group_id=self._id_value(target.group_id))
         else:
             params.update(message_type="private", user_id=self._id_value(target.user_id or ""))
-        await self.call_api("send_msg", params)
+        await self._send_logged("send_msg", params, target,
+                                body=f"（图片 1 张，{len(png)} 字节）", kind="image",
+                                reply_to=reply_to, part=None, total=None, origin="")
+
+    async def _send_logged(self, action: str, params: dict[str, object], target: MessageTarget,
+                           *, body: str, kind: str, reply_to: str, part: int | None,
+                           total: int | None, origin: str) -> None:
+        """调一次发送 action，并把**实际发出去的那一条**落进对话日志。
+
+        落点在传输层是有意的：只有这里看得见"真正出了门的那一条"。引擎只知道模型
+        写了什么，而群里收到的是被拆开后的每一段；插件发的图/文更是根本不经过引擎。
+
+        顺序也是刻意的：**先发送、再记日志**，失败照原样抛给调用方
+        （`Outbox` 的"能不能安全重发"分类靠它）。记日志本身只会往边上记一笔，
+        绝不会改变这次发送的结果（`ChatLog` 写盘失败只计数、不抛）。
+        """
+
+        try:
+            result = await self.call_api(action, params)
+        except Exception as exc:  # noqa: BLE001 - 记完这一笔再原样抛出，失败分类不能变
+            self._note_chat(target, body=body, kind=kind, reply_to=reply_to, part=part,
+                            total=total, origin=origin, outcome="failed",
+                            error=type(exc).__name__, error_detail=str(exc))
+            raise
+        self._note_chat(target, body=body, kind=kind, reply_to=reply_to, part=part,
+                        total=total, origin=origin, outcome="ok",
+                        message_id=receipt_message_id(result))
+
+    def _note_chat(self, target: MessageTarget, **fields: object) -> None:
+        """把一条出站记进对话日志。日志自身出问题只告警，**绝不打断发送**。"""
+
+        log = self.chat_log
+        if log is None:
+            return
+        try:
+            log.record_outgoing(target, **fields)  # type: ignore[arg-type]
+        except Exception:  # noqa: BLE001 - 日志坏了不能让消息发不出去
+            logger.warning("chat_log_out_failed", exc_info=True)
+
+    def _note_chat_in(self, message: IncomingMessage) -> None:
+        """把一条收到的消息记进对话日志（同样是"只记日志"）。"""
+
+        log = self.chat_log
+        if log is None:
+            return
+        try:
+            log.record_incoming(message)
+        except Exception:  # noqa: BLE001
+            logger.warning("chat_log_in_failed", exc_info=True)
 
     async def send_typing(self, target: MessageTarget, notice: str = "typing") -> None:
         """广播一次"正在输入"状态（OneBot v11 `set_input_status`）。
@@ -444,6 +539,9 @@ class OneBotWebSocketTransport:
 
         message = parse_message_event(payload)
         if message is not None:
+            # **收到的消息在这里落对话日志**：这是"真正从 QQ 进来"的那一步，
+            # 再往上是判定与回复。只记能解析成消息的事件（心跳/通知不记）。
+            self._note_chat_in(message)
             await self._messages.put(message)
 
     def _authorized(self, connection: ServerConnection) -> bool:

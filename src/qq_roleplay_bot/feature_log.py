@@ -1,8 +1,12 @@
-"""按功能分开的输入输出日志。
+"""按功能分开的输入输出日志（**模型日志**）。
 
 为什么单独做一个：模型 I/O 追踪原来是"一份总账"（`model_trace.py`），只留最近
 30 条、默认关闭，而且**只记 system + 第一条 user 消息**——回复请求有三段
 （system / 稳定段 / 易变段），易变段从来没被记下来过，查问题时正好缺的就是它。
+
+**这一份记的是"模型看到与生成了什么"，不是"群里实际收到什么"**（用户 2026-10-05
+定的边界："对话日志和模型日志分开"）。实际收发那一半在 `chat_log.py`（`chat.jsonl`），
+落在传输层；两边**文件、开关、容量、写入路径都各自独立**，互不覆盖。
 
 现在每个功能各写一份，各留最近 1000 次：
 
@@ -20,7 +24,9 @@
    上百 MB——运行状态里还要报内存占用，不能自己先把内存吃满。内存里只留计数与
    最后几条预览（给 `/super status` 看）。
 2. **文件最多留 2×容量行，超过就重写成最近 1000 条。** 每写一条都重写 1000 行
-   太贵；留一倍余量之后，摊到每条记录的成本可以忽略。
+   太贵；留一倍余量之后，摊到每条记录的成本可以忽略。**这段轮转逻辑现在只有一份**
+   （`RollingJsonlFile`）：对话日志（`chat_log.py`）要的是同一个做法，两边共用，
+   不会出现"模型日志的轮转修了、对话日志还是老样子"。
 3. **内容含完整 system prompt 与聊天正文**，所以目录在 `data/`（已被 .gitignore
    忽略），并且可以用 `QQBOT_FEATURE_LOG=0` 整体关掉。
 4. 单字段上限 20000 字符：一条请求撑不到这个数，但真撑到了也不该让日志无限长。
@@ -78,12 +84,107 @@ def log_capacity() -> int:
     return max(10, min(100000, value))
 
 
-def _trim(text: object) -> str:
+def truncate_field(text: object) -> str:
+    """单字段上限：**模型日志与对话日志共用这一份口径**（见 `MAX_FIELD_CHARS`）。"""
+
     if not isinstance(text, str):
         return ""
     if len(text) <= MAX_FIELD_CHARS:
         return text
     return text[:MAX_FIELD_CHARS] + f"\n…（已截断，原长 {len(text)}）"
+
+
+class RollingJsonlFile:
+    """按条滚动的 JSONL 落盘口：**模型日志与对话日志共用这一份实现**。
+
+    为什么要把它从 `FeatureLog` 里提出来：轮转只能有一份算法。原来"写一条 → 行数
+    超过 `capacity × TRIM_SLACK` 就把文件重写成最近 `capacity` 条"是长在 `FeatureLog`
+    身上的，而对话日志（`chat_log.py`）要的是**同一个做法**（按条滚动、留一倍余量、
+    写盘失败只计数）。提出来之后改一处两边一起生效。
+
+    共用纪律：
+
+    - **绝不让日志打断调用方**：写盘/轮转失败只累加 `write_failures` 并告警，不抛；
+    - 内存里**不留正文**：这里只数行数与字节数（正文在文件里），
+      所以文件再大也不吃内存。
+
+    `capacity` 下限只有 1（`FeatureLog` 自己在传进来之前已经按 10 兜住了）；
+    滚动判据是"行数 > capacity × slack"，所以文件里通常有 capacity..capacity×slack 条。
+    """
+
+    def __init__(self, path: Path | str, *, capacity: int, slack: int = TRIM_SLACK,
+                 enabled: bool = True, label: str = "") -> None:
+        self.path = Path(path)
+        self.capacity = max(1, int(capacity))
+        self.slack = max(1, int(slack))
+        self.enabled = bool(enabled)
+        # 告警行里用它指认是谁：`judge` / `chat`。只用于日志，不参与任何判据。
+        self.label = label or self.path.stem
+        self.lines = 0
+        self.bytes = 0
+        self.write_failures = 0
+        if self.enabled:
+            self.measure()
+
+    def measure(self) -> None:
+        """启动时数一次现有行数与字节数，供运行状态显示。"""
+
+        try:
+            with self.path.open("r", encoding="utf-8", errors="replace") as handle:
+                self.lines = sum(1 for _ in handle)
+            self.bytes = self.path.stat().st_size
+        except FileNotFoundError:
+            return
+        except OSError:
+            self.write_failures += 1
+
+    def append(self, entry: dict[str, object]) -> None:
+        """追加一条；超过上限就把文件重写成最近 `capacity` 条。"""
+
+        if not self.enabled:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            line = json.dumps(entry, ensure_ascii=False)
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+            self.lines += 1
+            self.bytes = self.path.stat().st_size
+        except OSError as exc:
+            self.write_failures += 1
+            logger.warning("rolling_log_write_failed label=%s category=%s",
+                           self.label, type(exc).__name__)
+            return
+        if self.lines > self.capacity * self.slack:
+            self.trim()
+
+    def trim(self) -> None:
+        """把文件重写成最近 capacity 条。顺序读一遍，内存里只留尾部若干行。"""
+
+        try:
+            with self.path.open("r", encoding="utf-8", errors="replace") as handle:
+                tail = deque(handle, maxlen=self.capacity)
+            temp = self.path.with_suffix(".jsonl.trim")
+            with temp.open("w", encoding="utf-8") as handle:
+                handle.writelines(tail)
+            os.replace(temp, self.path)
+            self.lines = len(tail)
+            self.bytes = self.path.stat().st_size
+            logger.info("rolling_log_trimmed label=%s kept=%s", self.label, len(tail))
+        except OSError as exc:
+            self.write_failures += 1
+            logger.warning("rolling_log_trim_failed label=%s category=%s",
+                           self.label, type(exc).__name__)
+
+    def clear(self) -> None:
+        """清空文件与计数（不删文件本身）。"""
+
+        self.lines = 0
+        self.bytes = 0
+        try:
+            self.path.write_text("", encoding="utf-8")
+        except OSError:
+            self.write_failures += 1
 
 
 class FeatureLog:
@@ -105,12 +206,21 @@ class FeatureLog:
         self.clock = clock
         self.path = self.directory / f"{feature}.jsonl"
         self.recorded = 0
-        self.write_failures = 0
-        self._lines_in_file = 0
-        self._bytes = 0
         self._previews: deque[dict[str, object]] = deque(maxlen=PREVIEW_ENTRIES)
-        if self.enabled:
-            self._measure_existing()
+        self._file = RollingJsonlFile(self.path, capacity=self.capacity,
+                                      enabled=self.enabled, label=feature)
+
+    @property
+    def write_failures(self) -> int:
+        return self._file.write_failures
+
+    @property
+    def _lines_in_file(self) -> int:
+        return self._file.lines
+
+    @property
+    def _bytes(self) -> int:
+        return self._file.bytes
 
     def record(self, *, input: str = "", output: str = "", system: str = "",
                error: str = "", **meta: object) -> None:
@@ -124,12 +234,12 @@ class FeatureLog:
             "at": round(self.clock(), 3),
             "feature": self.feature,
             **{key: value for key, value in meta.items() if value not in (None, "")},
-            "system": _trim(system),
-            "input": _trim(input),
-            "output": _trim(output),
+            "system": truncate_field(system),
+            "input": truncate_field(input),
+            "output": truncate_field(output),
         }
         if error:
-            entry["error"] = _trim(error)
+            entry["error"] = truncate_field(error)
         self._previews.append({
             "seq": entry["seq"],
             "at": entry["at"],
@@ -141,7 +251,7 @@ class FeatureLog:
             "input_preview": entry["input"][:PREVIEW_CHARS],
             "output_preview": entry["output"][:PREVIEW_CHARS],
         })
-        self._write(entry)
+        self._file.append(entry)
 
     def snapshot(self) -> dict[str, object]:
         """运行快照里用的摘要：计数、大小、路径，不含正文。"""
@@ -150,10 +260,10 @@ class FeatureLog:
             "enabled": self.enabled,
             "capacity": self.capacity,
             "recorded": self.recorded,
-            "lines": self._lines_in_file,
-            "bytes": self._bytes,
+            "lines": self._file.lines,
+            "bytes": self._file.bytes,
             "file": str(self.path),
-            "write_failures": self.write_failures,
+            "write_failures": self._file.write_failures,
         }
 
     def previews(self, count: int = 5) -> list[dict[str, object]]:
@@ -164,60 +274,7 @@ class FeatureLog:
 
         self._previews.clear()
         self.recorded = 0
-        self._lines_in_file = 0
-        self._bytes = 0
-        try:
-            self.path.write_text("", encoding="utf-8")
-        except OSError:
-            self.write_failures += 1
-
-    # --- 内部 -------------------------------------------------------------
-
-    def _measure_existing(self) -> None:
-        """启动时数一次现有行数与字节数，供运行状态显示。"""
-
-        try:
-            with self.path.open("r", encoding="utf-8", errors="replace") as handle:
-                self._lines_in_file = sum(1 for _ in handle)
-            self._bytes = self.path.stat().st_size
-        except FileNotFoundError:
-            return
-        except OSError:
-            self.write_failures += 1
-
-    def _write(self, entry: dict[str, object]) -> None:
-        try:
-            self.directory.mkdir(parents=True, exist_ok=True)
-            line = json.dumps(entry, ensure_ascii=False)
-            with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
-            self._lines_in_file += 1
-            self._bytes = self.path.stat().st_size
-        except OSError as exc:
-            self.write_failures += 1
-            logger.warning("feature_log_write_failed feature=%s category=%s",
-                           self.feature, type(exc).__name__)
-            return
-        if self._lines_in_file > self.capacity * TRIM_SLACK:
-            self._trim_file()
-
-    def _trim_file(self) -> None:
-        """把文件重写成最近 capacity 条。顺序读一遍，内存里只留尾部若干行。"""
-
-        try:
-            with self.path.open("r", encoding="utf-8", errors="replace") as handle:
-                tail = deque(handle, maxlen=self.capacity)
-            temp = self.path.with_suffix(".jsonl.trim")
-            with temp.open("w", encoding="utf-8") as handle:
-                handle.writelines(tail)
-            os.replace(temp, self.path)
-            self._lines_in_file = len(tail)
-            self._bytes = self.path.stat().st_size
-            logger.info("feature_log_trimmed feature=%s kept=%s", self.feature, len(tail))
-        except OSError as exc:
-            self.write_failures += 1
-            logger.warning("feature_log_trim_failed feature=%s category=%s",
-                           self.feature, type(exc).__name__)
+        self._file.clear()
 
 
 class FeatureLogs:
