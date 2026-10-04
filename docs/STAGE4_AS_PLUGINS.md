@@ -114,3 +114,34 @@ def build_background_plugins(engine)      # 只从 registry.backgrounds 里拿�
   `data/`、`backups/`、`docs/yunru-source/`、`.env` **不在 git 里**，删了不可逆。
 * `deploy_to_run.py`（本体上就有）负责"只增不减"的拷贝与保护检查。
 * **停/重启 `run` 的进程必须先问用户**（AGENTS §五）。
+
+---
+
+## 七、下一步的落点（2026-10-04 实测发现）
+
+移植到 `35d0a29` 时量出来的事实：**本体的命令插件层是半成品**。
+
+| | 本体（stage3 线） | 插件线（stage4） |
+| --- | --- | --- |
+| `CommandRegistry` / `CommandPlugin` | `command_plugins.py` **有** | 有 |
+| `default_command_plugins()` | `builtin_commands.py` **有** | 有 |
+| **谁调用它们** | **没有任何地方调**（`git grep` 只有定义处） | `build_engine` 里装配 |
+| `DialogueEngine.commands` | **不存在** | 有（插件登记命令的地方） |
+| `engine.plugin_registry` | 不存在 | 有（后台插件从它取） |
+
+所以插件线的 `attach_plugins(registry, engine.commands)` 在本体上**没有落点**。
+剩下的移植顺序应当是：
+
+1. **给引擎建落点**：`engine.commands`（一个 `CommandRegistry`），并把本体的
+   `default_command_plugins()`（ping 等）装进去——**先让本体自己那条路通**，
+   再谈插件；
+2. 在 `build_engine` 里造 `PluginRegistry` → `attach_plugins(registry, engine.commands)`
+   → `engine.plugin_registry = registry`（**这三行就是接口对齐的核心**）；
+3. 接缝（`ChatSeams` / `ReportSeams` / `UiSeams` + `runtime._SeamBinder`）——
+   插件线那块是 **+515 行**，最敏感（AGENTS 2.1 那三条"核心内的规矩"就在里面）；
+   可以先留空让相关插件优雅降级，再逐块接；
+4. 补插件测试（缺 5 个文件），跑五条判据。
+
+**不要**跳过第 1 步直接抄第 2 步：本体没有 `engine.commands`，`attach_plugins`
+会直接抛（或静默装不上），而"装上了但认不出"这个坑 AGENTS 里已经记过一次。
+
