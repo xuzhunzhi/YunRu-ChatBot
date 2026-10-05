@@ -83,3 +83,32 @@ def test_the_core_and_the_plugins_share_one_role_cache() -> None:
     assert asyncio.run(shared.role(GROUP)) == ROLE_OWNER
 
 
+def test_the_join_approval_plugin_gets_the_cores_role_service() -> None:
+    """真装配里：入群审批取到的角色来源**就是核心那一份**（不是第三份）。
+
+    上面那条钉的是"共享位上放的是核心那份"，这条往下走一步：**真的去问的那个插件**
+    （`plugins/join_approval/`，它判"她在这个群够不够格批"）拿到的也是同一个对象。
+    本体 `1c5fcf3` 之后 `plugins/roles/` 已删，共享位上只剩核心放的
+    `engine.group_roles`，所以这两条合起来就是"插件那条取角色的路上没有第二份实现"。
+    """
+
+    from qq_roleplay_bot import dev_config
+    from qq_roleplay_bot.plugins.join_approval import plugin as join_plugin
+
+    original = dev_config.AUTO_APPROVE_JOIN
+    dev_config.AUTO_APPROVE_JOIN = True      # 关掉时这个插件根本不装，就测不到了
+    try:
+        engine = runtime.build_engine(FakeTransport())
+    finally:
+        dev_config.AUTO_APPROVE_JOIN = original
+
+    join = next((plugin for plugin in engine.plugin_registry.backgrounds
+                 if getattr(plugin, "name", "") == "join-approval"), None)
+    assert join is not None, "入群审批没装上（后台节拍里没有 join-approval）"
+    source = join.poller.roles
+    assert isinstance(source, join_plugin._RoleSource), (
+        "插件该用自己那个「只问共享位」的转手，而不是别的东西")
+    assert source.current() is engine.group_roles, (
+        "插件取到的必须是核心那一份，否则'她是不是群主'又有两个答案")
+
+
