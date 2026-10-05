@@ -9,9 +9,18 @@ SnowLuma 把**表情包也发成 `image` 段**，所以按段类型分必然出�
     sub_type=11 summary=[图片]     → **表情包**（summary 写的是"图片"，只看它会漏）
     sub_type=7  summary=[可怜]     → 表情包（商城表情）
     sub_type=0  summary=[嘻嘻] + emoji_id/key/emoji_package_id → 表情包
-"""
-import asyncio
 
+## 识图那三条搬走了（2026-10-05 分支拆分）
+
+原来这个文件末尾还有三条要造 `ImageDescriber`（住在 `plugins/vision/`）的用例：
+"表情包按表情包问"、"最终正文是 `[表情包：…]`"、"贴图+照片混着时不按贴图问"。
+它们**搬到了 `tests/test_media_segments_plugins.py`**，本体侧这份不再 import 插件。
+
+**为什么是搬不是删/skip**：本体侧的正常形态是"插件文件夹不在"（`plugins/` 下只有
+`__init__.py`），那三条在那种树上**根本不该存在**——它们要的是插件提供的能力。
+按判据它们归**插件侧**。断言一字未改，共享的样例数据与 `Recorder` 仍在本文件里
+（由插件侧那份 import 过去），所以样例形状只有一份。
+"""
 from qq_roleplay_bot.conversation_context import segments_to_text
 from qq_roleplay_bot.media_segments import (
     IMAGE,
@@ -25,11 +34,6 @@ from qq_roleplay_bot.media_segments import (
     replace_media_placeholder,
 )
 from qq_roleplay_bot.onebot_ws import extract_media_kinds, parse_message_event
-from qq_roleplay_bot.stage3_main import DialogueEngine
-from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
-# 识图那一块现在是插件（2026-10-05 从包根 `qq_roleplay_bot.vision` 搬去
-# `plugins/vision/`）：这个文件用它来验"表情包按表情包问"。
-from qq_roleplay_bot.plugins.vision.vision import ImageDescriber, VISION_SYSTEM_PROMPT
 
 GROUP = "717151356"
 ME = "900000001"
@@ -142,7 +146,13 @@ def test_history_seeding_uses_the_same_judgement() -> None:
     ]) == "哈哈[表情]"
 
 
-# --- 识图那边 ---------------------------------------------------------------
+# --- 识图那边（插件侧）------------------------------------------------------
+#
+# 这里只留 `Recorder` 与 `replace_media_placeholder` 的判据：
+# - `Recorder` 是**假客户端**（只回一句话），它属于测试辅助，插件侧那三条也要用它，
+#   所以留在本体侧这份里、由 `tests/test_media_segments_plugins.py` import 过去；
+# - `replace_media_placeholder` 现在是**核心**的（`media_segments.py`，2026-10-05
+#   从 `vision.py` 搬回来），它跟识图插件在不在无关，所以留在这里验。
 
 class Recorder:
     def __init__(self, reply: str = "一只黄色的恐龙玩偶竖着大拇指") -> None:
@@ -154,19 +164,6 @@ class Recorder:
         return self.reply
 
 
-def test_vision_asks_differently_for_a_sticker() -> None:
-    client = Recorder()
-    describer = ImageDescriber(client)
-    asyncio.run(describer.describe(["https://x/1.gif"], sticker=True))
-    content = client.requests[0][-1]["content"]
-    assert "表情包" in content[0]["text"]
-    assert "表情包" in VISION_SYSTEM_PROMPT and "不是别人拍的照片" in VISION_SYSTEM_PROMPT
-
-    asyncio.run(describer.describe(["https://x/2.jpg"]))
-    content = client.requests[1][-1]["content"]
-    assert "表情包" not in content[0]["text"]
-
-
 def test_placeholder_carries_the_right_label() -> None:
     assert replace_media_placeholder("这个[表情包]", "一只猫") == "这个[表情包：一只猫]"
     assert replace_media_placeholder("[表情包][表情包]", "一只猫") == "[表情包：一只猫][表情包]"
@@ -174,39 +171,3 @@ def test_placeholder_carries_the_right_label() -> None:
     assert replace_media_placeholder("看这个[图片]", "猫") == "看这个[图片：猫]"
     assert replace_media_placeholder("没有占位符", "猫") == "没有占位符[图片：猫]"
     assert replace_media_placeholder("看图", "") == "看图"
-
-
-def test_sticker_goes_through_vision_as_a_sticker() -> None:
-    """一条只有表情包的消息：正文里最终应当是 `[表情包：…]`，不是 `[图片：…]`。"""
-
-    client = Recorder("一只黄色的恐龙玩偶")
-    engine = DialogueEngine(client, super_admin_user_ids=frozenset({ME}))
-    engine.vision = ImageDescriber(client)
-    message = IncomingMessage(
-        message_id="m1", session_id=f"group:{GROUP}", user_id=ME,
-        text="（发送了一条媒体消息）[表情包]", target=MessageTarget(group_id=GROUP),
-        has_media=True, media_urls=(ANIMATED_STICKER["url"],), media_kinds=(STICKER,),
-    )
-    state = engine.sessions.state(message.session_id)
-    updated = asyncio.run(engine._apply_vision(message, state))
-    assert "[表情包：一只黄色的恐龙玩偶]" in updated.text
-    assert "[图片" not in updated.text
-    assert updated.media_kinds == ()
-
-
-def test_mixed_media_is_asked_as_a_plain_picture() -> None:
-    """一条消息里既有贴图又有照片时，不按贴图问——免得把照片讲成梗图。"""
-
-    client = Recorder()
-    engine = DialogueEngine(client, super_admin_user_ids=frozenset({ME}))
-    engine.vision = ImageDescriber(client)
-    message = IncomingMessage(
-        message_id="m2", session_id=f"group:{GROUP}", user_id=ME,
-        text="[表情包][图片]", target=MessageTarget(group_id=GROUP),
-        has_media=True, media_urls=(ANIMATED_STICKER["url"], PLAIN_IMAGE["url"]),
-        media_kinds=(STICKER, IMAGE),
-    )
-    state = engine.sessions.state(message.session_id)
-    asyncio.run(engine._apply_vision(message, state))
-    question = client.requests[0][-1]["content"][0]["text"]
-    assert "表情包" not in question
