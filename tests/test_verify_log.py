@@ -181,3 +181,88 @@ def test_git_head_reads_without_spawning_git() -> None:
                           capture_output=True, text=True)
     if real.returncode == 0:
         assert sha == real.stdout.strip()[:7]
+
+
+# --- worktree 里的解析（2026-10-05 修的 bug）---------------------------------
+#
+# 上面那条 `test_git_head_reads_without_spawning_git` 在**本仓库主工作树**里跑不出
+# 这个 bug：普通仓库的 `.git` 是目录，ref 就在里面。`git worktree add` 出来的树
+# 里 `.git` 是一个文件，指向 `<主库>/.git/worktrees/<名字>`——**那是这个 worktree
+# 自己的** git 目录，`HEAD` 在里面，而 `refs/heads/<名字>` 与 `packed-refs` 在
+# **共享**目录里（由同级的 `commondir` 文件指出）。
+#
+# 离线测试里造不出真的 worktree（要起 git 子进程、要写仓库外层），所以下面按磁盘
+# 上的**文件形状**手搭一份，把解析逻辑钉住。实测的现场（2026-10-05）：
+# `dev\.git\worktrees\yunru-stage4\` 里有 `HEAD`(=`ref: refs/heads/stage4-plugins`)
+# 与 `commondir`(=`../..`)，没有 `refs/`；那时 `git_head()` 返回
+# `('unknown', 'stage4-plugins')`。
+
+_SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+def _fake_worktree(tmp: pathlib.Path, *, common: str, loose: bool):
+    """手搭一份 worktree 的 git 目录形状，返回 `(workspace, gitdir)`。"""
+
+    workspace = tmp / "wt"
+    workspace.mkdir()
+    gitdir = tmp / "main" / ".git" / "worktrees" / "wt"
+    gitdir.mkdir(parents=True)
+    (gitdir / "HEAD").write_text("ref: refs/heads/stage4-plugins\n", encoding="utf-8")
+    (gitdir / "gitdir").write_text(str(workspace / ".git") + "\n", encoding="utf-8")
+    (gitdir / "commondir").write_text(common + "\n", encoding="utf-8")
+    (workspace / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+    common_dir = (pathlib.Path(common) if pathlib.Path(common).is_absolute()
+                  else (gitdir / common).resolve())
+    common_dir.mkdir(parents=True, exist_ok=True)
+    if loose:
+        ref = common_dir / "refs" / "heads" / "stage4-plugins"
+        ref.parent.mkdir(parents=True, exist_ok=True)
+        ref.write_text(_SHA + "\n", encoding="utf-8")
+    else:
+        # `git gc` 之后很常见的形状：ref 在打好的 packed-refs 里
+        (common_dir / "packed-refs").write_text(
+            "# pack-refs with: peeled fully-peeled sorted\n"
+            f"{_SHA} refs/heads/stage4-plugins\n", encoding="utf-8")
+    return workspace, gitdir
+
+
+def test_git_head_follows_commondir_into_the_shared_git_dir() -> None:
+    """worktree：**松散的** ref 在共享目录里，也要读得到（这就是修掉的那一步）。
+
+    不跟 `commondir` 时这里会返回 `('unknown', 'stage4-plugins')`——那正是
+    2026-10-05 在 `yunru-stage4` 那棵树上实测到的假红。
+    """
+
+    V = _modules()
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace, _ = _fake_worktree(pathlib.Path(tmp), common="../..", loose=True)
+        sha, branch = V.git_head(workspace)
+    assert sha == _SHA[:7], sha
+    assert branch == "stage4-plugins", branch
+
+
+def test_git_head_sees_refs_that_git_packed_away() -> None:
+    """worktree + `packed-refs`（在共享目录里的）：也要读得到。"""
+
+    V = _modules()
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace, _ = _fake_worktree(pathlib.Path(tmp), common="../..", loose=False)
+        sha, branch = V.git_head(workspace)
+    assert sha == _SHA[:7], sha
+    assert branch == "stage4-plugins", branch
+
+
+def test_without_commondir_a_worktree_loses_its_sha() -> None:
+    """**反向钉子**：把 `commondir` 去掉，就必须读不到 sha。
+
+    这条不是"期望坏掉"，而是钉住"到底哪一步在起作用"——如果哪天有人把
+    `_read_ref()` 改成"找不着就自己编一个"，上面两条会照旧绿，而这条会红。
+    """
+
+    V = _modules()
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace, gitdir = _fake_worktree(pathlib.Path(tmp), common="../..", loose=True)
+        (gitdir / "commondir").unlink()
+        sha, branch = V.git_head(workspace)
+    assert sha == "unknown", sha
+    assert branch == "stage4-plugins", "HEAD 还在，分支名不该跟着丢"
