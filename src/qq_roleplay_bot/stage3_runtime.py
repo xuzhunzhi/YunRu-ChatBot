@@ -10,7 +10,6 @@ from html import escape
 from .transport import IncomingMessage, MessageTarget
 from .security import sanitize_chat_text, sanitize_reply_text
 from .memory_filters import scrub_system_self
-from .ask_when_unsure import UNSURE_ASK_RULE
 from .extensions import PromptMaterial
 from .base_prompt import BASE_PROMPT
 from .memory_model import MemoryMaterial
@@ -687,12 +686,17 @@ NO_REPLY 表示这次不发言但话题继续；EXIT_DIALOGUE 表示退出当前
 引用回复是例外而不是默认：普通接话、闲聊、回答当前这句时一律填 none。
 只有当回复必须挂到更早的某一句上才不至于产生歧义时，才引用那一句的编号。
 不要养成每条都引用的习惯。
-""" + UNSURE_ASK_RULE
-# 上面那份内置默认**已经带了代码层的「不懂就问」规矩**（`UNSURE_ASK_RULE`），所以
-# `prompt_library` 里 `reply` 那一套的默认值、以及面板"查看当前 prompt"看到的，
-# 都与真正生效的那一份一致（否则面板显示的和实际发的差一段规矩，改 prompt 的人会看错）。
-# 装配时 `compose_system_prompt` **还会再拼一次**（幂等）：那是为了面板保存的覆盖版
-# 也躲不掉这条规矩——它跟着代码走，不跟着人格或面板走。
+"""
+# ⚠️ **这一份是她的常驻 system，2026-10-05 起不再带「不懂就问」那段规矩**
+# （`ask_when_unsure.UNSURE_ASK_RULE`）。原因实测在案：它被无条件拼进来之后
+# system 从 7061 → 7378 字，多出的正是那段"他说的是一件具体的事——某个说法、
+# 某个行当里的规矩、某个数字…"的措辞；**prompt 里的措辞会被角色吸收**
+# （AGENTS §2.2），她的 `intent` 于是从"接住吐槽，顺口一句"变成"接话，给出判断"。
+# 那段话现在只作为**这一轮**的现场提示进易变段（`ASK_TURN_NOTE` / `HOLD_TURN_NOTE`，
+# 见 `stage3_main._model_path` 里 `clarify_note` 那一路），常驻 system 一个字都不加。
+#
+# 所以这里必须与 `prompt_library` 里 `reply` 那一套的**内置默认逐字一致**：
+# 面板"查看当前 prompt"看到的就是真正生效的那一份。
 
 
 def _replace_once(text: str, old: str, new: str) -> str:
@@ -739,24 +743,26 @@ def resolve_system_prompt(*, must_reply: bool = False) -> str:
 
 
 def compose_system_prompt(persona_text: str) -> str:
-    """把**代码层的规矩**拼在人格（或面板保存的那一份）之后。
+    """system 段的**唯一装配点**：现在它一字不加，原样返回。
 
-    为什么要这一层（2026-10-04，人格那件事教给我们的）：生产上 `BASE_PROMPT` 是
-    **整段替换**的——`data/private_docs/base_prompt.REAL.py` 里找到 `BASE_PROMPT = \"\"\"…\"\"\"`
-    就整段返回（`base_prompt.py:249-251`），仓库模板写什么都不生效。所以"不懂就问"
-    这类规矩**不能写进人格文件**：写在那儿等于只在 `dev/` 生效、在生产一个字都不算数。
-    放在这里之后它跟着代码走：面板换人格、部署换真人格，规矩都在。
+    为什么要留这一层（而不是把调用点删掉）：`AGENTS` §2.2 要求"代码层的规矩"只能
+    从这里进 system——生产上 `BASE_PROMPT` 是**整段替换**的
+    （`base_prompt.py:249-251` 找到 `data/private_docs/base_prompt.REAL.py` 就整段返回），
+    写进仓库模板的规矩在生产上一个字都不算数。留着这个接缝，下次要有代码级规矩时
+    只改这里一处，调用点与测试都不用动。
 
+    **2026-10-05 改**：这一层原来拼的是「不懂就问」的 `UNSURE_ASK_RULE`（无条件、
+    27 天里一直生效）。那条规矩的措辞教她"分析话题"，实测把她的说话意图带偏了
+    （见 `SYSTEM_PROMPT` 上面那段），所以**从这里撤掉**——它现在只按轮次进易变段，
+    详见 `ask_when_unsure.ASK_TURN_NOTE`。
+
+    **必须一字不加**：它拼的是常量，system 段每变一个字整段前缀缓存就作废；
+    而且"开关关掉时 system 与从前逐字相同"这句话就靠这一层成立。
     `persona_text` 用参数传进来（而不是在这里 import `BASE_PROMPT`）是为了让
-    "换一份人格，规矩还在不在"能被直接测出来。
-
-    幂等：已经拼过就不再拼（面板保存的 prompt 里若已经带了这一段，不会出现两遍）。
+    "换一份人格之后 system 是什么样"能被直接测出来。
     """
 
-    body = persona_text or ""
-    if UNSURE_ASK_RULE in body:
-        return body
-    return body + UNSURE_ASK_RULE
+    return persona_text or ""
 
 
 # 触发类型的自然语言说法。这些词会出现在 user 消息里，所以必须是交谈视角的
@@ -1291,9 +1297,10 @@ def build_dialogue_messages(
         # 也不知道邮件是发给我了"）。这段只在**收信人本人**说话时才会出现
         # （判断在引擎的 `_letter_note` 里），这里只负责把信递给他看。
         + _letter_block(letter_note)
-        # 「不懂就问」的**现场**提示（2026-10-04）：这一轮她有没有把握、该不该先问一句，
-        # 由引擎按判定的信号 + 三种根据确定性地定（`ask_when_unsure.decide_grounding`），
-        # 这里只把结论递给她。**只进易变段**：system 段每轮变一个字，前缀缓存整段作废。
+        # 「不懂就问」的**现场**提示（2026-10-04；2026-10-05 起它是这条规矩**唯一**的去处）：
+        # 这一轮她有没有把握、该不该先问一句，由引擎按判定的信号 + 三种根据确定性地定
+        # （`ask_when_unsure.decide_grounding`），这里只把结论递给她。**只进易变段**：
+        # system 段每轮变一个字，前缀缓存整段作废；而且常驻的措辞会被角色吸收。
         + clarify_note
         + "<current_event>\n"
         # 当前这条**同样要有** at / reply_to：她要不要接、接谁的话，先看的就是这一条。
@@ -1311,9 +1318,10 @@ def build_dialogue_messages(
         # system 段**每次现取**：面板保存的覆盖版下一条消息就生效（热更）。
         # `system_text` 只给测试与显式调用方用；不传就是当前生效的那一份。
         #
-        # **代码层的规矩在 `compose_system_prompt` 里拼上去**（见它的说明）：生产上人格是
-        # 整段替换的，写进人格文件的规矩进不了她的 prompt。拼的是**常量**，所以 system
-        # 段逐轮稳定、前缀缓存不受影响。
+        # **代码层的规矩一律经 `compose_system_prompt`**（见它的说明）：生产上人格是
+        # 整段替换的，写进人格文件的规矩进不了她的 prompt。它现在**一字不加**——
+        # 「不懂就问」那段已经撤到易变段（2026-10-05），所以这一行拿到的就是逐字原文，
+        # system 段逐轮稳定、前缀缓存不受影响。
         {"role": "system",
          "content": compose_system_prompt(
              system_text if system_text is not None

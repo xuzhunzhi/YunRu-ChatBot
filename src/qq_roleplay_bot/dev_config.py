@@ -141,6 +141,50 @@ MEMORY_API_KEY = agent_api_key("QQBOT_MEMORY_API_KEY")
 TARGET_GROUP_ID = "717151356"
 
 
+# --- 回复 agent 能不能单独换一套地址 / 模型 / key（2026-10-05）------------------
+#
+# 用户要求：**每个 agent 各用各的 base URL/key**。已有的 `QQBOT_API_BASE_URL` /
+# `QQBOT_API_KEY` / `QQBOT_API_MODEL` 是**全局那一套**（判定 / 记忆 / 审核 / 写信
+# 都按它组装，各自再配自己的 key）；这一节给**回复 agent** 一份可选的覆盖：
+#
+#     QQBOT_REPLY_API_BASE_URL / QQBOT_REPLY_API_MODEL / QQBOT_REPLY_API_KEY
+#
+# **缺省行为逐字不变**：这三个都没配（或配了空串）时，回复 agent 拿到的就是
+# 全局那一套——只配一把 key 的部署、干净 clone、测试全都照旧。
+# 反过来，只有回复那一路会换供应商：判定 / 记忆 / 审核仍然走全局地址。
+#
+# 写成函数而不是 import 期常量：面板热更与测试都靠"**调用时现读**环境"
+# （与 `agent_api_key` 同一条纪律）。空串一律当"没配"。
+
+
+def reply_api_base_url() -> str:
+    """回复 agent 的地址：专属的没配就回落全局地址（再没有就用代码默认）。"""
+
+    return (get("QQBOT_REPLY_API_BASE_URL", "") or get("QQBOT_API_BASE_URL", "")
+            or API_BASE_URL)
+
+
+def reply_api_model() -> str:
+    """回复 agent 的模型名：专属的没配就回落全局模型。"""
+
+    return get("QQBOT_REPLY_API_MODEL", "") or get("QQBOT_API_MODEL", "") or API_MODEL
+
+
+def reply_api_key() -> str:
+    """回复 agent 的 key：专属的没配就回落主 key（`QQBOT_API_KEY`）。
+
+    与 `agent_api_key` 同一个语义：分 key 只是"出问题只吊销那一把"，
+    不比主 key 多出任何隔离（并发限额与缓存容量是账号级的）。
+
+    **空串要当成"没有设置"**（第三项那个常量兜底就是干这个的）：环境里留一个空值
+    会把 `.env` 的填充挡在门外（`load_env_file` 不覆盖已存在的键），
+    2026-10-01 出过一次这样的事故——回复 agent 的 key 变空、模型全 401。
+    """
+
+    return (get("QQBOT_REPLY_API_KEY", "") or get("QQBOT_API_KEY", "")
+            or get("API_KEY", "") or API_KEY)
+
+
 def _csv_ids(name: str) -> frozenset[str]:
     """把一个逗号分隔的环境变量读成 id 集合（空 → 空集合）。
 
@@ -346,8 +390,12 @@ MEMORY_USER_ID = get("QQBOT_MEMORY_USER_ID", "qqbot-memory")
 
 # --- 回复风格审核（可选 agent）----------------------------------------------
 # 离线实测（data/style_reviewer_ab.py）：光靠 prompt 压不住"冲/抬杠"，而一次窄职责
-# 校对能把这类尾巴删掉（10 条改 5 条，中位长度 20→12 字）。默认**不开**：
+# 改写能把这类尾巴删掉（10 条改 5 条，中位长度 20→12 字）。默认**不开**：
 # 它每条回复多花一次调用（实测 +0.6~0.9 秒、约 360 token），钱要用户点头才花。
+#
+# **2026-10-05 起它只判不改**（用户："审核只负责打回，不负责修改"）：判不过就把理由
+# 交回回复 agent 重写一次（判不过的轮次因此多一次调用）。它不再产出正文，
+# 所以上面那句"10 条改 5 条"是**历史**——见 `style_reviewer.py` 的模块说明。
 # 语义：配了 `QQBOT_REVIEW_API_KEY` 就自动启用；`QQBOT_STYLE_REVIEW=0/1` 可以强行关或开。
 REVIEW_API_KEY = get("QQBOT_REVIEW_API_KEY", "")
 REVIEW_ENABLED = _enabled("QQBOT_STYLE_REVIEW", "1" if REVIEW_API_KEY else "0")

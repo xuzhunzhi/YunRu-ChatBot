@@ -49,8 +49,17 @@ OneBot 已连接
 | `QQBOT_API_BASE_URL` | 服务商地址，默认 `https://api.deepseek.com` |
 | `QQBOT_API_MODEL` | 模型名，默认 `deepseek-chat` |
 | `QQBOT_API_KEY` | **必填**。回复用的 key |
+| `QQBOT_REPLY_API_BASE_URL` | 可选。**只给回复 agent** 的地址（2026-10-05 起可以有）；不配回落全局地址 |
+| `QQBOT_REPLY_API_MODEL` | 可选。只给回复 agent 的模型；不配回落全局模型 |
+| `QQBOT_REPLY_API_KEY` | 可选。只给回复 agent 的 key；不配回落主 key |
 | `QQBOT_JUDGE_API_KEY` | 可选，判定用；不配回落主 key |
 | `QQBOT_MEMORY_API_KEY` | 可选，记忆维护用；不配回落主 key |
+| `QQBOT_REVIEW_API_KEY` | 可选，风格审核用；**配了它就自动开**（也可回落主 key） |
+
+**每个 agent 各用各的地址**：`QQBOT_REPLY_API_*` 只影响回复那一路（含按会话新建的
+client），判定 / 记忆 / 审核 / 写信仍然走全局那一套。所以"把回复换到别家模型、
+判定继续用便宜的那家"是填三个键的事，不用改代码。这三项在面板上也是 live 的，
+留空 = 清掉覆盖、回落全局。
 
 ⚠️ **同一个账号下的多把 key 不隔离并发限额与缓存容量**——那两样是账号级的。
 分 key 的意义是"出问题只吊销那一把"。想让账单彻底分开，得用**不同账号**的 key。
@@ -107,7 +116,7 @@ netstat -ano | findstr :8080     # 看是谁占了
 | `QQBOT_GROUP_LISTEN` | `1` | `1` = 群里每条消息都送进模型判断，她能看见别人之间的对话；`0` = 只跟对话对象说话 |
 | `QQBOT_TYPING_SIM` | `1` | `1` = 先亮"正在输入"、按字数停顿、长回复拆成几条；`0` = 立刻一次性发出 |
 | `QQBOT_VISION` | `1` | 识图：有图的消息先看一眼再判定 |
-| `QQBOT_STYLE_REVIEW` | 跟随 | 回复出口前的窄职责校对；配了审核 key 时默认开 |
+| `QQBOT_STYLE_REVIEW` | 跟随 | 回复出口前**只看不改**的审核（四类：事实错误/越权/出戏/伤人）；配了审核 key 时默认开。判不过就让回复 agent 重写一次 |
 | `QQBOT_DUAL_AGENT` | `1` | 判定与回复分离；判定不接就不发生回复调用 |
 
 ---

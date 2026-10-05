@@ -64,9 +64,32 @@ JudgeVerdict（dialogue_judge.py:137）的字段只有：
 | 根据检查（知识库 / 记忆 / 语境） | `ask_when_unsure.decide_grounding`（纯函数）+ `context_is_explicit` | 第三样"语境明确"是**粗判据**：只认"挂在眼前某一句上"与"对方正在解释这件事"；判不准就当作不明确（宁可问，不许编） |
 | 没被叫到且没懂 → 不插话 | 在取资料**之前**就返回，不额外翻知识库 | 这一轮本来就不出声，翻资料白花钱 |
 
+> ### ⚠️ 2026-10-05 更正：上面"三条禁令由 `compose_system_prompt` 拼进回复 prompt"**已作废**
+>
+> 用户报"她的回复风格变得很奇怪，很 ai"；定位到的两个原因之一就是这一行：
+> 那段规矩被**无条件**拼进**常驻 system**，system 从 **7061 → 7378 字**，
+> 多出来的正是"他说的是一件**具体的事**——某个说法、某个行当里的规矩、某个数字……"。
+> **那段措辞教她"分析话题"**（AGENTS §2.2：prompt 里的措辞会被角色吸收），
+> 她的 `intent` 于是从"接住吐槽，顺口一句"变成"接话，**给出判断**""给个实际出路"。
+>
+> 现在：**常驻 system 里没有它**（`SYSTEM_PROMPT` 与 `prompt_library` 的内置默认都不带，
+> `compose_system_prompt` 一字不加）；这条规矩只在判定说"这一句你没跟上"的那一轮，
+> 以 `ASK_TURN_NOTE` / `HOLD_TURN_NOTE` 进**易变段**（`stage3_main._model_path` 的
+> `clarify_note` 那一路——原本就是这么写的，保留）。`UNSURE_ASK_RULE` 这一份留着，
+> 它是那两条现场提示的完整版说法。
+>
+> 守卫跟着换了：`tests/test_ask_when_unsure.py` 里
+> `test_the_rule_survives_a_replaced_persona` 改成
+> `test_the_rule_is_not_in_the_system_prompt_even_with_a_replaced_persona`，
+> 另加 `test_the_resident_system_prompt_carries_no_unsure_rule`（长度钉子 + 不含那段文本）。
+> 逐字证据：改动前的 system == 改动后 + 那段规矩（`old == new + rule`，本树 6504 = 6187 + 317；
+> 生产 7378 = 7061 + 317）。
+
 判定那两个标签加进 `JUDGE_SYSTEM_PROMPT` 与 `JUDGE_ROUTING_PROMPT` 之后，判定的 prompt 从
-1916 字到 2121 字（`tests/test_dialogue_judge.py` 要求它小于回复 prompt 的三分之一）。
-**不多花一次调用**：那两个信号由原本那趟判定顺带吐出。
+1916 字到 2121 字。**不多花一次调用**：那两个信号由原本那趟判定顺带吐出。
+（2026-10-05 注：那一条"判定 prompt 小于回复 prompt 的三分之一"的断言跟着常驻 system 变短
+而失效——它其实在测"那份协议有多长"，现在改成直接跟**人格**比，见
+`tests/test_dialogue_judge.py`。）
 
 ---
 
@@ -142,7 +165,7 @@ JudgeVerdict（dialogue_judge.py:137）的字段只有：
 
 ### A 的审计范围（嫌疑度排序）
 
-1. **`style_reviewer.py` + `prompt_library.py` 里风格审核那套**——每条回复发送前过一道校对，
+1. **`style_reviewer.py` + `prompt_library.py` 里风格审核那套**——每条回复发送前过一道审核，
    写得保守就会把情绪磨平（改成"保留语气与情绪，只挡：事实错误、越权、出戏、伤人"）；
 2. `base_prompt.py`（**上半是"写 prompt 的说明"、下半才是人格正文**，别改错地方）；
 3. `stage3_runtime.py`（80 处"不要/不必/不许/别"，只改压制情绪的）；
@@ -163,7 +186,7 @@ JudgeVerdict（dialogue_judge.py:137）的字段只有：
 | `base_prompt.py:72-73` | "别把兴趣讲成科普，也别给建议清单、别给人上课" | 说教/上课 | 保留（压的是"讲台"，不是情绪） |
 | `base_prompt.py:74-75`（原 73-74） | "她会烦、会累、会不想说话。这些不是要压住的缺陷" | 只说了情绪"可以存在"，**没给表达许可** | 改成许可：L75-78"情绪出来的时候不要收着……唯一要收着的地方是别拿它去砸人"，并列进 L175-177 的边界："不攻击、不羞辱、不教训、不阴阳怪气地刺他，别的一概不用忍" |
 | `base_prompt.py:64-65` | "一到三句就够……话短不等于冷淡" | 长度（不是情绪） | 保留 |
-| `style_reviewer.py:52-79` | 判据 1 删反问、判据 3 删吐槽、判据 5"超过 40 字"、末尾"只删掉'冲'、'抬杠'和'上课'" | **情绪本身** | **这是元凶**：判据收成四类（事实/越权/出戏/伤人），并明写"不耐烦、嫌弃、懒得理、写得冲都不改""你不负责把话改短、改客气、改平稳""改完不许比原稿更冷、更淡、更客气" |
+| `style_reviewer.py:52-79` | 判据 1 删反问、判据 3 删吐槽、判据 5"超过 40 字"、末尾"只删掉'冲'、'抬杠'和'上课'" | **情绪本身** | **这是元凶**：判据收成四类（事实/越权/出戏/伤人），并明写"不耐烦、嫌弃、懒得理、写得冲都不改""你不负责把话改短、改客气、改平稳""改完不许比原稿更冷、更淡、更客气"（**2026-10-05 起它连"改"都不做了**，见下一条） |
 | `stage3_runtime.py` 里 `不要/不必/不许/别` 那批（本次实测 `Select-String` 命中 59 行；文件头那句"80 处"没复核） | 逐条看过 | 全是说话方式/身份/引用格式/安全边界/名册与旧事归属 | **一个字没动**（没有压情绪的那一类） |
 | `prompt_library.py` | `MUST_REPLY_ANCHORS` 等 | 机制与"必须回" | 没动 |
 
@@ -180,6 +203,26 @@ JudgeVerdict（dialogue_judge.py:137）的字段只有：
   把"写得冲也不改"改成"写得冲就改成温的"→ 审核断言红。
 * 实测：`pyflakes` 干净；套件 899 / OK / skipped=0（基线 895，+4 条新守卫）；
   `check_module_removal` 7 个可插能力全"能"。
+
+### ⚠️ 2026-10-05 更正：审核**只判不改**了，"情绪"这一半的判据仍是四类
+
+用户原话：*"审核只负责打回，不负责修改"*。此前它是**改写型**（`review()` 返回改完的文本），
+也就是**风格审核在直接改写她的话**——用户报的"她的回复风格变得很奇怪、很 ai"里，
+这是被定位到的第二个原因（第一个见 §① 的 2026-10-05 更正）。
+
+现在：`review(draft) -> (是否通过, 理由)`；判不过 → 理由交回**回复 agent**，同一轮里重写一次
+（**最多一次**）；重写后仍被拒 → **发重写的那一版**并记一笔；超时/报错/输出认不出 → 按**通过**。
+四类判据一个字没动（事实错误 / 越权 / 出戏 / 伤人），"她的脾气与情绪不归它管"那几句也留着，
+只是把"只改这四类"改成"只看这四类"。`keeps_the_facts` / `within_growth_limit` 两条机械兜底
+**随改写路径一起删掉**：审核不再产出文本，"改坏事实"由结构排除，不需要兜底。
+
+守卫跟着改口径（守的东西没变）：`tests/test_persona_shape.py` 里
+`test_review_prompt_keeps_emotion_and_only_blocks_four_kinds` 的锚点从"只改这四类/
+写得冲也不改/一字不差/改完不许比原稿更冷更淡"换成"只看这四类/写得冲也不算越界/
+只判断不改写/一律判过"；`tests/test_style_reviewer.py` 里新增
+"打回 → 同一轮重写一次""重写仍被拒也照发""审核返回改写文本时不听它的"三条。
+**第 2026-10-04 那条突变（删掉"只改这四类"）现在没有对象了**——那个说法已经不在 prompt 里，
+新的对应突变是"让审核重新返回改完的文本 / 让调用方直接用审核的文本"，实测三条用例转红。
 
 ### ⚠️ 2026-10-04 更正：人格那一半**已经撤回**，只剩风格审核
 
@@ -202,6 +245,17 @@ JudgeVerdict（dialogue_judge.py:137）的字段只有：
 **要生效得把 `dev/src/qq_roleplay_bot/{base_prompt,style_reviewer}.py` 同步到 `run/src/`**
 （`run/` 不许由我这边直接改）。另外 `run/data/private_docs/base_prompt.REAL.py` 是那份真人格——
 **它里面可能还有压情绪的句子，这次审计看不到**，同步源码不会动它，需要单独过一遍。
+
+**2026-10-05 那轮改动要同步的文件**（比上面这一行多）：
+`dev/src/qq_roleplay_bot/{stage3_runtime,style_reviewer,stage3_main,dev_config,operator_config,
+runtime,runtime_flags,snapshots,api_usage,ask_when_unsure}.py`。两处**部署侧**注意：
+
+1. **面板保存过的 `reply` 那份覆盖版**（`run/data/prompts/reply.json`，若存在且是那段规矩
+   还在时常驻 system 被写进去的）**不在我这次的改动范围内**——`compose_system_prompt` 现在
+   一字不加，也不会替操作者删已存的文本。要不要恢复/重存那一套，由部署方在面板上决定
+   （我没有读 `run/`，无法确认那份文件是否存在）。
+2. 回复 agent 单独的地址/模型/key 由 `QQBOT_REPLY_API_BASE_URL` / `QQBOT_REPLY_API_MODEL` /
+   `QQBOT_REPLY_API_KEY` 给（写在 `run/.env`，不进仓库）。**不配就是原来的全局那一套**。
 
 ---
 

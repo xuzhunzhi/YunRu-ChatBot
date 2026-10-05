@@ -36,7 +36,8 @@ SAVE_INTERVAL_SECONDS = 5.0
 COUNTER_NAMES = (
     "accepted_messages", "ignored_messages", "blocked_messages", "deferred_messages",
     "model_calls", "replies", "reply_segments", "judge_calls", "history_seeded",
-    "guard_raised", "media_described", "reply_reviewed", "empty_forced_reply",
+    "guard_raised", "media_described", "reply_reviewed", "reply_review_rejected_final",
+    "empty_forced_reply",
 )
 
 

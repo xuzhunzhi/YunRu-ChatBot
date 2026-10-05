@@ -66,8 +66,11 @@ class EngineSnapshot:
     # 前者是"她当场变冷"的次数，后者应当很少（上限是防模型抽风的）。
     guard_raised: int = 0
     guard_rejected: int = 0
-    # 风格审核改写的条数（没配审核时恒为 0）。
+    # 风格审核（**只判不改**，2026-10-05）打回、要求重写的条数。
+    # `reply_review_rejected_final` 是"重写后仍被拒、照重写的那一版发出"的条数
+    # （它不该是常态：常态是第一次就过，或者重写一次就过）。没配审核时两者恒为 0。
     reply_reviewed: int = 0
+    reply_review_rejected_final: int = 0
     # 识图成功把 `[图片]` 换成描述的条数（没配识图时恒为 0）。
     media_described: int = 0
     # 「不懂就问」（2026-10-04）：以"问"回应的次数，以及"没把握/没根据所以没插话"的次数。

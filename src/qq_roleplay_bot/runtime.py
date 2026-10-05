@@ -207,6 +207,8 @@ def apply_overrides(engine, payload: dict[str, object], *,
             url = base_url_of(chosen_provider)
             config.values["api_base_url"] = url
             apply_client_overrides(base_url=url)
+            # 回复 agent 有专属地址时，换全局供应商不该把它一起换掉。
+            _reapply_reply_overrides(base_url=True)
             applied["provider"] = {"applied": "live", "detail": f"地址已切到 {url}"}
         elif chosen_provider == "custom":
             applied["provider"] = {"applied": "live",
@@ -234,8 +236,8 @@ def _apply_live(engine, key: str, value: str, *, config=None) -> bool | None:
             return None
         flags.set(key, truthy)
         return True
-    if key in {"api_key", "judge_api_key", "memory_api_key", "review_api_key"}:
-        role = {"api_key": "dialogue", "judge_api_key": "judge",
+    if key in {"api_key", "reply_api_key", "judge_api_key", "memory_api_key", "review_api_key"}:
+        role = {"api_key": "dialogue", "reply_api_key": "dialogue", "judge_api_key": "judge",
                 "memory_api_key": "memory", "review_api_key": "review"}[key]
         from . import dev_config as _cfg
 
@@ -269,6 +271,8 @@ def _apply_live(engine, key: str, value: str, *, config=None) -> bool | None:
                     # 主 key 回落不到 = 谁都调不动，这个状态不该由面板造出来。
                     return False
                 apply_client_overrides(api_key=fallback)
+                # 回复 agent 有专属 key 时，不该被这次"全局回落"冲掉。
+                _reapply_reply_overrides(api_key=True)
                 return True
             main_key = os.environ.get("QQBOT_API_KEY", "") or _cfg.API_KEY
             if not main_key:
@@ -280,12 +284,30 @@ def _apply_live(engine, key: str, value: str, *, config=None) -> bool | None:
         os.environ[env] = value
         if key == "api_key":
             apply_client_overrides(api_key=value)
+            # 上面这次是"全局"改写，回复 agent 有专属 key 时要盖回去。
+            _reapply_reply_overrides(api_key=True)
         return True
     if key in {"api_model", "memory_model"}:
         model = str(value).strip()
         role = "memory" if key == "memory_model" else ""
         apply_client_overrides(model=model, usage_role=role)
         os.environ[operator_config.env_name(key)] = model
+        if key == "api_model":
+            # 同上：回复 agent 有专属模型时，全局改写之后要盖回去。
+            _reapply_reply_overrides(model=True)
+        return True
+    if key == "reply_api_model":
+        # 回复 agent 的模型可以单独换。**空值 = 回落全局模型**（清掉覆盖层那一项）。
+        env = operator_config.env_name(key)
+        model = str(value).strip()
+        os.environ.pop(env, None)
+        if model:
+            os.environ[env] = model
+        elif config is not None:
+            config.values.pop(key, None)
+        from . import dev_config as _cfg
+
+        apply_client_overrides(model=_cfg.reply_api_model(), usage_role="dialogue")
         return True
     if key == "api_base_url":
         url = str(value).strip()
@@ -293,11 +315,53 @@ def _apply_live(engine, key: str, value: str, *, config=None) -> bool | None:
             return False
         apply_client_overrides(base_url=url)
         os.environ[operator_config.env_name(key)] = url
+        # 同上：回复 agent 有专属地址时，全局改写之后要盖回去。
+        _reapply_reply_overrides(base_url=True)
+        return True
+    if key == "reply_api_base_url":
+        # 回复 agent 的地址可以单独换。**空值 = 回落全局地址**（清掉覆盖层那一项）。
+        env = operator_config.env_name(key)
+        url = str(value).strip()
+        os.environ.pop(env, None)
+        if url:
+            os.environ[env] = url
+        elif config is not None:
+            config.values.pop(key, None)
+        from . import dev_config as _cfg
+
+        apply_client_overrides(base_url=_cfg.reply_api_base_url(), usage_role="dialogue")
         return True
     if key == "provider":
         # 由 `apply_overrides` 在循环之后统一处理（要与显式地址比优先级）。
         return True
     return None
+
+
+def _reapply_reply_overrides(*, base_url: bool = False, model: bool = False,
+                             api_key: bool = False) -> None:
+    """全局改动之后，把**回复 agent 已配好的专属值**再盖回去。
+
+    语义是"**全局 = 默认值，reply 专属 = 覆盖它**"（见 `dev_config.reply_api_*`）。
+    没有这一步，面板改一次全局地址/模型/key 就会把已经配好的回复专属值在**内存里**
+    冲掉，而重启之后它又回来了——那正是"面板显示的和实际生效的不一样"。
+
+    **只在"专属值真的配了"时才盖回去**（判据就是那三个环境变量非空）：
+    没配的时候全局那次改动本来就是对的，再"盖回去"等于把刚设的全局值又还原成
+    旧常量（实测：`provider` 换供应商那一趟不写环境变量，于是这一步会把
+    回复 client 的地址拽回 `.env` 里那个旧值）。
+    """
+
+    from . import dev_config as _cfg
+
+    def _specific(name: str) -> str:
+        return os.environ.get(name, "").strip()
+
+    if base_url and _specific("QQBOT_REPLY_API_BASE_URL"):
+        apply_client_overrides(base_url=_cfg.reply_api_base_url(), usage_role="dialogue")
+    if model and _specific("QQBOT_REPLY_API_MODEL"):
+        apply_client_overrides(model=_cfg.reply_api_model(), usage_role="dialogue")
+    if api_key and _specific("QQBOT_REPLY_API_KEY"):
+        apply_client_overrides(api_key=_cfg.reply_api_key(), usage_role="dialogue")
 
 
 def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
@@ -338,9 +402,7 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
     global _USAGE_STORE
     _USAGE_STORE = usage_store
     client = OpenAICompatibleClient(
-        dev_config.API_BASE_URL,
-        dev_config.API_KEY,
-        dev_config.API_MODEL,
+        *_reply_endpoint(),
         # 按 agent 隔离 KVCache 与调度（同一账号下生效，与 API Key 无关）。
         user_id=dev_config.DIALOGUE_USER_ID,
         usage_store=usage_store,
@@ -973,11 +1035,27 @@ def _factory_api_key(env_name: str, fallback: str) -> str:
     return current or fallback
 
 
+def _reply_endpoint() -> tuple[str, str, str]:
+    """回复 agent 这一套 `(base_url, api_key, model)`。
+
+    **每个 agent 各用各的**（2026-10-05 用户要求）：回复那一路可以单独换供应商，
+    而判定 / 记忆 / 审核 / 写信仍按全局那一套组装。三个值都走
+    `dev_config.reply_api_*`——那几个函数是"**调用时现读环境**"的，
+    所以面板热更与新会话 client 都拿得到新值。
+
+    没配 `QQBOT_REPLY_API_*` 时它返回的就是全局那一套，**逐字不变**。
+    """
+
+    return (dev_config.reply_api_base_url(), dev_config.reply_api_key(),
+            dev_config.reply_api_model())
+
+
 def _dialogue_client_factory(session_id: str) -> OpenAICompatibleClient:
+    base_url, api_key, model = _reply_endpoint()
     return OpenAICompatibleClient(
-        os.environ.get("QQBOT_API_BASE_URL", dev_config.API_BASE_URL),
-        _factory_api_key("QQBOT_API_KEY", dev_config.API_KEY),
-        os.environ.get("QQBOT_API_MODEL", dev_config.API_MODEL),
+        base_url,
+        api_key,
+        model,
         user_id=dev_config.session_user_id(dev_config.DIALOGUE_USER_ID, session_id),
         usage_store=_USAGE_STORE,
         usage_role="dialogue",
@@ -1019,8 +1097,13 @@ _USAGE_STORE = ApiUsageStore(enabled=False)
 def _build_style_reviewer(usage_store=None):
     """风格审核（可选 agent）；没开开关、也没有 key 时返回 None（回复直通）。
 
-    默认**不开**：它给每条回复多加一次调用（实测 +0.6~0.9 秒、约 360 token）。
-    开了之后每次改了什么都会记一行 INFO，方便回头核对它到底有没有用。
+    默认**不开**：它给每条回复多加一次调用（实测 +0.6~0.9 秒、约 360 token）；
+    判不过还要**多一次重写**（`stage3_main._rewrite_after_review`）。所以说它
+    "贵一点"不是随口说的——只有真要看这道判断时才开。
+    开了之后每次打回都会记一行 INFO，方便回头核对它到底有没有用。
+
+    **2026-10-05 起它只判不改**（用户："审核只负责打回，不负责修改"）：
+    它不再返回改写后的文本，正文永远出自回复 agent 自己。
     """
 
     if not dev_config.REVIEW_ENABLED:
@@ -1030,7 +1113,7 @@ def _build_style_reviewer(usage_store=None):
     if not key:
         logger.warning("风格审核已开启但没有任何可用 key，本次不启用")
         return None
-    logger.info("风格审核已启用：每条回复发送前过一道窄职责校对（会多一次模型调用）")
+    logger.info("风格审核已启用：每条回复发送前看一眼（只判不改，判不过就重写一次）")
     return StyleReviewer(
         OpenAICompatibleClient(
             dev_config.API_BASE_URL,

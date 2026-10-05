@@ -290,7 +290,7 @@ bash run_stage3.sh        # Linux / macOS
 覆盖范围包括 OneBot 解析与 @ 精确匹配、表情包与图片的区分、注意力判定与冷却、
 压缩周期与缓存前缀复用、命令插件注册表与权限档位、能力闸门、fail-closed 边界、
 提示词注入与越权、长期记忆隔离与归档重放、记忆↔人的多对多、两层记忆库的晋升、
-墓碑与旧证据防复活、人物画像、风格审核的事实兜底与说教语气判据、
+墓碑与旧证据防复活、人物画像、风格审核的"只判不改 + 打回后重写一次"与说教语气判据、
 运行状态持久化、跨重启的用量账本、脱敏指标，以及 `archive/` 里归档实现的回归用例。
 
 **测试不碰真数据**：每个模块用带 pid 与 uuid 的独立临时目录，跑完自动回收。
@@ -316,7 +316,7 @@ src/qq_roleplay_bot/
 ├── memory_maintenance_agent.py  # 记忆维护 agent
 ├── memory_ops.py           # 人工清理（只删）
 ├── knowledge_base.py       # 知识库（按词检索）
-├── style_reviewer.py       # 风格审核 agent
+├── style_reviewer.py       # 风格审核 agent（只判不改；判不过由回复 agent 重写一次）
 ├── security.py             # 注入与敏感内容过滤
 ├── capabilities.py         # 出站能力闸门
 ├── command_plugins.py      # 命令插件协议

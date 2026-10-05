@@ -894,7 +894,9 @@ class DialogueEngine:
         self.async_sender: Callable[[MessageTarget, str], Awaitable[None]] | None = None
         self.memory_service = memory_service
         self.context_provider = context_provider
-        # 风格审核（可选）：她写完、要发出去之前过一道窄职责校对。没配就是 None（直通）。
+        # 风格审核（可选）：她写完、要发出去之前看一眼能不能发。**它只判断、不改写**
+        # （2026-10-05）：判不过就把理由交回回复 agent 重写一次（见 `_rewrite_after_review`）。
+        # 没配就是 None（直通）。
         self.style_reviewer = style_reviewer
         # 识图（可选）：有图的消息在**进判定之前**先看一眼，把 `[图片]` 换成一句描述。
         # 它只改正文，不新增决策路径——"要不要回、回什么"照旧全在原来那套里。
@@ -962,8 +964,9 @@ class DialogueEngine:
             "focus_declined_promised", "empty_forced_reply",
             # 关系：判定报了几次"越界"、其中被机械上限拒了几次（应当很少）。
             "guard_raised", "guard_rejected",
-            # 风格审核改了几条（没配审核时恒为 0）。
-            "reply_reviewed",
+            # 风格审核（只判不改）：被打回、要求重写的条数，以及"重写后仍被拒、
+            # 照重写的那一版发出"的条数（没配审核时两者恒为 0）。
+            "reply_reviewed", "reply_review_rejected_final",
             # 识图成功几次（把 `[图片]` 换成描述的次数；没配识图时恒为 0）。
             "media_described",
             # 「不懂就问」：以"问"回应的次数，以及"没把握/没根据所以没插话"的次数
@@ -989,6 +992,74 @@ class DialogueEngine:
         lines = [f"上一句：{text}" for text in recent[-2:]]
         lines.append(f"当前这句：{message.text or ''}")
         return "\n".join(lines)[-600:]
+
+    def _revision_request(self, request: list[dict[str, str]], draft: str,
+                          reason: str) -> list[dict[str, str]]:
+        """把"这一版被退回来了"接在**同一份请求**后面。
+
+        为什么不重新拼一遍整个请求：`build_dialogue_messages` 有十几个参数，抄一遍
+        迟早会抄漏一个——那就变成"重写那一次看到的语境和第一版不一样"。
+        这里只在末尾追加一条 user 消息：她仍然是那个人、仍然看着同一段语境，
+        只是知道了"刚才那句为什么不行"。**指令进 user 段**，system 前缀一个字不动。
+        """
+
+        note = (
+            "--- 你刚写的那一句要重来 ---\n"
+            f"你刚写的是：{draft}\n"
+            f"不合适的地方：{reason or '（没写清楚是哪一处）'}\n"
+            "照这个地方**重写一遍**——只改不合适的那处，别的不用动。"
+            "不要解释、也不要提这一段，像平常那样把新的一句说出来。"
+        )
+        return [*request, {"role": "user", "content": note}]
+
+    async def _rewrite_after_review(self, request, draft: str, reason: str, *,
+                                    session_id: str, trigger: str, trigger_kind: str,
+                                    context: str, known_message_ids: frozenset[str],
+                                    must_reply: bool) -> str | None:
+        """审核打回之后：**在同一轮里**让回复 agent 重写一次。返回新正文或 `None`。
+
+        几条边界（都是"宁可照旧，也不许把一条回复弄丢"）：
+
+        * **最多一次**：这里只调一次模型，重写的结果不再送回回复 agent 循环重写；
+        * 重写这一趟失败/空手/解析不出正文 → 返回 `None`，调用方**发第一版**；
+        * 重写后再过一次审核，仍被拒 → **照发重写的那一版**，只记一笔
+          （`reply_review_rejected_final`）——审核打回不是否决权；
+        * 走的是同一个回复 client（`_client_for`）、同一条调用路径与同一份账本，
+          没有另造一套客户端。
+        """
+
+        retry_request = self._revision_request(request, draft, reason)
+        self._stats["model_calls"] += 1
+        started_at = self.clock()
+        try:
+            raw = await self._client_for(session_id).complete(retry_request)
+        except Exception as exc:  # noqa: BLE001 - 重写失败必须退回第一版，绝不丢回复
+            summary = exc.safe_summary() if isinstance(exc, LLMError) else type(exc).__name__
+            self._log_model_io("reply", retry_request, "", session_id=session_id,
+                               trigger=trigger, error=summary)
+            logger.warning("Stage 3 rewrite after review failed kind=%s；按第一版发出", summary)
+            return None
+        elapsed = self.clock() - started_at
+        self.metrics.model_latency.observe(elapsed)
+        self._log_model_io("reply", retry_request, raw, session_id=session_id,
+                           trigger=trigger, elapsed=round(elapsed, 2))
+        rewritten = parse_dialogue_output(raw, known_message_ids=known_message_ids,
+                                         must_reply=must_reply)
+        if rewritten.kind is not DecisionKind.REPLY or not rewritten.text:
+            logger.warning("Stage 3 rewrite after review came back empty；按第一版发出")
+            return None
+        still_passed, still_reason = await self.style_reviewer.review(
+            rewritten.text, context=context)
+        if not still_passed:
+            # **不许把回复丢掉**：重写后仍被拒也照发这一版，只记一笔。
+            self._stats["reply_review_rejected_final"] += 1
+            logger.warning(
+                "Stage 3 rewrite still rejected by review; sending it anyway: reason=%s final=%s",
+                still_reason[:80], rewritten.text[:60])
+        else:
+            logger.info("Stage 3 reply rewritten after review: chars=%s final=%s",
+                        len(rewritten.text), rewritten.text[:60])
+        return rewritten.text
 
     async def _apply_vision(self, message: IncomingMessage, state) -> IncomingMessage:
         """识图：把 `[图片]`/`[表情包]` 换成一句描述，并把历史里那条也一起改掉。
@@ -3329,19 +3400,31 @@ class DialogueEngine:
             must_reply=self._judge_on(message.session_id),
         )
         # 风格审核放在**解析之后、其它一切之前**：这样统计、语境、记忆与发送看到的
-        # 都是最终稿。审核失败/超时/可疑输出一律退回原稿（见 style_reviewer.py）。
+        # 都是最终稿。它**只判断、不改写**（2026-10-05）：不通过 → 把理由交回回复 agent
+        # 在**同一轮**里重写一次（最多一次，不许循环）；重写后仍被拒 → **发重写的那一版**
+        # （绝不把回复丢掉、也不卡住），并记一笔。审核超时/报错/输出认不出来一律按通过。
         # `review_enabled` 是运行期开关（面板可关）——关掉就是原稿直发。
         if (self._flags().review_enabled and self.style_reviewer is not None
                 and decision.kind is DecisionKind.REPLY
                 and decision.text):
-            reviewed, changed = await self.style_reviewer.review(
+            passed, reason = await self.style_reviewer.review(
                 decision.text, context=self._review_context(message, state))
-            if changed:
+            if not passed:
                 self._stats["reply_reviewed"] += 1
                 logger.info(
-                    "Stage 3 reply reviewed: before=%s after=%s draft=%s final=%s",
-                    len(decision.text), len(reviewed), decision.text[:60], reviewed[:60])
-                decision = replace(decision, text=reviewed)
+                    "Stage 3 reply rejected by review: reason=%s draft=%s",
+                    reason[:80], decision.text[:60])
+                rewritten = await self._rewrite_after_review(
+                    request, decision.text, reason,
+                    session_id=message.session_id, trigger=trigger, trigger_kind=trigger_kind,
+                    context=self._review_context(message, state),
+                    known_message_ids=frozenset(message_ids),
+                    must_reply=self._judge_on(message.session_id),
+                )
+                if rewritten is not None:
+                    # **只换正文**：这一轮要不要说、引用哪一句、语境是什么，
+                    # 都是判定与第一次解析定下来的，不因为重写一遍就改主意。
+                    decision = replace(decision, text=rewritten)
         self.metrics.record_decision(decision.kind.value)
         logger.info(
             "Stage 3 decision: session=%s trigger=%s kind=%s dialogue=%s reply_length=%s "

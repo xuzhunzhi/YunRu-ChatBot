@@ -24,7 +24,8 @@ logger = logging.getLogger(__name__)
 #: 开关名 → 说明（面板直接用这份说明渲染"关掉会怎样"）。
 FLAG_NOTES: dict[str, str] = {
     "judge_enabled": "判定 agent。关掉＝退回单 agent：判定与回复在同一次调用完成，回复照常。",
-    "review_enabled": "风格审核 agent。关掉＝她的原稿直接发出，不再过那道校对。",
+    "review_enabled": "风格审核 agent。它**只判断、不改写**：关掉＝她的原稿直接发出，"
+                      "连那一道判断也不过。",
     "vision_enabled": "识图。关掉＝有图的消息回到 `[图片]` 占位，不描述内容。",
     "memory_enabled": "记忆维护 agent。关掉＝不再批记忆（已有记忆照常检索）。",
     "compaction_enabled": "对话压缩。关掉＝长对话不再压成摘要，靠活窗口滚动。",
@@ -32,7 +33,9 @@ FLAG_NOTES: dict[str, str] = {
     "group_manage_enabled": "群管理动作（踢/禁言/撤回/全员禁言）的总开关。",
     "group_owner_enabled": "群主专属动作（设管理员/名片/群名/头衔/公告）的总开关。",
     "ask_when_unsure": "不懂就问：没把握时先问一句、具体专业话题没有根据时不许断言。"
-                       "关掉＝退回从前：被叫到就直接答，问与不问不再由核心定。",
+                       "关掉＝退回从前：被叫到就直接答，问与不问不再由核心定。"
+                       "（那两句提示只在她「没跟上」的那一轮进易变段，"
+                       "常驻 system 里没有它——2026-10-05 撤出来的。）",
 }
 
 

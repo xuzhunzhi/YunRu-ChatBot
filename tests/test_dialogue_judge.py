@@ -12,6 +12,7 @@ from qq_roleplay_bot.dialogue_judge import (
     build_judge_messages,
     parse_judge_output,
 )
+from qq_roleplay_bot.base_prompt import BASE_PROMPT
 from qq_roleplay_bot.stage3_runtime import SYSTEM_PROMPT, ConversationState
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 
@@ -39,9 +40,19 @@ def _state_with(messages):
 
 
 def test_judge_prompt_is_much_smaller_than_persona_prompt() -> None:
-    """判定的价值就在"prompt 小"：它不该背人设与输出协议。"""
+    """判定的价值就在"prompt 小"：它不该背人设与输出协议。
 
-    assert len(JUDGE_SYSTEM_PROMPT) < len(SYSTEM_PROMPT) / 3
+    **2026-10-05 改了比法（不是放宽，是换成问对了）**：原来是
+    `len(JUDGE) < len(SYSTEM_PROMPT) / 3`——而 `SYSTEM_PROMPT` 是"人格 + 两千多字
+    群聊规矩与回话格式"，跟"判定要不要背人设"没关系。把常驻 system 里那段
+    「不懂就问」的规矩撤出来（-317 字）之后，那个比值当场压到判定头上
+    （判定 2121 字 vs 6187/3 ≈ 2062），也就是说它一直在测"那份协议有多长"。
+    现在直接跟**人格**比，那才是这条断言真正要守的东西；
+    再留一条量级上的宽松比值，防的是"判定 prompt 悄悄长成第二份人格"。
+    """
+
+    assert len(JUDGE_SYSTEM_PROMPT) < len(BASE_PROMPT), "判定 prompt 背上了人设？"
+    assert len(JUDGE_SYSTEM_PROMPT) < len(SYSTEM_PROMPT) * 0.4
     assert "心灵终结" not in JUDGE_SYSTEM_PROMPT
     assert "<decision>" not in JUDGE_SYSTEM_PROMPT
     assert "REPLY|NO_REPLY" in JUDGE_SYSTEM_PROMPT

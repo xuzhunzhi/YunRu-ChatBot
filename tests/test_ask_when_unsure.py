@@ -6,9 +6,16 @@
 2. **具体专业话题没有根据时不许主动断言**（知识库命中 / 记忆命中 / 语境明确，
    三样都没有）——它是**确定性**的，模型"觉得自己懂"绕不过去；
 3. **问的次数有上限**（同一话题一次、一段时间内几次），否则她会每句都问；
-4. **这条规矩跟着代码走、不跟着人格走**：生产上 `BASE_PROMPT` 是整段替换的
-   （`base_prompt.py:249-251`），所以规矩必须出现在**代码拼出来的** prompt 里——
-   这条用一个"极简假人格"直接测。
+4. **这条规矩不进常驻 system**（2026-10-05 更正）：它只在判定说"这一句你没跟上"的
+   那一轮作为**现场提示**进易变段（`ASK_TURN_NOTE` / `HOLD_TURN_NOTE`）。
+
+第 4 条是这次改出来的：`UNSURE_ASK_RULE` 从 2026-10-04 起被**无条件**拼进常驻
+system（`compose_system_prompt`），system 从 **7061 → 7378 字**，多出来的正是那段
+"他说的是一件**具体的事**——某个说法、某个行当里的规矩、某个数字……"。
+用户报的"她的回复风格变得很奇怪、很 ai"里，这是被定位到的原因之一：
+**那段措辞教她"分析话题"**（AGENTS §2.2：prompt 里的措辞会被角色吸收），
+她的 `intent` 于是从"接住吐槽，顺口一句"变成"接话，给出判断"。
+所以现在钉两件事：**system 里没有它**、**"关掉开关时与从前逐字相同"**。
 
 不回归那条也要有：判定没给新信号（老版 prompt、解析失败）时，她必须跟从前一模一样。
 """
@@ -38,6 +45,8 @@ from qq_roleplay_bot.stage3_main import DialogueEngine
 from qq_roleplay_bot.stage3_runtime import (
     ContextState,
     ConversationMode,
+    SYSTEM_PROMPT,
+    SYSTEM_PROMPT_MUST_REPLY,
     build_dialogue_messages,
     compose_system_prompt,
 )
@@ -226,15 +235,36 @@ def test_ask_budget_limits_per_topic_and_per_window() -> None:
     assert off.allows("group:1", "综测", 0.0) is False
 
 
-# --- 规则挂在生产路径上（不挂人格）------------------------------------------
+# --- 那条规矩**不在**常驻 system 里（2026-10-05）------------------------------
+
+#: 撤掉那段规矩之后 `SYSTEM_PROMPT` 的**逐字长度**（本树跑的是模板人格）。
+#: 生产上真人格那份是 **7061**（改之前是 7378 = 7061 + 317 字的规矩）。
+#: 这是个"逐字"级别的钉子：**谁再往常驻 system 里加/减东西，这里都会红**。
+#: 合理地改了人格或回话格式时，请一并更新这个数字（并说明为什么）。
+SYSTEM_PROMPT_CHARS = 6187
 
 
-def test_the_rule_survives_a_replaced_persona() -> None:
-    """**把 BASE_PROMPT 换成一份极简假人格，这条规矩照样在**。
+def test_the_resident_system_prompt_carries_no_unsure_rule() -> None:
+    """常驻 system（内置默认）里**没有**那段规矩，长度也回到撤掉它那一档。"""
+
+    from qq_roleplay_bot.prompt_library import PromptLibrary
+
+    assert UNSURE_ASK_RULE not in SYSTEM_PROMPT
+    assert UNSURE_ASK_RULE not in SYSTEM_PROMPT_MUST_REPLY
+    # 面板"查看当前 prompt"看到的就是这一份（内置默认）——两处必须一致。
+    assert PromptLibrary.builtin("reply") == SYSTEM_PROMPT
+    assert UNSURE_ASK_RULE not in PromptLibrary.builtin("reply")
+    assert len(SYSTEM_PROMPT) == SYSTEM_PROMPT_CHARS, (
+        f"常驻 system 的长度变了（{len(SYSTEM_PROMPT)} ≠ {SYSTEM_PROMPT_CHARS}）："
+        "是不是又把某段规矩拼回了常驻 system？")
+
+
+def test_the_rule_is_not_in_the_system_prompt_even_with_a_replaced_persona() -> None:
+    """**把 BASE_PROMPT 换成一份极简假人格，常驻 system 里也不许出现这条规矩**。
 
     生产上人格是整段替换的（`data/private_docs/base_prompt.REAL.py`，找到就整段返回，
-    见 `base_prompt.py:249-251`），所以规矩写进模板等于没写。这里就走那条真路：
-    用 `QQBOT_BASE_PROMPT_FILE` 指一份假人格 → 读出来 → 组装请求 → 规矩必须在。
+    见 `base_prompt.py:249-251`），所以这条走那条真路：用 `QQBOT_BASE_PROMPT_FILE`
+    指一份假人格 → 读出来 → 组装请求 → 规矩**不在**、人格**在**。
     """
 
     import tempfile
@@ -247,10 +277,11 @@ def test_the_rule_survives_a_replaced_persona() -> None:
             persona = _load_base_prompt()
         assert persona.strip() == fake, "假人格没被读进来，这条测试就没意义了"
 
-        # 1) 代码层的拼装：换成人格之后规矩还在
-        assert UNSURE_ASK_RULE in compose_system_prompt(persona)
+        # 1) 装配那一层**一字不加**（它是"代码层的规矩"唯一的入口）
+        assert compose_system_prompt(persona) == persona
+        assert UNSURE_ASK_RULE not in compose_system_prompt(persona)
         # 2) **生产的组装路径**：面板/人格给回来的 system 文本是"裸人格"，
-        #    组装出来的请求里照样有这条规矩（拼的是常量，不是人格的一部分）
+        #    组装出来的请求里也不许多出这段规矩，而人格本身要一字不少。
         current = msg(1, "随便聊点什么")
         with patch("qq_roleplay_bot.stage3_runtime.resolve_system_prompt",
                    lambda **kwargs: persona):
@@ -258,23 +289,29 @@ def test_the_rule_survives_a_replaced_persona() -> None:
                 [current], current=current, mode=ConversationMode.IDLE,
                 trigger="threshold", context=ContextState(topic="闲聊"),
             )
-        assert UNSURE_ASK_RULE in request[0]["content"]
-        assert fake in request[0]["content"], "人格本身不能被这条规矩挤掉"
+        assert UNSURE_ASK_RULE not in request[0]["content"]
+        assert request[0]["content"] == persona, "人格本身不能被改动"
+        # 3) 现场提示那一路仍在（它才是这条规矩现在的去处）
+        assert "别急着答" in ASK_TURN_NOTE
 
 
-def test_saving_a_panel_prompt_cannot_remove_the_rule() -> None:
-    """面板保存的覆盖版也躲不掉它（装配时再拼一次，幂等）。"""
+def test_a_panel_prompt_is_not_edited_by_the_assembly_step() -> None:
+    """面板保存的覆盖版同样**一字不加**：装配那一步不许往里塞东西。"""
 
     current = msg(1, "随便聊点什么")
+    panel = "面板改过的一份 prompt，里面没有不懂就问这条。"
     with patch("qq_roleplay_bot.stage3_runtime.resolve_system_prompt",
-               lambda **kwargs: "面板改过的一份 prompt，里面没有不懂就问这条。"):
+               lambda **kwargs: panel):
         request = build_dialogue_messages(
             [current], current=current, mode=ConversationMode.IDLE,
             trigger="threshold", context=ContextState(topic="闲聊"),
         )
-    assert UNSURE_ASK_RULE in request[0]["content"]
-    # 幂等：内置那一份本来就带着它，不会出现两遍
-    assert compose_system_prompt(UNSURE_ASK_RULE).count(UNSURE_ASK_RULE) == 1
+    assert request[0]["content"] == panel
+    assert UNSURE_ASK_RULE not in request[0]["content"]
+    # 装配层是纯粹的"原样通过"：面板那份里若已经带了这段规矩（旧版保存的），
+    # 它也不会被再拼一遍（幂等），更不会被悄悄删掉——
+    # 那种遗留要不要清，由面板上"恢复默认/重存"决定，装配层不替操作者改文本。
+    assert compose_system_prompt(panel + UNSURE_ASK_RULE) == panel + UNSURE_ASK_RULE
 
 
 # --- 引擎路径（判定 → 路由 → prompt）----------------------------------------
@@ -295,7 +332,8 @@ def test_unsure_and_called_asks_instead_of_asserting() -> None:
     note = _volatile(reply.requests[0])
     assert ASK_MARKER in note, "被叫到但没懂时，这一轮要走'问'"
     assert HOLD_MARKER not in note
-    assert UNSURE_ASK_RULE in reply.requests[0][0]["content"], "规矩在 system 段里"
+    # 规矩的措辞只在**这一轮的易变段**里，常驻 system 里没有它（2026-10-05）
+    assert UNSURE_ASK_RULE not in reply.requests[0][0]["content"], "规矩不该常驻 system"
     assert engine.snapshot().clarify_asked == 1
 
 

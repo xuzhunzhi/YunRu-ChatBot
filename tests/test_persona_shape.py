@@ -104,8 +104,12 @@ def test_review_prompt_keeps_emotion_and_only_blocks_four_kinds() -> None:
     """风格审核的**授权范围**：只挡事实错误 / 越权 / 出戏 / 伤人。
 
     它是每条回复发送前的最后一道，写得保守就会把情绪磨平（2026-10-04 审计：
-    上一版判据 1 删反问、判据 3 删吐槽、判据 5 按字数压）。这里钉三件事：
+    上一版判据 1 删反问、判据 3 删吐槽、判据 5 按字数压）。
+
+    2026-10-05 它从"只改这四类"改成"**只判这四类**"（用户："审核只负责打回，
+    不负责修改"），所以这里的锚点跟着改口径，但守的东西一个字没变：
     四类在、**"情绪与语气不归它管"**在、**上一版那套"去冲"的说法不许回来**。
+    "只改"那几句现在都换成"只看/不算越界/判过"——它已经没有任何改写权限了。
     """
 
     from qq_roleplay_bot.prompt_guard import scan_agent_text
@@ -113,10 +117,10 @@ def test_review_prompt_keeps_emotion_and_only_blocks_four_kinds() -> None:
 
     for scope in ("事实错了", "越权", "出戏", "伤人"):
         assert scope in review, scope
-    assert "只改这四类" in review
+    assert "只看这四类" in review
     assert "不负责把话改短、改客气、改平稳" in review, "审核又被授权去磨她的语气了"
-    assert "写得冲也不改" in review
-    assert "一字不差" in review
+    assert "写得冲也不算越界" in review
+    assert "只判断，不改写" in review, "审核又开始自己动手改台词了"
     assert "超过 40 字" not in review, "按字数压话的那条判据回来了"
-    assert "改完不许比原稿更冷、更淡、更客气" in review
+    assert "一律判过" in review
     assert scan_agent_text(review) == [], "审核 prompt 里混进了机制词"

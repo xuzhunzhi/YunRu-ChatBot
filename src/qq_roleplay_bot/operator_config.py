@@ -54,8 +54,15 @@ SETTINGS: dict[str, dict[str, object]] = {
     "api_base_url": {"kind": "str", "applies": "live", "env": "QQBOT_API_BASE_URL"},
     "api_model": {"kind": "str", "applies": "live", "env": "QQBOT_API_MODEL"},
     "memory_model": {"kind": "str", "applies": "live", "env": "QQBOT_MEMORY_MODEL"},
+    # 回复 agent 专属的一套（2026-10-05 用户："每个 agent 各用各的 base URL/key"）：
+    # 只影响**回复**那一路，判定 / 记忆 / 审核照旧走上面的全局那套。
+    # 留空 = 回落全局（这三项都可以从面板清回去）。
+    "reply_api_base_url": {"kind": "str", "applies": "live",
+                           "env": "QQBOT_REPLY_API_BASE_URL"},
+    "reply_api_model": {"kind": "str", "applies": "live", "env": "QQBOT_REPLY_API_MODEL"},
     # --- 凭据（live：同上；值**绝不回显**，见 webui_data.mask_settings） ---
     "api_key": {"kind": "secret", "applies": "live", "env": "QQBOT_API_KEY"},
+    "reply_api_key": {"kind": "secret", "applies": "live", "env": "QQBOT_REPLY_API_KEY"},
     "judge_api_key": {"kind": "secret", "applies": "live", "env": "QQBOT_JUDGE_API_KEY"},
     "memory_api_key": {"kind": "secret", "applies": "live", "env": "QQBOT_MEMORY_API_KEY"},
     "review_api_key": {"kind": "secret", "applies": "live", "env": "QQBOT_REVIEW_API_KEY"},
