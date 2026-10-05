@@ -1,4 +1,4 @@
-"""`test_optional_capabilities.py` 里**要造插件**的那两条（插件侧）。
+"""`test_optional_capabilities.py` 里**要造插件**的那一条（插件侧）。
 
 ## 为什么单独一个文件（2026-10-05 分支拆分）
 
@@ -8,16 +8,26 @@
 `test_backfill_all_skips_a_missing_capability_without_faking_a_prompt`
 （这两条把识图那套 prompt 藏起来，验的是"少了它照样起"）都留在那里。
 
-但这两条要**真的 import 插件的 `plugin.py`**（拿 `roles_plugin` / `vision_plugin`
-去验"插件自己拒绝装配"与"能力经由注册表注入"），本体侧的正常形态是插件不在，
-那两条在那种树上**根本不该存在**（不是"存在但跳过"），所以**整条搬到这里**。
+但这一条要**真的 import 插件的 `plugin.py`**（拿 `vision_plugin` 去验"能力经由
+注册表注入"），本体侧的正常形态是插件不在，那条在那种树上**根本不该存在**
+（不是"存在但跳过"），所以整条搬到这里。
+
+## 2026-10-05：删掉了原来那一半（`roles` 那条）
+
+原来这里还有 `test_build_engine_survives_a_missing_role_module`，钉的是
+"角色查询归 `plugins/roles/`，核心不自己造那份缓存"。**前提已经不存在**：
+用户拍板"身份/权限事实进核心"（本体 `1c5fcf3`），角色由核心的 `group_roles.py`
+提供，`plugins/roles/` 整个文件夹删掉了。那条测试要验的东西由本体侧接过去了——
+`tests/test_group_roles.py`（核心怎么降级、怎么 fail-closed）与
+`tests/test_runtime_assembly.py`（真装配出来是**同一个**来源）。
+留在这里只会是一条"假装还测着什么"的空壳。
 
 ## 为什么要 `skipUnless`
 
 这个文件住在**插件侧**，所以正常跑得到；但它用的是"藏模块"这种手段，只有在
 **插件真的在磁盘上**时才有意义。留一道守卫是为了让它在"插件被移走"的树上
 **诚实跳过、报出原因**，而不是假装绿——skip 不是本体的用例被跳过，
-这两条本来就只在带插件的树上有意义。
+这一条本来就只在带插件的树上有意义。
 
 断言**一字未改**。`_FakeTransport` / `_Hidden` 从本体侧那份 import 过来
 （借而不是抄，`_Hidden` 那套踩过的坑只该有一份维护）。
@@ -30,60 +40,16 @@ from test_optional_capabilities import _FakeTransport, _Hidden
 
 
 def _plugins_present() -> bool:
-    """两个插件文件夹在不在（`roles` / `vision` 是这两条用到的）。"""
+    """识图插件文件夹在不在（这一条用到的就是它）。"""
 
     from pathlib import Path
 
     pkg = Path(runtime.__file__).resolve().parent
-    return all((pkg / "plugins" / name / "plugin.py").is_file()
-               for name in ("roles", "vision"))
+    return (pkg / "plugins" / "vision" / "plugin.py").is_file()
 
 
 _NEEDS_PLUGINS = unittest.skipUnless(
-    _plugins_present(), "插件不在（本体侧的形态）：这两条只在带插件的树上有意义")
-
-
-@_NEEDS_PLUGINS
-def test_build_engine_survives_a_missing_role_module() -> None:
-    """**角色查询缺席**时是降级、不是崩；而且它的唯一来源是插件。
-
-    ## 这条在 2026-10-04 改了测的东西（改测的东西，不是因为红了才改）
-
-    原来它 `_Hidden("qq_roleplay_bot.qq_roles")` 再断言 `engine.self_roles is None`。
-    `qq_roles.SelfRoleCache` 是**核心自己那第二份**角色缓存——"单源"那一改之后，
-    核心不再 import 它（`runtime.build_engine` 里那个创建已删），于是藏起它
-    什么也证明不了（能力还在，是插件给的）。**这属于测试的前提变了，不是放宽断言。**
-
-    （函数名留着不改了：它是 `qq_roles` 那个模块第一次被抓到的现场，改名字会让
-    "这条守的是什么"的历史断掉。测的东西以本 docstring 为准。）
-
-    新的前提：角色查询归 `plugins/roles/`，由核心注入的 `call_action` 现造。
-    所以"这项能力不在"= **`call_action` 不在**。这条负向路径分两半验：
-
-    1. `roles.plugin.register` 在没有 `call_action` 时**明确抛错**，
-       不许"装上一个查不了角色的缓存"（那正是 2026-09-30 那次静默回归的形状）；
-    2. 核心这一侧：`build_engine` 装出来的机器**不再自己造**那份缓存——
-       `self_roles` 就是插件放进注册表的那一个对象（单源）。
-    """
-
-    from qq_roleplay_bot.plugins import PluginRegistry
-    from qq_roleplay_bot.plugins.roles import plugin as roles_plugin
-
-    registry = PluginRegistry()  # `call_action` 缺省就是 None
-    try:
-        roles_plugin.register(registry)
-    except RuntimeError:
-        # 明确拒绝是对的——**不许静默装一个查不了角色的缓存**。
-        pass
-    else:  # pragma: no cover - 不该走到
-        raise AssertionError("没有 call_action 时 roles 插件不该装上去")
-    assert registry.shared_roles() is None, "装失败了就不该留下半个共享角色"
-
-    # 核心照旧起得来（`build_engine` 跑通本身就是这条判据），
-    # 而且 `self_roles` 与注册表上那份**是同一个对象**：单源。
-    engine = runtime.build_engine(_FakeTransport())
-    assert engine.plugin_registry.shared_roles() is engine.self_roles, (
-        "角色的唯一来源必须是 roles 插件放进注册表的那一份（单源）")
+    _plugins_present(), "插件不在（本体侧的形态）：这一条只在带插件的树上有意义")
 
 
 @_NEEDS_PLUGINS

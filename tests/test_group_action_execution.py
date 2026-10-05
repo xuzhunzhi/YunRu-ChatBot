@@ -38,7 +38,9 @@ import sys
 
 from qq_roleplay_bot import dev_config, runtime
 from qq_roleplay_bot.capabilities import GROUP_MANAGE_ACTIONS, GROUP_OWNER_ACTIONS
-from qq_roleplay_bot.plugins.roles.roles import ROLE_MEMBER, ROLE_OWNER
+# 角色事实**在核心**（2026-10-05 用户："行，进核心"）：这两个常量从核心的
+# `group_roles` 取——`plugins/roles/` 已经删掉，插件侧不再有那份重复实现。
+from qq_roleplay_bot.group_roles import ROLE_MEMBER, ROLE_OWNER
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 
 GROUP = "717151356"

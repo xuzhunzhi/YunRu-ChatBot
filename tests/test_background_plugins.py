@@ -22,7 +22,9 @@ from qq_roleplay_bot import background_plugins as bp
 from qq_roleplay_bot.plugins.join_approval.background import JoinApprovalPlugin
 from qq_roleplay_bot.plugins import PluginRegistry
 from qq_roleplay_bot.plugins.join_approval.join_approval import JoinApprovalPolicy, JoinApprovalPoller
-from qq_roleplay_bot.plugins.roles.roles import ROLE_OWNER, SelfRoleCache
+# 角色事实**在核心**（2026-10-05 用户："行，进核心"）：`plugins/roles/` 已删除，
+# 测试要造角色来源就用核心那一份（`group_roles.GroupRoles`），不再有插件侧实现。
+from qq_roleplay_bot.group_roles import ROLE_OWNER, GroupRoles
 
 GROUP = "717151356"
 ME = "900000001"
@@ -190,7 +192,7 @@ def test_builder_registers_join_approval_as_a_plugin() -> None:
     from qq_roleplay_bot import dev_config
 
     with _Patch(AUTO_APPROVE_JOIN=True):
-        registry = _register("roles", "join_approval")
+        registry = _register("join_approval")
     names = [plugin.name for plugin in registry.backgrounds]
     assert "join-approval" in names
     join = next(p for p in registry.backgrounds if p.name == "join-approval")
@@ -327,7 +329,7 @@ def test_join_plugin_and_poller_hold_no_transport() -> None:
         return None
 
     poller = JoinApprovalPoller(call_action=call_action, notify=notify,
-                                policy=JoinApprovalPolicy(), roles=SelfRoleCache(None))
+                                policy=JoinApprovalPolicy(), roles=GroupRoles(None))
     plugin = JoinApprovalPlugin(poller, interval_seconds=60)
     for obj in (poller, plugin):
         for forbidden in ("transport", "capabilities", "self_roles"):
@@ -349,7 +351,7 @@ def test_poller_uses_the_injected_notify() -> None:
     async def notify(text):
         sent.append(text)
 
-    roles = SelfRoleCache(_RoleClient(ROLE_OWNER))
+    roles = GroupRoles(_role_seam(ROLE_OWNER))
     poller = JoinApprovalPoller(call_action=call_action, notify=notify,
                                 policy=JoinApprovalPolicy(), roles=roles)
     result = asyncio.run(poller.tick())
@@ -358,14 +360,20 @@ def test_poller_uses_the_injected_notify() -> None:
     assert not hasattr(poller, "transport")
 
 
-class _RoleClient:
-    def __init__(self, role):
-        self.role = role
+def _role_seam(role: str):
+    """一个**核心形状**的角色来源：造一个 `GroupRoles`（走 `call_action(action, params)`）。
 
-    async def call(self, action, params=None):
+    为什么不再用"带 `.call` 的客户端"那种形状（原 `_RoleClient`）：
+    核心那份 `GroupRoles` 明确**只收可调用**（收到裸传输层/别的形状当场 `TypeError`），
+    这跟 `plugins/roles/` 时代那条"装了走不到、走得到时没有闸门"的形状被删掉是同一条纪律。
+    """
+
+    async def call_action(action, params=None):
         if action == "get_login_info":
             return {"user_id": "900000002"}
-        return {"role": self.role}
+        return {"role": role}
+
+    return call_action
 
 
 def test_core_seams_gate_and_unwrap() -> None:
