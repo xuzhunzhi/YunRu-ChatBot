@@ -54,9 +54,14 @@ plugins/
 ## 为什么这样切
 
 - **可单独拿走**：不想要识图，删掉 `vision/` 就行；核心对它的引用都是"没有就降级"。
-  2026-10-05 起这句是**结构上**成立的：核心连"识图"这个模块名都不提了——识图器由
+  2026-10-05 起这句在**运行路径上**成立：核心**不再 import 那个模块**——识图器由
   `vision` 插件经 `registry.vision` 给一个工厂、它的 prompt 由
-  `registry.provide_prompt("vision", …)` 登记，删掉那个文件夹就是"这次部署没有识图"。
+  `registry.provide_prompt("vision", …)` 登记，删掉那个文件夹就是"这次部署没有识图"
+  （实测：`tests/check_module_removal.py` 拦掉整棵子树后 `build_engine()` 照起）。
+  **一处例外要如实说**（2026-10-05 核对时发现）：`prompt_library._vision_plugin_present()`
+  用 `importlib.util.find_spec("qq_roleplay_bot.plugins.vision.vision")` 问"那个模块在不在"
+  （面板的 `available()` 不许在插件被藏起来时撒谎）。**它提了模块名，但不 import**，
+  所以"删掉照跑"仍然成立；只是"核心一个字都不提那个模块名"这句**不成立**，别那么写。
 - **群管理动作也走这条口**（2026-10-06 补）：动作的**判定与执行仍在核心**
   （`stage3_main.execute_action` 判权限、过闸门、审计），核心只是不再自己去
   `import` 插件里的执行函数——`group_admin` 插件在 `register()` 里用
