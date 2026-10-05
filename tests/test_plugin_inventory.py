@@ -157,10 +157,13 @@ class InventoryShapeTests(unittest.TestCase):
         for row in rows:
             self.assertEqual(set(row), ROW_KEYS, f"{row.get('name')} 的键不对")
 
-    def test_the_five_shipped_plugins_are_listed(self) -> None:
+    def test_the_shipped_plugins_are_listed(self) -> None:
+        # 2026-10-05：`roles` 从名单里去掉——它**不是插件了**（身份事实进核心，
+        # `plugins/roles/` 整个文件夹已删除）。清单里剩下的必须一个不少。
         names = {row["name"] for row in plugins.inventory()}
         self.assertLessEqual(
-            {"group_admin", "join_approval", "mail", "roles", "webui"}, names)
+            {"group_admin", "join_approval", "mail", "outage_notice", "vision", "webui"},
+            names)
 
     def test_in_tree_plugins_count_as_preinstalled(self) -> None:
         # "预装"的定义：**在 plugins/ 目录里**（随代码发布）。

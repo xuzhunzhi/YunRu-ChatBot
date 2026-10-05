@@ -15,7 +15,9 @@ import asyncio
 
 from plugin_support import transport_seam, wired_command_registry
 from qq_roleplay_bot.command_plugins import ActionRequest, level_of
-from qq_roleplay_bot.plugins.roles.roles import ROLE_MEMBER, ROLE_OWNER, SelfRoleCache
+# 角色事实在核心（2026-10-05："行，进核心"）：`plugins/roles/` 已删除，
+# 这里用核心那一份（`group_roles.GroupRoles`），它的构造口是**可调用**。
+from qq_roleplay_bot.group_roles import ROLE_MEMBER, ROLE_OWNER, GroupRoles
 from qq_roleplay_bot.stage3_main import DialogueEngine, parse_super_command
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 
@@ -42,16 +44,21 @@ class FakeTransport:
         return self.response
 
 
-class RoleClient:
-    def __init__(self, role: str):
-        self.role = role
+def role_seam(role: str):
+    """一个**核心形状**的 `call_action`：回登录信息与她在这个群的角色。
 
-    async def call(self, action, params=None):
+    原来是 `RoleClient`（带 `.call` 的客户端，`plugins/roles/roles.py` 时代那种形状）；
+    核心那份 `GroupRoles` 只收可调用，收到别的形状当场 `TypeError`——所以这里跟着换。
+    """
+
+    async def call_action(action, params=None):
         if action == "get_login_info":
             return {"user_id": "900000002"}
         if action == "get_group_member_info":
-            return {"role": self.role}
+            return {"role": role}
         return {}
+
+    return call_action
 
 
 def message(text: str, *, user_id: str = SUPER, mentions=()) -> IncomingMessage:
@@ -62,14 +69,14 @@ def message(text: str, *, user_id: str = SUPER, mentions=()) -> IncomingMessage:
 
 
 def engine_with(transport, *, role: str = ROLE_OWNER) -> DialogueEngine:
-    # 命令由插件认领，所以注册表必须走真实装配；角色查询也走**同一个** `call_action`
-    # 接缝（生产里 `roles` 插件就是这么造的），不再是核心塞一个 client 进去。
+    # 命令由插件认领，所以注册表必须走真实装配；角色事实用**核心**那一份
+    # （`group_roles.GroupRoles`，2026-10-05 起为唯一来源：`plugins/roles/` 已删）。
     registry = wired_command_registry(call_action=transport_seam(transport))
     engine = DialogueEngine(NeverCalled(), super_admin_user_ids=frozenset({SUPER}),
                             admin_user_ids=frozenset({SUPER}),
                             command_registry=registry)
     engine.transport = transport
-    engine.self_roles = SelfRoleCache(RoleClient(role))
+    engine.group_roles = GroupRoles(role_seam(role))
     return engine
 
 
@@ -479,7 +486,7 @@ def test_owner_actions_are_closed_when_the_core_gives_no_role() -> None:
     async def run():
         transport = FakeTransport()
         engine = engine_with(transport)
-        engine.self_roles = None          # 核心那份角色来源缺席
+        engine.group_roles = None         # 核心那份角色来源缺席
         return await engine.handle(
             message("/super card @某人 新名片", mentions=(MEMBER,), user_id=SUPER)), transport
 

@@ -11,7 +11,9 @@
 import asyncio
 
 from qq_roleplay_bot import runtime
-from qq_roleplay_bot.plugins.roles.roles import ROLE_OWNER
+# 角色事实在核心（2026-10-05："行，进核心"）：常量和实现都从 `group_roles` 取，
+# `plugins/roles/` 已经删掉。
+from qq_roleplay_bot.group_roles import ROLE_OWNER
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 
 GROUP = "717151356"
@@ -50,26 +52,33 @@ def test_build_engine_wires_the_role_cache() -> None:
 
     transport = FakeTransport()
     engine = runtime.build_engine(transport)
-    assert engine.self_roles is not None, "装配漏了 SelfRoleCache（真机踩过：命令全变'查不到'）"
-    assert asyncio.run(engine.self_roles.role(GROUP)) == ROLE_OWNER
+    assert engine.group_roles is not None, (
+        "装配漏了核心的角色事实服务（真机踩过：命令全变'查不到'）")
+    assert asyncio.run(engine.group_roles.self_role(GROUP)) == ROLE_OWNER
 
 
 def test_the_core_and_the_plugins_share_one_role_cache() -> None:
-    """**单一来源**（2026-10-04 对齐）：核心与插件用的是**同一个**角色查询对象。
+    """**单一来源**：核心与插件用的是**同一个**角色事实服务。
 
-    改之前是两份：`runtime` 自己 `SelfRoleCache(transport, ...)`，
-    `roles` 插件又照核心给的 `call_action` 造一份给 `registry.shared_roles()`。
-    两份带各自 TTL 的缓存意味着"她在这个群里是不是群主"有**两个答案**，
-    而群主动作读核心那份、入群审批读插件那份（真机踩过的形状：
-    一边说能批、另一边说查不到）。现在只有一份：插件造、经
-    `registry.provide_roles()` → `chat.roles_sink()` 填回 `engine.self_roles`。
+    历史（两层都踩过）：
+
+    - 2026-10-04 之前是两份：`runtime` 自己造一份，`roles` 插件又照核心给的
+      `call_action` 造一份给 `registry.shared_roles()`；
+    - 2026-10-05 用户拍板"身份/权限事实进核心"（本体 `1c5fcf3`）之后，
+      `plugins/roles/` 那份**反而成了第三者**：`provide_roles` 后到者覆盖先到者，
+      插件一装上就把核心那份替换掉（实测过：核心 `tests/test_group_roles.py` 四条
+      当场报 `SelfRoleCache` 没有 `self_role` / `ready`）。所以那个文件夹**删掉了**。
+
+    现在只有一份：核心造的 `engine.group_roles`，在 `discover()` **之前**经
+    `registry.provide_roles(...)` 放到共享位上——插件问 `registry.shared_roles()`
+    拿到的就是它，没有第二个提供者。
     """
 
     engine = runtime.build_engine(FakeTransport())
     shared = engine.plugin_registry.shared_roles()
-    assert shared is not None, "roles 插件没把角色查询放上注册表"
-    assert shared is engine.self_roles, (
-        "核心与插件必须是**同一个**角色查询对象，否则'她是不是群主'就有两个真相")
+    assert shared is not None, "核心没把角色事实服务放到共享位上"
+    assert shared is engine.group_roles, (
+        "核心与插件必须是**同一个**角色事实服务，否则'她是不是群主'就有两个真相")
     # 而且它确实在用核心注入的那个通道（走 `call_action`，不是活的 transport）
     assert asyncio.run(shared.role(GROUP)) == ROLE_OWNER
 
