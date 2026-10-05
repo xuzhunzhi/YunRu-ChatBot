@@ -16,8 +16,16 @@
 所以这里的每条用例都是**端到端**的：用真实的 `discover()` 把插件装上、用真实的
 `runtime._DisconnectNotifier` 喂事件、**断言信真的被发了**——不是"我认为它会发"。
 核心那一份状态机不是本插件的代码，这里**不曾**在插件里再实现一遍（那正是要避免的：
-两处各记一份必然分叉）。其中一条用例（在 `_feed_twice_as_a_mutation` 的注释里）
-用的是"绕过核心一次性"的驱动方式——那是**突变验证**的手法，见文件末尾的说明。
+两处各记一份必然分叉）。文件末尾那条 `_call_the_receiver_twice` 是**突变验证**的手法：
+它绕开核心的一次性，直接问接收者"被叫两次发几封"。
+
+## 交付后又按决定删掉了插件里那个"突变钩子"（2026-10-06）
+
+第一版在 `plugin.py` 里留过一个 `MUTATION_SEND_EVERY_EVENT = False`（只有测试会翻）。
+决定是**生产代码里不该有这种东西**——它会漂、会被误读，于是删掉了，
+连同那条"翻它"的用例。突变验证改成**改源码那一行调用本身**
+（`await notice_on_disconnect(send)` → 写两遍），改法写在 `_call_the_receiver_twice`
+的 docstring 里（交付时真跑过一次：**7 条红**，还原后全绿）。
 
 ## 全是离线、绝不真发信
 
@@ -32,7 +40,6 @@ import importlib
 import logging
 import pathlib
 import re
-import sys
 import types
 from contextlib import contextmanager
 from unittest import mock
@@ -48,7 +55,6 @@ from qq_roleplay_bot.plugins.outage_notice import plugin as outage_plugin
 from qq_roleplay_bot.prompt_guard import scan_persona_text
 
 #: 插件自己的那一份：`REQUIRES` 必须**只**声明 mail，方向一个字都不能反。
-OUTAGE_PLUGIN = "qq_roleplay_bot.plugins.outage_notice.plugin"
 MAIL_PLUGIN = "qq_roleplay_bot.plugins.mail.plugin"
 
 
@@ -76,7 +82,7 @@ def _fake_sender():
 
 
 def _wired(*, sender=None, only=("outage_notice",)):
-    """把插件装到一个注册表上（走真实的 `discover()`），回 `(registry, sends, wired)`。
+    """把插件装到一个注册表上（走真实的 `discover()`），回 `(registry, sends)`。
 
     **`only` 缺省是 `("outage_notice",)`——刻意不把前置 `mail` 一起装上**。
     这不是绕开 `REQUIRES`：发现机制对 `only` 命中的那个名字照样先把它的 `REQUIRES`
@@ -87,11 +93,6 @@ def _wired(*, sender=None, only=("outage_notice",)):
     `test_the_mail_plugin_provides_the_sender_and_the_outage_uses_it_end_to_end` 覆盖**，
     `REQUIRES` 的先后顺序由
     `test_the_requirement_points_at_mail_and_mail_is_installed_first` 覆盖。
-
-    第三个返回值 `wired` 是**传进 `discover()` 的那一个 `plugin.py` 模块对象**：
-    突变验证要临时翻它上面的 `MUTATION_SEND_EVERY_EVENT`，而 `discover()` 是按名字
-    重新 import 的——直接打 `tests` 里 import 的那一份有可能不是同一个对象
-    （测试文件是被 `spec_from_file_location` 加载的）。拿到哪一个，就翻哪一个。
 
     **`discover()` 会改进程级的 `_REGISTRY` / `_LAST_LOADED`**（那是它的正常行为，
     `prompt_library` 与面板清单读的就是它们）。别的测试文件也会读那两个值，
@@ -104,9 +105,8 @@ def _wired(*, sender=None, only=("outage_notice",)):
     registry.mail.provide(sender)
     with _discovery_state():
         loaded = discover(registry, only=only)
-        wired = sys.modules[OUTAGE_PLUGIN]
     assert "outage_notice" in loaded, loaded
-    return registry, sends, wired
+    return registry, sends
 
 
 def _notifier(registry):
@@ -174,7 +174,7 @@ def _logs(name: str):
 def test_one_outage_sends_exactly_one_mail_with_the_fixed_template() -> None:
     """断一次 → **一封**；主题是固定的那一句，正文含【时间】【症状】【怎么办】。"""
 
-    registry, sends, _ = _wired()
+    registry, sends = _wired()
 
     fired = _feed([False, False, False], _notifier(registry))
 
@@ -216,7 +216,7 @@ def test_the_body_is_built_without_any_model_call() -> None:
 def test_more_events_within_the_same_outage_send_nothing_more() -> None:
     """喂 5 次"没连上" → **仍然只有第一封**（用户："断一次只发一次，不要反复调用"）。"""
 
-    registry, sends, _ = _wired()
+    registry, sends = _wired()
 
     fired = _feed([False] * 5, _notifier(registry))
 
@@ -230,7 +230,7 @@ def test_more_events_within_the_same_outage_send_nothing_more() -> None:
 def test_reconnect_and_a_second_outage_send_again() -> None:
     """`断 → 连上 → 再断` = 两段 → 两封；**恢复本身不发**（用户："不用额外通知"）。"""
 
-    registry, sends, _ = _wired()
+    registry, sends = _wired()
     notifier = _notifier(registry)
 
     fired = _feed([False, False, True, True, False, False], notifier)
@@ -243,7 +243,7 @@ def test_reconnect_and_a_second_outage_send_again() -> None:
 def test_recovery_alone_never_sends() -> None:
     """一直连着 → **一封都不发**。"""
 
-    registry, sends, _ = _wired()
+    registry, sends = _wired()
 
     fired = _feed([True, True, True], _notifier(registry))
 
@@ -351,7 +351,7 @@ def test_a_failing_send_is_logged_and_never_propagates() -> None:
     async def angry_sender(subject: str, body: str) -> object:
         raise RuntimeError("发不出去（合成故障：凭据过期）")
 
-    registry, _, _ = _wired(sender=angry_sender)
+    registry, _ = _wired(sender=angry_sender)
     notifier = _notifier(registry)
 
     with _logs("qq_roleplay_bot.plugins.outage_notice.outage_notice") as records:
@@ -387,7 +387,7 @@ def test_the_plugin_survives_a_failing_send_and_still_notices_the_next_outage() 
         sends.append((subject, body))
         return {}
 
-    registry, _, _ = _wired(sender=flaky_sender)
+    registry, _ = _wired(sender=flaky_sender)
     notifier = _notifier(registry)
 
     with _logs("qq_roleplay_bot.plugins.outage_notice.outage_notice"):
@@ -445,7 +445,7 @@ def test_the_mail_body_carries_no_persona_mechanism_words() -> None:
     assert scan_persona_text(body) == [], scan_persona_text(body)
     assert scan_persona_text(subject) == []
 
-    _registry, sends, _ = _wired()
+    _registry, sends = _wired()
     _feed([False], _notifier(_registry))
     assert len(sends) == 1
     sent_subject, sent_body = sends[0]
@@ -609,12 +609,35 @@ def test_the_outage_notice_module_does_not_know_the_mail_modules() -> None:
 
 
 def _call_the_receiver_twice(registry) -> None:
-    """**突变手法**：把同一个接收者直接叫两次（绕过核心的一次性）。
+    """**突变手法**：把同一个接收者直接叫两次（绕开核心的一次性）。
 
     为什么手法是这样：核心的 `_DisconnectNotifier` 只在一段掉线的**第一枪**才叫接收者，
     所以"每来一次事件就发一封"这个弱化在**正常喂事件**时根本看不出来
-    （喂 5 次 `False` 也只叫一次）。能把它变红的驱动方式有两种：
-    直接叫两次接收者（本函数），或者翻插件里那个突变开关（见下面那条用例）。
+    （喂 5 次 `False` 也只叫一次）。要把它变红就必须**绕开核心那一层**，
+    直接问接收者："你被叫两次，发几封？"
+
+    ## 交付时真跑过一次的突变更改（2026-10-06，给读的人一个可复现的改法）
+
+    **插件里没有留任何"只有测试会翻"的常量**（第一版留过一个，按决定删掉了）——
+    改弱的就是 `plugin.py::receiver` 里那一行调用本身：
+
+        -        await notice_on_disconnect(send)
+        +        await notice_on_disconnect(send)
+        +        await notice_on_disconnect(send)
+
+    跑全量套件 → **7 条红**，其余 977 全绿；还原后全绿。红的是这几条：
+
+    | 用例 | 它守的是 |
+    | --- | --- |
+    | `test_one_outage_sends_exactly_one_mail_with_the_fixed_template` | 一段一封 |
+    | `test_more_events_within_the_same_outage_send_nothing_more` | 同段不再发 |
+    | `test_reconnect_and_a_second_outage_send_again` | 第二段再发（且总数是 2） |
+    | `test_the_mail_body_carries_no_persona_mechanism_words` | 它顺带数了"正好一封" |
+    | `test_the_mail_plugin_provides_the_sender_and_the_outage_uses_it_end_to_end` | 真装配下一段一封 |
+    | `test_the_plugin_survives_a_failing_send_and_still_notices_the_next_outage` | 每段各试一次 |
+    | `test_the_receiver_sends_one_mail_per_call_and_keeps_no_state` | 被叫两次 = 两封（下面这条） |
+
+    也就是说：**这 7 条断言守的就是用户那句"断一次只发一次"**，不是"我认为它会红"。
     """
 
     receivers = registry.disconnect_receivers()
@@ -631,41 +654,10 @@ def test_the_receiver_sends_one_mail_per_call_and_keeps_no_state() -> None:
 
     这条钉住插件这一侧的契约：它只做"被叫一次发一封"，**不在自己这里再记一份状态**
     （两处各记一份正是用户最强调的那条会分叉的地方）。
+    上面 `_call_the_receiver_twice` 的说明里写着这条断言在哪个突变更改下会红。
     """
 
-    registry, sends, _ = _wired()
+    registry, sends = _wired()
     _call_the_receiver_twice(registry)
 
     assert len(sends) == 2, sends
-
-
-def test_the_mutation_hook_defaults_to_off_and_making_it_send_twice_turns_the_count_red() -> None:
-    """**突变验证**：把"断一次只发一封"改弱成"被叫一次发两封"，钉住它的用例立刻红。
-
-    改弱点就是 `plugin.MUTATION_SEND_EVERY_EVENT`（生产路径永远是 `False`，
-    没有任何生产代码会打开它）。这条同时说清三件事：
-
-    1. 开关缺省是关的（生产语义不受那个开关影响）；
-    2. 打开它之后**同一段掉线会发出两封**——正是用户不许的形状；
-    3. 文件上半部分那几条（`test_one_outage_sends_exactly_one_mail_with_the_fixed_template`、
-       `test_more_events_within_the_same_outage_send_nothing_more`、
-       `test_the_mail_plugin_provides_the_sender_and_the_outage_uses_it_end_to_end`）
-       断的正是"信的数量"，它们在那种改弱下必然红。
-       下面这个 `assert len(sends) == 2` 与那几条里的 `len(sends) == 1`
-       是**同一件事的两种取值**——所以"会红"不必靠人相信。
-    """
-
-    assert outage_plugin.MUTATION_SEND_EVERY_EVENT is False, "生产路径不该默认打开突变"
-
-    registry, sends, wired = _wired()
-    assert wired is not None and hasattr(wired, "MUTATION_SEND_EVERY_EVENT"), wired
-
-    wired.MUTATION_SEND_EVERY_EVENT = True
-    try:
-        _feed([False, False], _notifier(registry))
-    finally:
-        wired.MUTATION_SEND_EVERY_EVENT = False
-
-    assert len(sends) == 2, f"改弱之后该变成两封，实际 {len(sends)}：{sends}"
-    assert sends[0] == sends[1]
-    assert outage_plugin.MUTATION_SEND_EVERY_EVENT is False, "跑完必须还原"

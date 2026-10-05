@@ -42,13 +42,6 @@ REQUIRES = ("mail",)
 #: 面板上的显示名（`plugins.inventory()` 读它）。
 TITLE = "掉线通知"
 
-#: **突变验证用的开关**（`tests/test_outage_notice.py` 的 `test_the_mutation_hook_...`）：
-#: 打开它，接收者就从"被叫一次 = 发一封"变成"**被叫一次 = 发两封**"——
-#: 也就是把用户最强调的那条（"断一次只发一次，不要反复调用"）**改弱**成"反复调用"。
-#: 生产路径永远是 `False`（没有任何代码会把它打开，只有测试会临时翻它）。
-#: 留着它的价值：交付时"改弱了会不会红"是可以自己跑一次的，不是一句承诺。
-MUTATION_SEND_EVERY_EVENT = False
-
 
 def register(registry) -> None:
     """把"掉线那一次"接到 mail 的发信能力上。取不到能力就明确不接。"""
@@ -67,13 +60,16 @@ def register(registry) -> None:
     async def receiver() -> None:
         """核心在**一段掉线开始时**叫这一次（同一个接收者被叫第二次 = 新的一段）。
 
+        `notice_on_disconnect` 里"每被叫一次 = 一封"，别的一概不管。
         这里刻意不记任何"发过没有"的状态：那是 `runtime._DisconnectNotifier` 的活，
         在这里再记一份就是两处各记一份（用户最强调的"断一次只发一次"会因此分叉）。
+
+        **本文件里没有任何"只有测试会翻"的开关**（2026-10-06 定）：
+        突变验证要改弱的是**这句话本身**（把一次 `notice_on_disconnect` 改成两次），
+        改的是一个字都不用留的调用点，不是某个常量。
         """
 
         await notice_on_disconnect(send)
-        if MUTATION_SEND_EVERY_EVENT:  # pragma: no cover - 只有突变验证会打开它
-            await notice_on_disconnect(send)
 
     registry.link.on_disconnect(receiver)
     logger.info("掉线通知已接上：断线一次给操作者发一封邮件")
