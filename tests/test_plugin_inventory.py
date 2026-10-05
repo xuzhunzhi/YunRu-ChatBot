@@ -188,12 +188,16 @@ class InventoryShapeTests(unittest.TestCase):
     def test_requires_expresses_dependencies_instead_of_burying_them(self) -> None:
         """用户 2026-10-01：依赖用 `REQUIRES` 表达，不许把前置塞进核心。
 
-        2026-10-05：**群管理那条依赖整条撤了**——"角色事实归核心"
-        （用户："身份/权限事实并进核心"），所以 `group_admin` 不再问
-        `plugins/roles/` 要角色，`requires` 应当是空的。
+        2026-10-05：**角色那条依赖整条撤了**——用户把身份/权限事实判给核心，
+        "角色事实归核心"。所以这条判据反过来钉：**谁都不许把 `roles` 写进
+        `requires`**（写回去就是把角色事实又挂到一个插件上）。
+        而真正还活着的插件依赖仍然要用 `REQUIRES` 表达清楚：
+        `outage_notice → mail` 是同一条规矩下的正例。
         """
         rows = {row["name"]: row for row in plugins.inventory()}
-        self.assertEqual(rows["group_admin"]["requires"], [])
+        for name, row in rows.items():
+            self.assertNotIn("roles", row["requires"], f"{name} 不该再依赖 roles 插件")
+        self.assertEqual(rows["outage_notice"]["requires"], ["mail"])
 
 
 class MissingPluginTests(unittest.TestCase):

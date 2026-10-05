@@ -31,8 +31,8 @@ plugins/
     registry.link                     # LinkSeams：掉线事件（on_disconnect(接收者)）
     registry.mail                     # MailSeams：发一封给操作者的普通邮件（provide/notify）
     registry.call_action / notify     # 动作与通知（后台插件用）
-    registry.roles / loop             # 前置插件放上来的共享能力 / 事件循环
-    registry.shared_roles()           # 取前置插件放上来的角色查询
+    registry.roles / loop             # 核心注入的角色来源 / 事件循环
+    registry.shared_roles()           # 取前置插件放上来的共享能力（过渡期）
     registry.command(plugin)          # 一条命令插件
     registry.background(plugin)       # 一条后台节拍（有 name/interval_seconds/poll_once）
     registry.provide_roles(cache)     # 前置插件：把共享能力放上来
@@ -92,10 +92,14 @@ plugins/
   面板弹一条）都是插件的事；核心不知道有邮件这回事，也不会去发。见 `LinkSeams`。
   接它的那一个（`outage_notice/`）**依赖 `mail`**：`REQUIRES = ("mail",)`，方向不许反，
   见 `MailSeams`。
-- **`roles/` 也是插件**（2026-10-01 用户）："一个东西搬进插件另一个插件失效不代表
-  前者不能作为插件，只需要把前者作为前置插件就行。" 群管理与入群审批都要它，
-  所以它是**前置插件**：`group_admin` / `join_approval` 声明 `REQUIRES = ("roles",)`。
-  "B 依赖 A"从来不是 A 该进核心的理由——那样换思维链路时 A 会跟着核心一起被换掉。
+- **`roles/` 曾经也是插件**（2026-10-01 用户）："一个东西搬进插件另一个插件失效不代表
+  前者不能作为插件，只需要把前者作为前置插件就行。" 当时群管理与入群审批都要它，
+  所以它是**前置插件**：那两个声明 `REQUIRES = ("roles",)`。那句话本身仍然成立
+  （"B 依赖 A"不是"A 该进核心"的理由，现在活着的正例是 `outage_notice → mail`）。
+  **但 2026-10-05 变了**：用户把**身份/权限事实**判给核心，角色就是这种东西，
+  于是那两个插件的 `REQUIRES` 撤掉了，角色改由**核心**经 `registry.roles` 注入
+  （`group_admin` 更是连角色查询都不碰：执行端拿的是核心递进来的那份）。
+  `plugins/roles/` 这个文件夹这一轮还留着，等本体那边落地后再删。
 """
 from __future__ import annotations
 
@@ -640,6 +644,14 @@ class PluginRegistry:
                  action_caller=None) -> None:
         self.call_action = call_action
         self.notify = notify
+        #: **核心注入的角色来源**（"她在某个群里是什么角色"）。2026-10-05 用户：
+        #: "身份/权限事实并进核心"——插件要角色就问它，**不许自己造缓存、
+        #: 也不许把角色事实当插件之间的共享能力传**。
+        #:
+        #: 迁移中：核心那边还没搬完时它是 `None`，此刻 `plugins/roles/` 是唯一的
+        #: 提供方（`provide_roles` / `shared_roles()`）。取用方按"核心优先、过渡次之"
+        #: 处理，见 `plugins/join_approval/plugin._RoleSource`——那一半是过渡，
+        #: 核心落地、`plugins/roles/` 删掉之后要删掉。
         self.roles = roles
         self.loop = loop
         #: 识图器的**工厂**：`(usage_store) -> 有 describe()/enabled 的对象 | None`。
@@ -980,7 +992,7 @@ def discover(registry: PluginRegistry, *, only: tuple[str, ...] = ()) -> tuple[s
 
     - `register(registry)`（必须）
     - `ENABLED = False`（可选，装在这里但先别启用）
-    - **`REQUIRES = ("roles",)`**（可选，**前置插件**）
+    - **`REQUIRES = ("mail",)`**（可选，**前置插件**）
 
     ### 关于 `REQUIRES`（2026-10-01 用户纠正）
 
@@ -991,11 +1003,17 @@ def discover(registry: PluginRegistry, *, only: tuple[str, ...] = ()) -> tuple[s
     B 声明 `REQUIRES = ("A",)`，由这里保证 A 先装上。把 A 塞进核心才是错的——
     那样换一套思维链路时，A 会跟着核心一起被换掉，而它其实只是个功能。
 
+    **但反过来也成立：进了核心的东西不再是插件依赖**（2026-10-05）。用户把
+    **身份/权限事实**判给核心，`plugins/roles/` 于是不再是 `group_admin` /
+    `join_approval` 的前置——那两个插件的 `REQUIRES` 已经撤掉（角色由核心注入，
+    见 `PluginRegistry.roles`）。这条规矩现在活着的正例是
+    `outage_notice → mail`（`REQUIRES = ("mail",)`，方向不许反）。
+
     本函数据此做三件事：
 
     1. **按依赖顺序装**：`_load(name)` 先递归装它的 `REQUIRES`，再装自己；
-    2. **前置装不上就跳过自己**（并记一行日志）：`roles` 没装成，
-       `group_admin` 就不该半死不活地挂在那里；
+    2. **前置装不上就跳过自己**（并记一行日志）：`mail` 没装成，
+       `outage_notice` 就不该半死不活地挂在那里；
     3. **环依赖不会转不出来**：正在装的集合里出现重复就报错跳过。
     """
 

@@ -34,9 +34,17 @@ import re
 import time
 from dataclasses import dataclass
 
-from ..roles.roles import ROLE_ADMIN, ROLE_OWNER
-
 logger = logging.getLogger(__name__)
+
+#: **QQ 侧线上取值**（`get_group_member_info` 的 `role` 字段）：**对面的协议词表**，
+#: 不是"我们这边的身份事实"。
+#:
+#: 2026-10-05 改：原来这两个是从 `plugins/roles/roles.py` **import 另一个插件**拿的。
+#: 角色事实（谁去查、缓存多久）已经归核心，`plugins/roles/` 删掉之后那句 import
+#: 就进不来了；核心递回来的字符串是什么意思，这边还得认。
+#: 本插件里**没有任何角色缓存，也不发角色查询**——来源由 `_RoleSource` 交给核心。
+ROLE_OWNER = "owner"
+ROLE_ADMIN = "admin"
 
 APPROVE = "approve"
 REJECT = "reject"
@@ -244,7 +252,11 @@ class JoinApprovalPoller:
         return result
 
     async def _may_approve(self, group_id: str) -> bool:
-        """只有她在这个群是群主/管理员才处理（管理员也能批入群）。"""
+        """只有她在这个群是群主/管理员才处理（管理员也能批入群）。
+
+        角色来自 `roles`（**核心注入的那份**，见 `plugin._RoleSource`）；
+        拿不到（`None` 或空串）就**不批**，也不猜——fail-closed。
+        """
 
         role = await self.roles.role(group_id) if self.roles is not None else ""
         if role in {ROLE_OWNER, ROLE_ADMIN}:
