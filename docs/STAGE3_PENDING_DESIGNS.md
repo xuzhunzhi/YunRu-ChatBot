@@ -60,7 +60,7 @@ JudgeVerdict（dialogue_judge.py:137）的字段只有：
 | --- | --- | --- |
 | 判定加字段 `understood` | `JudgeVerdict.understood`（`clear`/`unsure`/`lost`）+ `JudgeVerdict.specialist`，另有 `verdict.unsure` | "专业·事实话题"这个门也要判定来给，不然核心没法只凭消息正文判断 |
 | 人格三条禁令 | 三条禁令写进 **`ask_when_unsure.UNSURE_ASK_RULE`**，由 `stage3_runtime.compose_system_prompt` 拼进回复 prompt | 生产上 `BASE_PROMPT` 整段来自真人格文件（`base_prompt.py:249-251`），写进人格等于只在 `dev/` 生效。`tests/test_ask_when_unsure.py::test_the_rule_survives_a_replaced_persona` 拿假人格钉住这条 |
-| 限量（同一话题一次、10 分钟 3 次） | `dev_config.ASK_MAX_PER_TOPIC` / `ASK_MAX_PER_WINDOW` / `ASK_WINDOW_SECONDS`（`QQBOT_ASK_*`）+ 运行期开关 `ask_when_unsure` | 照既有配置写法，不硬编码 |
+| 限量（同一话题一次、10 分钟 3 次） | ~~`dev_config.ASK_MAX_PER_TOPIC` / `ASK_MAX_PER_WINDOW` / `ASK_WINDOW_SECONDS`（`QQBOT_ASK_*`）~~ + 运行期开关 `ask_when_unsure` | **那三个键 2026-10-05 晚已删**（"问"这条路拆掉了，没有消费者）；开关留着，它现在统管"不出声 / 打回"两条规则 |
 | 根据检查（知识库 / 记忆 / 语境） | `ask_when_unsure.decide_grounding`（纯函数）+ `context_is_explicit` | 第三样"语境明确"是**粗判据**：只认"挂在眼前某一句上"与"对方正在解释这件事"；判不准就当作不明确（宁可问，不许编） |
 | 没被叫到且没懂 → 不插话 | 在取资料**之前**就返回，不额外翻知识库 | 这一轮本来就不出声，翻资料白花钱 |
 
@@ -91,6 +91,37 @@ JudgeVerdict（dialogue_judge.py:137）的字段只有：
 （2026-10-05 注：那一条"判定 prompt 小于回复 prompt 的三分之一"的断言跟着常驻 system 变短
 而失效——它其实在测"那份协议有多长"，现在改成直接跟**人格**比，见
 `tests/test_dialogue_judge.py`。）
+
+### ⚠️ 2026-10-05 晚：**"问"这条路整个拆掉了**（口径改成"要么不出声，要么别断言"）
+
+**用户原话**：*"别做不懂就问"* · *"先改掉**不懂装懂硬插话**"*，并给了判据——
+**"没根据的时候，要么不出声，要么别断言"**。所以上面那一套里关于"以问回应"的部分
+**全部作废**（不是"暂时不用"，是这条路不该存在）。
+
+| 上面写过的 | 现在（2026-10-05 晚起） |
+| --- | --- |
+| 被叫到 + 没懂 → **以"问"回应** | 被叫到 + 没懂 + 话里有具体断言 + 三处没根据 → **打回，让她在同一轮里重写一次**（`NO_ASSERT_NOTE`：能说的照说、不知道就直说，**不是**反问她） |
+| 没被叫到 + 没懂 → 不插话 | **不变**，而且加了新信号：没被叫到 + 没懂 + **具体话题** → 不出声 |
+| 限量（同一话题最多问一次、10 分钟 3 次）+ `QQBOT_ASK_*` | **整套删掉**：`dev_config` 里那三个键、`dev_config.ASK_MAX_*` / `ASK_WINDOW_SECONDS` 都没了——没有消费者了。`AskBudget` 这个类留在 `ask_when_unsure.py` 里（它的语义仍有测试钉着），但**引擎不再持有它**，也不再传 `ask_budget=` |
+| `ASK_TURN_NOTE` / `HOLD_TURN_NOTE` 进易变段 | **没有调用点**了（留着当历史与文字来源，测试仍扫它们的机制词）。引擎的 `clarify_note` **恒为空串** |
+| 反馈："要么只在那一轮的易变段出现，要么由核心确定性拦" | 这一版**两条都做到**：唯一递到她眼前的是 `NO_ASSERT_NOTE`（只在她被打回的那一轮、经 `_revision_request` 进 user 段）；路由与打回由 `decide_grounding` / `has_specific_claim` **确定性**决定，一个字都不进 prompt |
+
+**这一版新增的确定性判据**（`ask_when_unsure.has_specific_claim`）：
+她那一版话里有没有**具体断言**——数字（阿拉伯/汉字+量词）、型号/编号、流程词。
+刻意收窄，判错的一侧是"少打回一次"而不是"凭空打回正常聊天"：
+句子里有"不清楚/不知道/记不清/没把握"这类**承认不知道**的写法，或者整句是**反问**，
+就不算断言。
+
+**两条边界的实测结论**（`dev/` 分支 `main`，2026-10-05 晚）：
+
+* 被叫到、但**只说自己的角度**（"这个我没跟上，不敢乱说。"）→ **放行**，不打回；
+* 有根据（知识库 / 记忆 / 语境任一处命中）→ **一个字都不拦**（三种各有一条用例）；
+* 风格审核与"别断言"**共用同一次重写机会**（审核已经打回重写过就不再打回第二次）。
+
+**上一版的两个教训（这一版都没有重犯）**：① 常驻 system 里**没有**任何新增的行为指导
+（`UNSURE_ASK_RULE` 与 `NO_ASSERT_NOTE` 都不在 `compose_system_prompt` 的那条路上，
+守卫见 `tests/test_ask_when_unsure.py`）；② 不靠提示措辞自觉——真正的拦与放行是
+`decide_grounding` 与 `has_specific_claim` 两个纯函数加一处引擎判断。
 
 ---
 

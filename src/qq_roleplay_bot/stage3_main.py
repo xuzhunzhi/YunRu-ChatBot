@@ -32,7 +32,12 @@ from .builtin_commands import (
     build_help_text,
 )
 from ._host import HostServices
-from .ask_when_unsure import AskBudget, context_is_explicit, decide_grounding
+from .ask_when_unsure import (
+    NO_ASSERT_NOTE,
+    context_is_explicit,
+    decide_grounding,
+    has_specific_claim,
+)
 from .dialogue_judge import JudgeVerdict, build_judge_messages, parse_judge_output
 from .dialogue_compaction import (
     build_compaction_messages,
@@ -826,7 +831,6 @@ class DialogueEngine:
         style_reviewer=None,
         vision=None,
         host: HostServices | None = None,
-        ask_budget: AskBudget | None = None,
     ) -> None:
         self.client = client
         # **宿主能力**（出站表现、卡片渲染、机器探测、审计、余额、角色、检索）。
@@ -907,14 +911,10 @@ class DialogueEngine:
         # 识图（可选）：有图的消息在**进判定之前**先看一眼，把 `[图片]` 换成一句描述。
         # 它只改正文，不新增决策路径——"要不要回、回什么"照旧全在原来那套里。
         self.vision = vision
-        # 「不懂就问」的限量（2026-10-04）：同一话题最多一次、同一个群一段时间内最多几次。
-        # 计数只在内存里（见 `AskBudget`），默认值来自 `dev_config.QQBOT_ASK_*`；
-        # 测试可以直接塞一份自己的进来，把"十分钟"缩成"一秒"。
-        self.ask_budget = ask_budget if ask_budget is not None else AskBudget(
-            max_per_topic=dev_config.ASK_MAX_PER_TOPIC,
-            max_per_window=dev_config.ASK_MAX_PER_WINDOW,
-            window_seconds=dev_config.ASK_WINDOW_SECONDS,
-        )
+        # 「没把握就别断言」这条路（2026-10-04 起叫"不懂就问"，2026-10-05 晚改口径）：
+        # **没有限量器了**。旧版有一个 `AskBudget`（同一话题最多问一次），因为那时
+        # "以问回应"会被她每句都用一遍；现在那条路拆掉了，兜底是"打回重写一次"——
+        # 一次重写本身就是上限，不存在"每句都问"，所以这里不再持有一个配额账本。
         # 能力闸门（群管理要用它按用途校验 action）。默认自己建一份离线目录；
         # runtime 会把它自己的那份塞进来，保证与补上下文用的是同一份白名单。
         from .capabilities import CapabilityRegistry
@@ -975,9 +975,11 @@ class DialogueEngine:
             "reply_reviewed", "reply_review_rejected_final",
             # 识图成功几次（把 `[图片]` 换成描述的次数；没配识图时恒为 0）。
             "media_described",
-            # 「不懂就问」：以"问"回应的次数，以及"没把握/没根据所以没插话"的次数
-            # （关掉那条规则时两者恒为 0）。只有计数，没有正文。
-            "clarify_asked", "clarify_quiet",
+            # 「没把握就别断言」（旧名"不懂就问"）：`clarify_quiet` 是"没被叫到、没把握、
+            # 又是具体话题，所以没插话"的次数；`reply_grounding_rewrites` 是"被叫到、
+            # 话里有具体断言、三处都没有根据，于是被打回重写一次"的次数。
+            # （关掉 `ask_when_unsure` 开关时两者恒为 0。只有计数，没有正文。）
+            "clarify_quiet", "reply_grounding_rewrites",
         )}
         self._pending_relays: dict[str, PendingRelay] = {}
         self._pending_relay_selections: dict[str, PendingRelaySelection] = {}
@@ -1025,29 +1027,43 @@ class DialogueEngine:
         return "\n".join(lines)[-600:]
 
     def _revision_request(self, request: list[dict[str, str]], draft: str,
-                          reason: str) -> list[dict[str, str]]:
+                          reason: str, *, note: str = "") -> list[dict[str, str]]:
         """把"这一版被退回来了"接在**同一份请求**后面。
 
         为什么不重新拼一遍整个请求：`build_dialogue_messages` 有十几个参数，抄一遍
         迟早会抄漏一个——那就变成"重写那一次看到的语境和第一版不一样"。
         这里只在末尾追加一条 user 消息：她仍然是那个人、仍然看着同一段语境，
         只是知道了"刚才那句为什么不行"。**指令进 user 段**，system 前缀一个字不动。
+
+        `note` 是"打回"的具体要求。两条路各自给一句现成的措辞（都在易变段、
+        不常驻、不点机制词）：
+        * 风格审核那一趟：`reason` 就是审核给的理由，没有别的话；
+        * 「没把握就别断言」那一趟：`note=ask_when_unsure.NO_ASSERT_NOTE`
+          ——"别断言你不知道的 / 说你能说的，或者说这个你不清楚"，**不是**"问她一句"。
         """
 
-        note = (
+        note_block = f"\n{note.strip()}\n" if note.strip() else ""
+        body = (
             "--- 你刚写的那一句要重来 ---\n"
             f"你刚写的是：{draft}\n"
-            f"不合适的地方：{reason or '（没写清楚是哪一处）'}\n"
+            f"不合适的地方：{reason or '（没写清楚是哪一处）'}"
+            f"{note_block}\n"
             "照这个地方**重写一遍**——只改不合适的那处，别的不用动。"
             "不要解释、也不要提这一段，像平常那样把新的一句说出来。"
         )
-        return [*request, {"role": "user", "content": note}]
+        return [*request, {"role": "user", "content": body}]
 
     async def _rewrite_after_review(self, request, draft: str, reason: str, *,
                                     session_id: str, trigger: str, trigger_kind: str,
                                     context: str, known_message_ids: frozenset[str],
-                                    must_reply: bool) -> str | None:
-        """审核打回之后：**在同一轮里**让回复 agent 重写一次。返回新正文或 `None`。
+                                    must_reply: bool, note: str = "") -> str | None:
+        """打回之后：**在同一轮里**让回复 agent 重写一次。返回新正文或 `None`。
+
+        两个调用方共用这一条路（**不另造机器**）：
+        * 风格审核判不过（2026-10-05）：`reason` 是审核给的那一句；
+        * 「没把握就别断言」（2026-10-05 晚）：她这一版话里有具体断言，
+          而知识库 / 记忆 / 语境三处都没有根据 → 同一个动作，
+          只是多带一句现成的 `note`（`ask_when_unsure.NO_ASSERT_NOTE`）。
 
         几条边界（都是"宁可照旧，也不许把一条回复弄丢"）：
 
@@ -1059,7 +1075,7 @@ class DialogueEngine:
           没有另造一套客户端。
         """
 
-        retry_request = self._revision_request(request, draft, reason)
+        retry_request = self._revision_request(request, draft, reason, note=note)
         self._stats["model_calls"] += 1
         started_at = self.clock()
         try:
@@ -1079,6 +1095,13 @@ class DialogueEngine:
         if rewritten.kind is not DecisionKind.REPLY or not rewritten.text:
             logger.warning("Stage 3 rewrite after review came back empty；按第一版发出")
             return None
+        if self.style_reviewer is None:
+            # 没配审核（或审核被关掉）时，这一条路只有"打回重写"这一半：
+            # 重写的结果不再过一遍审核——没有审核可过。**它绝不能在这里炸**：
+            # 「没把握就别断言」这一关不依赖审核是否存在。
+            logger.info("Stage 3 rewritten after grounding/review: chars=%s final=%s",
+                        len(rewritten.text), rewritten.text[:60])
+            return rewritten.text
         still_passed, still_reason = await self.style_reviewer.review(
             rewritten.text, context=context)
         if not still_passed:
@@ -3289,9 +3312,10 @@ class DialogueEngine:
         # 判定说"这一句在问她的世界吗"——只有 YES 才去翻世界观资料（单 agent 模式照旧查）。
         lore_wanted = True
         care_note: dict | None = None
-        # 「不懂就问」这一轮的现场提示（`ask_when_unsure`）：空串＝照旧说话。
-        # 它进的是**易变段**，所以不影响前缀缓存（见 `build_dialogue_messages`）。
-        clarify_note = ""
+        # 「没把握就别断言」这条路的确定性结论（`ask_when_unsure`）：第一道在判定刚回来时
+        # 就能算（没被叫到又没懂 → 直接不出声），第二道要等资料取完才算得出来
+        # （三处根据一样都没有 + 被叫到 → 之后要看她的草稿）。
+        grounding = None
         ask_rules = self._flags().ask_when_unsure
         # 双 agent 结构：先由判定 agent 决定"要不要接"。它的 prompt 与窗口都小得多，
         # 所以这次调用便宜；判定说 NO_REPLY 就直接结束，省掉回复那一次完整调用。
@@ -3312,11 +3336,14 @@ class DialogueEngine:
             self._refresh_context_from_verdict(state, verdict, session_id=message.session_id)
             verdict_related = bool(getattr(verdict, "related", True))
             lore_wanted = bool(getattr(verdict, "lore", True))
-            # 「不懂就问」的第一道确定性规则（2026-10-04）：**没听懂、又没被叫到 → 不插话**。
+            # 「没把握就别断言」的第一道确定性规则（2026-10-04 加，2026-10-05 晚改口径）：
+            # **没被叫到 + 没懂 + 具体话题 → 不插话**。不出声，**不是**"问一句"——
+            # 用户否掉的就是"不懂就问"那条路（"没根据的时候，要么不出声，要么别断言"）。
             # 它放在取资料之前：这一轮本来就不出声，没必要为它去翻东西（翻要花钱）。
             # **"被叫到时没有否决权"的原意保留**：这里唯一的沉默条件是"没被叫到"，
-            # 被叫到时她照样必须回应——只是允许她把"断言的答"换成"问"（见下面）。
-            if ask_rules and verdict.unsure and not (addressed or must_reply):
+            # 被叫到时她照样必须回应——只是那一版话里若有具体断言，会被打回重写一次
+            # （见下面 `decide_grounding` 的第二道与草稿那一关）。
+            if ask_rules and verdict.unsure and verdict.specialist and not (addressed or must_reply):
                 self._stats["clarify_quiet"] += 1
                 logger.info(
                     "Stage 3 clarify: 没听懂、也没被叫到，不插话 session=%s topic=%s",
@@ -3348,10 +3375,11 @@ class DialogueEngine:
                 message,
                 topic_shifted=bool(self._judge_on(message.session_id) and not verdict_related),
             )
-        # 「不懂就问」的第二道：**根据检查**（确定性，模型"觉得自己懂"绕不过它）。
+        # 「没把握就别断言」的第二道：**根据检查**（确定性，模型"觉得自己懂"绕不过它）。
         # 三种根据——知识库命中 / 记忆命中 / 语境明确——一样都没有、判定又说这是具体的
-        # 专业·事实话题时，不许主动断言：被叫到就以"问"回应（问的次数还够的话），
-        # 没被叫到就干脆不出声。日常、情感、闲聊不受这条限制（`care=False` 就是照旧）。
+        # 专业·事实话题（或者判定说她没懂）时：**没被叫到就不出声**；被叫到照常开口，
+        # 但那之后要看一眼她的草稿（见下面那一关）。日常、情感、闲聊
+        # 不受这条限制（`care=False` 就是照旧，正常聊天一个字都不受影响）。
         #
         # 放在这里（而不是判定刚回来时）是因为前两样根据**要等资料取完才知道**。
         if ask_rules and self._judge_on(message.session_id):
@@ -3361,7 +3389,6 @@ class DialogueEngine:
                 has_knowledge=bool(prompt_material.knowledge_items),
                 has_memory=bool(memory_material.records),
                 context_explicit=context_is_explicit(message, state.recent()),
-                ask_allowed=self.ask_budget.allows(message.session_id, state.context.topic, now),
             )
             if not grounding.speak:
                 self._stats["clarify_quiet"] += 1
@@ -3371,13 +3398,10 @@ class DialogueEngine:
                     grounding.specialist, grounding.grounded,
                 )
                 return None
-            # 只有"要当心"的那几种才拼提示、才记日志：照旧说话的绝大多数轮次
-            # 不该多一条日志（这条路上的每一轮都会跑到这里）。
-            if grounding.care:
-                clarify_note = grounding.turn_note
-                if grounding.ask:
-                    self.ask_budget.note(message.session_id, state.context.topic, now)
-                    self._stats["clarify_asked"] += 1
+            # 只有"要当心"的那几种才记日志：照旧说话的绝大多数轮次不该多一条日志
+            # （这条路上的每一轮都会跑到这里）。**这一层一个字都不进她的 prompt**：
+            # 真正的动作是"草稿有具体断言就打回重写一次"（见下面）。
+            if grounding.rewrite:
                 logger.info(
                     "Stage 3 clarify: %s session=%s topic=%s understood=%s specialist=%s grounded=%s",
                     grounding.reason, message.session_id, state.context.topic or "-",
@@ -3424,8 +3448,11 @@ class DialogueEngine:
             # 也判断不了"昨天晚上""三天前"（2026-09-30 用户："云茹不能获取时间吗"）。
             # 它进的是**易变段**，不影响前缀缓存。
             now=now,
-            # 「不懂就问」的现场提示（空串＝照旧）。同样只进易变段。
-            clarify_note=clarify_note,
+            # 这一轮**不再有**"没把握就先问一句"的现场提示（2026-10-05 晚拆掉那条路：
+            # 用户否掉的就是它）。`clarify_note` 这个口子留着（它只进易变段），
+            # 但引擎这一侧现在**恒为空串**——没把握时不再教她怎么说话，
+            # 而是"没被叫到就不出声、被叫到就看她自己那一版有没有具体断言"。
+            clarify_note="",
         )
         self._stats["model_calls"] += 1
         started_at = self.clock()
@@ -3460,6 +3487,9 @@ class DialogueEngine:
         # 在**同一轮**里重写一次（最多一次，不许循环）；重写后仍被拒 → **发重写的那一版**
         # （绝不把回复丢掉、也不卡住），并记一笔。审核超时/报错/输出认不出来一律按通过。
         # `review_enabled` 是运行期开关（面板可关）——关掉就是原稿直发。
+        # `review_rewrote` 记"审核已经把这一次重写机会用掉了"（见下面那一关）：
+        # 两条路**共用同一次**重写机会，不许一条回复被重写两遍。
+        review_rewrote = False
         if (self._flags().review_enabled and self.style_reviewer is not None
                 and decision.kind is DecisionKind.REPLY
                 and decision.text):
@@ -3477,10 +3507,51 @@ class DialogueEngine:
                     known_message_ids=frozenset(message_ids),
                     must_reply=self._judge_on(message.session_id),
                 )
+                review_rewrote = True
                 if rewritten is not None:
                     # **只换正文**：这一轮要不要说、引用哪一句、语境是什么，
                     # 都是判定与第一次解析定下来的，不因为重写一遍就改主意。
                     decision = replace(decision, text=rewritten)
+        # 「没把握就别断言」的**兜底那一关**（2026-10-05 晚加，治"不懂装懂"）。
+        #
+        # 条件全部确定性：**被叫到**（`grounding.rewrite` 只在被叫到时为 True）
+        # + **没懂 / 具体话题又没有根据**（知识库 / 记忆 / 语境三处，`decide_grounding` 算的）
+        # + **她这一版的话里确实出现了具体断言**（数字 / 型号 / 流程——`has_specific_claim`）
+        # → **打回，让她自己在同一轮里重写一次**（复用上面那条路，不另造机器；最多一次）。
+        #
+        # 为什么放在审核之后：两条路共用**同一次**重写机会——先看审核，审核已经打回重写过
+        # 就不再重写第二次（"最多一次"这条边界对两条路一起成立）。
+        #
+        # 为什么还要"有具体断言"才打回：只说她自己那点感受的（"这个我没跟上"、
+        # "行，等你"）不打回——**不许把正常聊天掐死**。打回时递的那句话
+        # （`NO_ASSERT_NOTE`）说的是"别断言你不知道的、不知道就直说"，
+        # **不是**"问她一句"——那条路用户已经否掉了。
+        if (grounding is not None and grounding.rewrite and not review_rewrote
+                and decision.kind is DecisionKind.REPLY and decision.text
+                and has_specific_claim(decision.text)):
+            first_draft = decision.text
+            self._stats["reply_grounding_rewrites"] += 1
+            logger.info(
+                "Stage 3 grounding: 没把握却写了具体断言，打回重写 session=%s topic=%s "
+                "understood=%s specialist=%s draft=%s",
+                message.session_id, state.context.topic or "-",
+                getattr(verdict, "understood", "clear"),
+                getattr(verdict, "specialist", False), first_draft[:60],
+            )
+            rewritten = await self._rewrite_after_review(
+                request, first_draft, reason="",
+                session_id=message.session_id, trigger=trigger, trigger_kind=trigger_kind,
+                context=self._review_context(message, state),
+                known_message_ids=frozenset(message_ids),
+                must_reply=self._judge_on(message.session_id),
+                note=NO_ASSERT_NOTE,
+            )
+            if rewritten is not None:
+                # 重写版**已经过了一遍审核**（在 `_rewrite_after_review` 里，跟审核那条路
+                # 共用同一次机会）：仍被拒也照发重写的那一版、并记一笔，
+                # 审核打回不是否决权，回复绝不许被丢掉。这里只换正文。
+                decision = replace(decision, text=rewritten)
+            # 重写这一趟空手/失败 → **发第一版**（宁可照旧，也不许把回复弄丢）。
         self.metrics.record_decision(decision.kind.value)
         logger.info(
             "Stage 3 decision: session=%s trigger=%s kind=%s dialogue=%s reply_length=%s "

@@ -82,10 +82,13 @@ class EngineSnapshot:
     review_failed: int = 0
     # 识图成功把 `[图片]` 换成描述的条数（没配识图时恒为 0）。
     media_described: int = 0
-    # 「不懂就问」（2026-10-04）：以"问"回应的次数，以及"没把握/没根据所以没插话"的次数。
-    # 关掉 `ask_when_unsure` 开关时两者恒为 0。只有计数，没有正文。
-    clarify_asked: int = 0
+    # 「没把握就别断言」（旧名「不懂就问」，2026-10-05 晚改口径）。
+    # `clarify_quiet` 是"没被叫到、没懂、又是具体话题，所以没插话"的次数；
+    # `reply_grounding_rewrites` 是"被叫到、话里有具体断言、知识库/记忆/语境三处
+    # 都没有根据，于是被打回重写一次"的次数。关掉 `ask_when_unsure` 开关时两者恒为 0。
+    # 只有计数，没有正文。
     clarify_quiet: int = 0
+    reply_grounding_rewrites: int = 0
     # 当前当值状态：热群、当值多久、排队深度。只有数字与群号，没有正文。
     focus: dict[str, object] | None = None
     memory: dict[str, object] | None = None

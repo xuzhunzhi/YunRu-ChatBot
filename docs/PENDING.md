@@ -248,7 +248,21 @@ outage_notice **取用**它；mail 那一侧不认识任何使用者的名字。
   "哦，看啊，云茹，今天的大大的哈基米。"（第三人称叫自己 + 词序乱）。
   **未部署**（`run/` 要另做一步，见 `docs/STAGE3_PENDING_DESIGNS.md` §③"部署注意"）。
 
+* **"不懂就问"改口径：拆掉"以问回应"，换成"要么不出声，要么别断言"**（10-05 晚，在 `dev` 这条线）：
+  用户否掉了上一版（*"别做不懂就问"* · *"先改掉不懂装懂硬插话"*）。现在三层：
+  ① 判定那两个信号（`understood` / `specialist`）照旧，**不多花一次调用**；
+  ② **路由**（确定性）：没被叫到 + 没懂 + 具体话题 → **不出声**（`stage3_main.py` 那道
+  `verdict.unsure and verdict.specialist`，以及 `decide_grounding` 里的 `speak=False`）；
+  ③ **兜底**（确定性）：被叫到 + 没懂/没根据 + 她那一版话里有**具体断言**（数字/型号/流程，
+  `ask_when_unsure.has_specific_claim`）→ **打回，同一轮重写一次**（复用 `_rewrite_after_review`，
+  `stage3_main.py` 那道 `grounding.rewrite ... has_specific_claim`）。
+  **两个教训都没重犯**：常驻 system 一字不增（`UNSURE_ASK_RULE` 与新的 `NO_ASSERT_NOTE`
+  都不在 `compose_system_prompt` 路上）；拦与放行是纯函数 + 一处引擎判断，不靠措辞自觉。
+  旧的限量（`QQBOT_ASK_MAX_*` / `AskBudget` 接线）**整套删掉**——没有消费者了。
+  **未部署**（`run/` 仍未同步）。
+
 （上面每条的主题与 sha 是我实测查的；"拆成两条线 / 风格审核放宽 / 不懂就问 / 对话日志"这些**说法**来自任务书。）
+（10-05 晚那一条是我这次改的；sha 见 `docs/STAGE3_PENDING_DESIGNS.md` §① 末尾那一节与 git log。）
 
 ---
 
