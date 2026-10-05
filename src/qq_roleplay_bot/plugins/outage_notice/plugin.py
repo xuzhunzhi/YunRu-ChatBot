@@ -50,8 +50,9 @@ def register(registry) -> None:
         logger.info("掉线通知未启用（QQBOT_MAIL_OUTAGE_NOTICE=0）")
         return
 
-    # 与 `group_admin` 取 `shared_roles()` 同一个形状：**前置给的能力，
-    # 取不到就退回"这个功能这次没有"，绝不半挂着。**
+    # **前置给的能力，取不到就退回"这个功能这次没有"，绝不半挂着**：
+    # `REQUIRES = ("mail",)` 已经把"mail 不在就不装本插件"钉死了，这里挡的是
+    # 第二种情形——mail 装了、但它没配收件人（能力是空的）。
     send = getattr(registry.mail, "operator_sender", None)
     if not callable(send):
         logger.warning("掉线通知这次没接上：mail 没提供发信能力（没配收件人？）")
