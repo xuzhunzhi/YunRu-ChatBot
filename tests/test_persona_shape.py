@@ -11,7 +11,7 @@
    告诉她你不是真人（早期踩过，她随后就开始讲自己的机制）；
 5. **正文进的是可信 system 前缀**，不是 DATA 段；
 6. **风格审核不许被授权去磨她的语气**（2026-10-04）——它是每条回复发送前的最后一道，
-   详见下面 `test_review_prompt_keeps_emotion_and_only_blocks_four_kinds`。
+   详见下面 `test_review_prompt_keeps_emotion_and_only_blocks_six_kinds`。
 
 2026-10-04 第二次改动（**撤掉的一半**）：`45f3535` 那条人格审计往模板里加的"情绪许可 /
 不怼人边界 / `:68` 那条的限定"三处**已经撤回**（`git checkout 45f3535^ --
@@ -100,27 +100,36 @@ def test_persona_is_actually_shipped_with_the_package() -> None:
 # --- 风格审核的授权范围（2026-10-04）----------------------------------------
 
 
-def test_review_prompt_keeps_emotion_and_only_blocks_four_kinds() -> None:
-    """风格审核的**授权范围**：只挡事实错误 / 越权 / 出戏 / 伤人。
+def test_review_prompt_keeps_emotion_and_only_blocks_six_kinds() -> None:
+    """风格审核的**授权范围**：只挡事实错误 / 越权 / 出戏自指 / 伤人 / 不成句 / 空回复。
 
     它是每条回复发送前的最后一道，写得保守就会把情绪磨平（2026-10-04 审计：
     上一版判据 1 删反问、判据 3 删吐槽、判据 5 按字数压）。
 
-    2026-10-05 它从"只改这四类"改成"**只判这四类**"（用户："审核只负责打回，
-    不负责修改"），所以这里的锚点跟着改口径，但守的东西一个字没变：
-    四类在、**"情绪与语气不归它管"**在、**上一版那套"去冲"的说法不许回来**。
-    "只改"那几句现在都换成"只看/不算越界/判过"——它已经没有任何改写权限了。
+    2026-10-05 两改：它从"只改这四类"改成"**只判这六类**"（用户："审核只负责打回，
+    不负责修改"），随后判据按两条真实故障收紧（出戏自指 / 不成句 / 空回复），
+    并把"拿不准就判过""一律判过"那套宽松偏置删掉（用户："审核是不是管太松了"——
+    松的**前提**是它会改写，现在它不写了，那个前提没了）。
+
+    守的东西一个字没变：六类在、**"情绪与语气不归它管"**在、
+    **"不许评价好不好听/像不像她/够不够有人味"**在、**上一版那套"去冲"的说法不许回来**。
     """
 
     from qq_roleplay_bot.prompt_guard import scan_agent_text
     from qq_roleplay_bot.style_reviewer import REVIEW_SYSTEM_PROMPT as review
 
-    for scope in ("事实错了", "越权", "出戏", "伤人"):
+    for scope in ("事实错了", "越权", "出戏自指", "伤人", "不成句", "空回复"):
         assert scope in review, scope
-    assert "只看这四类" in review
+    assert "只看这六类" in review
     assert "不负责把话改短、改客气、改平稳" in review, "审核又被授权去磨她的语气了"
     assert "写得冲也不算越界" in review
     assert "只判断，不改写" in review, "审核又开始自己动手改台词了"
     assert "超过 40 字" not in review, "按字数压话的那条判据回来了"
-    assert "一律判过" in review
+    # 宽松偏置（"会改写"时代的产物）与"评价她的味道"都不许回来。
+    assert "一律判过" not in review, "宽松偏置回来了"
+    assert "拿不准就判过" not in review, "宽松偏置回来了"
+    assert '"好不好听""像不像她""够不够有人味"不归你管' in review, "它又被允许评价她的味道了"
+    # fail-open 的**机制**在代码里（`review()` 重试一次后仍认不出才放行），
+    # 但不许再用 prompt 里的措辞把"多数时候不用管"暗示回去。
+    assert "通常不用管" not in review
     assert scan_agent_text(review) == [], "审核 prompt 里混进了机制词"

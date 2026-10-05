@@ -15,6 +15,7 @@ from .extensions import PromptMaterial
 from .base_prompt import BASE_PROMPT
 from .memory_model import MemoryMaterial
 from .prompt_library import derive_must_reply
+from .stay_in_character import STAY_IN_CHARACTER_RULE
 
 logger = logging.getLogger(__name__)
 
@@ -734,10 +735,12 @@ NO_REPLY 表示这次不发言但话题继续；EXIT_DIALOGUE 表示退出当前
 # 某个行当里的规矩、某个数字…"的措辞；**prompt 里的措辞会被角色吸收**
 # （AGENTS §2.2），她的 `intent` 于是从"接住吐槽，顺口一句"变成"接话，给出判断"。
 # 那段话现在只作为**这一轮**的现场提示进易变段（`ASK_TURN_NOTE` / `HOLD_TURN_NOTE`，
-# 见 `stage3_main._model_path` 里 `clarify_note` 那一路），常驻 system 一个字都不加。
+# 见 `stage3_main._model_path` 里 `clarify_note` 那一路）。
 #
-# 所以这里必须与 `prompt_library` 里 `reply` 那一套的**内置默认逐字一致**：
-# 面板"查看当前 prompt"看到的就是真正生效的那一份。
+# 2026-10-05 追加：这一段**不是**完整生效的 system——真正发出去的那一份还带
+# `compose_system_prompt` 拼在末尾的 `STAY_IN_CHARACTER_RULE`（防她参与"自己怎么做出来的"
+# 那种讨论）。这一份恒等于 `prompt_library` 里 `reply` 那一套的**内置默认**（面板看到的是
+# 它），所以改这里时必须两处一致。
 
 
 def _replace_once(text: str, old: str, new: str) -> str:
@@ -784,26 +787,36 @@ def resolve_system_prompt(*, must_reply: bool = False) -> str:
 
 
 def compose_system_prompt(persona_text: str) -> str:
-    """system 段的**唯一装配点**：现在它一字不加，原样返回。
+    """system 段的**唯一装配点**：把**代码层的规矩**拼在人格后面。
+
+    这里现在拼的是 `stay_in_character.STAY_IN_CHARACTER_RULE`：有人当着她的面谈
+    "这东西怎么做出来的""该给它加点什么"时，她**不接这个话**（见那个模块的由来——
+    生产日志里她真的接了，还说了"再加一个插件，那条线还得挪"）。
 
     为什么要留这一层（而不是把调用点删掉）：`AGENTS` §2.2 要求"代码层的规矩"只能
     从这里进 system——生产上 `BASE_PROMPT` 是**整段替换**的
     （`base_prompt.py:249-251` 找到 `data/private_docs/base_prompt.REAL.py` 就整段返回），
-    写进仓库模板的规矩在生产上一个字都不算数。留着这个接缝，下次要有代码级规矩时
-    只改这里一处，调用点与测试都不用动。
+    写进仓库模板的规矩在生产上一个字都不算数。
 
-    **2026-10-05 改**：这一层原来拼的是「不懂就问」的 `UNSURE_ASK_RULE`（无条件、
-    27 天里一直生效）。那条规矩的措辞教她"分析话题"，实测把她的说话意图带偏了
+    **2026-10-05 两次改动**：这一层原来拼的是「不懂就问」的 `UNSURE_ASK_RULE`
+    （无条件、27 天里一直生效）。那条规矩的措辞教她"分析话题"，实测把她的说话意图带偏了
     （见 `SYSTEM_PROMPT` 上面那段），所以**从这里撤掉**——它现在只按轮次进易变段，
-    详见 `ask_when_unsure.ASK_TURN_NOTE`。
+    详见 `ask_when_unsure.ASK_TURN_NOTE`。现在拼进来的是**上面那条禁令**（2026-10-05 加）。
 
-    **必须一字不加**：它拼的是常量，system 段每变一个字整段前缀缓存就作废；
-    而且"开关关掉时 system 与从前逐字相同"这句话就靠这一层成立。
+    两条约束照旧：
+
+    * 拼的是**常量**（`STAY_IN_CHARACTER_RULE`），不按轮次变化——system 每变一个字
+      整段前缀缓存就作废；人格本身一个字不动，改的只是它后面多出的这一小段。
+    * **幂等**：文本里已经有这一段（面板上有人手工粘过）就不再拼第二遍；
+      人格为空时不拼（没有可以附着的正文）。
     `persona_text` 用参数传进来（而不是在这里 import `BASE_PROMPT`）是为了让
     "换一份人格之后 system 是什么样"能被直接测出来。
     """
 
-    return persona_text or ""
+    body = persona_text or ""
+    if not body or STAY_IN_CHARACTER_RULE in body:
+        return body
+    return body + STAY_IN_CHARACTER_RULE
 
 
 # 触发类型的自然语言说法。这些词会出现在 user 消息里，所以必须是交谈视角的
@@ -1466,9 +1479,10 @@ def build_dialogue_messages(
         # `system_text` 只给测试与显式调用方用；不传就是当前生效的那一份。
         #
         # **代码层的规矩一律经 `compose_system_prompt`**（见它的说明）：生产上人格是
-        # 整段替换的，写进人格文件的规矩进不了她的 prompt。它现在**一字不加**——
-        # 「不懂就问」那段已经撤到易变段（2026-10-05），所以这一行拿到的就是逐字原文，
-        # system 段逐轮稳定、前缀缓存不受影响。
+        # 整段替换的，写进人格文件的规矩进不了她的 prompt。它现在拼的是
+        # `stay_in_character.STAY_IN_CHARACTER_RULE` 那一条禁令（2026-10-05 加），
+        # 是常量、逐轮稳定，所以前缀缓存不受影响；「不懂就问」那段已经撤到易变段
+        # （2026-10-05），不在这里。
         {"role": "system",
          "content": compose_system_prompt(
              system_text if system_text is not None

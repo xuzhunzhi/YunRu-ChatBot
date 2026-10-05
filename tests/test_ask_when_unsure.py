@@ -8,6 +8,8 @@
 3. **问的次数有上限**（同一话题一次、一段时间内几次），否则她会每句都问；
 4. **这条规矩不进常驻 system**（2026-10-05 更正）：它只在判定说"这一句你没跟上"的
    那一轮作为**现场提示**进易变段（`ASK_TURN_NOTE` / `HOLD_TURN_NOTE`）。
+   （常驻 system 末尾现在拼的是**另一条禁令**——"有人当面谈这东西怎么做出来的，她不接"，
+   见 `tests/test_stay_in_character.py`；那一条不是这段规矩。）
 
 第 4 条是这次改出来的：`UNSURE_ASK_RULE` 从 2026-10-04 起被**无条件**拼进常驻
 system（`compose_system_prompt`），system 从 **7061 → 7378 字**，多出来的正是那段
@@ -50,6 +52,7 @@ from qq_roleplay_bot.stage3_runtime import (
     build_dialogue_messages,
     compose_system_prompt,
 )
+from qq_roleplay_bot.stay_in_character import STAY_IN_CHARACTER_RULE
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 
 GROUP = "717151356"
@@ -277,11 +280,13 @@ def test_the_rule_is_not_in_the_system_prompt_even_with_a_replaced_persona() -> 
             persona = _load_base_prompt()
         assert persona.strip() == fake, "假人格没被读进来，这条测试就没意义了"
 
-        # 1) 装配那一层**一字不加**（它是"代码层的规矩"唯一的入口）
-        assert compose_system_prompt(persona) == persona
+        # 1) 装配那一层只拼**代码层的禁令**（2026-10-05 起是 `STAY_IN_CHARACTER_RULE`）：
+        #    「不懂就问」那段一个字都不许从这里进来。
+        assert compose_system_prompt(persona).endswith(STAY_IN_CHARACTER_RULE)
+        assert compose_system_prompt(persona) == persona + STAY_IN_CHARACTER_RULE
         assert UNSURE_ASK_RULE not in compose_system_prompt(persona)
         # 2) **生产的组装路径**：面板/人格给回来的 system 文本是"裸人格"，
-        #    组装出来的请求里也不许多出这段规矩，而人格本身要一字不少。
+        #    组装出来的请求里也不许多出这段规矩，而人格本身要一字不少（禁令拼在它后面）。
         current = msg(1, "随便聊点什么")
         with patch("qq_roleplay_bot.stage3_runtime.resolve_system_prompt",
                    lambda **kwargs: persona):
@@ -290,13 +295,13 @@ def test_the_rule_is_not_in_the_system_prompt_even_with_a_replaced_persona() -> 
                 trigger="threshold", context=ContextState(topic="闲聊"),
             )
         assert UNSURE_ASK_RULE not in request[0]["content"]
-        assert request[0]["content"] == persona, "人格本身不能被改动"
+        assert request[0]["content"] == persona + STAY_IN_CHARACTER_RULE, "人格本身不能被改动"
         # 3) 现场提示那一路仍在（它才是这条规矩现在的去处）
         assert "别急着答" in ASK_TURN_NOTE
 
 
 def test_a_panel_prompt_is_not_edited_by_the_assembly_step() -> None:
-    """面板保存的覆盖版同样**一字不加**：装配那一步不许往里塞东西。"""
+    """面板保存的覆盖版同样**只多出那一条常驻禁令**：装配那一步不改操作者写的字。"""
 
     current = msg(1, "随便聊点什么")
     panel = "面板改过的一份 prompt，里面没有不懂就问这条。"
@@ -306,12 +311,14 @@ def test_a_panel_prompt_is_not_edited_by_the_assembly_step() -> None:
             [current], current=current, mode=ConversationMode.IDLE,
             trigger="threshold", context=ContextState(topic="闲聊"),
         )
-    assert request[0]["content"] == panel
+    assert request[0]["content"] == panel + STAY_IN_CHARACTER_RULE
     assert UNSURE_ASK_RULE not in request[0]["content"]
-    # 装配层是纯粹的"原样通过"：面板那份里若已经带了这段规矩（旧版保存的），
-    # 它也不会被再拼一遍（幂等），更不会被悄悄删掉——
-    # 那种遗留要不要清，由面板上"恢复默认/重存"决定，装配层不替操作者改文本。
-    assert compose_system_prompt(panel + UNSURE_ASK_RULE) == panel + UNSURE_ASK_RULE
+    # 装配层不替操作者改已存的文本：面板那份里若已经带了旧版留下的那段规矩，
+    # 它既不会被删掉、也不会被再拼一遍（幂等）——那种遗留要不要清，由面板上
+    # "恢复默认/重存"决定。常驻禁令那一小段同理，已有的不重复拼。
+    assert compose_system_prompt(panel + UNSURE_ASK_RULE) == (
+        panel + UNSURE_ASK_RULE + STAY_IN_CHARACTER_RULE)
+    assert compose_system_prompt(panel + STAY_IN_CHARACTER_RULE) == panel + STAY_IN_CHARACTER_RULE
 
 
 # --- 引擎路径（判定 → 路由 → prompt）----------------------------------------

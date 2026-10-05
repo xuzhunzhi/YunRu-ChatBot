@@ -71,6 +71,15 @@ class EngineSnapshot:
     # （它不该是常态：常态是第一次就过，或者重写一次就过）。没配审核时两者恒为 0。
     reply_reviewed: int = 0
     reply_review_rejected_final: int = 0
+    # 审核自己的运行计数（2026-10-05 追加：**把拦截率露出来**，靠数字判松紧，不靠感觉）。
+    # `review_calls` 是它判断过的草稿数（含机器判的空回复），`review_blocked` 是判不过的次数，
+    # `review_unrecognized` 是"重试一次之后仍读不出判定"的次数（那种情况按通过处理），
+    # `review_failed` 是审核那一趟自己挂掉/超时的次数。**长期 0 拦截 = 审核没在工作；
+    # 拦截率很高 = 可能过紧。** 没配审核时全为 0。
+    review_calls: int = 0
+    review_blocked: int = 0
+    review_unrecognized: int = 0
+    review_failed: int = 0
     # 识图成功把 `[图片]` 换成描述的条数（没配识图时恒为 0）。
     media_described: int = 0
     # 「不懂就问」（2026-10-04）：以"问"回应的次数，以及"没把握/没根据所以没插话"的次数。

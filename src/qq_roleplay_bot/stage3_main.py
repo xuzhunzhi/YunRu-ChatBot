@@ -1002,15 +1002,26 @@ class DialogueEngine:
         self.group_roles = value
 
     def _review_context(self, message: IncomingMessage, state) -> str:
-        """交给风格审核的一点现场：她正在回的那句话 + 最近两句。
+        """交给风格审核的一点现场：**谁在跟她说话、对方说了什么、现在聊的是什么**。
 
-        审核只需要判断"这句是不是在抬杠"，所以给最小的现场就够——给整段历史
-        既贵又会把审核带偏成"替她重新聊天"。
+        2026-10-05 追加：这三样是判"事实错了""越权""出戏"的最低需要——只给草稿的话，
+        审核看不出"这句话跟刚过去那段对得上吗"。给整段历史既贵又会把审核带偏成
+        "替她重新聊天"，所以仍然是**最近两句 + 当前这句 + 当前话题**，截断到 600 字。
+
+        它进的是审核那次请求的 **user 段**（`StyleReviewer._messages`）：只读，
+        不动她的 system，也不动审核自己的 system。
         """
 
-        recent = [item.text for item in state.recent()[-3:] if item.text and not item.is_bot_message]
-        lines = [f"上一句：{text}" for text in recent[-2:]]
-        lines.append(f"当前这句：{message.text or ''}")
+        recent = [item for item in state.recent()[-3:] if item.text and not item.is_bot_message]
+        lines: list[str] = []
+        for item in recent[-2:]:
+            who = getattr(item, "sender_name", "") or "有人"
+            lines.append(f"{who}说：{item.text}")
+        who_now = getattr(message, "sender_name", "") or "有人"
+        lines.append(f"{who_now}说：{message.text or ''}")
+        topic = str(getattr(getattr(state, "context", None), "topic", "") or "").strip()
+        if topic and topic != "未知":
+            lines.append(f"现在聊的是：{topic}")
         return "\n".join(lines)[-600:]
 
     def _revision_request(self, request: list[dict[str, str]], draft: str,
@@ -1384,6 +1395,9 @@ class DialogueEngine:
         """只读运行快照。内存数字每次读取时现取（取不到就是 0）。"""
 
         memory_now, memory_peak = process_memory_bytes()
+        # 审核的计数在**它自己**身上（判不过/认不出都发生在它内部，引擎看不到中间那一步），
+        # 所以快照现取一份，让 `/super status` 与面板能看到拦截率（2026-10-05 追加）。
+        review = self.style_reviewer.snapshot() if self.style_reviewer is not None else {}
         sessions = tuple(
             SessionSnapshot(
                 session_id=session_id,
@@ -1409,6 +1423,10 @@ class DialogueEngine:
             memory_peak_bytes=memory_peak,
             persistence_enabled=self.state_store is not None,
             focus=self.focus_stats(),
+            review_calls=int(review.get("calls", 0)),
+            review_blocked=int(review.get("blocked", 0)),
+            review_unrecognized=int(review.get("unrecognized", 0)),
+            review_failed=int(review.get("failed", 0)),
             **self._stats,
         )
 
@@ -2303,6 +2321,18 @@ class DialogueEngine:
             )
         if snapshot.empty_forced_reply:
             lines.append(f"异常：判定说要回但回复空手 {snapshot.empty_forced_reply} 次")
+        if getattr(self, "style_reviewer", None) is not None:
+            # 审核的**拦截率**（2026-10-05 追加）：长期 0 拦截 = 它没在工作；
+            # 拦截率很高 = 可能过紧。这一行照配置出现，所以"0 次"本身也是信息。
+            rate = (snapshot.review_blocked / snapshot.review_calls
+                    if snapshot.review_calls else 0.0)
+            lines.append(
+                f"风格审核：判断 {snapshot.review_calls} 次   打回 {snapshot.review_blocked} 次"
+                f"（{rate:.0%}）"
+                + (f"   读不出判定 {snapshot.review_unrecognized} 次"
+                   if snapshot.review_unrecognized else "")
+                + (f"   它自己出错 {snapshot.review_failed} 次" if snapshot.review_failed else "")
+            )
         outbox = getattr(self, "outbox", None)
         if outbox is not None:
             stats = outbox.stats()

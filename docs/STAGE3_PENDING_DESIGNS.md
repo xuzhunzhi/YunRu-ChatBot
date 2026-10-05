@@ -72,8 +72,9 @@ JudgeVerdict（dialogue_judge.py:137）的字段只有：
 > **那段措辞教她"分析话题"**（AGENTS §2.2：prompt 里的措辞会被角色吸收），
 > 她的 `intent` 于是从"接住吐槽，顺口一句"变成"接话，**给出判断**""给个实际出路"。
 >
-> 现在：**常驻 system 里没有它**（`SYSTEM_PROMPT` 与 `prompt_library` 的内置默认都不带，
-> `compose_system_prompt` 一字不加）；这条规矩只在判定说"这一句你没跟上"的那一轮，
+> 现在：**常驻 system 里没有它**（`SYSTEM_PROMPT` 与 `prompt_library` 的内置默认都不带；
+> `compose_system_prompt` 只拼**另一条**禁令——"有人当面谈这东西怎么做出来的，她不接"，
+> 2026-10-05 晚些加的，见下面 §③ 的第三次改动）；这条规矩只在判定说"这一句你没跟上"的那一轮，
 > 以 `ASK_TURN_NOTE` / `HOLD_TURN_NOTE` 进**易变段**（`stage3_main._model_path` 的
 > `clarify_note` 那一路——原本就是这么写的，保留）。`UNSURE_ASK_RULE` 这一份留着，
 > 它是那两条现场提示的完整版说法。
@@ -196,8 +197,9 @@ JudgeVerdict（dialogue_judge.py:137）的字段只有：
 
 ### 守卫（原先没有任何测试会发现"情绪又被悄悄压回去"）
 
-* `tests/test_persona_shape.py`：`test_review_prompt_keeps_emotion_and_only_blocks_four_kinds`
-  钉住审核的授权范围（四类 + "不许改短改客气改平稳" + 上一版那套"去冲"的说法不许回来）；
+* `tests/test_persona_shape.py`：`test_review_prompt_keeps_emotion_and_only_blocks_six_kinds`
+  钉住审核的授权范围（六类 + "不许改短改客气改平稳" + 上一版那套"去冲"的说法不许回来 +
+  "不许评价好不好听/像不像她/够不够有人味"）；
 * `tests/test_style_reviewer.py`：说教那条的锚点从"第 6 条"改到"越权/站到讲台上"。
 * **突变验证过**（不然守卫是不是摆设无从判断）：删掉"只改这四类"或
   把"写得冲也不改"改成"写得冲就改成温的"→ 审核断言红。
@@ -224,6 +226,33 @@ JudgeVerdict（dialogue_judge.py:137）的字段只有：
 **第 2026-10-04 那条突变（删掉"只改这四类"）现在没有对象了**——那个说法已经不在 prompt 里，
 新的对应突变是"让审核重新返回改完的文本 / 让调用方直接用审核的文本"，实测三条用例转红。
 
+### ⚠️ 2026-10-05 第三次改动：判据收紧（四类 → 六类）+ 常驻 system 末尾多一条禁令
+
+用户问"审核是不是管太松了"——**是**；同一天用户还报了她**出戏**的故障
+（群 `908696203`：她说"分得清是今天的事。**再加一个插件，那条线还得挪。**"，
+`intent` 被记成"给 bot 加社交欲望、改架构"）。这两件事一起改：
+
+1. **常驻 system 末尾加一条禁令**（`stay_in_character.STAY_IN_CHARACTER_RULE`，经
+   `stage3_runtime.compose_system_prompt` 拼进去）：有人当面谈"这东西怎么做出来的"
+   "该给它加点什么"时，她**不接这个话**。它是**禁令**（只写"不许做什么"），
+   不是上一版那种行为指导——上一版"听不懂就先问一句"把她的语域带成了技术顾问，
+   教训就在本文件 §① 的更正里。规矩里**一个机制词都没有**（用"这东西""那些事"），
+   守卫是 `tests/test_stay_in_character.py`（扫规矩本身 + 组装后的整份 system）。
+2. **审核判据收紧**：宽松偏置（"拿不准就判过""一律判过"）删掉；四类扩到六类
+   （新增**出戏自指 / 不成句 / 空回复**，前两类的判据按上面两条真故障写实）；
+   输出认不出来**重试一次**；拦截率（`calls`/`blocked`/`unrecognized`/`failed`）进
+   `EngineSnapshot` 与 `/super status`；审核那次请求带上"谁在说 + 对方原话 + 当前话题"
+   （只进 user 段）。
+   **红线没动**：只判不改、重写最多一次、fail-open，以及"不许评价好不好听/像不像她/
+   够不够有人味"。
+3. **一处与任务书口径不同的地方（如实记）**：`提示词` 这个词**没有**出现在审核 prompt 里。
+   它在那份"必须点名"的清单上，但 `prompt_guard.AGENT_MECHANISM_WORDS` 把它列为
+   独立 agent 的禁用词——审核的**理由会回灌给回复 agent**（`_revision_request`），
+   而且 `prompt_library.validate` 会让面板存一份含这个词的 `review` prompt 被拒。
+   所以那一档用"**按一段写好的说明在说话**"这种同义说法覆盖；其余点名的话
+   （插件 / 架构 / agent / 模型 / 记忆（库）/ "这条线" / "我这个 bot" / 是程序 / 是 AI）
+   都照写。要不要为此放宽那张词表，由用户定。
+
 ### ⚠️ 2026-10-04 更正：人格那一半**已经撤回**，只剩风格审核
 
 原来这条分支上人格正文的三处改动（情绪许可两句、不怼人边界、`:68` 那条的限定）在
@@ -248,12 +277,14 @@ JudgeVerdict（dialogue_judge.py:137）的字段只有：
 
 **2026-10-05 那轮改动要同步的文件**（比上面这一行多）：
 `dev/src/qq_roleplay_bot/{stage3_runtime,style_reviewer,stage3_main,dev_config,operator_config,
-runtime,runtime_flags,snapshots,api_usage,ask_when_unsure}.py`。两处**部署侧**注意：
+runtime,runtime_flags,snapshots,api_usage,ask_when_unsure}.py`。**再加当天晚些的那一轮**：
+`stay_in_character.py`（新文件，禁口令）与上面列表里的
+`{stage3_runtime,style_reviewer,stage3_main,snapshots}.py`。两处**部署侧**注意：
 
 1. **面板保存过的 `reply` 那份覆盖版**（`run/data/prompts/reply.json`，若存在且是那段规矩
-   还在时常驻 system 被写进去的）**不在我这次的改动范围内**——`compose_system_prompt` 现在
-   一字不加，也不会替操作者删已存的文本。要不要恢复/重存那一套，由部署方在面板上决定
-   （我没有读 `run/`，无法确认那份文件是否存在）。
+   还在时常驻 system 被写进去的）**不在我这次的改动范围内**——装配层不会替操作者删已存的
+   文本，只会在末尾补上**代码层那一条禁令**（已有的不重复拼）。要不要恢复/重存那一套，
+   由部署方在面板上决定（我没有读 `run/`，无法确认那份文件是否存在）。
 2. 回复 agent 单独的地址/模型/key 由 `QQBOT_REPLY_API_BASE_URL` / `QQBOT_REPLY_API_MODEL` /
    `QQBOT_REPLY_API_KEY` 给（写在 `run/.env`，不进仓库）。**不配就是原来的全局那一套**。
 
