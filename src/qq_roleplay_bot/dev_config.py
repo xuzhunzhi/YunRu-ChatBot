@@ -199,6 +199,15 @@ def _float(name: str, default: float) -> float:
 ONEBOT_WS_HOST = get("ONEBOT_WS_HOST", "127.0.0.1")
 ONEBOT_WS_PORT = _int("ONEBOT_WS_PORT", 8080)
 ONEBOT_ACCESS_TOKEN = get("ONEBOT_ACCESS_TOKEN", "")
+# **掉线事件**的开关（本体侧只广播事件，谁来接是插件的事，见 `plugins.LinkSeams`）。
+# 默认开：看门狗本来就每 600 秒查一次"对面还连着没有"（`runtime._watch_connection`），
+# 这里只是把那个状态变成**确定的边沿**，`在线 → 掉线` 那一次广播一次。
+# 关掉（`QQBOT_DISCONNECT_NOTICE=0`）= 与没有这个功能时**逐字相同**：告警日志照打，
+# 一个接收者都不叫。用户 2026-10-06：*"断一次只发一次，不要反复调用"*、
+# *"bot 本身稳定性我认为是很可靠的，不用额外通知"*——所以**恢复不发**。
+DISCONNECT_NOTICE_ENABLED = get("QQBOT_DISCONNECT_NOTICE", "1").lower() not in {
+    "0", "false", "no", "off",
+}
 # SnowLuma 侧地址。默认指向它的 OneBot v11 HTTP Server 与 WS Server。
 SNOWLUMA_HTTP_BASE_URL = get("QQBOT_SNOWLUMA_HTTP_BASE_URL", "http://127.0.0.1:3000")
 SNOWLUMA_ACCESS_TOKEN = get("QQBOT_SNOWLUMA_ACCESS_TOKEN", "")

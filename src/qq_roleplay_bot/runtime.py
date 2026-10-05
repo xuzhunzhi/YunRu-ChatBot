@@ -63,6 +63,7 @@ from .plugins import (
     PluginRegistry,
     ReportSeams,
     UiSeams,
+    _maybe_await,
     attach_plugins,
     inventory,
 )
@@ -1188,7 +1189,10 @@ async def serve(transport: QQTransport, *, stage_label: str = "Stage 3") -> None
         for plugin in background if plugin_enabled(plugin)
     ]
     connection_task = asyncio.create_task(
-        _watch_connection(transport), name="connection-watchdog"
+        # 掉线事件的广播对象在**这里**造：`build_engine` 已经把插件装好了，
+        # 所以插件经 `registry.link` 登记的接收者此刻就在名单里（没有插件就是空的）。
+        _watch_connection(transport, _disconnect_notifier_for(engine)),
+        name="connection-watchdog",
     )
     restart_requested = False
     try:
@@ -1220,18 +1224,131 @@ CONNECTION_WARN_AFTER_SECONDS = 60.0
 CONNECTION_WARN_EVERY_SECONDS = 600.0
 
 
-async def _watch_connection(transport: QQTransport) -> None:
-    """盯"对面连上来没有"。没连上就明确告警，并说清怎么救。"""
+class _DisconnectNotifier:
+    """把"在线 → 掉线"这个**边沿**变成一次广播。**一次掉线只广播一次。**
+
+    由来（2026-10-06 用户）：*"掉线可以调用 mail 插件给我发消息通知我"*、
+    *"断一次只发一次，不要反复调用"*、*"bot 本身稳定性我认为是很可靠的，
+    不用额外通知"*。本体侧只做这一件事：**把已有的状态变成确定的边沿并广播出去**
+    （接缝是 `plugins.LinkSeams`），谁接、发什么，全在插件那一侧。
+
+    ## 确定的状态迁移（这就是"一次只发一次"的全部实现）
+
+    | 上一刻 | 这一刻看到 | 结果 |
+    | --- | --- | --- |
+    | 武装（看门狗刚起来就是） | 连着 | 什么都不发，仍然武装 |
+    | 武装 | 没连 | **广播一次**，这一段转成"已播过" |
+    | 已播过 | 没连 | 什么都不发（掉线期间反复检查**不算新事件**） |
+    | 已播过 | 连着 | **重新武装**，什么都不发（**恢复不发**） |
+
+    也就是说：**状态只由"喂进来的 connected"决定**，与"检查了多少次"无关。
+    这样一来"每轮都通知"这种写法不会有任何立足点（突变验证用的正是它）。
+
+    ## 三个必须说清的限度（别把推断当实测）
+
+    1. **广播是采样出来的，不是事件回调**：看门狗每
+       `CONNECTION_WARN_EVERY_SECONDS` 才看一次 `transport.connected`。
+       如果对面在两次采样之间断了又连上，这一段掉线**不会被看见**（也就不会通知）。
+       要更准就得让传输层在 `_connection_ready.clear()` 那里发事件——**这次没做**。
+    2. **第一次采样在启动后 60 秒**（沿用看门狗原有的计时）：开机时对面还没连上来，
+       算**一段掉线**，会广播一次。这与那条告警日志的口径一致（"消息进不来"是同一个事实）。
+    3. **接收者抛异常只记一笔**，不会把看门狗带走，也不影响后面的接收者。
+    """
+
+    __slots__ = ("_receivers", "_enabled", "_announced")
+
+    def __init__(self, receivers: object = (), *, enabled: bool = True) -> None:
+        self._receivers: tuple[object, ...] = tuple(receivers)  # type: ignore[arg-type]
+        self._enabled = bool(enabled)
+        #: 当前这一段掉线**播过没有**。名字刻意是"播过"而不是"断着"：
+        #: 状态只关心边沿，不关心断了多久。
+        self._announced = False
+
+    @property
+    def enabled(self) -> bool:
+        """这一个实例的开关（来源是 `dev_config.DISCONNECT_NOTICE_ENABLED`）。"""
+
+        return self._enabled
+
+    @property
+    def receivers(self) -> tuple[object, ...]:
+        """广播名单（装配时取的那一份快照）。"""
+
+        return self._receivers
+
+    async def observe(self, connected: bool) -> bool:
+        """喂一次"现在连着没有"；返回**这一次是不是新广播了一段掉线**。
+
+        返回值只用于测试与日志（"这一段是不是新的"），调用方不必依赖它。
+        """
+
+        if connected:
+            # 重连 = **重新武装**。这里刻意什么都不发：用户明确说过
+            # "bot 本身稳定性很可靠，不用额外通知"，恢复通知只是噪音。
+            self._announced = False
+            return False
+        if self._announced:
+            # 同一段掉线里的后续检查：**不是新事件**，一次都不再叫。
+            return False
+        self._announced = True
+        if not self._enabled:
+            # 开关关掉时行为与改动前逐字相同：状态照常迁移，一个接收者都不叫。
+            return False
+        await self._broadcast()
+        return True
+
+    async def _broadcast(self) -> None:
+        """逐个叫接收者。**每一个都单独兜异常**——发信失败不许把机器人带走。"""
+
+        for receiver in self._receivers:
+            try:
+                await _maybe_await(receiver())
+            except Exception:  # noqa: BLE001 - 接收者自己的失败不该有别的后果
+                logger.warning("disconnect_receiver_failed receiver=%s",
+                               getattr(receiver, "__qualname__", repr(receiver)),
+                               exc_info=True)
+
+
+def _disconnect_notifier_for(engine: DialogueEngine) -> _DisconnectNotifier:
+    """给看门狗造广播对象：名单是**装配时**已登记的那一份，开关来自配置。
+
+    名单在这里取一次快照，而不是每次广播都去问注册表：一次掉线里"谁在听"
+    中途变化的话，"叫了谁"就不好说清了（`PluginRegistry.disconnect_receivers()`
+    返回的也是元组快照）。没有插件注册时名单为空——广播是空转，**核心照常跑**。
+    """
+
+    registry = getattr(engine, "plugin_registry", None)
+    receivers = registry.disconnect_receivers() if registry is not None else ()
+    return _DisconnectNotifier(receivers, enabled=dev_config.DISCONNECT_NOTICE_ENABLED)
+
+
+async def _watch_connection(transport: QQTransport,
+                            notifier: _DisconnectNotifier | None = None) -> None:
+    """盯"对面连上来没有"。没连上就明确告警，并说清怎么救。
+
+    `notifier` 是**掉线事件**的广播口（`plugins.LinkSeams` 那条接缝的发送端）。
+    缺省 `None` = 没有广播（老调用方与不关心事件的测试照常）。
+
+    **计时与状态都是原来那一份**：第一次检查在启动后 `CONNECTION_WARN_AFTER_SECONDS`，
+    之后每 `CONNECTION_WARN_EVERY_SECONDS` 一次；`transport.connected` 是既有状态。
+    **没有第二个定时器**——"断一次只发一次"靠的是把这条已有的采样变成边沿，
+    不是另起一套监视。
+    """
 
     await asyncio.sleep(CONNECTION_WARN_AFTER_SECONDS)
     while True:
-        if not bool(getattr(transport, "connected", True)):
+        connected = bool(getattr(transport, "connected", True))
+        if not connected:
             logger.warning(
                 "还没有 OneBot 客户端连上来（%s 秒）：消息进不来，她不会说话。"
                 "常见原因是 QQ 客户端（NapCat）先于 bot 启动、之后没有重试——"
                 "把它重开一次即可；开机顺序问题见 README「开机自启动」。",
                 int(CONNECTION_WARN_AFTER_SECONDS),
             )
+        if notifier is not None:
+            # **每次采样都要喂**（不只掉线那几次）：重连也是靠这里看到的，
+            # 而"重新武装"正是下一次掉线能再通知一次的前提。
+            await notifier.observe(connected)
         await asyncio.sleep(CONNECTION_WARN_EVERY_SECONDS)
 
 

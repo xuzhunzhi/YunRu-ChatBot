@@ -27,6 +27,7 @@ plugins/
     registry.chat                     # ChatSeams：reserved() / allow() / run() / follow_ups()
     registry.report                   # ReportSeams：写日报要的五项
     registry.ui                       # UiSeams：控制面板要的十项
+    registry.link                     # LinkSeams：掉线事件（on_disconnect(接收者)）
     registry.call_action / notify     # 动作与通知（后台插件用）
     registry.roles / loop             # 前置插件放上来的共享能力 / 事件循环
     registry.shared_roles()           # 取前置插件放上来的角色查询
@@ -53,6 +54,10 @@ plugins/
   `vision` 插件经 `registry.vision` 给一个工厂、它的 prompt 由
   `registry.provide_prompt("vision", …)` 登记，删掉那个文件夹就是"这次部署没有识图"。
 - **依赖方向清楚**：插件 import 核心；核心**不 import 具体插件**，只调 `discover()`。
+- **"掉线通知"也是插件**（2026-10-06 用户："记住这个也是插件"）：本体侧只做两件事——
+  把看门狗本来就有的状态变成**确定的边沿**（`在线 → 掉线` 算一段），再在
+  `registry.link` 上广播**"断了"这个事实**。谁来接、拿它做什么（发信 / 记日志 /
+  面板弹一条）都是插件的事；核心不知道有邮件这回事，也不会去发。见 `LinkSeams`。
 - **`roles/` 也是插件**（2026-10-01 用户）："一个东西搬进插件另一个插件失效不代表
   前者不能作为插件，只需要把前者作为前置插件就行。" 群管理与入群审批都要它，
   所以它是**前置插件**：`group_admin` / `join_approval` 声明 `REQUIRES = ("roles",)`。
@@ -382,11 +387,69 @@ class UiSeams:
     plugins: object = None
 
 
+@dataclass(frozen=True, slots=True)
+class LinkSeams:
+    """**连接事件**（现在是掉线）的接缝：插件登记一个"被叫一次"的接收者。
+
+    由来（2026-10-06 用户）：*"掉线可以调用 mail 插件给我发消息通知我"*、
+    *"断一次只发一次，不要反复调用"*、*"记住这个也是插件"*。
+
+    ## 这一侧只有**事件**，没有"通知给谁"
+
+    | 谁 | 负责什么 |
+    | --- | --- |
+    | 核心（`runtime._watch_connection`） | 看传输层的 `connected`，做**边沿检测**：`在线 → 掉线` 算一段，广播一次 |
+    | 这个接缝 | 把"谁在听"收上来（`on_disconnect`），别的不做 |
+    | 插件（掉线通知那一个） | 决定"断了之后做什么"——发信、记一条、面板弹窗 |
+
+    这一侧**不认识任何具体接收者**：它只广播"断了这个事实"，谁接、发到哪、
+    发得出去发不出去，都是插件自己的事（核心这条路径上一个插件名都没有）。
+
+    ## "一次掉线只叫一次"由谁保证（别在这里再记一遍状态）
+
+    由**核心那一侧的边沿检测**保证（`runtime._DisconnectNotifier`）：掉线期间
+    反复检查**不算新事件**，重连后重新武装，再次断开才是新的一段。这里刻意
+    **不重复记状态**——两处各记一份，迟早会分叉，而用户最强调的就是这一条。
+
+    ## 接收者的形状（写插件时照这个来）
+
+    * **不收参数**：核心只广播"断了"这个事实。要时间戳自己取（`time.time()`）。
+    * **同步函数或协程函数都行**（广播侧统一 await）。
+    * **抛异常不会影响机器人**：广播侧逐个兜住并记一行 `disconnect_receiver_failed`，
+      剩下的接收者照常被叫。发信失败不该把看门狗（以及进程）带走。
+    * `on_disconnect` 可以被叫多次（登记多个接收者），按登记顺序广播。
+
+    字段同样**只放函数**（理由见 `ChatSeams`）：这里给的是核心注入的登记口，
+    不是引擎、不是传输层——插件拿不到 `transport`，也就不能自己造一条连接事件。
+    """
+
+    #: `(receiver) -> None`：登记口，由 `PluginRegistry` 注入（它自己持有名单）。
+    #: 缺省（手造 `LinkSeams()`）时 `on_disconnect()` 是空操作——没有注册表的
+    #: 单元测试里也不会崩。
+    disconnect_sink: object = None
+
+    def on_disconnect(self, receiver: object) -> None:
+        """登记一个接收者：**掉线那一次**被叫一次（同一段掉线不会叫第二次）。
+
+        返回 `None`：这里不告诉调用方"登记成没成"。**接缝没接上时静默不登记**
+        与 `ChatSeams.reserved()` 的缺省语义一致（没接上 = 什么都没有），
+        但要区分"没接上"与"接上了没人听"请用 `PluginRegistry.knows_link()`
+        （同 `ChatSeams.knows_reserved()` 的道理）。
+        """
+
+        if not callable(self.disconnect_sink):
+            return
+        try:
+            self.disconnect_sink(receiver)
+        except Exception:  # noqa: BLE001 - 登记失败不该让插件装配炸掉
+            logger.warning("plugin_link_register_failed", exc_info=True)
+
+
 class PluginRegistry:
     """插件能用的**全部**东西。核心造一个，交给 `discover()`。
 
     **这里没有 `engine`**——那是刻意的。插件要用的能力都由窄接缝给：
-    `call_action` / `notify` / `roles` / `loop` / `chat` / `report`。
+    `call_action` / `notify` / `roles` / `loop` / `chat` / `report` / `link`。
 
     为什么连"只读的引擎"也不给：引擎上有 `transport`（活的传输层）与三份权限名单
     （超管、管理员、补发白名单）。给出去就等于**插件能自己发消息、能读权限名单**，
@@ -394,8 +457,9 @@ class PluginRegistry:
     """
 
     __slots__ = ("call_action", "notify", "roles", "loop", "chat", "report", "ui",
-                 "vision", "action_caller", "commands", "backgrounds", "_shared_roles",
-                 "_commands", "_prompts", "_prompt_defaults", "loaded")
+                 "link", "vision", "action_caller", "commands", "backgrounds",
+                 "_shared_roles", "_commands", "_prompts", "_prompt_defaults",
+                 "_disconnect_receivers", "loaded")
 
     def __init__(self, *, call_action=None, notify=None, roles=None,
                  loop=None, chat: ChatSeams | None = None,
@@ -419,6 +483,14 @@ class PluginRegistry:
         self.report: ReportSeams = report if report is not None else ReportSeams()
         #: 控制面板要的东西（见 `UiSeams`）。面板权限最大，所以更不该拿到引擎。
         self.ui: UiSeams = ui if ui is not None else UiSeams()
+        #: 连接事件（掉线）的接缝（见 `LinkSeams`）。
+        #:
+        #: **这一个没有"注入"参数**（不像上面三个要由 `runtime` 递进引擎绑定的闭包）：
+        #: 接收者名单本来就归注册表自己管（同 `_prompts` / `_shared_roles`），
+        #: 核心的看门狗只问 `disconnect_receivers()`。少一个旋钮就少一处"装配漏了"。
+        self.link: LinkSeams = LinkSeams(disconnect_sink=self._add_disconnect_receiver)
+        #: 已登记的掉线接收者（`registry.link.on_disconnect(...)` 往这里放）。
+        self._disconnect_receivers: list[object] = []
         #: `(purpose) -> async (action, params) -> response`：造一个**已过闸门**的调用函数。
         #:
         #: **这是给核心自己用的**，不是给插件的：核心执行"插件声明的动作"时
@@ -556,6 +628,35 @@ class PluginRegistry:
 
         if callable(getattr(self.chat, "reporter_sink", None)):
             self.chat.reporter_sink(reporter)  # type: ignore[attr-defined]
+
+    def _add_disconnect_receiver(self, receiver: object) -> None:
+        """`LinkSeams.on_disconnect()` 的落点：把接收者放进本注册表的名单。
+
+        这是**绑定方法**，所以 `registry.link.disconnect_sink.__self__` 就是注册表本身。
+        这里不违反 `_SeamBinder` 那条纪律（见 `runtime._SeamBinder`）：泄露出去的是
+        **插件的调用方本来就拿着的那个注册表对象**（`register(registry)` 的第一个参数），
+        不是引擎、不是传输层——多给不了任何东西。
+        """
+
+        if callable(receiver):
+            self._disconnect_receivers.append(receiver)
+
+    def knows_link(self) -> bool:
+        """**接缝接上了吗**——用来区分"没人听"与"没接上"（同 `ChatSeams.knows_reserved()`）。
+
+        缺省那个 `LinkSeams()`（`disconnect_sink=None`）就是"没接上"；
+        注册表自己造的那个永远是接上的，只是名单可能为空。
+        """
+
+        return callable(self.link.disconnect_sink)
+
+    def disconnect_receivers(self) -> tuple[object, ...]:
+        """取**此刻**已登记的掉线接收者（按登记顺序）。核心的看门狗读它。
+
+        返回元组快照，不是活列表——看门狗在广播时不该看见"名单中途变化"。
+        """
+
+        return tuple(self._disconnect_receivers)
 
     def set_loop(self, loop: object) -> None:
         """补上事件循环。
