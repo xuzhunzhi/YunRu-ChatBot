@@ -36,6 +36,26 @@
 `vision` / `qq_roles` / `control_audit` 三个模块的 `import` 全绿、`build_engine` 全炸。
 我原来那版**只报了 import 那一列**，于是给出误导性的"已解耦"。
 
+## 名单里的一项查不了时**不许静默跳过**（2026-10-05 修）
+
+原来那版遇到"包根与 `plugins/` 下都没有它"就打印一行"跳过 X"，然后**照样**
+打印"全部通过：7 个可插能力都能拔掉而核心照跑"。实测（把 6 个插件文件夹移走、
+只留 `plugins/__init__.py`）：`vision` 那一项**静默从 7 项变 6 项**，
+结论却长得像 7 项全过。
+
+现在分三种情况，各有各的说法：
+
+| 情况 | 处理 |
+| --- | --- |
+| 包根 `<名字>.py` 在，或 `plugins/<名字>/plugin.py` 在 | 正常拦掉它、探一次 |
+| 由插件提供（`PLUGIN_PROVIDED`），**而这条线不带插件** | 显式说明"本树没有插件，故不参与检查"，**不计入通过数** |
+| 哪儿都没有，而**这条线带插件** | 报错、退出码 1（名字写错 / 能力被删了） |
+
+"这条线带不带插件"由 `_has_plugin_folders()` 判：它看 **git 跟踪的**文件
+（`plugins/` 下除 `__init__.py` 之外还有没有别的），因为光看目录会出错——
+`plugins/__pycache__/` 会让"有插件"成真（2026-10-05 实测踩过这个坑，
+`vision` 因此被报成"哪都找不到"）。
+
 用法（在仓库根目录）：
 
     .\\.venv\\Scripts\\python.exe tests\\check_module_removal.py
@@ -64,6 +84,23 @@ PY = ROOT / ".venv" / "Scripts" / "python.exe"
 #: （见 `_block_target`）。
 DEFAULT_MODULES = ("vision", "qq_roles", "control_audit", "typing_sim", "help_card",
                    "provider_registry", "runtime_diagnostics")
+
+#: 名单里**由插件提供**的那几个（包根已经没有对应的 `.py` 了）。
+#:
+#: 2026-10-05 加：`vision` 从包根搬进了 `plugins/vision/`。于是"本树里找不到它"
+#: 有三种完全不同的含义，必须分开说（这是这一版修的东西）：
+#:
+#: - 它在 `plugins/<名字>/plugin.py` 里 → **正常检查**（判断核心拔掉它还能不能跑）；
+#: - 它哪儿都没有，**而这条线本来就不带插件**（本体侧的正常形态）→ 这一项
+#:   **没法检查**，输出要显式说明、并且**不计入通过项**；
+#: - 它哪儿都没有，而这条线**带插件** → 名单里的名字真找不到了（名字写错、
+#:   或能力被删），这是**错误**，退出码 1。
+#:
+#: 原来那版是"第一种之外一律打印一行『跳过 X』"，然后**照样打印
+#: 『全部通过：7 个可插能力都能拔掉而核心照跑』**——实测（把 6 个插件文件夹移走、
+#: 只留 `plugins/__init__.py`）`vision` **静默**从 7 项变 6 项，结论却长得像 7 项
+#: 全过。**不许为了让输出好看而删名字。**
+PLUGIN_PROVIDED = ("vision",)
 
 #: 在一个**全新解释器**里拦掉指定的模块，然后看核心能不能起来。
 #: `{blocked!r}` 是完整模块名集合；`{src!r}` 是 `src` 的绝对路径。
@@ -184,20 +221,55 @@ def probe(module: str) -> tuple[bool, bool, str]:
     return core_ok, engine_ok, reason
 
 
+def _has_plugin_folders() -> bool:
+    """这条线**带不带插件**（即"是不是本体侧那棵树"），不是"目录在不在"。
+
+    判据用 **git 跟踪的文件**，因为 `plugins/` 里总有 `__init__.py`（发现器）与
+    `__pycache__/`，光看目录会得出相反的答案——2026-10-05 实测踩过：把 6 个插件
+    文件夹移走之后 `__pycache__/` 让"有插件"成了真，于是 `vision` 被报成
+    "哪都找不到"（错的那一类）。
+
+    - 跟踪的文件里除 `plugins/__init__.py` 之外还有别的 → **这条线带插件**；
+    - 只有 `__init__.py`（本体侧的正常形态）→ 不带；
+    - git 用不了（受限沙箱）：退到"有没有哪个子目录里躺着 `plugin.py`"。
+
+    这是**只读**查询，不改仓库；拿不准时它宁可说"带插件"（那会把一项报成错误，
+    而不是把一项静默算成通过）。
+    """
+
+    plugins = PKG / "plugins"
+    if not plugins.is_dir():
+        return False
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "--", "src/qq_roleplay_bot/plugins"],
+            cwd=ROOT, capture_output=True, text=True, timeout=30)
+        if out.returncode == 0:
+            tracked = [line.strip() for line in out.stdout.splitlines() if line.strip()]
+            return any(not line.endswith("/plugins/__init__.py") for line in tracked)
+    except Exception:  # noqa: BLE001 - 拿不到就退到磁盘形状
+        pass
+    return any(child.is_dir() and (child / "plugin.py").is_file()
+               for child in plugins.iterdir())
+
+
 def main(argv: list[str]) -> int:
     if not PY.exists():
         print(f"找不到解释器 {PY}（这个脚本要在仓库根目录、用仓库自带的 .venv 跑）")
         return 2
     names = argv or list(DEFAULT_MODULES)
     verdicts = []
+    plugin_provided = []      # 名字由插件提供，而**这条线不带插件** → 无从检查
+    nowhere = []              # 包根与 plugins/ 下都没有，而这条线并不缺插件 → 名单出错了
+    tree_has_plugins = _has_plugin_folders()
     for name in names:
-        if _block_target(name) is None:
-            print(f"跳过 {name}：包根与 plugins/ 下都没有它"
-                  f"（找过 {PKG / f'{name}.py'} 与 "
-                  f"{PKG / 'plugins' / name / 'plugin.py'}）")
-            continue
-        core_ok, engine_ok, reason = probe(name)
-        verdicts.append((name, core_ok, engine_ok, reason, test_files_importing(name)))
+        if _block_target(name) is not None:
+            core_ok, engine_ok, reason = probe(name)
+            verdicts.append((name, core_ok, engine_ok, reason, test_files_importing(name)))
+        elif name in PLUGIN_PROVIDED and not tree_has_plugins:
+            plugin_provided.append(name)
+        else:
+            nowhere.append(name)
 
     print("=" * 96)
     print("模块                 能 import   build_engine 能起     它自己的测试（收集阶段就会崩）")
@@ -213,11 +285,37 @@ def main(argv: list[str]) -> int:
         if not engine_ok:
             print(f"{'':20} 原因: {reason}")
     print("=" * 96)
+
+    # 没参与检查的那几项**必须显式列出来**：静默少查一项，结论就不该长得像"全过"。
+    if plugin_provided:
+        print(f"由插件提供、这条线不带插件，故**不参与检查**"
+              f"（{len(plugin_provided)} 项）：{', '.join(plugin_provided)}")
+        print(f"  说明：这些能力在 plugins/<名字>/plugin.py 里，而本树的 "
+              f"{PKG / 'plugins'} 下没有插件文件夹。")
+        print(f"  本体侧的正常形态就是这样：{', '.join(plugin_provided)} 由插件提供，"
+              f"核心不依赖它才是对的。")
+        print("  要真正验它们得在**带插件的树**上跑（插件侧那条分支）——"
+              "所以这项**没有**算进下面的通过数。")
+    if nowhere:
+        print(f"**名单里有名字，但包根与 plugins/ 下都找不到（{len(nowhere)} 项）："
+              f"{', '.join(nowhere)}**")
+        print(f"  找过：{PKG / '<名字>.py'} 与 {PKG / 'plugins' / '<名字>' / 'plugin.py'}"
+              f"（这条线{'带' if tree_has_plugins else '不带'}插件）。")
+        print("  这不是通过，是这一项已经不在本仓库里了——名字写错了，"
+              "或者能力真的被删了。要么改回名字，要么在 PLUGIN_PROVIDED / "
+              "DEFAULT_MODULES 里如实交代。")
+
     if failed:
         print(f"不通过：{', '.join(failed)}——删掉之后 `build_engine()` 起不来。")
         return 1
-    print(f"全部通过：{len(verdicts)} 个可插能力都能拔掉而核心照跑。")
-    return 0
+    # 报数如实：查了几项、几项没查。**不要**把没查的算进"全过"里。
+    tail = f"检查了 {len(verdicts)} 项，全部能拔掉而核心照跑。"
+    if plugin_provided:
+        tail += f"另有 {len(plugin_provided)} 项由插件提供、这条线不带插件，未参与检查。"
+    if nowhere:
+        tail += f"另有 {len(nowhere)} 项在包根与 plugins/ 下都找不到。"
+    print(f"通过：{tail}")
+    return 1 if nowhere else 0
 
 
 if __name__ == "__main__":
