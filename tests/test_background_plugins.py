@@ -214,43 +214,42 @@ def test_join_approval_is_loaded_by_the_discovery_mechanism() -> None:
     assert loaded == ("join_approval",), loaded
 
 
-# --- 角色来源：核心优先（2026-10-05：身份/权限事实归核心）---------------------
+# --- 角色来源：走**共享位**（2026-10-05 起由核心放上来）----------------------
 
-def test_join_approval_asks_the_core_for_the_role_source() -> None:
-    """角色来源**先问核心**（`registry.roles`）；核心给了就不看插件那一份。
+def test_join_approval_takes_the_role_source_from_the_shared_slot() -> None:
+    """角色来源 = **共享位上那一份**（现在由核心放上来），插件不自己造、也不缓存。
 
-    2026-10-05 用户把身份/权限事实判给核心：`plugins/roles/` 迟早删掉，所以
-    "核心给了什么就用什么"必须被断言钉住——否则哪天退回共享那一份，没有测试会红。
-    （过渡那一半——核心还没有时退回 `registry.shared_roles()`——由下一条钉。）
+    2026-10-05 用户把身份/权限事实判给核心；本体 `1c5fcf3` 的实现是
+    "核心在 `discover()` **之前** `registry.provide_roles(engine.group_roles)`"，
+    插件问 `registry.shared_roles()`。所以这里钉两件事：
+
+    1. **没人放就没有**（不是自己造一个查不了的缓存），放了什么就用什么；
+    2. **它只是转手**：每问一次就往下问一次，**本插件不留第二份缓存**
+       （缓存归核心——两份带各自 TTL 的缓存就是"她是不是群主"有两个答案）。
     """
 
     from qq_roleplay_bot.plugins.join_approval import plugin as join_plugin
 
-    core_source = SelfRoleCache(None)
-    plugin_source = SelfRoleCache(None)
-    registry = _registry(roles=core_source)
-    registry.provide_roles(plugin_source)
-    assert join_plugin._RoleSource(registry).current() is core_source
-
-
-def test_join_approval_falls_back_only_while_the_core_has_nothing() -> None:
-    """过渡期：核心那边还没落地（`registry.roles is None`）时才用插件那一份。
-
-    **这条跟着过渡一起删**：核心落地、`plugins/roles/` 删掉之后，
-    `_RoleSource.current()` 里那句退回就该没了，这条测试也该删——
-    它钉的不是目标状态，而是"迁移期间不许静默失去角色来源"。
-    """
-
-    from qq_roleplay_bot.plugins.join_approval import plugin as join_plugin
-
-    plugin_source = SelfRoleCache(None)
     registry = _registry()
-    registry.provide_roles(plugin_source)
-    assert join_plugin._RoleSource(registry).current() is plugin_source
+    assert join_plugin._RoleSource(registry).current() is None, "没人放就该是空的"
+
+    seen: list[tuple[str, dict]] = []
+
+    class RecordingRoles:
+        async def role(self, group_id, **kwargs):
+            seen.append((group_id, kwargs))
+            return ROLE_OWNER
+
+    registry.provide_roles(RecordingRoles())
+    adapter = join_plugin._RoleSource(registry)
+    assert adapter.current() is registry.shared_roles()
+    assert asyncio.run(adapter.role(GROUP)) == ROLE_OWNER
+    asyncio.run(adapter.role(GROUP))
+    assert seen == [(GROUP, {}), (GROUP, {})], "每次都要往下问，插件不许自己缓存"
 
 
 def test_poller_approves_nothing_without_a_role_source() -> None:
-    """两个来源都没有：**一条申请都不处理**（fail-closed），也不发任何写动作。
+    """共享位空着时：**一条申请都不处理**（fail-closed），也不发任何写动作。
 
     判据（用户）：拿不到"她在那个群是什么角色"时不许猜——以前这里的坏形态是
     `unknown` 被当成"大概是群主"，一条白名单申请就真批了。

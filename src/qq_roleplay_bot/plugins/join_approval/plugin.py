@@ -4,26 +4,25 @@
 `background_plugins._join_approval_plugin()` 里，**原样搬过来**，只把函数名改成
 `build`、把参数从关键字参数改成从 `registry` 取——避免搬家时改坏行为。
 
-## 角色来源：2026-10-05 起**先问核心**
+## 角色来源：2026-10-05 起由**核心**放到共享位上
 
 原来本插件声明 `REQUIRES = ("roles",)`，向**另一个插件**（`plugins/roles/`）要
-"她在这个群里是什么角色"。用户 2026-10-05 的决定是**身份/权限事实归核心**，
-所以那条依赖撤了：核心把角色来源注入到 `registry.roles` 上（`PluginRegistry`
-本来就有这个槽位，`tests/plugin_support.plugin_registry(roles=…)` 也是这么给的），
-本插件**只认核心那一份**，不自己查、不自己缓存。
+"她在这个群里是什么角色"。用户 2026-10-05 的决定是**身份/权限事实归核心**
+（本体 `1c5fcf3`：新增核心的 `group_roles.py`，`runtime.build_engine` 在 `discover()`
+**之前**就 `registry.provide_roles(engine.group_roles)`），所以那条依赖撤了：
+角色事实由核心放进**既有那个共享位**，本插件问 `registry.shared_roles()` 就行——
+**不自己查、不自己缓存、也不管是谁放上来的**。
 
-**过渡（要删的那一半）**：本体那边还在做"角色进核心"，此刻 `registry.roles` 仍是
-`None`，所以 `_RoleSource` 会退回 `registry.shared_roles()`（`plugins/roles/` 插件
-放上来的那一份）。为什么必须**延后到真正用它的那一刻**再取、而不是在 `register()`
-里取一次：`discover()` 按名字序装插件，`join_approval` 排在 `roles` **前面**，
-注册那一刻两份来源都还是空的——以前靠 `REQUIRES` 把顺序钉死，那条依赖撤掉之后
-顺序不再由我们控制。核心那边落地、`plugins/roles/` 删掉之后，
-`_RoleSource.current()` 里那一行退回**要删掉**（`tests/test_background_plugins.py`
-里那条"核心给了就只认核心的"钉着这个方向）。
+**为什么 `_RoleSource` 要延后到真正用它的那一刻再取**（这是这次最容易踩的一脚）：
+`discover()` 按名字序装插件，`join_approval` 排在 `roles` **前面**。以前靠 `REQUIRES`
+把顺序钉死；依赖撤掉之后，若在 `register()` 那一刻取一次，在本体那份落地之前会拿到
+`None` → 插件静默不装（真机形态："审批好像没开"）。延后之后，装配期与运行期解耦：
+来源什么时候出现都不影响装配，而且**核心现在是在 `discover()` 之前放好的**，
+正常情况下第一轮就取得到。
 
-拿不到角色来源时不装或不做都由**核心那边**决定得更早：这里一律 **fail-closed**——
-`_RoleSource` 返回空角色，`JoinApprovalPoller._may_approve` 于是不批任何一条，
-并且**第一次**遇到这种情况会喊一声（不是每轮都喊）。
+拿不到角色来源时一律 **fail-closed**：`_RoleSource` 返回空角色，
+`JoinApprovalPoller._may_approve` 于是不批任何一条，并且**第一次**遇到会喊一声
+（不是每轮都喊）。
 """
 from __future__ import annotations
 
@@ -36,10 +35,12 @@ logger = logging.getLogger(__name__)
 
 
 class _RoleSource:
-    """"她在某个群里是什么角色"的来源：**核心优先**，过渡期才看插件那一份。
+    """"她在某个群里是什么角色"的来源：**共享位上那一份**（现在由核心放上来）。
 
-    形状与 `plugins/roles/roles.py::SelfRoleCache` 一样只有 `role(group_id)`，
-    因为使用者（`JoinApprovalPoller._may_approve`）只问这一个问题。
+    只依赖形状里那一个问题 `role(group_id)`——使用者
+    （`JoinApprovalPoller._may_approve`）只问这一个。核心那份
+    （`group_roles.GroupRoles`）有更多方法，但本插件不碰：它只需要"她是群主/管理员吗"
+    这一条答案，动词越少越好。
     """
 
     __slots__ = ("_registry", "_warned")
@@ -49,11 +50,8 @@ class _RoleSource:
         self._warned = False
 
     def current(self) -> object | None:
-        """此刻该用哪一份：核心注入的优先；核心那份不在时才是过渡那一份。"""
+        """此刻共享位上那一份；没人放上来就是 `None`（装配顺序不再被假定）。"""
 
-        core = getattr(self._registry, "roles", None)
-        if core is not None:
-            return core
         return self._registry.shared_roles()
 
     async def role(self, group_id: str, **kwargs: object) -> str:
@@ -64,8 +62,8 @@ class _RoleSource:
             if not self._warned:      # 只喊一次：每轮都喊会把日志淹掉
                 self._warned = True
                 logger.warning(
-                    "join_approval_no_role_source：没有任何角色来源"
-                    "（核心还没注入 registry.roles、plugins/roles/ 也不在），"
+                    "join_approval_no_role_source：共享位上没有角色来源"
+                    "（核心那份没放上来、plugins/roles/ 也不在），"
                     "从这一轮起一条申请都不会被批（fail-closed）")
             return ""
         return await source.role(group_id, **kwargs)  # type: ignore[attr-defined]
@@ -105,7 +103,7 @@ def build(*, call_action, notify, roles):
 
 
 def register(registry) -> None:
-    # 角色来源**先问核心**（`registry.roles`），延后到真正用它的那一刻取——
-    # 见本模块 docstring 的"角色来源"与 `_RoleSource`。
+    # 角色来源走**共享位**（`registry.shared_roles()`，现在由核心放上来），
+    # 并且延后到真正用它的那一刻取——见本模块 docstring 与 `_RoleSource`。
     registry.background(build(call_action=registry.call_action, notify=registry.notify,
                               roles=_RoleSource(registry)))
