@@ -169,8 +169,12 @@ def _register(*plugins: str) -> PluginRegistry:
     """**直接**调这几个插件的 `register()`，不跑整个 `discover()`。
 
     为什么不 `discover(only=...)`：发现机制会顺着 `REQUIRES` 把前置插件也装上
-    （那是它的职责），于是这里会连带装上 `roles`、甚至面板——测试要的是"这两个插件
-    各自装出了什么"，所以直接把范围钉死。装配顺序由 `roles` 先行的约定在这里手写。
+    （那是它的职责），于是"只想验这一个"时旁边那几个也会一起装上——测试要的是
+    "这一个插件装出了什么"，所以直接把范围钉死。
+
+    传进来的顺序就是 `register()` 的顺序（`_register("roles", "join_approval")`
+    是"角色来源已就位"的那种装配）。2026-10-05 起 `join_approval` 不再声明
+    `REQUIRES = ("roles",)`，所以这个顺序得由调用方自己交代清楚。
     """
 
     import importlib
@@ -195,14 +199,85 @@ def test_builder_registers_join_approval_as_a_plugin() -> None:
 
 
 def test_join_approval_is_loaded_by_the_discovery_mechanism() -> None:
-    """发现机制也要能装它（前置 `roles` 会被自动带上）。"""
+    """发现机制要能装它，而且**不再顺着 `REQUIRES` 把 `roles` 拉进来**。
+
+    2026-10-05：身份/权限事实归核心，`REQUIRES = ("roles",)` 撤了——所以
+    "只装 join_approval"的 `loaded` 里**只有它自己**（以前会连带装上 `roles`）。
+    这条同时钉住"没有 REQUIRES"：哪天有人把角色依赖加回去，这里会红。
+    """
 
     from qq_roleplay_bot.plugins import discover
 
     with _Patch(AUTO_APPROVE_JOIN=True):
         registry = _registry()
         loaded = discover(registry, only=("join_approval",))
-    assert "roles" in loaded and "join_approval" in loaded, loaded
+    assert loaded == ("join_approval",), loaded
+
+
+# --- 角色来源：核心优先（2026-10-05：身份/权限事实归核心）---------------------
+
+def test_join_approval_asks_the_core_for_the_role_source() -> None:
+    """角色来源**先问核心**（`registry.roles`）；核心给了就不看插件那一份。
+
+    2026-10-05 用户把身份/权限事实判给核心：`plugins/roles/` 迟早删掉，所以
+    "核心给了什么就用什么"必须被断言钉住——否则哪天退回共享那一份，没有测试会红。
+    （过渡那一半——核心还没有时退回 `registry.shared_roles()`——由下一条钉。）
+    """
+
+    from qq_roleplay_bot.plugins.join_approval import plugin as join_plugin
+
+    core_source = SelfRoleCache(None)
+    plugin_source = SelfRoleCache(None)
+    registry = _registry(roles=core_source)
+    registry.provide_roles(plugin_source)
+    assert join_plugin._RoleSource(registry).current() is core_source
+
+
+def test_join_approval_falls_back_only_while_the_core_has_nothing() -> None:
+    """过渡期：核心那边还没落地（`registry.roles is None`）时才用插件那一份。
+
+    **这条跟着过渡一起删**：核心落地、`plugins/roles/` 删掉之后，
+    `_RoleSource.current()` 里那句退回就该没了，这条测试也该删——
+    它钉的不是目标状态，而是"迁移期间不许静默失去角色来源"。
+    """
+
+    from qq_roleplay_bot.plugins.join_approval import plugin as join_plugin
+
+    plugin_source = SelfRoleCache(None)
+    registry = _registry()
+    registry.provide_roles(plugin_source)
+    assert join_plugin._RoleSource(registry).current() is plugin_source
+
+
+def test_poller_approves_nothing_without_a_role_source() -> None:
+    """两个来源都没有：**一条申请都不处理**（fail-closed），也不发任何写动作。
+
+    判据（用户）：拿不到"她在那个群是什么角色"时不许猜——以前这里的坏形态是
+    `unknown` 被当成"大概是群主"，一条白名单申请就真批了。
+    """
+
+    from qq_roleplay_bot.plugins.join_approval import plugin as join_plugin
+
+    calls: list[tuple[str, dict]] = []
+
+    async def call_action(action, params=None):
+        calls.append((action, dict(params or {})))
+        if action == "get_group_system_msg":
+            return [{"flag": "f1", "group_id": GROUP, "requester_uin": ME,
+                     "requester_nick": "某人", "message": "让我进"}]
+        return {}
+
+    source = join_plugin._RoleSource(_registry())      # 核心没给、插件也没有
+    assert source.current() is None
+    assert asyncio.run(source.role(GROUP)) == "", "没有来源时角色是空串，不是猜出来的"
+    poller = JoinApprovalPoller(
+        call_action=call_action, notify=None,
+        policy=JoinApprovalPolicy(whitelist=(ME,)),    # 白名单命中，本该通过
+        roles=source)
+    result = asyncio.run(poller.tick())
+    assert result == {"approved": 0, "rejected": 0, "held": 0, "invites": 0}
+    assert [action for action, _ in calls] == ["get_group_system_msg"], \
+        "没有角色来源时一条写动作都不该发出去"
 
 
 def test_builder_skips_disabled_channels() -> None:
