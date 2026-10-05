@@ -11,6 +11,26 @@
 
 这是 `docs/ADD_A_COMMAND.md` 里"需要权限的命令"那条的新答案：以前是"不要用插件做需要
 身份判断的命令"，现在插件可以**声明档位**，判定仍在核心。想读权限表？插件手上没有。
+
+## 群公告的「需确认收到」：默认关，写字段才开（2026-10-06 用户要求）
+
+用户原话：*"还有一个要你改的是群公告插件，这个现在默认发送的公告需要收到，我希望默认是
+读取即可，不需要确认收到，以及需要收到的可以在前面加个字段"*。
+
+判定（证据写在 `group_owner.py` 同一段里）：**"需要收到"不是我们往正文里写了"请确认收到"
+这样的话，也不是 QQ 客户端上的某个开关**，而是 `_send_group_notice` 自带的参数
+`confirm_required`——它的默认值是 **1（要确认）**，而我们以前**根本不传这个参数**，
+于是对面按默认值替我们选了"要确认"。
+
+所以现在：
+
+- **默认 `confirm_required=0`**：发出去的公告只要读，不用确认收到；
+- 想要求确认，把 `[需确认]` 写在**正文最前面**（`/super notice [需确认] 正文`）。
+  那个字段本身**不进公告正文**，也不往正文里塞任何"请确认收到"的话——
+  正文是要发到群里的，只放用户自己写的字。
+
+字段的解析在本模块（`parse_owner_action` 把它折成 `notice_confirm` 这个**意图名**），
+参数怎么拼在 `group_owner.build_params`；两边同一个常量，不各写一份字面量。
 """
 from __future__ import annotations
 
@@ -64,6 +84,20 @@ OWNER_ACTIONS = {
     "notice": "notice", "公告": "notice", "群公告": "notice",
 }
 
+#: 群公告要求"群成员确认收到"用的**前缀字段**（2026-10-06 用户："需要收到的可以在前面
+#: 加个字段"）。只认**正文最前面**这一处，只有公告这一条命令认它，别的命令里它就是普通文字。
+#:
+#: 为什么用方括号标记而不是一句话：正文是要**发到群里**的，里面出现"请确认收到"是我们在
+#: 替用户说话——他要的是"公告内容 + 一个开关"，不是一段我们写的客套。
+NOTICE_CONFIRM_FIELD = "[需确认]"
+
+#: 上面那个字段折出来的**意图名**：`notice` 这条命令的另一种形态（要确认收到）。
+#:
+#: 它**不是一条用户命令**，所以不写进 `group_owner.SPECS`——进了就会出现在
+#: `/super help` 那行用法清单里（那是给人看的）。执行端按这个名字决定
+#: `confirm_required` 传 0 还是 1。
+NOTICE_CONFIRM_KIND = "notice_confirm"
+
 # 公开的"给自己设头衔"：`/title 龙王`、`#title 龙王`、`/yunru title 龙王`。
 # **裸 `title 龙王` 不算**——跟 `/help` 那条同一个理由（"title 是什么意思"是聊天）。
 TITLE_PATTERN = re.compile(
@@ -106,6 +140,10 @@ def parse_owner_action(text: str) -> tuple[str, str] | None:
 
     返回的"文本"里还带着 @ 段之外的内容；真正的目标优先取 `mentioned_user_ids`
     （@ 段不在正文里）。**@ 之后的文字算正文**，所以调用方要先剥掉 @ 段留下的空白。
+
+    公告那一条多一步（2026-10-06）：正文最前面写了 `[需确认]` 时，返回的动作名是
+    `notice_confirm`（= 同一条命令、要求群成员确认收到），**返回的正文里不含那个字段**。
+    默认（没写这个字段）就是 `notice`——只要读、不用确认收到。
     """
 
     match = OWNER_PATTERN.fullmatch((text or "").strip())
@@ -114,7 +152,10 @@ def parse_owner_action(text: str) -> tuple[str, str] | None:
     kind = OWNER_ACTIONS.get((match.group("action") or "").casefold(), "")
     if not kind:
         return None
-    return kind, (match.group("rest") or "").strip()
+    body = (match.group("rest") or "").strip()
+    if kind == "notice" and body.startswith(NOTICE_CONFIRM_FIELD):
+        return NOTICE_CONFIRM_KIND, body[len(NOTICE_CONFIRM_FIELD):].strip()
+    return kind, body
 
 
 def _strip_target(text: str, target: str) -> str:
@@ -211,6 +252,10 @@ class GroupOwnerCommand:
     前提是**她自己在那个群确实是群主**——但那个判断在核心（角色由核心递给执行端，
     见 `group_owner.execute` 的 `roles`），
     插件只把意图交出去。所以她在这儿看起来"什么都能做"，实际上核心会拦。
+
+    公告那条多一个**可选前缀字段**（2026-10-06）：`/super notice [需确认] 正文` = 要群成员
+    确认收到；不写就是默认的"只要读、不用确认"。字段在 `parse_owner_action` 里就被剥掉，
+    `ActionRequest.text` 交出去的**始终是纯正文**。
     """
 
     name = "group_owner"
