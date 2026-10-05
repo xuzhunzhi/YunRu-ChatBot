@@ -5,12 +5,25 @@
 1. 保存的 prompt 必须**保住派生锚点**（少了那个片段，`derive_must_reply` 会在每条消息的
    路上抛错——等于改一次 prompt 就把回复打瘫），以及**不含机制词**（AGENTS 2.2）。
 2. 内置默认永远可用（覆盖文件删掉就回去），所以面板坏了等于没装它。
+
+## 两条要装插件的用例搬走了（2026-10-05 分支拆分）
+
+`test_all_six_prompts_have_builtin_defaults`（"六套都有原稿"）与
+`test_resolve_falls_back_and_never_raises` 的第一段原来靠
+`_load_plugins()` 先 `discover()`——因为识图那套 prompt 从 2026-10-05 起是
+**插件**在 `register()` 里 `provide_prompt("vision", …)` 登记的"六套"这件事只在
+插件装配之后成立。本体侧的正常形态是插件不在，那两段在那种树上**根本不该存在**
+（不是"存在但跳过"），所以搬到了 `tests/test_prompt_library_plugins.py`。
+
+`test_empty_and_oversized_are_rejected` **留在本体侧**，但靶子从插件提供的
+`"vision"` 换成核心自己的 `"judge"`——原因见那条的 docstring（原来"超长"那一档
+会因为"不认识这个名字"而变绿，是**以错误的理由通过**）。断言一档没少。
 """
 import tempfile
 from pathlib import Path
 
 from qq_roleplay_bot.prompt_library import (
-    PROMPTS, PromptLibrary, PromptRejected, derive_must_reply, missing_anchors,
+    PromptLibrary, PromptRejected, derive_must_reply, missing_anchors,
 )
 from qq_roleplay_bot.stage3_runtime import SYSTEM_PROMPT, SYSTEM_PROMPT_MUST_REPLY
 
@@ -22,14 +35,12 @@ def _library(tmp: str, **kwargs) -> PromptLibrary:
 def _load_plugins() -> None:
     """按运行时那条路装一次插件（`discover` 是"登记发生了"的时刻）。
 
-    **为什么这两个用例需要它**（2026-10-05，前提变了不是放宽断言）：识图从包根
-    搬进了插件 `plugins/vision/`，它那一套 prompt 不再是核心里的一句
-    `from .vision import …`，而是插件在 `register()` 里
-    `registry.provide_prompt("vision", …)` 放上来的。"六套都有原稿"这件事于是
-    在插件装配**之后**才成立——运行时的顺序本来就是"先 `discover()`、面板才来问"
-    （`build_engine` 里 `attach_plugins()` 在 `prompts.backfill_all()` 之前）。
-    插件不在时的样子由 `tests/test_optional_capabilities.py` 那两个用例守
-    （`available()` 少一套、`backfill_all()` 只写五份）。
+    **留着它，不是因为本文件还在用**（2026-10-05 分支拆分把用它的两条搬去了
+    `tests/test_prompt_library_plugins.py`），而是因为它是这两份文件**共用**的辅助：
+    识图那套 prompt 现在是插件在 `register()` 里 `provide_prompt("vision", …)` 放上来的，
+    "六套都有原稿"只在 `discover()` 之后成立——运行时的顺序本来就是"先 `discover()`、
+    面板才来问"（`build_engine` 里 `attach_plugins()` 在 `prompts.backfill_all()` 之前）。
+    借而不是抄：装配这条路只该有一份维护。
     """
 
     from qq_roleplay_bot.plugins import PluginRegistry, discover
@@ -42,14 +53,6 @@ def test_builtin_derivation_matches_the_shipped_prompt() -> None:
 
     assert missing_anchors(SYSTEM_PROMPT) == []
     assert derive_must_reply(SYSTEM_PROMPT) == SYSTEM_PROMPT_MUST_REPLY
-
-
-def test_all_six_prompts_have_builtin_defaults() -> None:
-
-    _load_plugins()
-    for name in PROMPTS:
-        text = PromptLibrary.builtin(name)
-        assert len(text) > 100, name
 
 
 def test_unknown_prompt_is_rejected() -> None:
@@ -131,11 +134,20 @@ def test_mechanism_words_are_rejected() -> None:
 
 
 def test_empty_and_oversized_are_rejected() -> None:
+    """空 / 超长一律拒绝。
+
+    2026-10-05 分支拆分：这条原来拿 `"vision"` 当靶子——那是**插件提供**的 prompt
+    名，本体侧（插件不在）根本不是合法名字，于是"超长"那一档会被
+    `PromptRejected("不认识的 prompt")` 拦下、**以错误的理由变绿**。所以本体侧这份
+    改用核心自己的 `"judge"`；`"vision"` 那份（六套都在时才有意义）在
+    `tests/test_prompt_library_plugins.py`。两档判据没变、也没变弱。
+    """
+
     with tempfile.TemporaryDirectory() as tmp:
         library = _library(tmp)
         for bad in ("   ", "字" * 30000):
             try:
-                library.save("vision", bad)
+                library.save("judge", bad)
             except PromptRejected:
                 continue
             raise AssertionError("空/超长该被拒")
@@ -179,14 +191,20 @@ def test_disabled_library_never_touches_disk() -> None:
 
 
 def test_resolve_falls_back_and_never_raises() -> None:
-    """`resolve` 从不抛异常：拿不到覆盖版就给内置默认（prompt 层出问题不能让她不说话）。"""
+    """`resolve` 从不抛异常：拿不到覆盖版就给内置默认（prompt 层出问题不能让她不说话）。
+
+    2026-10-05 分支拆分：原来这里第一段拿 `"vision"` 当靶子，那需要**插件先登记**
+    那一套 prompt（六套都在才有意义），所以那一段搬到
+    `tests/test_prompt_library_plugins.py`。本体侧这份改用核心自己的 `"judge"`——
+    **判据没换、也没变弱**（"有内置默认的名字 → 给内置默认"与"没有的名字 → 给兜底"
+    两条路都还在），只是换了个本体侧一定存在的名字。
+    """
 
     from qq_roleplay_bot import prompt_library
     from qq_roleplay_bot.prompt_library import resolve
 
-    _load_plugins()
-    resolved = resolve("vision", "兜底文本")
-    assert resolved in {prompt_library.PromptLibrary.builtin("vision"), "兜底文本"}
+    resolved = resolve("judge", "兜底文本")
+    assert resolved == prompt_library.PromptLibrary.builtin("judge")
     assert resolve("nope", "兜底文本") == "兜底文本"
 
 
