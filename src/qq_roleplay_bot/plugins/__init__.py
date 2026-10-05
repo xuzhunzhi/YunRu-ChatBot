@@ -31,8 +31,8 @@ plugins/
     registry.link                     # LinkSeams：掉线事件（on_disconnect(接收者)）
     registry.mail                     # MailSeams：发一封给操作者的普通邮件（provide/notify）
     registry.call_action / notify     # 动作与通知（后台插件用）
-    registry.roles / loop             # 核心注入的角色来源 / 事件循环
-    registry.shared_roles()           # 取前置插件放上来的共享能力（过渡期）
+    registry.roles / loop             # 预留（**未接线**） / 事件循环
+    registry.shared_roles()           # 共享位：角色事实（**核心**放上来的那一份）
     registry.command(plugin)          # 一条命令插件
     registry.background(plugin)       # 一条后台节拍（有 name/interval_seconds/poll_once）
     registry.provide_roles(cache)     # 前置插件：把共享能力放上来
@@ -102,9 +102,13 @@ plugins/
   所以它是**前置插件**：那两个声明 `REQUIRES = ("roles",)`。那句话本身仍然成立
   （"B 依赖 A"不是"A 该进核心"的理由，现在活着的正例是 `outage_notice → mail`）。
   **但 2026-10-05 变了**：用户把**身份/权限事实**判给核心，角色就是这种东西，
-  于是那两个插件的 `REQUIRES` 撤掉了，角色改由**核心**经 `registry.roles` 注入
-  （`group_admin` 更是连角色查询都不碰：执行端拿的是核心递进来的那份）。
-  `plugins/roles/` 这个文件夹这一轮还留着，等本体那边落地后再删。
+  于是那两个插件的 `REQUIRES` 撤掉了，角色改由**核心**放进共享位
+  （本体 `1c5fcf3`：`runtime.build_engine` 在 `discover()` 之前
+  `registry.provide_roles(engine.group_roles)`；插件问 `registry.shared_roles()`）。
+  `group_admin` 更是连角色查询都不碰：执行端拿的是核心**递进来**的那份
+  （`stage3_main.execute_action(roles=engine.group_roles, …)`）。
+  `plugins/roles/` 这个文件夹这一轮还留着，等那边落地后再删（现在它和核心那一份
+  都在 `provide_roles` 这条路上——**同一个槽位，谁后放谁生效**，删掉它才是单源）。
 """
 from __future__ import annotations
 
@@ -649,14 +653,13 @@ class PluginRegistry:
                  action_caller=None) -> None:
         self.call_action = call_action
         self.notify = notify
-        #: **核心注入的角色来源**（"她在某个群里是什么角色"）。2026-10-05 用户：
-        #: "身份/权限事实并进核心"——插件要角色就问它，**不许自己造缓存、
-        #: 也不许把角色事实当插件之间的共享能力传**。
-        #:
-        #: 迁移中：核心那边还没搬完时它是 `None`，此刻 `plugins/roles/` 是唯一的
-        #: 提供方（`provide_roles` / `shared_roles()`）。取用方按"核心优先、过渡次之"
-        #: 处理，见 `plugins/join_approval/plugin._RoleSource`——那一半是过渡，
-        #: 核心落地、`plugins/roles/` 删掉之后要删掉。
+        #: **预留、当前未接线**：读它的地方一处都没有（`runtime.build_engine` 传的是
+        #: `None`）。身份/权限事实进核心那件事**没有**走这个槽位——本体 `1c5fcf3`
+        #: 走的是**既有接缝** `provide_roles()` / `shared_roles()`：
+        #: 核心在 `discover()` **之前** `provide_roles(engine.group_roles)`，
+        #: 插件问 `registry.shared_roles()` 拿到的就是核心那一份
+        #: （见 `plugins/join_approval/plugin._RoleSource` 与 `AGENTS.md` §3.3
+        #: 对"先画好的插座"的口径：要么接上，要么在文档里标"预留、未接线"）。
         self.roles = roles
         self.loop = loop
         #: 识图器的**工厂**：`(usage_store) -> 有 describe()/enabled 的对象 | None`。
