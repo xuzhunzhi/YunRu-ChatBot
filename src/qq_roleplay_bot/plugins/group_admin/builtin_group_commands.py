@@ -208,7 +208,8 @@ def parse_title_command(text: str) -> str | None:
 class GroupOwnerCommand:
     """`/super qqadmin|card|groupname|title|notice`：群主专属动作。
 
-    前提是**她自己在那个群确实是群主**——但那个判断在核心（`plugins/_shared/roles.py` 现查角色），
+    前提是**她自己在那个群确实是群主**——但那个判断在核心（角色由核心递给执行端，
+    见 `group_owner.execute` 的 `roles`），
     插件只把意图交出去。所以她在这儿看起来"什么都能做"，实际上核心会拦。
     """
 

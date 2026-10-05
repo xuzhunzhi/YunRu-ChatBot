@@ -186,10 +186,14 @@ class InventoryShapeTests(unittest.TestCase):
         self.assertEqual(loaded, {"webui"})
 
     def test_requires_expresses_dependencies_instead_of_burying_them(self) -> None:
-        """用户 2026-10-01：依赖用 `REQUIRES` 表达，不许把前置塞进核心。"""
+        """用户 2026-10-01：依赖用 `REQUIRES` 表达，不许把前置塞进核心。
+
+        2026-10-05：**群管理那条依赖整条撤了**——"角色事实归核心"
+        （用户："身份/权限事实并进核心"），所以 `group_admin` 不再问
+        `plugins/roles/` 要角色，`requires` 应当是空的。
+        """
         rows = {row["name"]: row for row in plugins.inventory()}
-        self.assertEqual(rows["group_admin"]["requires"], ["roles"])
-        self.assertEqual(rows["join_approval"]["requires"], ["roles"])
+        self.assertEqual(rows["group_admin"]["requires"], [])
 
 
 class MissingPluginTests(unittest.TestCase):
