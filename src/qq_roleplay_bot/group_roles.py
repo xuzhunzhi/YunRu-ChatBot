@@ -13,7 +13,7 @@
 | **她自己**在某个群是什么角色 | `await roles.self_role(group_id)`（= `role(group_id, self_id)`） |
 
 再加两个**只读**的判断题（都是上面两条的组合，不再单独查一次）：
-`is_admin(group_id, user_id)`、`is_owner(group_id, user_id)`。
+`is_owner(group_id, user_id)` 与 `at_least_admin(group_id, user_id)`。
 
 ## 事实从哪来
 
@@ -36,7 +36,7 @@
 
 **拿不到事实时一律是 `unknown`，绝不猜。** 查不到、通道不支持、对面没返回 role、
 没有注入 `call_action`、查询抛异常——全部归到 `ROLE_UNKNOWN`。
-`is_admin` / `is_owner` 对 `unknown` 一律返回 `False`。要动群的动作因此会被挡下，
+`is_owner` / `at_least_admin` 对 `unknown` 一律返回 `False`。要动群的动作因此会被挡下，
 而不是"大概是管理员就放行"。
 
 `tests/test_group_roles.py` 里有专门的用例钉这一条（含"查询抛异常"与"payload 没有 role"
