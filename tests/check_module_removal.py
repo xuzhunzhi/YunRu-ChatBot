@@ -34,6 +34,8 @@
 `import qq_roleplay_bot.runtime` 能过，是因为那些可选能力的 import 在**函数体里**；
 真正的入口是 `build_engine()` → `serve`。2026-10-02 实测过：修之前
 `vision` / `qq_roles` / `control_audit` 三个模块的 `import` 全绿、`build_engine` 全炸。
+（`qq_roles` 已于 2026-10-06 归核心并改名 `group_roles`，见 `DEFAULT_MODULES` 上面
+那段说明——**它现在是核心依赖，不再是本脚本探的对象**。）
 我原来那版**只报了 import 那一列**，于是给出误导性的"已解耦"。
 
 ## 名单里的一项查不了时**不许静默跳过**（2026-10-05 修）
@@ -82,7 +84,7 @@ PY = ROOT / ".venv" / "Scripts" / "python.exe"
 #: 问的正是它，所以**不能**因为"文件不在包根了"就把它从名单里去（那等于把这道
 #: 门槛悄悄关掉）。名字保持 `vision`，拦截的模块名由 `probe()` 现算
 #: （见 `_block_target`）。
-DEFAULT_MODULES = ("vision", "qq_roles", "control_audit", "typing_sim", "help_card",
+DEFAULT_MODULES = ("vision", "control_audit", "typing_sim", "help_card",
                    "provider_registry", "runtime_diagnostics")
 
 #: 名单里**由插件提供**的那几个（包根已经没有对应的 `.py` 了）。
@@ -100,6 +102,19 @@ DEFAULT_MODULES = ("vision", "qq_roles", "control_audit", "typing_sim", "help_ca
 #: 『全部通过：7 个可插能力都能拔掉而核心照跑』**——实测（把 6 个插件文件夹移走、
 #: 只留 `plugins/__init__.py`）`vision` **静默**从 7 项变 6 项，结论却长得像 7 项
 #: 全过。**不许为了让输出好看而删名字。**
+#:
+#: ## 2026-10-06：`qq_roles` 从这个名单里**撤掉**了（这里如实交代）
+#:
+#: 用户当天拍板 **"行，进核心"**：群成员角色事实（`group_roles.py`）从"可插能力"
+#: 变成**核心能力**——判据是"删掉它，Stage 3 会不会出问题？"答案是**会**
+#: （她认不出谁是管理员/群主，自己的身份也不知道）。
+#:
+#: 所以它的名字从 `DEFAULT_MODULES` 里撤掉了，并**没有**改成"算一项通过"：
+#: 它的缺席是"搭不起来"，不是"已解耦"。为什么不放进下面这一组：
+#: `PLUGIN_PROVIDED` 的含义是"**名字由插件提供**、这条线不带插件所以查不了"，
+#: 而 `group_roles` 是核心自己的模块、插件侧没有它——塞进去等于换一种方式撒谎。
+#:
+#: 同一轮里 `src/qq_roleplay_bot/qq_roles.py`（单源角色之后的死代码）已删除。
 PLUGIN_PROVIDED = ("vision",)
 
 #: 在一个**全新解释器**里拦掉指定的模块，然后看核心能不能起来。

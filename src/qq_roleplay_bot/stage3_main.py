@@ -56,6 +56,7 @@ from .stage3_runtime import (
     GUARDEDNESS_LABELS,
     Stance,
     build_dialogue_messages,
+    build_roster_lines,
     message_index_of,
     parse_dialogue_output,
 )
@@ -849,9 +850,14 @@ class DialogueEngine:
         self.sessions = sessions or DialogueSessions()
         # 跨重启的累计账本（runtime 会塞进来；测试里是 None，等于只报本次进程）。
         self.usage_store = None
-        # 她自己在每个群的 QQ 角色（群主/管理员/成员）。群主专属动作靠它决定能不能做；
+        # 群成员角色事实（**核心的能力**，2026-10-06 从插件搬进来）：回答
+        # "某人在某群是什么角色"与"她自己是什么角色"。群主专属动作靠它决定能不能做；
+        # 名册（`<people>`）也用它标出谁是管理员/群主。
         # 测试里是 None 时一律按"查不到"处理（fail-closed），不会误当成群主。
-        self.self_roles = None
+        #
+        # `runtime.build_engine` 装的是 `_LazyGroupRoles`（懒构造，模块不在就降级成
+        # "一律不知道"）；这里默认 None 保持"直接造引擎"的测试与旧调用方不变。
+        self.group_roles = None
         # 发一张本地图片的接缝（`(target, png_bytes) -> Awaitable[bool]`）。
         # 只有"帮助卡片"用它；没接（测试、别的传输层）时帮助自动退回文字。
         self.image_sender = None
@@ -980,6 +986,20 @@ class DialogueEngine:
         # 判定那条通道写入时主动失效（"立刻变冷"靠这个），TTL 是给维护 agent
         # 那条通道兜底的——它在别的线程改库，引擎收不到通知。
         self._stance_cache: dict[str, tuple[Stance, float]] = {}
+
+    @property
+    def self_roles(self):
+        """**兼容别名**：群成员角色事实服务原来叫 `self_roles`（插件侧那棵树上还是）。
+
+        它现在只是 `group_roles` 的另一个名字（读写都落到同一个属性上），
+        所以不会出现"两份角色缓存、查到两套答案"。新代码请用 `group_roles`。
+        """
+
+        return self.group_roles
+
+    @self_roles.setter
+    def self_roles(self, value) -> None:
+        self.group_roles = value
 
     def _review_context(self, message: IncomingMessage, state) -> str:
         """交给风格审核的一点现场：她正在回的那句话 + 最近两句。
@@ -1660,7 +1680,7 @@ class DialogueEngine:
                 return await run_owner_action(
                     request.kind,
                     call=self._group_action_caller("group_owner"),
-                    roles=getattr(self, "self_roles", None),
+                    roles=getattr(self, "group_roles", None),
                     group_id=group_id,
                     actor_id=actor_id,
                     target_id=request.target_id,
@@ -3334,6 +3354,12 @@ class DialogueEngine:
                     getattr(verdict, "understood", "clear"),
                     grounding.specialist, grounding.grounded,
                 )
+        # 名册（含**核心的角色事实**：她是谁、对方是不是管理员/群主）在调模型之前算一次。
+        # `await` 的是"把角色取进缓存"那一步（`build_roster_lines`），渲染本身是同步的。
+        roster = tuple(await build_roster_lines(
+            # 只有这一份来源。插件不自己取：要问就问 `registry.shared_roles()`
+            # （见 `runtime.build_engine` 里 `provide_roles` 那一处）。
+            getattr(self, "group_roles", None), message.target.group_id, state))
         request = build_dialogue_messages(
             history,
             current=message,
@@ -3349,7 +3375,7 @@ class DialogueEngine:
             summary=state.summary,
             alias_of=state.alias_of,
             aliases=state.aliases,
-            roster=tuple(state.roster_lines()),
+            roster=roster,
             # 引用可能指向话题起点之前、甚至已经被摘要盖住的消息：渲染的仍是本话题，
             # 但**查引用目标**要拿完整窗口，否则只能写一句"看不见"（实测 686 次引用里
             # 218 次如此；其中一次真的让她把邦邦说的"我电脑没电了"算到了另一个人头上）。
@@ -3813,7 +3839,10 @@ class DialogueEngine:
             seq_of=state.seq_of,
             alias_of=state.alias_of,
             aliases=state.aliases,
-            roster=tuple(state.roster_lines()),
+            roster=tuple(await build_roster_lines(
+                # **核心的角色事实**（她是谁、对方是不是管理员/群主）——只有这一份来源。
+                # 插件不自己取：要问就问 `registry.shared_roles()`（见 `runtime.build_engine`）。
+                getattr(self, "group_roles", None), message.target.group_id, state)),
             summary=state.summary,
             # 判定也看得到被引用的那句是谁说的（判断"还在不在同一条线上"要靠它）。
             lookup=state.recent(),

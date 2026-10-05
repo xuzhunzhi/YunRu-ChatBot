@@ -62,7 +62,7 @@ class _Engine:
 
     def __init__(self) -> None:
         self.usage_store = None
-        self.self_roles = None
+        self.group_roles = None
 
 
 class _FakeTransport:

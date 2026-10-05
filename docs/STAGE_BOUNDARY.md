@@ -69,7 +69,8 @@ Stage 4 是**手脚**：它给大脑接上更多表达方式和动作能力。
 | 模块 | 职责 |
 | --- | --- |
 | `builtin_group_commands.py` / `group_admin.py` / `group_owner.py` | 群管理与群主命令（档位 `super`）：踢 / 禁言 / 撤回 / 头衔 / 公告 / 改名片 |
-| `qq_roles.py` / `join_approval.py` | 她自己角色的现查、入群审批策略 |
+| `join_approval.py` | 入群审批策略 |
+| ~~`qq_roles.py`~~ → **`group_roles.py`（已进核心）** | 群成员角色事实（某人在某群 / 她自己）。2026-10-06 用户拍板"行，进核心"：身份判定属于权限判定那一类，按 `AGENTS.md` §2.3 留在核心；`plugins/roles/` 那份只答得出她自己的角色 |
 | `webui_panel.py` / `webui_access.py` / `webui_data.py` | **WebUI 面板**（2026-10-01 用户："面板属于 stage4 内容，本质插件"）：HTTP 与路由、本地/远程两套接入、只读数据层。它拿不到 `transport` 也拿不到引擎，只能调装配点注入的闭包 |
 | `mail_client.py` / `mail_state.py` / `mail_channel.py` / `daily_report.py` / `letter_writer.py` | 邮件通道：读信回信、每日汇报 |
 | `vision.py` | 识图（图片描述） |

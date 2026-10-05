@@ -266,7 +266,7 @@ runtime,runtime_flags,snapshots,api_usage,ask_when_unsure}.py`。两处**部署�
 | `runtime.py` 约 L460 `prompt_sources.add_plugins(...)` | **插件材料已经接到对话 prompt 上了**（`PromptPlugin.build_prompt`）——按"插件不准碰对话"该撤 |
 | `plugins/webui/wire.py` 的 `memory_ops` / `knowledge` | 面板能碰**记忆**与**知识库**；但这两样是用户 2026-10-01 明确要过的，要定"面板算不算例外" |
 | `registry.chat`（`mail` 插件把信投进对话） | 按边界也算碰对话；但邮件插件的"读信回信"整个靠它 |
-| `src/qq_roleplay_bot/qq_roles.py` | 单源角色之后成了**死代码**（树里还有第二份 `SelfRoleCache`）；删它会让 `check_module_removal` 从 7 变 6，要单独决定 |
+| ~~`src/qq_roleplay_bot/qq_roles.py`~~ | **已裁决（2026-10-06 用户："行，进核心"）**：角色事实归核心，改名 `group_roles.py`（`GroupRoles` 回答"某人在某群是什么角色"与"她自己是什么角色"），`qq_roles.py` 那份死代码已删。判据的账已如实记在 `tests/check_module_removal.py` 的 `DEFAULT_MODULES` 上面那段——它从 `DEFAULT_MODULES` 里**撤掉**（缺席会搭不起来，不是"已解耦"），通过项因此从 6 变 5 |
 
 ## ⑤ 验证这类改动的手法（这轮验证出来的，沿用）
 

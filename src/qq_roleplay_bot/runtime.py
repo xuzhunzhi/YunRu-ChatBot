@@ -467,17 +467,22 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
     # 群管理要能直接调 action（`/super ban` 之类）。传输层照样是唯一变量：
     # 引擎只拿着它调 `call_api`，不碰任何 QQ 细节。
     engine.transport = transport
-    # **不再由核心创建"她自己的角色查询"**（原来这里 `SelfRoleCache(transport, ...)`）。
-    # 它是群管理与入群审批的前置能力，**删掉它 Stage 3 照样答话**——所以按判据它不是底层，
-    # 归插件：`plugins/roles/` 以核心注入的 `call_action` 造它，群管理与入群审批
-    # 用 `REQUIRES = ("roles",)` 声明依赖。核心这边留一个空位，插件装上了就填。
+    # **身份与权限事实进核心了**（2026-10-06 用户："行，进核心"）。
     #
-    # **单一来源**（2026-10-04 对齐）：插件那一个实例经
-    # `registry.provide_roles()` → `chat.roles_sink()`（`_SeamBinder.roles_sink`）
-    # 落到这里，同时留在 `registry.shared_roles()` 给别的插件用。
-    # 所以 `engine.self_roles is registry.shared_roles()` 恒真——"她在这个群里
-    # 是不是群主"只有一个真相，不会出现核心查到一套、插件查到另一套。
-    engine.self_roles = None
+    # 它原来长在插件侧（`plugins/roles/`），核心这边留一个空位等插件来填；那条形状错了
+    # 两处：一是身份判定属于"权限判定/护栏"，按 `AGENTS.md` §2.3 必须留在核心；
+    # 二是插件那份**只回答"她自己是什么角色"**，"对方是管理员还是群主"根本没得问，
+    # 而她要知道的恰恰有对方那一半。
+    #
+    # 现在：核心自己造这个服务（`group_roles.py`），事实只走 `call_action` 的**只读**
+    # 那一族（`action_caller("read")`：已过 `capabilities` 闸门，插件与引擎都拿不到
+    # transport）。插件要问"某人是不是管理员"就调 `registry.shared_roles()` 上这一份，
+    # **不自己取**。
+    #
+    # `LazyGroupRoles` 是**懒构造**的：模块的 import 推迟到第一次真要用的时候，
+    # 而且失败被兜住 → 那台机器上角色一律 `unknown`（fail-closed），
+    # **引擎照样起得来**。这保住了判据"删掉它，Stage 3 照样跑得起来"。
+    engine.group_roles = _LazyGroupRoles(engine, transport)
     # 面板要用的四样东西挂到引擎上（插件拿不到引擎，只拿得到装配点给的闭包）：
     # 覆盖层、prompt 库、记忆人工操作、操作审计。
     engine.operator_config = operator
@@ -510,12 +515,21 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
     # `ChatSeams`（对话四件事）与 `ReportSeams`（写日报五件事），
     # 它们内部持有引擎引用，但对插件只暴露**函数**。
     call_action, notify = _plugin_action_seams(engine, transport)
+    # 动作调用函数与角色事实服务**共用同一个 `_SeamBinder`**：一个令牌一张私表，
+    # 少一处"又造了一个绑定"的机会。
+    binder = _SeamBinder(engine, transport)
     registry = PluginRegistry(call_action=call_action, notify=notify,
                               roles=None, loop=None,
                               chat=_chat_seams_for(engine),
                               report=_report_seams_for(engine),
                               ui=_ui_seams_for(engine),
-                              action_caller=_action_caller_for(engine, transport))
+                              action_caller=binder.action_caller)
+    # **把核心的角色事实服务放到共享位上**：插件要问"某人是不是管理员"就走
+    # `registry.shared_roles()`，拿到的是核心这一份——插件**不自己取**（`AGENTS.md`
+    # §2.3：权限判定、护栏留在核心）。走既有接缝而不是新造一个：`provide_roles()`
+    # 本来就是"把角色查询放到共享位上"那个口，现在由核心来放，语义没变。
+    # 放在 `discover()` **之前**，插件在 `register()` 里就取得到。
+    registry.provide_roles(engine.group_roles)
     attach_plugins(registry, engine.commands)
     engine.plugin_registry = registry
     # **识图**：能力由插件给（`plugins/vision/`），核心只问"有没有"。
@@ -858,7 +872,7 @@ class _SeamBinder:
         return taker(session_id) if callable(taker) else []
 
     def roles_sink(self, cache: object) -> None:
-        self._require().self_roles = cache
+        self._require().group_roles = cache
 
     def reporter_sink(self, reporter: object) -> None:
         self._require().daily_reporter = reporter
@@ -924,8 +938,12 @@ class _SeamBinder:
         return {"snapshot": engine.snapshot(), "usage_store": getattr(engine, "usage_store", None)}
 
     def ui_self_id(self):
-        roles = getattr(self._require(), "self_roles", None)
-        return roles.self_id() if roles is not None else ""
+        roles = getattr(self._require(), "group_roles", None)
+        # **同步**取：这个接缝是 `() -> self_id`（见 `UiSeams.self_id`），不能 await。
+        # 角色服务查过一次 `get_login_info` 之后这里就有值；没查过就是空串
+        # （面板那边本来就要处理"还没有 self_id"这一档）。
+        reader = getattr(roles, "cached_self_id", None)
+        return reader() if callable(reader) else ""
 
     def ui_apply_overrides(self, body, **kwargs):
         from .runtime import apply_overrides as _apply_overrides
@@ -950,15 +968,6 @@ class _SeamBinder:
             # 不是某个对象——接缝一律是函数，理由见 `UiSeams` 的说明。
             plugins=inventory,
         )
-
-
-def _roles_sink_for(engine: DialogueEngine):
-    """前置插件把"她自己是什么角色"的查询放回核心（`provide_roles` 用它）。"""
-
-    def sink(cache: object) -> None:
-        engine.self_roles = cache
-
-    return sink
 
 
 def _reporter_sink_for(engine: DialogueEngine):
@@ -1170,9 +1179,144 @@ def _plugin_action_seams(engine: DialogueEngine, transport: QQTransport):
 
 
 def _action_caller_for(engine: DialogueEngine, transport: QQTransport):
-    """`(purpose) -> 已过闸门的调用函数`。核心执行插件声明的动作时用它。"""
+    """`(purpose) -> 已过闸门的调用函数`。核心执行插件声明的动作时用它。
+
+    2026-10-06：`build_engine` 改成直接持有 `_SeamBinder(...).action_caller`（它还要把
+    同一个绑定给角色事实服务用，见 `_LazyGroupRoles`），所以这里现在**没有调用点**。
+    留着是因为它就是"核心要一个已过闸门的调用函数"这件事的现成写法，
+    下一处需要的人直接调它比再写一遍 `_SeamBinder` 好——**它不 import 任何可选能力**，
+    不影响任何一条判据。
+    """
 
     return _SeamBinder(engine, transport).action_caller
+
+
+#: `group_roles.ROLE_UNKNOWN` 的**字面**副本。
+#:
+#: 为什么不在降级分支里 `from .group_roles import ROLE_UNKNOWN`：那个 import 正是
+#: "模块不在时会炸"的那一句——降级路径去 import 它，等于把懒构造白做了。
+#: 代理只需要这一个字符串，抄一份字面量比多一条 import 边便宜。
+_ROLE_UNKNOWN = "unknown"
+
+
+class _LazyGroupRoles:
+    """**懒构造**核心的角色事实服务（`group_roles.GroupRoles`）。
+
+    ## 为什么要懒构造（不是洁癖，是判据）
+
+    `AGENTS.md` 的判据是"**删掉它，Stage 3 照样跑得起来**"，而 `check_module_removal`
+    探的正是 `build_engine()` 这一句。所以构造点必须满足两条：
+
+    1. **不在 `build_engine` 顶层 import 它**（否则删掉模块 → `ModuleNotFoundError`）；
+    2. 模块真的不在时，构造失败要**当场被兜住**、并且降级到"一律不知道"。
+
+    两条合起来的结果：模块被拿掉时，引擎照常装配起来，只是每个角色都是 `unknown`
+    ——那是 fail-closed 的那一侧，不是"炸掉"或"猜一个"。
+
+    ## 为什么 `ensure()` 与 `ready` 是两个口
+
+    名册要在**同步**渲染里读角色，所以服务必须能"先异步取一次、再同步读很多次"：
+
+    - `await ensure()`：把服务造出来（造过就直接返回），拿不到就 `None`；
+    - `ready`：**同步**取已经造好的那一个，没造过就是 `None`（绝不在同步上下文里
+      触发 import 或网络）。
+
+    代理方法只做转发；**没有 `ready` 时那些方法名仍然在**（`role` / `is_owner` …），
+    所以调用方不需要写 `if 服务在不在`——照常 `await`，拿到的是 `unknown` / `False`。
+    """
+
+    __slots__ = ("_engine", "_transport", "_service")
+
+    def __init__(self, engine: DialogueEngine, transport: QQTransport) -> None:
+        self._engine = engine
+        self._transport = transport
+        self._service = None
+
+    @property
+    def ready(self):
+        """已经造好的服务；没造好就是 `None`。**同步、不触发 import。**"""
+
+        return self._service
+
+    async def ensure(self):
+        """造出服务并返回它；这台机器上没有它时返回 `None`（只报告一次）。"""
+
+        if self._service is not None:
+            return self._service
+        try:
+            from .group_roles import GroupRoles
+
+            caller = _SeamBinder(self._engine, self._transport).action_caller("read")
+            from . import dev_config
+
+            self._service = GroupRoles(caller, ttl=dev_config.SELF_ROLE_TTL_SECONDS)
+        except Exception as exc:  # noqa: BLE001 - 没有它不该让对话或装配炸掉
+            logger.warning("group_roles_unavailable category=%s", type(exc).__name__)
+            return None
+        return self._service
+
+    # --- 转发：没造好时一律 fail-closed ----------------------------------
+
+    async def role(self, group_id: str, user_id: str = "", **kwargs) -> str:
+        service = await self.ensure()
+        if service is None:
+            return _ROLE_UNKNOWN
+        return await service.role(group_id, user_id, **kwargs)
+
+    async def self_role(self, group_id: str, **kwargs) -> str:
+        service = await self.ensure()
+        if service is None:
+            return _ROLE_UNKNOWN
+        return await service.self_role(group_id, **kwargs)
+
+    async def is_owner(self, group_id: str, user_id: str = "") -> bool:
+        service = await self.ensure()
+        return False if service is None else await service.is_owner(group_id, user_id)
+
+    async def at_least_admin(self, group_id: str, user_id: str = "") -> bool:
+        service = await self.ensure()
+        return False if service is None else await service.at_least_admin(group_id, user_id)
+
+    async def prime(self, group_id: str, user_ids, **kwargs) -> None:
+        service = await self.ensure()
+        if service is not None:
+            await service.prime(group_id, user_ids, **kwargs)
+
+    def cached_self_id(self) -> str:
+        """**同步**取已经查到过的那份；服务还没造出来时是空串。"""
+
+        service = self._service
+        if service is None:
+            # 服务还没造出来 = 还没查过一次。**这里不能顺手把服务造出来**：
+            # 这是个同步口（面板的 `self_id` 接缝），它一 await 就把调用方拖下水。
+            # 空串本来就是那个接缝认得的一档（"还没有 self_id"）。
+            return ""
+        return service.cached_self_id()
+
+    def labels_for(self, group_id: str, user_ids) -> dict[str, str]:
+        """**同步**读缓存：`{user_id: 角色说明}`，只含缓存里已有的。
+
+        没造好服务时是空表——渲染方按"不知道"处理（名册上就不写角色），
+        绝不填一个默认角色。
+        """
+
+        service = self._service
+        if service is None:
+            return {}
+        return service.labels_for(group_id, user_ids)
+
+    def known_role(self, group_id: str, user_id: str) -> str:
+        """缓存里已知的角色；没有就是 `unknown`（同 `labels_for`，同步、不发查询）。"""
+
+        service = self._service
+        if service is None:
+            return _ROLE_UNKNOWN
+        return service.known_role(group_id, user_id)
+
+    def forget(self, group_id: str = "", user_id: str = "") -> None:
+        service = self._service
+        if service is not None:
+            service.forget(group_id, user_id)
 
 
 def _start_memory(engine: DialogueEngine, client) -> MemoryService | None:

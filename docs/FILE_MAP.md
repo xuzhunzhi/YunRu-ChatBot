@@ -69,7 +69,7 @@
 
 | 文件 | 提供 | 用到 |
 | --- | --- | --- |
-| `runtime` | `serve()` `build_engine()` `build_context_provider()` `apply_overrides()` `state_persistence_enabled()` `_USAGE_STORE` | `stage3_main`(引擎类与常量) `transport` `llm_client` `capabilities` `state_store` `api_usage` `outbox` `memory_service` `memory_ops` `memory_config` `conversation_context` `extensions` `style_reviewer` `background_plugins` `_host_adapters` `prompt_library` `operator_config` `runtime_flags` + 函数内：`control_audit` `provider_registry` `qq_roles` `vision` `knowledge_base` `knowledge_operator` |
+| `runtime` | `serve()` `build_engine()` `build_context_provider()` `apply_overrides()` `state_persistence_enabled()` `_USAGE_STORE` | `stage3_main`(引擎类与常量) `transport` `llm_client` `capabilities` `state_store` `api_usage` `outbox` `memory_service` `memory_ops` `memory_config` `conversation_context` `extensions` `style_reviewer` `background_plugins` `_host_adapters` `prompt_library` `operator_config` `runtime_flags` + 函数内：`control_audit` `provider_registry` `group_roles` `vision` `knowledge_base` `knowledge_operator` |
 | `dev_config` | 全部环境变量常量与 `data_dir()` `load_env_file()` | 被 11 个模块顶层依赖 |
 | `llm_client` | `OpenAICompatibleClient` `LLMError` `apply_client_overrides()` | 被 `runtime` `stage3_main` `dialogue_judge` 等 |
 | `capabilities` | `CapabilityRegistry` `CapabilityDenied` `Capability` `load_catalog()` + 6 组 action 名单 | （不依赖包内） |
@@ -151,7 +151,7 @@
 | `typing_sim` | `split_segments()` `delay_plan()` `total_pause()` `segment_delay()` | （不依赖） |
 | `help_card` | `render()` `available()` `clear_cache()` | （PIL 在函数内） |
 | `vision` | `ImageDescriber` `replace_media_placeholder()` | `llm_client` `dev_config` |
-| `qq_roles` | `SelfRoleCache` `normalize_role()` `ROLE_OWNER` 等 | `onebot_client`（函数内） |
+| `group_roles` | `GroupRoles` **群成员角色事实**（某人在某群 / 她自己）、`normalize_role()` `ROLE_OWNER` 等 | （不依赖；`call_action` 由核心注入） |
 | `knowledge_base` | 本地知识库检索 | `embeddings` |
 | `knowledge_operator` | `OperatorKnowledge` `OperatorChunksStore` `open_index_readonly()` | `dev_config` `prompt_guard` |
 | `embeddings` | ONNX 嵌入模型 | `dev_config` |

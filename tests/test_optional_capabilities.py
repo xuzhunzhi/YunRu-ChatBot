@@ -15,6 +15,16 @@
 真正的入口 `build_engine()` → `serve` 第一步就炸。判据问的是"能不能跑起来"，
 **不是"能不能 import"**——所以我原来那个只测 import 的探针给出了误导性的"已解耦"。
 
+## 2026-10-06：`qq_roles` 不再是"可插能力"
+
+用户当天拍板 **"行，进核心"**：群成员角色事实从插件搬进核心并改名
+`group_roles.py`（`GroupRoles` 回答"某人在某群是什么角色"与"她自己是什么角色"）。
+它**不在**这个文件的名单里，因为它的缺席**会**影响 Stage 3（她认不出谁是管理员/群主）。
+
+它的缺席路径另有用例守：`tests/test_group_roles.py` 里的
+`test_the_lazy_wrapper_degrades_when_the_module_is_missing`（模块不在时一律
+fail-closed、不抛异常），以及 `tests/check_module_removal.py` 那段说明。
+
 ## 这个文件怎么测
 
 把目标模块在 `sys.modules` 里置成 `None`：CPython 随后对它的 `import` 会抛

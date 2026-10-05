@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import time
 from collections import deque
@@ -14,6 +15,8 @@ from .extensions import PromptMaterial
 from .base_prompt import BASE_PROMPT
 from .memory_model import MemoryMaterial
 from .prompt_library import derive_must_reply
+
+logger = logging.getLogger(__name__)
 
 
 class ConversationMode(str, Enum):
@@ -57,6 +60,18 @@ class DialogueDecision:
 
 #: 每个别名最多记几个"另外见过的名字"（别称）。定 3 够用，又不让名册膨胀。
 ALIAS_ALSO_LIMIT = 3
+
+# 名册里"要标出来"的角色词。为什么在这里**抄字面量**、而不是
+# `from .group_roles import ROLE_LABELS`：
+#
+# `stage3_runtime` 是**核心常驻模块**，`runtime` 顶层就 import 它。一旦在这里 import
+# `group_roles`，那个模块不在时连 `import qq_roleplay_bot.runtime` 都会炸——
+# 判据"删掉它，Stage 3 照样跑得起来"（`tests/check_module_removal.py`）当场就破。
+# 名册渲染只需要"普通成员长什么样"这一个字符串，抄一份字面量比多一条 import 边便宜。
+#
+# 抄写会漂：`tests/test_group_roles.py::test_the_roster_and_the_role_service_speak_the_same_words`
+# 对着 `group_roles` 逐字核这一份，改了一边而忘了另一边会红。
+ROSTER_ROLE_MEMBER_LABEL = "普通成员"
 
 
 @dataclass(slots=True)
@@ -140,11 +155,22 @@ class ConversationState:
             return None
         return self.aliases.get(message.user_id)
 
-    def roster_lines(self) -> list[str]:
+    def roster_lines(self, role_of=None) -> list[str]:
         """名册：只列**当前窗口里还出现**的人，按别名升序（只增不重排）。
 
         昵称是外部输入（QQ 昵称），进 prompt 前必须转义 `<` 与 `&`——
         否则一个叫 `<history>` 的人就能把结构搅乱。
+
+        `role_of(user_id) -> str` 是**可选**的"这个人在这个群里是什么角色"读数
+        （核心给的 `group_roles` 事实，见 `stage3_main._role_reader`）。
+        给了就在这一行末尾追加一个角色词：`1=小K（QQ1001；管理员）`。
+
+        三条规矩：
+
+        - **只标群主与管理员**。绝大多数人是普通成员，标出来只是每行多两个字、
+          每轮都占着 prompt；有身份的那几个才是她需要分清的人。
+        - **它读的是缓存**（同步、不发查询）；不知道就**不写**，绝不填一个默认角色。
+        - 传 `None`（测试与离线渲染）时这一行与从前**逐字相同**。
         """
 
         present = {self.aliases.get(m.user_id) for m in self.history if not m.is_bot_message}
@@ -160,8 +186,23 @@ class ConversationState:
             suffix = f"；别称：{'、'.join(also)}" if also else ""
             lines.append(
                 f"{alias}={name}{suffix}"
-                f"（QQ{escape(sanitize_chat_text(user_id, max_length=128), quote=False)}）")
+                f"（QQ{escape(sanitize_chat_text(user_id, max_length=128), quote=False)}"
+                f"{self._role_tag(role_of, user_id)}）")
         return lines
+
+    @staticmethod
+    def _role_tag(role_of, user_id: str) -> str:
+        """名册行里的角色后缀；**只有群主/管理员才给**，其余（含不知道）是空串。"""
+
+        if not callable(role_of):
+            return ""
+        try:
+            label = str(role_of(user_id) or "").strip()
+        except Exception:  # noqa: BLE001 - 名册渲染不该因为角色读数而失败
+            return ""
+        if not label or label == ROSTER_ROLE_MEMBER_LABEL:
+            return ""
+        return f"；{escape(sanitize_chat_text(label, max_length=32), quote=False)}"
 
     def topic_history(self) -> list[IncomingMessage]:
         """当前话题的消息：话题起点之后（含起点）的全部消息。
@@ -867,6 +908,112 @@ def render_roster(lines: list[str]) -> str:
     if not lines:
         return ""
     return "<people>\n" + "\n".join(lines) + "\n</people>\n"
+
+
+#: 她自己那两行在名册里的编号。用 `0` 与 `-` 而不是数字别名：别名从 1 起（`note_speaker`
+#: 分配），所以 `0` 从来不指别人；这两个写法也不会撞上任何 `\d+=` 行，一眼能分出
+#: "这两条说的是她自己"。
+SELF_ALIAS = "0"
+SELF_GROUP_ALIAS = "-"
+
+
+def format_self_roles(*, self_label: str = "", group_label: str = "") -> list[str]:
+    """把"**她自己**在这个群是什么角色"渲染成名册的头两行。
+
+    - `self_label`：她自己作为**群成员**的那个角色（"群主"/"管理员"/"普通成员"）；
+    - `group_label`：**这个群**里她的角色——现在与上面是同一份事实（`self_role`
+      查的就是"她自己在这个群的角色"），所以调用方两个传同一个值。留两个参数是为了
+      将来要区分时不用改渲染；默认空串=不知道，那一行就不写。
+
+    **绝不填一个默认角色**：两个都空时返回空列表。
+
+    为什么放 `<people>` 而不是 system：这一块在 `build_dialogue_messages` 里落在
+    UNTRUSTED DATA 区，而 system 前缀只承载人格、协议与安全规则（`AGENTS §2.1`）。
+    "我在这个群是群主"是外部世界的事实，属于 DATA。
+    """
+
+    own = [
+        f"{alias}=云茹（{escape(sanitize_chat_text(label.strip(), max_length=32), quote=False)}）"
+        for alias, label in ((SELF_ALIAS, str(self_label or "")),
+                             (SELF_GROUP_ALIAS, str(group_label or "")))
+        if str(label).strip() and str(label).strip() not in _NOT_A_ROLE_LABEL
+    ]
+    return own
+
+
+#: 渲染名册时**绝不**当成角色说明写出去的内部值（`group_roles` 的"不知道"）。
+#: 它在这里出现只可能是调用方漏折了，兜一手比让它印在名册上强。
+_NOT_A_ROLE_LABEL = frozenset({"unknown"})
+
+
+def _role_reader(roles, group_id: str):
+    """造一个**同步**读数：`(user_id) -> 角色说明`（不知道就是空串）。
+
+    读的是 `roles.known_role()` —— 它**只看缓存、不发查询**。事实由
+    `build_roster_lines` 事先 `await roles.prime(...)` 取进来。
+
+    服务还没造出来（`known_role` 不在）时返回 `None`；调用方于是不写角色
+    （名册与从前逐字相同），而不是写一个默认值。
+    """
+
+    if not callable(getattr(roles, "known_role", None)):
+        return None
+
+    def read(user_id: str) -> str:
+        try:
+            known = roles.known_role(group_id, user_id)
+        except Exception:  # noqa: BLE001 - 名册渲染不该因为角色读数而失败
+            return ""
+        return "" if known in {"", "unknown"} else ROLE_LABELS_FOR_ROSTER.get(known, known)
+
+    return read
+
+
+async def build_roster_lines(roles, group_id: str, state: ConversationState) -> list[str]:
+    """把名册（含角色事实）算出来——**判定段与回复段共用这一个口**。
+
+    顺序是"**先取事实、后渲染**"：`roles.prime()` 是异步的，把这一群人的角色取进缓存；
+    `state.roster_lines(reader)` 是同步的，只读缓存。整个异步只发生在这里，
+    渲染那边不 await——判定段的 `build_judge_messages` 因此一个字都不用改。
+
+    `roles` 是核心的角色事实服务（`group_roles.GroupRoles` / `runtime._LazyGroupRoles`）。
+    它不在、或者这一轮什么都没取到时，名册里就没有角色——与从前逐字相同。
+    """
+
+    group = str(group_id or "").strip()
+    reader = _role_reader(roles, group)
+    if group and roles is not None:
+        try:
+            # 只给"名册里真的会出现的人"取事实；她自己的那份由 `self_role` 在下面单独取。
+            await roles.prime(group, [m.user_id for m in state.history if not m.is_bot_message])
+        except Exception:  # noqa: BLE001 - 取不到角色不该耽误这一条回复
+            logger.warning("roster_role_prime_failed group=%s", group, exc_info=True)
+    lines: list[str] = []
+    if group and roles is not None:
+        self_role = await _safe_self_role(roles, group)
+        lines.extend(format_self_roles(self_label=self_role, group_label=self_role))
+    lines.extend(state.roster_lines(reader))
+    return lines
+
+
+async def _safe_self_role(roles, group_id: str) -> str:
+    """她自己在 `group_id` 的角色说明；取不到就是空串（fail-closed，不猜）。"""
+
+    try:
+        role = str(await roles.self_role(group_id) or "").strip()
+    except Exception:  # noqa: BLE001 - 降级成"不知道"
+        return ""
+    return "" if role in {"", "unknown"} else ROLE_LABELS_FOR_ROSTER.get(role, role)
+
+
+#: role 名 → 名册里给人看的词。与 `group_roles.ROLE_LABELS` **同义**：这里是核心常驻
+#: 模块，不能 import 那个可拔掉的模块（理由见 `ROSTER_ROLE_MEMBER_LABEL` 那段）。
+#: `tests/test_group_roles.py` 里有用例逐字核这张表，改了一边忘了另一边会红。
+ROLE_LABELS_FOR_ROSTER = {
+    "owner": "群主",
+    "admin": "管理员",
+    "member": "普通成员",
+}
 
 
 def _temporary_alias_of(messages: list[IncomingMessage]):

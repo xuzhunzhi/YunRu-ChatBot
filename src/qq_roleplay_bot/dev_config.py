@@ -341,7 +341,7 @@ HELP_IMAGE_WIDTH = _int("QQBOT_HELP_IMAGE_WIDTH", 880)
 
 # --- 群主专属能力（2026-09-30 用户："群主的接口应该比管理员更多"）-------------
 # 前提是实测的：她（900000002）在测试群 717151356 里 role=owner，别的群是 member。
-# 所以这批动作的**执行前提是"她在那个群确实是群主"**（`qq_roles.py` 现查），
+# 所以这批动作的**执行前提是"她在那个群确实是群主"**（`group_roles.py` 现查），
 # 命令一侧仍然只有超管能发。闸门见 `capabilities.GROUP_OWNER_ACTIONS`。
 GROUP_OWNER_ENABLED = get("QQBOT_GROUP_OWNER", "1").lower() not in {"0", "false", "no", "off"}
 # 自己角色缓存多久（秒）。她不会频繁变更角色，一次查询够用很久。

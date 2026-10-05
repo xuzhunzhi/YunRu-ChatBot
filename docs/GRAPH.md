@@ -344,7 +344,7 @@ classDef host fill:#fce9d2,stroke:#96540f,color:#321
 
 | 模块 | 函数内 import（可插：删掉只是少一项能力） |
 | --- | --- |
-| `runtime` | `control_audit`, `provider_registry` |
+| `runtime` | `control_audit`, `provider_registry`, `group_roles` |
 
 ## 宿主与可插能力
 
@@ -357,7 +357,6 @@ flowchart TD
     n_knowledge_base["knowledge_base"]
     n_knowledge_operator["knowledge_operator"]
     n_prompt_library["prompt_library"]
-    n_qq_roles["qq_roles"]
     n_stage3_main["stage3_main"]
     n_typing_sim["typing_sim"]
     n_vision["vision"]
