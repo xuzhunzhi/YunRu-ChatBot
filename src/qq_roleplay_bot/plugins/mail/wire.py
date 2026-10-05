@@ -1,11 +1,13 @@
-"""邮件通道的装配：读信回信 + 每日汇报。
+"""邮件通道的装配：读信回信 + 每日汇报 + **开放发信能力**。
 
 从 `background_plugins.py` 原样搬来（只改 import 路径与函数名），装配逻辑没动。
 
-两块的开关相互独立：
+三块的开关相互独立：
 
 - **读信回信**：`QQBOT_MAIL_REPLY`（还要配主人地址与 QQ 号）
 - **每日汇报**：`QQBOT_MAIL_REPORT`
+- **把发信能力开放给别的插件**（`build_operator_mail_sender`）：**没有开关**——
+  它是"提供能力"，用不用由使用者决定（见那个函数的说明）。
 """
 from __future__ import annotations
 
@@ -85,6 +87,77 @@ def build_daily_report(report, *, registry=None):
         for letter in reversed(state.letters):
             report.remember_letter(letter)
     return reporter
+
+
+def build_operator_mail_sender(seams):
+    """把**"给操作者发一封普通邮件"**这个能力放上注册表（`registry.mail`）。
+
+    由来（2026-10-06 用户）：*"掉线可以调用 mail 插件给我发消息通知我"* ·
+    *"这个作为 mail 插件的后置插件，也就是说 mail 插件是这个插件的依赖"*。
+
+    ## 这里只做一件事：把 mail 已有的发信能力**开放出去**
+
+    在这之前，`MailClient` 只在 `build_daily_report` / `build_mail_channel` 里各造一个，
+    两个都**只服务自己**——别的插件没有口子。这个函数补的就是那个口子，没有第二套逻辑：
+    收件人还是配置里那一个、发信还是 `MailClient.send`、错误还是 `MailError`。
+
+    ## 收件人：**复用 `MAIL_REPORT_TO`，不新写一份配置**
+
+    用户说的"用 mail 插件现有的配置"就是这个意思。回落到 `MAIL_OWNER_FROM`
+    （它本身也默认等于 `MAIL_REPORT_TO`）只是"配了主人地址没配汇报地址"时少一条静默死路，
+    不引入新配置项。
+
+    ## 与开关的关系（刻意与 `MAIL_REPORT_ENABLED` **无关**）
+
+    这个能力**不看 `MAIL_REPORT_ENABLED`**：那是"每天那封汇报发不发"的开关，
+    和"别的插件能不能借邮箱发一封信"是两件事——关掉日报不该让掉线通知变成哑巴
+    （用户要的是"断了就告诉我"）。发不发由**使用者**的开关决定（见
+    `dev_config.MAIL_OUTAGE_NOTICE_ENABLED`）。
+
+    反过来也有代价，说清楚：**登记了这个能力之后，就是"这个部署里插件能发信"**。
+    它仍然不是"给任意地址发信"——收件人写死在这一个函数里（`MailSeams` 的说明）。
+
+    ## 一件事：**已经有人提供过就不覆盖**
+
+    `registry.mail.provide(...)` 只在**还没有**发信函数时才登记。理由是踩出来的
+    （2026-10-06，写掉线通知的测试时）：`discover()` 会把前置 `mail` 装一遍——
+    哪怕调用方只想要后置那一个（`only=("outage_notice",)` 也会顺着 `REQUIRES` 把 mail
+    装上）。于是"测试或部署自己先塞了一个发信函数"会被这里**静默盖掉**，
+    而盖掉之后那一封会去起真的 CLI（实测：`MailError: credential_lock_unavailable`，
+    用例里表现为"假发信函数一次都没被调用"）。
+
+    生产路径上注册表是新的、`operator_sender` 是 `None`，所以这条守卫在真装配里
+    不改变任何行为；它挡住的是"重复装配把别人已经接好的那条线换掉"这种失败形状
+    （与 `PluginRegistry.provide_roles` 的"谁放的就用谁的"是同一条道理）。
+    真要换，显式调 `registry.mail.provide(...)`（它自己仍然是后到者覆盖先到者）。
+    """
+
+    from ...plugins.mail.mail_client import MailClient
+
+    existing = getattr(seams, "operator_sender", None)
+    if callable(existing):
+        # 别人已经接好了（测试的手造注册表、或将来某处先登记了一份）。
+        # 不覆盖：那条线是**调用方**建立起来的，替换它只会让"我塞的那个还在不在"
+        # 变成一个没法从日志看出来的问题（见 docstring 里那次实测）。
+        logger.info("发信能力已经有人提供过，本次不覆盖")
+        return existing
+
+    recipient = (dev_config.MAIL_REPORT_TO or "").strip()
+    if not recipient:
+        recipient = (dev_config.MAIL_OWNER_FROM or "").strip()
+    if not recipient:
+        logger.warning("没有配收件人（QQBOT_MAIL_REPORT_TO），本次不开放发信能力")
+        return None
+    client = MailClient(dev_config.MAIL_CLI, workdir=mail_workdir())
+
+    async def send_operator_mail(subject: str, body: str) -> dict:
+        """给操作者发一封**普通邮件**（不是日报、不是回信）。收件人由上面那个闭包定。"""
+
+        return await client.send(to=recipient, subject=str(subject), body=str(body))
+
+    seams.provide(send_operator_mail)
+    logger.info("邮件能力已开放给别的插件：收件人=%s", recipient)
+    return send_operator_mail
 
 
 def build_mail_channel(chat):

@@ -10,7 +10,8 @@ plugins/
 ├── join_approval/       入群审批：白名单 → 黑名单 → 正则 → 模型兜底
 ├── vision/              识图：把图片消息换成一句描述
 ├── webui/               控制面板：本地与远程两套接入 + 前端资源
-└── mail/                邮件通道：读信回信 + 每日汇报
+├── mail/                邮件通道：读信回信 + 每日汇报
+└── outage_notice/       掉线通知：断一次给操作者发一封固定模板的邮件（依赖 mail）
 ```
 
 ## 契约
@@ -28,6 +29,7 @@ plugins/
     registry.report                   # ReportSeams：写日报要的五项
     registry.ui                       # UiSeams：控制面板要的十项
     registry.link                     # LinkSeams：掉线事件（on_disconnect(接收者)）
+    registry.mail                     # MailSeams：发一封给操作者的普通邮件（provide/notify）
     registry.call_action / notify     # 动作与通知（后台插件用）
     registry.roles / loop             # 前置插件放上来的共享能力 / 事件循环
     registry.shared_roles()           # 取前置插件放上来的角色查询
@@ -88,6 +90,8 @@ plugins/
   把看门狗本来就有的状态变成**确定的边沿**（`在线 → 掉线` 算一段），再在
   `registry.link` 上广播**"断了"这个事实**。谁来接、拿它做什么（发信 / 记日志 /
   面板弹一条）都是插件的事；核心不知道有邮件这回事，也不会去发。见 `LinkSeams`。
+  接它的那一个（`outage_notice/`）**依赖 `mail`**：`REQUIRES = ("mail",)`，方向不许反，
+  见 `MailSeams`。
 - **`roles/` 也是插件**（2026-10-01 用户）："一个东西搬进插件另一个插件失效不代表
   前者不能作为插件，只需要把前者作为前置插件就行。" 群管理与入群审批都要它，
   所以它是**前置插件**：`group_admin` / `join_approval` 声明 `REQUIRES = ("roles",)`。
@@ -525,11 +529,98 @@ class LinkSeams:
             logger.warning("plugin_link_register_failed", exc_info=True)
 
 
+class MailSeams:
+    """**"给操作者发一封普通邮件"**的能力面：谁来发由 `mail` 插件登记，别的插件只管用它。
+
+    由来（2026-10-06 用户）：*"掉线可以调用 mail 插件给我发消息通知我"* ·
+    *"这个作为 mail 插件的后置插件，也就是说 mail 插件是这个插件的依赖，不要搞错了"*。
+
+    ## 为什么要有它
+
+    mail 插件的发信能力原来只服务它自己（每日汇报从 `wire.build_daily_report` 里
+    直接 `MailClient(...)`）。别的插件要发一封"给自己人看的"邮件**没有口子**——
+    没有这个口子，掉线通知只有两条路：把逻辑写进 mail 插件（用户明确否了），
+    或者自己再造一个 `MailClient`（配置就有了第二份）。两条都不是"插件之间的依赖"。
+
+    ## 方向（这一条绝不能反）
+
+    | 谁 | 做什么 |
+    | --- | --- |
+    | `mail`（前置） | 在 `register()` 里 `registry.mail.provide(fn)` —— **提供**发信能力 |
+    | `outage_notice`（后置） | `REQUIRES = ("mail",)`，在 `register()` 里 `registry.mail.notify(...)` —— **使用** |
+
+    反过来（mail 认识掉线通知、或核心认识邮件）都是错的：`discover()` 保证前置先装，
+    装不上就跳过后置（见那个函数的 `REQUIRES` 一节）。
+
+    ## 它给的是"发一封信"，不是"邮件通道"
+
+    接收者拿到的是 `(subject, body) -> await`：**收件人与发信方式都由 mail 插件定**
+    （它读自己的配置 `MAIL_REPORT_TO`，与日报同一个收件人）。使用者指定不了发件人、
+    指定不了收件人、也拿不到 `MailClient`——所以"给任意地址发信"这个原语没有被发出去。
+
+    字段同样是**函数**（同 `ChatSeams` 的理由）：这里给的是插件登记的一个函数，
+    不是引擎、不是传输层、也不是邮箱凭据。
+
+    ## 一件刻意不做的事：这里不写"失败怎么办"
+
+    `notify()` 把异常**照原样抛**——是使用者（发告警的那个插件）自己决定
+    "记一笔还是吞掉"，还是核心的广播侧兜住。在这里吞掉等于让一切都变成静默成功，
+    而"发信失败要记一笔"正是使用者的责任（见 `plugins/outage_notice/`）。
+
+    ## 为什么是普通类，不是 `@dataclass(frozen=True, slots=True)`
+
+    与 `LinkSeams` 的唯一区别：那一个的字段（`disconnect_sink`）**由注册表在构造时绑好、
+    之后只读**；这一个的字段是**别的插件登记进来的**，所以它必须能被写一次。
+    写成 frozen dataclass 就得用 `object.__setattr__` 绕过——那是为了形状统一而绕过
+    自己定的规矩，不值得。字段清单仍然只有下面一个，语义仍然是"只放函数"。
+    """
+
+    #: `(subject, body) -> await`：登记上来的发信函数；缺省 `None` = 这次部署没有 mail。
+    #: 与 `LinkSeams.disconnect_sink` 同一形状（注册表自己持有名单，不需要引擎注入）。
+    __slots__ = ("operator_sender",)
+
+    def __init__(self, operator_sender: object = None) -> None:
+        self.operator_sender = operator_sender
+
+    def provide(self, sender: object) -> None:
+        """**前置插件**（`mail`）把"发一封给操作者的邮件"放上来。
+
+        非可调用的东西一律不收（`on_disconnect` 同一条纪律：错在这里发现，
+        比在掉线那一刻发现便宜得多）。后到者覆盖先到者，与 `provide_prompt` 一致。
+        """
+
+        if not callable(sender):
+            logger.warning("plugin_mail_sender_refused type=%s", type(sender).__name__)
+            return
+        self.operator_sender = sender
+
+    def knows(self) -> bool:
+        """**这个能力在不在**（区分"没人提供"与"有人提供了但发不出去"）。
+
+        同 `ChatSeams.knows_reserved()` 的道理：使用者据此**决定要不要登记掉线接收者**——
+        没有发信能力时登记一个注定失败的接收者，只会在每次掉线时往日志里灌一行错。
+        """
+
+        return callable(self.operator_sender)
+
+    async def notify(self, subject: str, body: str) -> object:
+        """发一封给操作者的邮件；**没有提供者就抛 `RuntimeError`**（不许静默丢弃）。
+
+        为什么不静默返回 `None`：调用方（告警）**必须**能分清"发出去了"与"根本没人接"。
+        在这条路上"以为发了其实没发"的代价是"断了没人知道"，比一行异常贵得多。
+        """
+
+        sender = self.operator_sender
+        if not callable(sender):
+            raise RuntimeError("没有插件提供发信能力（registry.mail 是空的）")
+        return await _maybe_await(sender(str(subject), str(body)))
+
+
 class PluginRegistry:
     """插件能用的**全部**东西。核心造一个，交给 `discover()`。
 
     **这里没有 `engine`**——那是刻意的。插件要用的能力都由窄接缝给：
-    `call_action` / `notify` / `roles` / `loop` / `chat` / `report` / `link`。
+    `call_action` / `notify` / `roles` / `loop` / `chat` / `report` / `link` / `mail`。
 
     为什么连"只读的引擎"也不给：引擎上有 `transport`（活的传输层）与三份权限名单
     （超管、管理员、补发白名单）。给出去就等于**插件能自己发消息、能读权限名单**，
@@ -537,7 +628,7 @@ class PluginRegistry:
     """
 
     __slots__ = ("call_action", "notify", "roles", "loop", "chat", "report", "ui",
-                 "link", "vision", "action_caller", "commands", "backgrounds",
+                 "link", "mail", "vision", "action_caller", "commands", "backgrounds",
                  "_shared_roles", "_commands", "_prompts", "_prompt_defaults",
                  "_group_actions", "_owner_channels", "_disconnect_receivers", "loaded")
 
@@ -569,6 +660,13 @@ class PluginRegistry:
         #: 接收者名单本来就归注册表自己管（同 `_prompts` / `_shared_roles`），
         #: 核心的看门狗只问 `disconnect_receivers()`。少一个旋钮就少一处"装配漏了"。
         self.link: LinkSeams = LinkSeams(disconnect_sink=self._add_disconnect_receiver)
+        #: **"给操作者发一封普通邮件"**那条接缝（见 `MailSeams`）。
+        #:
+        #: 与 `link` 同一形状、同一个理由：**名单/能力本来就归注册表自己管**
+        #: （由 `mail` 插件在 `register()` 里 `provide()` 填），不需要核心递引擎绑定的闭包。
+        #: 缺省是空的：没有 mail 插件时 `knows()` 为假，使用者据此**不登记**
+        #: （所以要在这里就造好，而不是等某个插件来赋值——`__slots__` 也不允许那样）。
+        self.mail: MailSeams = MailSeams()
         #: 已登记的掉线接收者（`registry.link.on_disconnect(...)` 往这里放）。
         self._disconnect_receivers: list[object] = []
         #: `(purpose) -> async (action, params) -> response`：造一个**已过闸门**的调用函数。

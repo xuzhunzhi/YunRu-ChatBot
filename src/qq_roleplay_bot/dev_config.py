@@ -426,6 +426,14 @@ MAIL_SELF_FROM = get("QQBOT_MAIL_SELF_FROM", "")
 # 太旧的来信不回（小时）。理由：上限卡住的那几封会攒到第二天，
 # 隔了好几天再回一封"你好吗"很奇怪。
 MAIL_MAX_AGE_HOURS = _float("QQBOT_MAIL_MAX_AGE_HOURS", 48.0)
+# **掉线通知**（`plugins/outage_notice/`）的开关：断一次给操作者发一封普通邮件。
+# 收件人**没有第二个配置**——就用 `MAIL_REPORT_TO`（与每日汇报同一个人），
+# 这与"读信回信认谁的信"复用同一个地址是同一条原则（`MAIL_OWNER_FROM` 也回落到它）。
+# 关掉只是"这个插件不接那条事件"，与 `QQBOT_DISCONNECT_NOTICE`（更上游的总闸，
+# 关掉连广播都不发生）是两层，别混：那个是**事件发不发生**，这个是**发不发邮件**。
+# 内联写法而不是用下面的 `_enabled`：那个函数定义在本文件更靠后的位置（同上面那条注释）。
+MAIL_OUTAGE_NOTICE_ENABLED = get(
+    "QQBOT_MAIL_OUTAGE_NOTICE", "1").lower() not in {"0", "false", "no", "off"}
 
 
 # --- 双 agent（判定 / 回复分离）--------------------------------------------
