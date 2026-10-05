@@ -8,20 +8,27 @@
 
 本体侧只做两件事（通知那半边是插件的事，**不在这里测**）：
 
-1. **复用**看门狗本来就有的状态与计时（`transport.connected` +
-   `CONNECTION_WARN_AFTER/EVERY_SECONDS`）做**确定的边沿**：
+1. **复用**看门狗本来就有的状态（`transport.connected`）做**确定的边沿**：
    `在线 → 掉线` 算一段，掉线期间反复检查不算新事件，重连后重新武装；
 2. 在 `registry.link`（`plugins.LinkSeams`）上广播**"断了"这个事实**。
 
+**两个节奏是分开的**（2026-10-06 用户定的第二条）：
+`CONNECTION_DETECT_EVERY_SECONDS`（检测，≤60 秒）决定"多久被广播"，
+`CONNECTION_WARN_EVERY_SECONDS`（10 分钟）只管那条告警日志的节奏，
+启动后第一次检查仍在 `CONNECTION_WARN_AFTER_SECONDS`（60 秒）。
+**开机一直没连上算一段掉线**（用户定的第一条：那种"机器起来了、谁也看不见"
+正是这条通知最大的价值）。
+
 **恢复不发**（用户："不用额外通知"）——这条与"一次只发一次"一样是判据。
 
-这里的用例都是**实测**：驱动真实的 `_watch_connection`（把两个计时改小），
-不是"我认为它会这样"。
+这里的用例都是**实测**：要么驱动真实的 `_watch_connection`（把三个计时改小），
+要么用**假时钟**直接喂 `_ConnectionTicker`（不真等 60 秒），不是"我认为它会这样"。
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import types
 from contextlib import contextmanager
 
@@ -37,6 +44,16 @@ class _Transport:
         self.connected = connected
 
 
+class _Clock:
+    """假时钟：测试把"时间"推着走，不必真的等 60 秒。"""
+
+    def __init__(self, now: float = 0.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
 def _feed(states: list[bool], notifier) -> list[bool]:
     """按顺序喂一串"连着没有"，返回每次 `observe()` 的返回值。"""
 
@@ -47,18 +64,25 @@ def _feed(states: list[bool], notifier) -> list[bool]:
 
 
 @contextmanager
-def _fast_watchdog(after: float = 0.01, every: float = 0.02):
-    """把看门狗的计时改小（只有测试这么干），退出时原样还回去。"""
+def _fast_watchdog(after: float = 0.01, every: float = 0.02, detect: float = 0.02):
+    """把看门狗的**三个**计时改小（只有测试这么干），退出时原样还回去。
+
+    `every` 是日志节奏、`detect` 是检测节奏——两个都要给：只改一个的话，
+    另一个会以生产值（600 / 60 秒）出现，用例会挂在"等不到第二轮"上。
+    """
 
     previous_after = runtime_module.CONNECTION_WARN_AFTER_SECONDS
     previous_every = runtime_module.CONNECTION_WARN_EVERY_SECONDS
+    previous_detect = runtime_module.CONNECTION_DETECT_EVERY_SECONDS
     runtime_module.CONNECTION_WARN_AFTER_SECONDS = after
     runtime_module.CONNECTION_WARN_EVERY_SECONDS = every
+    runtime_module.CONNECTION_DETECT_EVERY_SECONDS = detect
     try:
         yield
     finally:
         runtime_module.CONNECTION_WARN_AFTER_SECONDS = previous_after
         runtime_module.CONNECTION_WARN_EVERY_SECONDS = previous_every
+        runtime_module.CONNECTION_DETECT_EVERY_SECONDS = previous_detect
 
 
 @contextmanager
@@ -347,3 +371,144 @@ def test_the_watchdog_runs_without_any_receiver() -> None:
         asyncio.run(run())
 
     assert any("连上来" in line for line in records), records
+
+
+# --- 检测节奏与日志节奏（2026-10-06 用户：10 分钟的检测延迟不可接受）------------
+
+
+def test_the_detection_rhythm_is_at_most_a_minute() -> None:
+    """检测节奏 **≤60 秒**，且它与日志节奏是**两个常量、两个值**。
+
+    用户原话：*"用户要的是『断了就告诉我』，不是『断了十分钟后告诉我』"*。
+    这条把要求钉在常量上：把检测周期改回 10 分钟，它立刻红。
+    """
+
+    assert runtime_module.CONNECTION_DETECT_EVERY_SECONDS <= 60.0, (
+        "检测节奏必须 ≤60 秒，否则掉线通知最坏要十分钟才发出去"
+    )
+    assert (runtime_module.CONNECTION_DETECT_EVERY_SECONDS
+            < runtime_module.CONNECTION_WARN_EVERY_SECONDS), "两个节奏不许并回一个"
+    # 启动后第一次检查仍是 60 秒——那条告警的口径（也是"开机没连上算一段"的口径）。
+    assert runtime_module.CONNECTION_WARN_AFTER_SECONDS == 60.0
+    # ticker 的两个节奏就是从这两个常量来的（一个来源，不许各写一份）。
+    ticker = runtime_module._ConnectionTicker()
+    assert ticker.detect_every == runtime_module.CONNECTION_DETECT_EVERY_SECONDS
+    assert ticker.warn_every == runtime_module.CONNECTION_WARN_EVERY_SECONDS
+
+
+def test_a_disconnect_is_broadcast_within_one_detection_interval() -> None:
+    """"断了就告诉我"：最多晚**一个检测周期**，不是等到十分钟的日志点。
+
+    用假时钟（不真等 60 秒）：第一次采样 t=0 是"连着"，对面在两次采样之间
+    （t=5）断了，下一个检测点就必须广播出去。
+    """
+
+    interval = runtime_module.CONNECTION_DETECT_EVERY_SECONDS
+    clock = _Clock()
+    calls: list[float] = []
+    notifier = runtime_module._DisconnectNotifier([lambda: calls.append(clock.now)])
+    ticker = runtime_module._ConnectionTicker(notifier, clock=clock)
+    transport = _Transport(connected=True)
+
+    async def run() -> None:
+        await ticker.tick(transport)                 # t=0：连着
+        assert calls == []
+        transport.connected = False                  # 两次采样之间断了（t=5）
+        clock.now = 5.0
+        assert calls == [], "广播发生在采样点上，不是掉线那一刻——这正是要 ≤60 秒的原因"
+        clock.now = interval                         # 下一个检测点
+        await ticker.tick(transport)
+
+    asyncio.run(run())
+
+    assert calls == [interval], calls
+    assert calls[0] - 5.0 <= 60.0, f"检测延迟 {calls[0] - 5.0} 秒超过一分钟"
+
+
+def test_the_alert_log_keeps_its_ten_minute_cadence() -> None:
+    """**日志节奏仍是 10 分钟**：采样快了 10 倍，日志一条都没变多。
+
+    假时钟按**生产比值**推进（每 60 秒一次检测）：35 次检测 = 35 分钟，
+    日志只该出现在第 0、10、20、30 次（启动后 60 秒那一枪，之后每 10 分钟一枪）。
+    """
+
+    clock = _Clock()
+    ticker = runtime_module._ConnectionTicker(clock=clock)
+    transport = _Transport(connected=False)
+
+    async def run() -> list[bool]:
+        warned: list[bool] = []
+        for _ in range(35):
+            clock.now += runtime_module.CONNECTION_DETECT_EVERY_SECONDS
+            warned.append(await ticker.tick(transport))
+        return warned
+
+    with _runtime_logs() as records:
+        warned = asyncio.run(run())
+
+    assert [index for index, flag in enumerate(warned) if flag] == [0, 10, 20, 30], warned
+    assert len([line for line in records if "连上来" in line]) == 4, records
+
+
+def test_a_boot_with_nobody_connected_is_one_outage() -> None:
+    """**开机一直没连上 = 一段掉线**（用户定的第一条：机器起来了、谁也看不见）。
+
+    段只算一段——第一次检查广播一次，之后继续没连上**不再叫**。
+    """
+
+    clock = _Clock()
+    calls: list[float] = []
+    notifier = runtime_module._DisconnectNotifier([lambda: calls.append(clock.now)])
+    ticker = runtime_module._ConnectionTicker(notifier, clock=clock)
+    transport = _Transport(connected=False)
+
+    async def run() -> None:
+        clock.now = runtime_module.CONNECTION_WARN_AFTER_SECONDS   # 启动后第一次检查
+        await ticker.tick(transport)
+        clock.now += runtime_module.CONNECTION_DETECT_EVERY_SECONDS
+        await ticker.tick(transport)                                # 还是没连上
+        clock.now += runtime_module.CONNECTION_DETECT_EVERY_SECONDS
+        await ticker.tick(transport)
+
+    asyncio.run(run())
+
+    assert calls == [runtime_module.CONNECTION_WARN_AFTER_SECONDS], calls
+
+
+def test_the_loop_detects_on_the_fast_rhythm_not_the_log_rhythm() -> None:
+    """真实循环里两个节奏是**分开的**：掉线在检测周期内被广播，不是等到日志点。
+
+    把检测调成 0.05 秒、日志点调成 0.50 秒（与生产的 60/600 同比例），
+    然后量"对面断了"到"接收者被叫"的墙钟时间：它必须落在**检测尺度**上（<0.25 秒）。
+    如果循环睡的是日志节奏，这里会接近 0.5 秒——这条正是那个突变的看门人。
+    """
+
+    calls: list[float] = []
+    registry = PluginRegistry()
+    registry.link.on_disconnect(lambda: calls.append(time.monotonic()))
+    transport = _Transport(connected=True)
+    notifier = runtime_module._disconnect_notifier_for(
+        types.SimpleNamespace(plugin_registry=registry)
+    )
+
+    with _fast_watchdog(after=0.01, every=0.5, detect=0.05), _runtime_logs():
+        async def run() -> float:
+            task = asyncio.create_task(
+                runtime_module._watch_connection(transport, notifier)
+            )
+            try:
+                await asyncio.sleep(0.15)          # 先让它看见几次"连着"
+                assert calls == [], "没断就不许广播"
+                dropped_at = time.monotonic()
+                transport.connected = False        # 两次采样之间断了
+                await asyncio.sleep(0.30)          # 检测周期 0.05 → 早该被看见了
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            return dropped_at
+
+        dropped_at = asyncio.run(run())
+
+    assert calls, "掉线没有被广播"
+    latency = calls[0] - dropped_at
+    assert latency < 0.25, f"检测延迟 {latency:.3f}s 落在日志节奏上（应 ≈ 检测周期）"

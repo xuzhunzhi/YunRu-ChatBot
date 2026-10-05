@@ -17,6 +17,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 from . import dev_config
@@ -1221,7 +1222,95 @@ async def serve(transport: QQTransport, *, stage_label: str = "Stage 3") -> None
 # 结果是**她活着、日志也在走，但一条消息都进不来**，而且日志里只有"监听于 8080"，
 # 看不出"没人连上来"。这一条告警就是为了让这种情况一眼可见。
 CONNECTION_WARN_AFTER_SECONDS = 60.0
+# **日志节奏**（秒）：掉线期间那条告警**至多**这么频繁地打一条。
+# 名字没改（"warn every"本来就是"隔多久再提醒一次"）；但它现在**只管日志**了——
+# 循环周期不再等于它，见下面那个常量（2026-10-06）。
 CONNECTION_WARN_EVERY_SECONDS = 600.0
+# **检测节奏**（秒）：看门狗多久采一次 `transport.connected`、喂一次掉线状态机。
+#
+# 为什么要跟日志节奏分开（2026-10-06 用户）：*"用户要的是『断了就告诉我』，
+# 不是『断了十分钟后告诉我』"*。原来循环只有 `sleep(600 秒)` 一个节奏，于是
+# **掉线最坏 10 分钟才被发现**。现在采样快、日志照旧：
+#
+# | 事 | 节奏 | 常量 |
+# | --- | --- | --- |
+# | 采样 + 喂状态机（检测掉线、广播） | ≤60 秒 | 本常量 |
+# | 那条告警日志 | 10 分钟 | `CONNECTION_WARN_EVERY_SECONDS` |
+#
+# **不许再拿它当循环周期以外的东西用**，也不许把两个节奏并回一个名字。
+CONNECTION_DETECT_EVERY_SECONDS = 60.0
+
+
+class _ConnectionTicker:
+    """**一次采样**：该不该打那条告警，以及把状态喂给掉线状态机。
+
+    为什么单独成一件东西：检测与告警**是两个节奏**（见上面两个常量的说明）。
+    把两件事写在一个 `if` 里，下一次改动很容易又并回去——分成"一次 tick"之后，
+    "多久 tick 一次"（`_watch_connection` 的 sleep）与"多久打一条日志"
+    （这里按最后一个日志点的时钟判定）各自只有一个地方。
+
+    ## 两个节奏的具体口径
+
+    * **检测**：每次 `tick()` 都喂 `_DisconnectNotifier.observe(connected)`，
+      与日志打没打无关。所以"断了"最多晚一个检测周期（≤60 秒）被广播；
+    * **日志**：**日志点**由时钟推进（第一次就是启动后 `CONNECTION_WARN_AFTER_SECONDS`
+      那一次检查，与改动前同刻；之后每 `CONNECTION_WARN_EVERY_SECONDS`
+      **推进一次**，不管当时连没连上），到点时若没连上就打那一条。于是
+      "掉线期间日志在哪几秒打"**与改动前逐条一致**——它只是不再兼职当采样周期。
+
+    `clock` 可注入：测试用假时钟把时间推着走，不必真的等 60 秒。
+    """
+
+    __slots__ = ("_notifier", "warn_every", "detect_every", "_clock", "_last_log_slot")
+
+    def __init__(self, notifier: _DisconnectNotifier | None = None, *,
+                 warn_every: float | None = None,
+                 detect_every: float | None = None,
+                 clock=None) -> None:
+        self._notifier = notifier
+        # 缺省值**在这里现读模块常量**，不写成参数默认值：参数默认值在函数**定义时**
+        # 就绑定了，那样测试改 `CONNECTION_*` 常量完全不生效（写这版时踩到过）。
+        self.warn_every = float(
+            CONNECTION_WARN_EVERY_SECONDS if warn_every is None else warn_every)
+        #: 循环该多久 tick 一次（`_watch_connection` 读它睡）。放这里是为了让
+        #: "检测节奏"只有**一个**来源：常量 → ticker → sleep。
+        self.detect_every = float(
+            CONNECTION_DETECT_EVERY_SECONDS if detect_every is None else detect_every)
+        self._clock = clock if clock is not None else time.monotonic
+        # 让**第一次** tick 就是日志点（改动前：启动后 60 秒那一次检查就打）。
+        self._last_log_slot = self._clock() - self.warn_every
+
+    async def tick(self, transport: object) -> bool:
+        """采一次样。返回**这一次打没打那条告警**（测试用；调用方不必依赖）。
+
+        `transport` 只用到 `connected`（取不到就按"连着"——与改动前同一处理）。
+        """
+
+        connected = bool(getattr(transport, "connected", True))
+        due = self._log_slot_due()
+        warned = False
+        if due and not connected:
+            logger.warning(
+                "还没有 OneBot 客户端连上来（%s 秒）：消息进不来，她不会说话。"
+                "常见原因是 QQ 客户端（NapCat）先于 bot 启动、之后没有重试——"
+                "把它重开一次即可；开机顺序问题见 README「开机自启动」。",
+                int(CONNECTION_WARN_AFTER_SECONDS),
+            )
+            warned = True
+        if self._notifier is not None:
+            # **每次都喂**（不只掉线那几次）：重连也是靠这里看到的，
+            # 而"重新武装"正是下一次掉线能再通知一次的前提。
+            await self._notifier.observe(connected)
+        return warned
+
+    def _log_slot_due(self) -> bool:
+        """到下一个日志点了吗。**每次 tick 都要问**——日志点由时钟推进，与状态无关。"""
+
+        now = self._clock()
+        if now - self._last_log_slot < self.warn_every:
+            return False
+        self._last_log_slot = now
+        return True
 
 
 class _DisconnectNotifier:
@@ -1247,11 +1336,14 @@ class _DisconnectNotifier:
     ## 三个必须说清的限度（别把推断当实测）
 
     1. **广播是采样出来的，不是事件回调**：看门狗每
-       `CONNECTION_WARN_EVERY_SECONDS` 才看一次 `transport.connected`。
-       如果对面在两次采样之间断了又连上，这一段掉线**不会被看见**（也就不会通知）。
-       要更准就得让传输层在 `_connection_ready.clear()` 那里发事件——**这次没做**。
+       `CONNECTION_DETECT_EVERY_SECONDS`（≤60 秒）看一次 `transport.connected`。
+       所以"断了"最多晚**一个检测周期**被广播；而**两次采样之间断了又连上**
+       （窗口 <60 秒的瞬时抖动）仍然**不会被看见**，也就不会通知。要彻底不漏，
+       得让传输层在 `_connection_ready.clear()` 那里发事件——**这次没做**。
     2. **第一次采样在启动后 60 秒**（沿用看门狗原有的计时）：开机时对面还没连上来，
-       算**一段掉线**，会广播一次。这与那条告警日志的口径一致（"消息进不来"是同一个事实）。
+       算**一段掉线**，会广播一次。**这是有意的**（2026-10-06 用户定的）：
+       "机器重启后 NapCat 没起来、机器人活着但谁也看不见"正是这条通知最大的价值。
+       它与那条告警日志的口径一致（"消息进不来"是同一个事实）。
     3. **接收者抛异常只记一笔**，不会把看门狗带走，也不影响后面的接收者。
     """
 
@@ -1323,33 +1415,27 @@ def _disconnect_notifier_for(engine: DialogueEngine) -> _DisconnectNotifier:
 
 
 async def _watch_connection(transport: QQTransport,
-                            notifier: _DisconnectNotifier | None = None) -> None:
-    """盯"对面连上来没有"。没连上就明确告警，并说清怎么救。
+                            notifier: _DisconnectNotifier | None = None,
+                            ticker: _ConnectionTicker | None = None) -> None:
+    """盯"对面连上来没有"：**检测快**（≤60 秒一次），**日志照旧**（10 分钟一条）。
 
     `notifier` 是**掉线事件**的广播口（`plugins.LinkSeams` 那条接缝的发送端）。
     缺省 `None` = 没有广播（老调用方与不关心事件的测试照常）。
+    `ticker` 是采样/日志的节奏（见 `_ConnectionTicker`）；缺省按两个常量造一个。
+    给它留参数只是为了让测试能换掉时钟与节奏——生产路径永远走缺省那一份。
 
-    **计时与状态都是原来那一份**：第一次检查在启动后 `CONNECTION_WARN_AFTER_SECONDS`，
-    之后每 `CONNECTION_WARN_EVERY_SECONDS` 一次；`transport.connected` 是既有状态。
-    **没有第二个定时器**——"断一次只发一次"靠的是把这条已有的采样变成边沿，
-    不是另起一套监视。
+    **还是这一条看门狗、还是同一个循环**（没有第二个定时器）：
+    第一次检查仍在启动后 `CONNECTION_WARN_AFTER_SECONDS`（60 秒），
+    之后每 `CONNECTION_DETECT_EVERY_SECONDS`（≤60 秒）转一圈——**周期变快了**，
+    而那条告警日志由 `_ConnectionTicker` 按 `CONNECTION_WARN_EVERY_SECONDS`
+    （10 分钟）单独裁，文案与出现时刻都没变（见那个类的说明）。
     """
 
+    ticker = ticker if ticker is not None else _ConnectionTicker(notifier)
     await asyncio.sleep(CONNECTION_WARN_AFTER_SECONDS)
     while True:
-        connected = bool(getattr(transport, "connected", True))
-        if not connected:
-            logger.warning(
-                "还没有 OneBot 客户端连上来（%s 秒）：消息进不来，她不会说话。"
-                "常见原因是 QQ 客户端（NapCat）先于 bot 启动、之后没有重试——"
-                "把它重开一次即可；开机顺序问题见 README「开机自启动」。",
-                int(CONNECTION_WARN_AFTER_SECONDS),
-            )
-        if notifier is not None:
-            # **每次采样都要喂**（不只掉线那几次）：重连也是靠这里看到的，
-            # 而"重新武装"正是下一次掉线能再通知一次的前提。
-            await notifier.observe(connected)
-        await asyncio.sleep(CONNECTION_WARN_EVERY_SECONDS)
+        await ticker.tick(transport)
+        await asyncio.sleep(ticker.detect_every)
 
 
 # 换进程之前留给"正在重启"这条回复的时间。
