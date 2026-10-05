@@ -107,8 +107,12 @@ plugins/
   `registry.provide_roles(engine.group_roles)`；插件问 `registry.shared_roles()`）。
   `group_admin` 更是连角色查询都不碰：执行端拿的是核心**递进来**的那份
   （`stage3_main.execute_action(roles=engine.group_roles, …)`）。
-  `plugins/roles/` 这个文件夹这一轮还留着，等那边落地后再删（现在它和核心那一份
-  都在 `provide_roles` 这条路上——**同一个槽位，谁后放谁生效**，删掉它才是单源）。
+  `plugins/roles/` 那个文件夹**已经删掉**了——它和核心那一份都走 `provide_roles`
+  这条"后到者覆盖先到者"的路，插件一装上就把核心那份替换掉（实测：核心
+  `tests/test_group_roles.py` 当场四条报 `SelfRoleCache` 没有 `self_role` / `ready`）。
+  删掉它之后共享位上只剩核心一份，**单一来源**才真的成立。
+  这条与 `AGENTS.md` §2.3 是同一个道理：**能当插件不等于什么都该当插件**——
+  身份/权限事实属于核心（它是权限判定的一部分）。
 """
 from __future__ import annotations
 
