@@ -10,7 +10,7 @@
 
 | 文件 | 记什么 | 谁写 |
 | --- | --- | --- |
-| `data/logs/chat.jsonl` | **实际收发**的每条消息（拆开的每一段各一条） | 传输层（`onebot_ws.py` 的收发边界） |
+| `data/logs/chat.jsonl` | **实际收发**的每条消息（拆开的每一段各一条），外加**表情回应**（`kind="reaction"`，见 `reactions.py`） | 传输层（`onebot_ws.py` 的收发边界） |
 | `data/logs/raw_events.jsonl` | **没被处理**的入站事件（通知/请求/其它，原样 JSON） | 传输层（`raw_events.py`） |
 | `data/logs/{judge,reply,memory,security,mail}.jsonl` | 模型请求与原始输出（**模型日志**） | 引擎（`feature_log.py`） |
 
@@ -187,6 +187,22 @@ class ChatLog:
         if outcome == "ok" and not message_id:
             entry["message_id_missing"] = True
         self._write(entry)
+
+    def record_reaction(self, entry: dict[str, object]) -> None:
+        """记一条**表情回应**（`kind="reaction"`），与收到的消息并列。
+
+        由来（2026-10-06）：用户想用群里的表情回应定位她说过的好句子。解析在
+        `reactions.py`（传输层那一层，认 `group_msg_emoji_like` 这种 notice），
+        这里只负责**落盘到同一个 `chat.jsonl`**——于是 in/out/reaction 三类记录
+        共用一份文件、一套开关（`QQBOT_CHAT_LOG`）与一套容量口径
+        （`RollingJsonlFile`，**不另写一套轮转**）。
+
+        `entry` 由 `reactions.parse_reaction` 归一化：一个 `likes` 元素一条，
+        `direction` / `kind` 已经在里面。本方法只做两件既有的事：去掉空字段
+        （`_clean`，与 in/out 同一条；`message_id` 例外）并加上 `at`。
+        """
+
+        self._write(dict(entry))
 
     # --- 运维 -------------------------------------------------------------
 

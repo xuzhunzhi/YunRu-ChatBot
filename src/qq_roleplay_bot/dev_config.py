@@ -480,6 +480,15 @@ RAW_EVENTS_MAX = _int("QQBOT_RAW_EVENTS_MAX", 5000)
 # 默认空 = 与另外两份日志同一个 `data/logs/`（并列的三份）；要单独搬走就写路径。
 RAW_EVENTS_DIR = get("QQBOT_RAW_EVENTS_DIR", "")
 
+# --- 表情回应（`group_msg_emoji_like`）----------------------------------------
+# 2026-10-06（第二批）：`raw_events.jsonl` 已经证明 NapCat 确实推这种 notice（里面有真实帧），
+# 于是把它**解析成干净一行**写进对话日志（`kind="reaction"`），与 in/out 并列。解析与落盘
+# 见 `reactions.py`（**不判金句、不做 few-shot**：这一批只到"记下来"）。
+#
+# **它没有自己的开关、容量与目录**：写的是那个同一个 `chat.jsonl`，用同一个 `ChatLog`
+# 与同一套 `RollingJsonlFile` 轮转，所以 `QQBOT_CHAT_LOG=0` 一起关掉、`CHAT_LOG_MAX` 一起
+# 管着。理由：它本来就是"对话日志里的一类记录"，另开一个开关只会多一条要对齐的配置。
+
 
 def session_user_id(base: str, session_id: str) -> str:
     """把会话 id 变成服务商能接受的 user_id 后缀。

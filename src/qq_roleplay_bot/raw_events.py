@@ -13,9 +13,13 @@
 
 | 文件 | 记什么 | 谁写 |
 | --- | --- | --- |
-| `data/logs/chat.jsonl` | **实际收发**的消息（拆开的每一段各一条） | 传输层（`onebot_ws.py`） |
+| `data/logs/chat.jsonl` | **实际收发**的消息（拆开的每一段各一条），外加**表情回应**（`kind="reaction"`） | 传输层（`onebot_ws.py`） |
 | `data/logs/raw_events.jsonl` | **没被处理**的入站事件（原样 JSON） | 传输层（`raw_events.py`） |
 | `data/logs/{judge,reply,memory,security,mail}.jsonl` | 模型请求与原始输出（模型日志） | 引擎（`feature_log.py`） |
+
+2026-10-06 追加：表情回应（`group_msg_emoji_like`）现在**两份都写**——`chat.jsonl`
+里是解析后的干净一行（`reactions.py`），这里仍然是**原样一帧**（排障底稿）。
+两份不冲突、也不互相替代：前者给人看"谁给哪条消息点了什么"，后者是"对面到底发了什么"。
 
 三条纪律：
 

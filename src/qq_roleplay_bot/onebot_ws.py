@@ -13,6 +13,7 @@ from websockets.asyncio.server import ServerConnection, Server, serve
 from .chat_log import ChatLog
 from .media_segments import image_refs, media_markers
 from .raw_events import RawEventLog, should_record
+from .reactions import ReactionLog, is_reaction_notice
 from .transport import (
     DeliveryRejected,
     DeliveryUncertain,
@@ -247,6 +248,7 @@ class OneBotWebSocketTransport:
         connection_timeout: float = 15.0,
         chat_log: ChatLog | None = None,
         raw_events: RawEventLog | None = None,
+        reactions: ReactionLog | None = None,
     ) -> None:
         self.host = host
         self.port = port
@@ -261,6 +263,11 @@ class OneBotWebSocketTransport:
         # （见 `raw_events.py` 头部）。它是"NapCat 到底推不推某种事件"唯一的证据来源，
         # 所以默认开；`QQBOT_RAW_EVENTS=0` 一键关掉（那时它是空操作）。
         self.raw_events = raw_events if raw_events is not None else RawEventLog()
+        # **表情回应**（`group_msg_emoji_like` 这种 notice）：拿**上面那个同一个 `ChatLog`**
+        # 落盘，所以开关（`QQBOT_CHAT_LOG=0`）与容量口径都跟着对话日志走，没有第二套
+        # （见 `reactions.py` 头部）。它是 Stage 3 的**排障/样本口**，不是功能：不判金句、
+        # 不做 few-shot、不进核心、不发模型调用。
+        self.reactions = reactions if reactions is not None else ReactionLog(self.chat_log)
         # None 是被 close() 放入的唤醒哨兵，不是消息。
         self._messages: asyncio.Queue[IncomingMessage | None] = asyncio.Queue()
         self._closed = False
@@ -447,6 +454,27 @@ class OneBotWebSocketTransport:
         except Exception:  # noqa: BLE001 - 日志坏了不能让接收循环出问题
             logger.warning("raw_events_failed", exc_info=True)
 
+    def _note_reaction(self, payload: dict[str, object]) -> None:
+        """认出表情回应就记一行进对话日志（`kind="reaction"`）；不是这种 notice 就什么都不做。
+
+        与 `_note_chat_in` / `_note_raw_event` 同一套纪律：只记一笔，**绝不改变这次
+        收发的成败**。解析与写盘的异常在这里兜住（`ReactionLog` 自己也兜一层）——
+        一帧坏数据不能让整条连接的处理循环出问题。
+
+        这一帧**仍然**会再落一份 `raw_events.jsonl`（调用方紧接着就调 `_note_raw_event`）：
+        对话日志里是给人看的干净一行，raw 里是排障用的原始底稿，**两份都留**、不互相替代。
+        """
+
+        if not is_reaction_notice(payload):
+            return
+        log = self.reactions
+        if log is None:
+            return
+        try:
+            log.record(payload)
+        except Exception:  # noqa: BLE001 - 日志坏了不能让接收循环出问题
+            logger.warning("reaction_log_failed", exc_info=True)
+
     async def send_typing(self, target: MessageTarget, notice: str = "typing") -> None:
         """广播一次"正在输入"状态（OneBot v11 `set_input_status`）。
 
@@ -565,11 +593,16 @@ class OneBotWebSocketTransport:
         message = parse_message_event(payload)
         if message is not None:
             # **收到的消息在这里落对话日志**：这是"真正从 QQ 进来"的那一步，
-            # 再往上是判定与回复。对话日志里只记能解析成消息的事件——
-            # 心跳/通知不进对话日志，它们去 `raw_events.jsonl`（见下面那个分支）。
+            # 再往上是判定与回复。消息事件走完这条就 `return`——它**不进** `raw_events`
+            # （那边记的是"没被处理"的事件）。心跳/通知走下面两个分支。
             self._note_chat_in(message)
             await self._messages.put(message)
             return
+        # **表情回应**：NapCat 实测会推（真实帧见 `reactions.py` 头部）。它**不是消息**，
+        # 照旧不进 `_messages`、不碰引擎、不发模型调用；但它要**解析成干净的一行**进
+        # 对话日志（`kind="reaction"`），与 in/out 记录并列。下面那条 raw 照旧也写一份：
+        # 对话日志里是给人看的那一行，raw 里是**排障用的原始底稿**，两份不冲突。
+        self._note_reaction(payload)
         # **没被当成消息收下的那些事件**（notice / request / 其它 post_type，
         # 以及解析失败的消息事件）：核心历来是**直接丢掉**的，于是"NapCat 到底推不推
         # 这种事件"永远查不出来。这里原样落一行（心跳排除），只为看清真实形状。
