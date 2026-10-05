@@ -217,9 +217,17 @@ CASES: tuple[tuple[str, dict, tuple[tuple[str, dict], ...]], ...] = (
     ("/super title @某人 龙王", {"mentions": (MEMBER,)},
      (("set_group_special_title", {"group_id": int(GROUP), "user_id": int(MEMBER),
                                    "special_title": "龙王"}),)),
+    # 群公告：**默认只要读**（`confirm_required=0`）。这个参数以前根本不传，
+    # 对面按自己的默认值 **1（要确认收到）** 走，就是用户 2026-10-06 报的那件事。
     ("/super notice 第一行\n第二行", {},
      (("_send_group_notice", {"group_id": int(GROUP),
-                              "content": "第一行\n第二行"}),)),
+                              "content": "第一行\n第二行",
+                              "confirm_required": 0}),)),
+    # 正文最前面写了 `[需确认]` 才要确认收到；那个字段**不进正文**（也不拍成一行）。
+    ("/super notice [需确认] 第一行\n第二行", {},
+     (("_send_group_notice", {"group_id": int(GROUP),
+                              "content": "第一行\n第二行",
+                              "confirm_required": 1}),)),
     # --- 公开那条：`/title 头衔` 只能改自己，谁都能发 ---
     ("/title 龙王", {"user_id": MEMBER},
      (("set_group_special_title", {"group_id": int(GROUP), "user_id": int(MEMBER),
@@ -241,6 +249,38 @@ def test_every_group_command_sends_exactly_this_action() -> None:
         assert tuple(writes) == expected, f"{text!r}\n  实收 {writes}\n  期望 {expected}"
         # 每一次调用都该留在假传输层的记录里（证明不是我们读错了地方）
         assert all(action in WRITE_ACTIONS for action, _ in writes)
+
+
+def test_the_group_notice_asks_for_no_confirmation_unless_the_field_is_written() -> None:
+    """群公告的「需确认收到」：**默认不带**，正文最前面写了字段才带——两种都逐字段核 payload。
+
+    用户 2026-10-06：*"这个现在默认发送的公告需要收到，我希望默认是读取即可，
+    不需要确认收到，以及需要收到的可以在前面加个字段"*。
+
+    成因（判定与证据见 `group_owner.py` 模块头）：`_send_group_notice` 自带参数
+    `confirm_required`、**默认值 1**，而我们以前**根本不传它**——于是对面按默认值替我们
+    选了"要确认"。所以这条测试盯的是"那个参数必须**出现在 payload 里**、且默认是 0"：
+    只断言动作名对是不够的（突变：改回不传，动作名照样对，公告却又变成"要收到"）。
+
+    顺带钉住默认那档的回复里**不提**"确认收到"——不然操作者会以为这条公告要人确认。
+    """
+
+    def run(text: str):
+        engine, transport = assembly()
+        return asyncio.run(_dispatch(engine, transport, text))
+
+    reply, writes = run("/super notice 今晚维护")
+    assert writes == [("_send_group_notice", {"group_id": int(GROUP),
+                                              "content": "今晚维护",
+                                              "confirm_required": 0})], writes
+    assert reply is not None and "已发出" in reply, reply
+    assert "确认" not in reply, f"默认这一档不该提「确认收到」：{reply}"
+
+    reply, writes = run("/super notice [需确认] 今晚维护")
+    assert writes == [("_send_group_notice", {"group_id": int(GROUP),
+                                              "content": "今晚维护",
+                                              "confirm_required": 1})], writes
+    assert reply is not None and "确认收到" in reply, reply
 
 
 def test_the_group_owner_check_runs_in_the_core_before_the_write() -> None:

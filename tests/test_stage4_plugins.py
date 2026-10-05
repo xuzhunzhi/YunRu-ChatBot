@@ -368,7 +368,11 @@ def test_multi_line_owner_text_is_recognised() -> None:
 
 
 def test_multi_line_notice_reaches_the_action() -> None:
-    """正文里的换行要原样送进 action（群公告支持多行）。"""
+    """正文里的换行要原样送进 action（群公告支持多行）。
+
+    payload 里还带着 `confirm_required: 0`：默认那一档**只要读、不用确认收到**
+    （2026-10-06 用户要求；成因与证据见 `group_owner.py` 模块头）。
+    """
 
     async def run():
         transport = FakeTransport()
@@ -379,7 +383,123 @@ def test_multi_line_notice_reaches_the_action() -> None:
     transport, result = asyncio.run(run())
     assert result is not None and "已发出" in result.text
     assert transport.calls == [("_send_group_notice",
-                               {"group_id": int(GROUP), "content": "第一行\n第二行"})]
+                               {"group_id": int(GROUP), "content": "第一行\n第二行",
+                                "confirm_required": 0})]
+
+
+# --- 群公告的「需确认收到」：默认关，写字段才开 --------------------------------
+
+def test_a_plain_notice_carries_nothing_about_confirmation() -> None:
+    """默认形态逐字段核：payload 只有群号、正文、`confirm_required=0`。
+
+    "需要收到"**不是**正文里的一句话，也不是别的一个开关——它是 `_send_group_notice`
+    自带的参数 `confirm_required`，默认值 1（`data/snowluma_actions.json` 的 `params`／
+    `inputSchema` 都写着 `default: 1`；NapCat 官方文档 `/_send_group_notice` 同款）。
+    我们以前根本不传它 → 对面按默认值替我们选了"要确认"。
+    所以这里断言的是**整个 dict 相等**：少一个键、多一个键都会红。
+    """
+
+    async def run(text: str):
+        transport = FakeTransport()
+        engine = engine_with(transport, role=ROLE_OWNER)
+        return transport, await engine.handle(message(text, user_id=SUPER))
+
+    transport, result = asyncio.run(run("/super notice 今晚维护"))
+    assert transport.calls == [("_send_group_notice",
+                                {"group_id": int(GROUP), "content": "今晚维护",
+                                 "confirm_required": 0})], transport.calls
+    assert result is not None and "已发出" in result.text
+    # 回复里也不提"确认"，免得操作者以为这条公告要人点确认
+    assert "确认" not in result.text, result.text
+
+
+def test_the_confirm_field_turns_confirmation_on_and_stays_out_of_the_body() -> None:
+    """正文最前面写 `[需确认]` 才要求群成员确认收到；那个字段**不进公告正文**。
+
+    字段只认"正文最前面"这一处，且只有公告这一条命令认它：
+    写在中间、或者写在 `/super groupname` 后面，就是普通文字（不能被顺手吞掉，
+    也不能让改群名变成发公告）。
+    """
+
+    from qq_roleplay_bot.plugins.group_admin.builtin_group_commands import parse_owner_action
+
+    assert parse_owner_action("/super notice 今晚维护") == ("notice", "今晚维护")
+    assert parse_owner_action("/super notice [需确认] 今晚维护") == (
+        "notice_confirm", "今晚维护")
+    assert parse_owner_action("/super 群公告 [需确认] 今晚维护") == (
+        "notice_confirm", "今晚维护")
+    # 不在最前面 → 普通文字，照原样进正文
+    assert parse_owner_action("/super notice 今晚维护[需确认]") == (
+        "notice", "今晚维护[需确认]")
+    # 别的命令里它就是普通文字
+    assert parse_owner_action("/super groupname [需确认] 新群名") == (
+        "groupname", "[需确认] 新群名")
+
+    async def run(text: str):
+        transport = FakeTransport()
+        engine = engine_with(transport, role=ROLE_OWNER)
+        return transport, await engine.handle(message(text, user_id=SUPER))
+
+    transport, result = asyncio.run(run("/super notice [需确认] 今晚维护"))
+    assert transport.calls == [("_send_group_notice",
+                                {"group_id": int(GROUP), "content": "今晚维护",
+                                 "confirm_required": 1})], transport.calls
+    assert result is not None and "确认收到" in result.text, result
+    # 正文里既没有那个字段，也没有我们替用户写的"请确认收到"这类话
+    body = transport.calls[0][1]["content"]
+    assert body == "今晚维护", body
+
+
+def test_the_confirm_field_is_documented_in_the_command_usage() -> None:
+    """字段要写在**命令用法**里（用户："需要收到的可以在前面加个字段"）。
+
+    用法字符串就是这条命令自己会回给用户的东西——少写正文时 `execute` 回的那句
+    `用法：{spec.usage}`。另外钉住 `notice_confirm` **不是一条用户命令**：
+    它只该是意图名，不许混进给人看的用法清单。
+    """
+
+    from qq_roleplay_bot.plugins.group_admin.builtin_group_commands import NOTICE_CONFIRM_FIELD
+    from qq_roleplay_bot.plugins.group_admin.group_owner import SPECS, USAGE_LINE
+
+    assert NOTICE_CONFIRM_FIELD == "[需确认]"
+    notice = SPECS["notice"]
+    assert NOTICE_CONFIRM_FIELD in notice.usage, notice.usage
+    assert "确认收到" in notice.usage, notice.usage
+    assert "notice_confirm" not in USAGE_LINE, USAGE_LINE
+
+
+def test_both_notice_forms_are_intent_from_the_plugin_and_execution_in_the_core() -> None:
+    """两种形态都只有插件产出**意图**，真发出动作的是核心。
+
+    判据是两条可观测量，不是"代码看起来分层"：
+
+    1. `GroupOwnerCommand.handle` 只回 `ActionRequest` —— 它自己**一个 action 都发不出去**
+       （`handle` 跑完时假传输层还是空的，而且插件身上没有 `transport` 这个名字）；
+    2. 动作是**核心**发出去的：同一条消息交给引擎，`_send_group_notice` 才出现在传输层上。
+    """
+
+    from qq_roleplay_bot.plugins.group_admin.builtin_group_commands import GroupOwnerCommand
+
+    plugin = GroupOwnerCommand()
+    assert not hasattr(plugin, "transport")
+
+    for text, kind, confirm in (("/super notice 今晚维护", "notice", 0),
+                                ("/super notice [需确认] 今晚维护", "notice_confirm", 1)):
+        transport = FakeTransport()
+        incoming = message(text, user_id=SUPER)
+        assert plugin.match(incoming) is True, text
+        request = asyncio.run(plugin.handle(incoming))
+        assert isinstance(request, ActionRequest), text
+        assert (request.group, request.kind) == ("group_owner", kind), text
+        assert request.text == "今晚维护", text
+        assert transport.calls == [], "插件自己不该发出任何 action"
+
+        engine = engine_with(transport, role=ROLE_OWNER)
+        result = asyncio.run(engine.handle(incoming))
+        assert result is not None, text
+        assert transport.calls == [("_send_group_notice",
+                                    {"group_id": int(GROUP), "content": "今晚维护",
+                                     "confirm_required": confirm})], (text, transport.calls)
 
 
 # --- 认不出来的命令不能"消失" ------------------------------------------------

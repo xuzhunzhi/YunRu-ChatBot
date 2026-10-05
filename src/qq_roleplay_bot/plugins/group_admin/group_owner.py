@@ -32,6 +32,32 @@
 证据来自真机日志：用户第一次试就是 @ 自己（超管），命令认出来了（
 `action=owner_action`），回了一句 **11 个字**的 `这个人是超管，不动他。`，于是"不行"。
 真正的前提只有一条：**她在那个群确实是群主**（角色现查）。
+
+## 群公告的「需确认收到」：默认关，写字段才开（2026-10-06 用户要求）
+
+用户原话：*"还有一个要你改的是群公告插件，这个现在默认发送的公告需要收到，我希望默认是
+读取即可，不需要确认收到，以及需要收到的可以在前面加个字段"*。
+
+**"需要收到"是怎么来的（判定，不是猜）**：`_send_group_notice` 自带参数
+`confirm_required`（"是否需要群成员确认收到：1=是，0=否"），**默认值是 1**。两处独立证据：
+
+1. 本仓库的能力目录（从 SnowLuma WebUI `/api/debug/actions` 导出，离线可读）
+   `data/snowluma_actions.json`：`_send_group_notice` 的 `params` 里 `confirm_required`
+   写着 `"default": 1`，`inputSchema` 里同样 `default: 1`；
+2. NapCat 官方接口文档 `/_send_group_notice`：`confirm_required` `default: 1`、
+   "是否需要确认 (0/1)"（<https://napcat.apifox.cn/226658740e0.md>）。
+
+而我们这边**从来没传过这个参数**（`build_params` 过去只给 `group_id` + `content`），
+于是对面按它自己的默认值替我们选了"要确认"。所以它**不是**正文里的一句话、也不是
+QQ 客户端上的某个开关，而是**少传了一个参数**。
+
+改法：
+
+- `build_params` **每次都显式给** `confirm_required`：默认 `0`（只要读、不用确认收到），
+  只有命令里写了 `[需确认]`（`builtin_group_commands.NOTICE_CONFIRM_FIELD`，在那边被折成
+  意图名 `notice_confirm`）才给 `1`；
+- 其余参数（`pinned` / `type` / `is_show_edit_card` / `tip_window_type` …）**继续不传**：
+  它们的默认值不是这次要改的东西，顺手一起传等于把没验证过的行为也改了。
 """
 from __future__ import annotations
 
@@ -39,6 +65,9 @@ import logging
 from dataclasses import dataclass
 
 from ...plugins import ActionDenied
+# 群公告的「需确认收到」字段与它折出来的意图名：**只有一份定义**，在命令解析那一侧
+# （`builtin_group_commands.py`）。这边不复制字面量——用法那行与参数拼装都从它取。
+from .builtin_group_commands import NOTICE_CONFIRM_FIELD, NOTICE_CONFIRM_KIND
 
 logger = logging.getLogger(__name__)
 
@@ -101,13 +130,32 @@ SPECS: dict[str, OwnerActionSpec] = {
     "title": OwnerActionSpec("title", "set_group_special_title", "设置群头衔",
                              "/super title @某人 头衔；也可以自己发 /title 头衔",
                              needs_target=True, needs_text=True, text_limit=MAX_SPECIAL_TITLE),
+    # "notice" 的用法那行把「需确认」字段写进去：用户在少写正文时看到的就是它
+    # （`execute` 的 `f"用法：{spec.usage}"`）。字段常量只在 builtin_group_commands 里有一份。
     "notice": OwnerActionSpec("notice", "_send_group_notice", "发群公告",
-                              "/super notice 公告正文", needs_text=True,
+                              "/super notice 公告正文（默认只要读；正文最前面加 "
+                              f"{NOTICE_CONFIRM_FIELD} 才要群成员确认收到）",
+                              needs_text=True,
                               text_limit=MAX_NOTICE, owner_only=False),
 }
 
 # 给 `/super help` 与状态看的一行人话。
+# **只列用户命令**：`notice_confirm` 那种"同一条命令的另一种意图"不进这里
+# （它不是命令，写进去等于让人以为要发 `/super notice_confirm`）。
 USAGE_LINE = "、".join(f"/super {kind}" for kind in SPECS)
+
+
+def resolve_kind(kind: str) -> tuple[OwnerActionSpec | None, bool]:
+    """意图名 → `(动作常量, 要不要群成员确认收到)`。
+
+    `notice_confirm` 是 `notice` 的**另一种意图**（命令正文最前面写了 `[需确认]`，
+    见 `builtin_group_commands.parse_owner_action`）：折回同一条 spec，只多带一个 `True`。
+    别的名字照旧在 `SPECS` 里查，查不到就是 `(None, False)`（调用方回一句用法）。
+    """
+
+    if kind == NOTICE_CONFIRM_KIND:
+        return SPECS.get("notice"), True
+    return SPECS.get(kind), False
 
 
 class OwnerActionRefused(Exception):
@@ -115,10 +163,14 @@ class OwnerActionRefused(Exception):
 
 
 def clamp_text(spec: OwnerActionSpec, text: str) -> str:
-    """公告允许换行，别的都拍成一行；超长直接拒绝（不截断——改群名改半个更糟）。"""
+    """公告允许换行，别的都拍成一行；超长直接拒绝（不截断——改群名改半个更糟）。
+
+    按 **action** 判而不是按 `kind`：公告有 `notice` / `notice_confirm` 两种意图，
+    两种都是同一段多行正文（按 kind 判的话"要确认"那一档会被拍成一行）。
+    """
 
     value = str(text or "")
-    if spec.kind == "notice":
+    if spec.action == "_send_group_notice":
         value = value.strip()
     else:
         value = " ".join(value.split())
@@ -127,8 +179,12 @@ def clamp_text(spec: OwnerActionSpec, text: str) -> str:
     return value
 
 
-def build_params(spec: OwnerActionSpec, *, group_id: str, target_id: str, text: str) -> dict[str, object]:
-    """按常量表拼参数。参数名写死在这里，调用方只能给值。"""
+def build_params(spec: OwnerActionSpec, *, group_id: str, target_id: str, text: str,
+                 confirm: bool = False) -> dict[str, object]:
+    """按常量表拼参数。参数名写死在这里，调用方只能给值。
+
+    `confirm` 只有公告用得上：它决定 `confirm_required` 给 0 还是 1（见模块头那段判定）。
+    """
 
     if spec.action == "set_group_admin":
         return {"group_id": _as_int(group_id), "user_id": _as_int(target_id), "enable": spec.enable}
@@ -140,7 +196,12 @@ def build_params(spec: OwnerActionSpec, *, group_id: str, target_id: str, text: 
         return {"group_id": _as_int(group_id), "user_id": _as_int(target_id),
                 "special_title": text}
     if spec.action == "_send_group_notice":
-        return {"group_id": _as_int(group_id), "content": text}
+        # `confirm_required` **每次都显式给**，一次都不省：
+        # 不给的话对面按默认值 **1（需确认）** 走（SnowLuma 目录与 NapCat 文档都写着
+        # `default: 1`），用户看到的正是"默认发出去的公告要收到"（2026-10-06 用户要求改）。
+        # 默认 0 = 只要读；命令里写了 `[需确认]` 才给 1。
+        return {"group_id": _as_int(group_id), "content": text,
+                "confirm_required": 1 if confirm else 0}
     raise OwnerActionRefused("这个动作没有定义参数，已拒绝。")  # pragma: no cover - 常量表兜底
 
 
@@ -179,7 +240,7 @@ async def execute(
     这种最自然的用法直接失败。
     """
 
-    spec = SPECS.get(str(kind))
+    spec, confirm = resolve_kind(str(kind))
     if spec is None:
         return f"用法：{USAGE_LINE}（详见 /super help）"
     if not enabled:
@@ -198,7 +259,8 @@ async def execute(
 
     try:
         value = clamp_text(spec, text)
-        params = build_params(spec, group_id=group_id, target_id=target_id, text=value)
+        params = build_params(spec, group_id=group_id, target_id=target_id, text=value,
+                              confirm=confirm)
     except OwnerActionRefused as exc:
         return str(exc)
 
@@ -262,6 +324,10 @@ async def execute(
             return (f"{target_id} 的群头衔现在是「{actual}」"
                     f"（我提交的是 {len(value)} 字，对面只留了 {len(actual)} 字）。")
         return f"已给 {target_id} 设置群头衔「{value}」。"
+    if spec.action == "_send_group_notice" and confirm:
+        # 回话里说清"这一条是要确认的"：发出去的公告长什么样不由我们复读，
+        # 但"要不要收到"是这次命令里唯一被我们改掉的开关，得让人看得见。
+        return "群公告已发出（要求群成员确认收到）。"
     return "群公告已发出。"
 
 
