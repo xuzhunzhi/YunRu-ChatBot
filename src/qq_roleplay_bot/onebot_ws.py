@@ -12,6 +12,7 @@ from websockets.asyncio.server import ServerConnection, Server, serve
 
 from .chat_log import ChatLog
 from .media_segments import image_refs, media_markers
+from .raw_events import RawEventLog, should_record
 from .transport import (
     DeliveryRejected,
     DeliveryUncertain,
@@ -245,6 +246,7 @@ class OneBotWebSocketTransport:
         send_timeout: float = 15.0,
         connection_timeout: float = 15.0,
         chat_log: ChatLog | None = None,
+        raw_events: RawEventLog | None = None,
     ) -> None:
         self.host = host
         self.port = port
@@ -255,6 +257,10 @@ class OneBotWebSocketTransport:
         # （见 `chat_log.py` 头部）。收发两头都在这一层记，所以插件发的图/文、
         # 以及所有收到的消息都跑不掉。`QQBOT_CHAT_LOG=0` 可整体关掉（那时它是空操作）。
         self.chat_log = chat_log if chat_log is not None else ChatLog()
+        # **原始事件日志**（没被处理的那一类）：同样默认挂上，同样只落盘
+        # （见 `raw_events.py` 头部）。它是"NapCat 到底推不推某种事件"唯一的证据来源，
+        # 所以默认开；`QQBOT_RAW_EVENTS=0` 一键关掉（那时它是空操作）。
+        self.raw_events = raw_events if raw_events is not None else RawEventLog()
         # None 是被 close() 放入的唤醒哨兵，不是消息。
         self._messages: asyncio.Queue[IncomingMessage | None] = asyncio.Queue()
         self._closed = False
@@ -422,6 +428,25 @@ class OneBotWebSocketTransport:
         except Exception:  # noqa: BLE001
             logger.warning("chat_log_in_failed", exc_info=True)
 
+    def _note_raw_event(self, payload: dict[str, object]) -> None:
+        """把一条**没被处理**的入站事件原样记进原始事件日志。
+
+        与 `_note_chat_in` 同一套纪律：只记一笔，**绝不改变这次收发的结果**。
+        写盘失败只计数并告警（`RawEventLog` 自己不抛），这里再兜一层异常——
+        日志坏了不能让一条事件把整条连接的处理循环带走。
+
+        心跳在这一层就被 `should_record` 排掉（`meta_event/heartbeat` 每几十秒一条，
+        记下来只会把真正想看的东西淹掉）。
+        """
+
+        log = self.raw_events
+        if log is None or not should_record(payload):
+            return
+        try:
+            log.record(payload)
+        except Exception:  # noqa: BLE001 - 日志坏了不能让接收循环出问题
+            logger.warning("raw_events_failed", exc_info=True)
+
     async def send_typing(self, target: MessageTarget, notice: str = "typing") -> None:
         """广播一次"正在输入"状态（OneBot v11 `set_input_status`）。
 
@@ -540,9 +565,16 @@ class OneBotWebSocketTransport:
         message = parse_message_event(payload)
         if message is not None:
             # **收到的消息在这里落对话日志**：这是"真正从 QQ 进来"的那一步，
-            # 再往上是判定与回复。只记能解析成消息的事件（心跳/通知不记）。
+            # 再往上是判定与回复。对话日志里只记能解析成消息的事件——
+            # 心跳/通知不进对话日志，它们去 `raw_events.jsonl`（见下面那个分支）。
             self._note_chat_in(message)
             await self._messages.put(message)
+            return
+        # **没被当成消息收下的那些事件**（notice / request / 其它 post_type，
+        # 以及解析失败的消息事件）：核心历来是**直接丢掉**的，于是"NapCat 到底推不推
+        # 这种事件"永远查不出来。这里原样落一行（心跳排除），只为看清真实形状。
+        # 它**不进 `_messages`**、不碰引擎、不发任何模型调用——落盘不是"收到"。
+        self._note_raw_event(payload)
 
     def _authorized(self, connection: ServerConnection) -> bool:
         if not self.access_token:

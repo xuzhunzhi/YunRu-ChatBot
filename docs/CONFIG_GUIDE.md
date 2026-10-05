@@ -131,6 +131,9 @@ netstat -ano | findstr :8080     # 看是谁占了
 | `QQBOT_CHAT_LOG` | 开启 | **对话日志**（实际收发，`data/logs/chat.jsonl`）。`0` 关掉整份 |
 | `QQBOT_CHAT_LOG_MAX` | `20000` | 对话日志保留多少条（按条滚动，不是按天）。范围兜在 10..1000000，**不会无限增长** |
 | `QQBOT_CHAT_LOG_DIR` | 空 | 空 = 与模型日志同一个 `data/logs/`；要单独搬走就写路径 |
+| `QQBOT_RAW_EVENTS` | 开启 | **原始事件日志**（`data/logs/raw_events.jsonl`）：**没被处理**的入站事件（通知/请求/其它 post_type）原样落盘。只为查"NapCat 到底推不推某种事件"（如表情回应）。`0` 关掉整份 |
+| `QQBOT_RAW_EVENTS_MAX` | `5000` | 原始事件日志保留多少条（按条滚动）。范围兜在 10..1000000，**不会无限增长** |
+| `QQBOT_RAW_EVENTS_DIR` | 空 | 空 = 与另外两份日志同一个 `data/logs/`；要单独搬走就写路径 |
 
 **调试用（生产建议保持注释掉）**：`QQBOT_DEBUG_MODEL_IO=1` 会把模型的完整
 输入输出（含 system prompt 与聊天正文）落盘到 `data/traces/`。
@@ -194,6 +197,7 @@ netstat -ano | findstr :8080     # 看是谁占了
 | `/balance` 查不到 | fail-closed：必须显式配白名单，见第 7 节 |
 | 想看她到底看了什么（模型那一半） | `data/logs/` 下按功能分的 `judge.jsonl` / `reply.jsonl` / `memory.jsonl` |
 | 想查群里**实际**收到了什么、她到底发出去过什么 | `data/logs/chat.jsonl`（**对话日志**，实际收发；拆开的每一段各一条）。留多少条看 `QQBOT_CHAT_LOG_MAX`（默认 20000），关掉整份用 `QQBOT_CHAT_LOG=0` |
+| 想知道 **NapCat 到底推不推某种事件**（例如"别人给她的话点了表情"） | `data/logs/raw_events.jsonl`（**原始事件日志**）：核心没认出来、历来直接丢掉的那些帧**原样**在这里一行一条（`{"at":…, "payload":{…原始…}}`，心跳不记）。排查时 `Select-String -Path data\logs\raw_events.jsonl -Pattern 'emoji'`。容量 `QQBOT_RAW_EVENTS_MAX`（默认 5000），关掉用 `QQBOT_RAW_EVENTS=0` |
 
 ---
 

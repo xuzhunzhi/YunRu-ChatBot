@@ -462,6 +462,25 @@ CHAT_LOG_MAX = _int("QQBOT_CHAT_LOG_MAX", 20000)
 CHAT_LOG_DIR = get("QQBOT_CHAT_LOG_DIR", "")
 
 
+# --- 原始入站事件日志（**没被识别/没被处理**的那些事件）-----------------------
+# 2026-10-06：想知道 NapCat 到底推不推"表情回应"（用户想拿群里的表情回应定位她说过的好句子），
+# 而传输层只认 `post_type=message`，别的事件**被直接丢掉、一点痕迹不留**——所以"没记"
+# 与"没发生"分不出来。这一份把没被处理的事件**原样**落进 `data/logs/raw_events.jsonl`
+# （实现见 `raw_events.py`）：不解析、不判据、不喂模型、不进核心，只落盘。
+#
+# 与对话日志（`chat.jsonl`）、模型日志各自独立：文件、开关、容量都分开，
+# 写它不会往那两份里写一个字（`tests/test_raw_events.py` 钉住这条）。
+#
+# 为什么默认留 5000 条：这是**按条**的滚动窗口。raw 事件是"消息之外"的那一类
+# （戳一戳、撤回、名片变更、入群申请、上下线…），比消息少一个量级；真出现
+# 表情回应推送也只是每条被回应的消息多一行。5000 条 ≈ 几周到一个月，够看清形状。
+# 容量见 `raw_events.raw_events_capacity()`（范围兜在 [10, 1000000]，不会无限增长）。
+RAW_EVENTS_ENABLED = _enabled("QQBOT_RAW_EVENTS")
+RAW_EVENTS_MAX = _int("QQBOT_RAW_EVENTS_MAX", 5000)
+# 默认空 = 与另外两份日志同一个 `data/logs/`（并列的三份）；要单独搬走就写路径。
+RAW_EVENTS_DIR = get("QQBOT_RAW_EVENTS_DIR", "")
+
+
 def session_user_id(base: str, session_id: str) -> str:
     """把会话 id 变成服务商能接受的 user_id 后缀。
 

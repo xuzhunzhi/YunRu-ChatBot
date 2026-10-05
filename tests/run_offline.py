@@ -36,6 +36,11 @@ os.environ["QQBOT_FEATURE_LOG_DIR"] = str(root / ".tmp_test_run" / "logs")
 # `enabled=True` + 自己的临时目录（见 tests/test_chat_log.py），不靠这个开关。
 os.environ["QQBOT_CHAT_LOG"] = "0"
 os.environ["QQBOT_CHAT_LOG_DIR"] = str(root / ".tmp_test_run" / "logs")
+# 同理关掉**原始事件日志**（没被处理的入站事件，`raw_events.jsonl`）：它默认也是开的，
+# 而套件里到处在建传输层、喂心跳/通知/请求这类假 payload。要测日志本身的用例显式传
+# `enabled=True` + 自己的临时目录（见 tests/test_raw_events.py），不靠这个开关。
+os.environ["QQBOT_RAW_EVENTS"] = "0"
+os.environ["QQBOT_RAW_EVENTS_DIR"] = str(root / ".tmp_test_run" / "logs")
 
 sys.path.insert(0, str(root / "src"))
 sys.path.insert(0, str(root / "archive"))

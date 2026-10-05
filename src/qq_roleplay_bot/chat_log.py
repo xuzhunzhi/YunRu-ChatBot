@@ -11,6 +11,7 @@
 | 文件 | 记什么 | 谁写 |
 | --- | --- | --- |
 | `data/logs/chat.jsonl` | **实际收发**的每条消息（拆开的每一段各一条） | 传输层（`onebot_ws.py` 的收发边界） |
+| `data/logs/raw_events.jsonl` | **没被处理**的入站事件（通知/请求/其它，原样 JSON） | 传输层（`raw_events.py`） |
 | `data/logs/{judge,reply,memory,security,mail}.jsonl` | 模型请求与原始输出（**模型日志**） | 引擎（`feature_log.py`） |
 
 **为什么落在传输层**：只有那里看得见"真正出了门的那一条"——引擎只知道模型写了什么，
@@ -19,6 +20,8 @@
 **两条线互不影响**：文件、开关（`QQBOT_CHAT_LOG` / `QQBOT_FEATURE_LOG`）、容量
 （`QQBOT_CHAT_LOG_MAX` / `QQBOT_FEATURE_LOG_CAPACITY`）、写入路径各自独立。
 写对话日志不会往模型日志里写一个字，反过来也一样（`tests/test_chat_log.py` 钉住了这条）。
+第三份 `raw_events.jsonl`（没被处理的入站事件，`raw_events.py`）同样是独立的一份：
+写它不会碰这两份，写这两份也不会碰它（`tests/test_raw_events.py` 钉住了那条）。
 
 **正文是聊天内容，所以只落 `data/`**（已进 `.gitignore`）——不进 git，也不该被贴到
 任何仓库/工单里；排查时按会话与时间读文件。
