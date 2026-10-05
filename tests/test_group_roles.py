@@ -386,7 +386,23 @@ def test_build_engine_gives_plugins_one_shared_role_source() -> None:
     assert asyncio.run(shared.role(GROUP, SOMEONE)) == ROLE_ADMIN
 
 
-def test_the_engine_role_source_fails_closed_when_the_channel_is_broken() -> None:
+def test_the_engine_reports_her_id_after_she_is_looked_up() -> None:
+    """面板那条**同步**接缝（`ui.self_id`）在查过她自己之后要拿得到号。
+
+    落点是 `_LazyGroupRoles.cached_self_id()`：懒构造出来的服务必须把"查到过的
+    她自己"透出去——否则面板永远读到空串（那条接缝不能 await）。
+    """
+
+    engine = runtime.build_engine(_FakeTransport(role=ROLE_OWNER))
+    read_self = engine.plugin_registry.ui.self_id
+
+    assert read_self() == "", "还没查过就是空串"
+    assert asyncio.run(engine.group_roles.self_role(GROUP)) == ROLE_OWNER
+    assert read_self() == ME, "查过之后同步接缝要拿得到"
+    assert isinstance(read_self(), str), "**不能**把协程对象漏出去"
+
+
+def test_the_engines_role_source_fails_closed_when_the_channel_is_broken() -> None:
     """通道坏了（对面每次查询都抛）时，引擎上那一份也必须 fail-closed。"""
 
     engine = runtime.build_engine(_FakeTransport(explode={"get_group_member_info"}))
