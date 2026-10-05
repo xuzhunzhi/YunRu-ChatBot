@@ -446,3 +446,43 @@ def test_title_executes_only_where_she_is_owner() -> None:
     transport, result = asyncio.run(run(ROLE_MEMBER))
     assert result is not None and "做不了" in result.text
     assert transport.calls == []
+
+
+# --- 角色事实归核心（2026-10-05）：插件既不依赖 roles，也不自己缓存 -----------
+
+def test_group_admin_registers_without_any_role_source() -> None:
+    """**没有角色来源也要装**：三条命令只做"解析 + 声明意图"。
+
+    原来这个插件声明 `REQUIRES = ("roles",)`：`plugins/roles/` 一不在，
+    `discover()` 就把群管理**整个跳过**（三条命令一起消失）。用户 2026-10-05 把
+    身份/权限事实判给核心之后，登记命令不需要任何角色信息——所以这里用一个
+    **光秃秃**的注册表（连 `call_action` 都没有）钉住"装得上、三条命令都在"。
+    """
+
+    from qq_roleplay_bot.plugins import PluginRegistry
+    from qq_roleplay_bot.plugins.group_admin import plugin as group_admin_plugin
+
+    assert not tuple(getattr(group_admin_plugin, "REQUIRES", ()) or ()), \
+        "群管理不该再声明依赖 roles 插件（角色事实归核心）"
+    registry = PluginRegistry()
+    group_admin_plugin.register(registry)
+    names = {getattr(plugin, "name", "") for plugin in registry.commands}
+    assert {"group_manage", "group_owner", "title"} <= names, names
+
+
+def test_owner_actions_are_closed_when_the_core_gives_no_role() -> None:
+    """核心**没递**角色来源时一条都不放行（fail-closed），而且回的是人话。
+
+    "她是不是群主"由核心给的那份角色来源回答；来源缺席时最坏的做法是**猜**。
+    """
+
+    async def run():
+        transport = FakeTransport()
+        engine = engine_with(transport)
+        engine.self_roles = None          # 核心那份角色来源缺席
+        return await engine.handle(
+            message("/super card @某人 新名片", mentions=(MEMBER,), user_id=SUPER)), transport
+
+    result, transport = asyncio.run(run())
+    assert result is not None and "做不了" in result.text
+    assert transport.calls == [], "没有角色来源时一条动作都不该发出去"

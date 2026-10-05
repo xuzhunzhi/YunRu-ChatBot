@@ -1,28 +1,34 @@
 """群管理插件：踢 / 禁言 / 撤回 / 头衔 / 公告 / 改名片。
 
 **命令插件**（有消息进来才动）。三条命令只做"解析 + 声明意图"，
-真正的权限判定、护栏与调用留在核心的 `stage3_main.execute_action_request`——
+真正的权限判定、护栏与调用留在核心的 `stage3_main.execute_action`——
 插件拿不到 `transport`。
 
-它还负责**创建"她自己的角色"查询**（`_shared/roles.py`）：判"她是不是群主"才能
-做群主动作。核心不再替它造这个（`runtime` 里留空位），因为删掉本插件后 Stage 3
-照样说话——按判据它不是底层。插件造好之后**登记回核心**（`register_roles`），
-执行端要用它。
+## 她自己的角色：2026-10-05 起**不经过插件**
+
+原来本插件声明 `REQUIRES = ("roles",)`，向**另一个插件**（`plugins/roles/`）要那份
+"她在这个群里是什么角色"的共享查询。用户 2026-10-05 的决定是**身份/权限事实归核心**，
+所以那条依赖整条撤了：这里不声明前置、不问 `registry.shared_roles()`、
+也不自己造任何角色缓存（三样都是被明确否掉的）。
+
+角色那条路现在**只有一个方向**：核心把角色来源递给执行端——
+`stage3_main.execute_action()` 调 `group_owner.execute(roles=self.self_roles, …)`，
+执行端只回答"核心给的这个角色够不够做这个动作"。**本插件不问、不查、不缓存**。
+`plugins/roles/` 删掉之后本插件照常装、照常认命令；群主动作做不做得了
+由核心那份角色来源决定（拿不到就 fail-closed，见 `group_owner.execute`）。
 """
 from __future__ import annotations
 
 from .builtin_group_commands import GroupManageCommand, GroupOwnerCommand, TitleCommand
 
-#: 前置插件：她自己的群角色查询（判"她是不是群主"）。装不上就不装本插件——
-#: 没有角色来源时群主动作一条都做不了，半挂着不如明说。
-REQUIRES = ("roles",)
-
 
 def register(registry) -> None:
-    # 角色查询由前置插件 `roles` 提供，这里只**取用**（`register()` 阶段它是就绪的：
-    # 发现机制保证 `REQUIRES` 先装）。它内部走核心的 `call_action`，不持有 transport。
-    if registry.shared_roles() is None:  # pragma: no cover - 前置没装时本插件会先被跳过
-        raise RuntimeError("group_admin 需要前置插件 roles")
+    """三条命令**无条件登记**。
+
+    为什么这里不再有 `REQUIRES = ("roles",)`：那等于"角色事实还在插件之间传"，
+    而它已经归核心。而且前置一旦装不上，`discover()` 会把本插件整个跳过——
+    可这三条命令只是**解析 + 声明意图**（`ActionRequest`），登记时不需要任何角色信息。
+    """
 
     registry.command(GroupManageCommand())
     registry.command(GroupOwnerCommand())

@@ -2,7 +2,7 @@
 
 由来（2026-09-30 用户："群主的接口应该比管理员更多来着……能适配自动审批，添加管理这些吗"，
 随后点明"yunru 现在是测试群的群主了"）。实测：她（900000002）在测试群 717151356 里
-`role=owner`，别处是 `member`（`plugins/_shared/roles.py` 现查）。
+`role=owner`，别处是 `member`（角色现查，**来源由核心递进来**——见 `execute` 的 `roles`）。
 
 和 `group_admin.py`（禁言/踢/撤回，只有超管、四条短名单）是**并列的两套**，
 不是把那一套放宽：
@@ -39,9 +39,22 @@ import logging
 from dataclasses import dataclass
 
 from ...plugins import ActionDenied
-from ..roles.roles import ROLE_ADMIN, ROLE_OWNER, ROLE_LABELS
 
 logger = logging.getLogger(__name__)
+
+#: **QQ 侧线上取值**（`get_group_member_info` 的 `role` 字段）。与 `SPECS` 里那些
+#: action 名同一类东西：**对面的协议词表**，不是"我们这边的身份事实"。
+#:
+#: 2026-10-05 改：原来这几个是从 `plugins/roles/roles.py` **import 另一个插件**拿的
+#: （`from ..roles.roles import …`）。那条路必须断——角色事实（谁去查、查完缓存多久）
+#: 已经归核心，`plugins/roles/` 删掉之后 import 不进来就等于整个插件装不上。
+#: 核心递回来的那个字符串是什么意思，插件这边还得认，所以词表留在这里一份；
+#: **插件里没有任何角色缓存，也不发任何角色查询**（用户 2026-10-05）。
+ROLE_OWNER = "owner"
+ROLE_ADMIN = "admin"
+#: 只用来把"我在这个群里是什么"写成人话（回话正文）。
+ROLE_LABELS = {ROLE_OWNER: "群主", ROLE_ADMIN: "管理员",
+               "member": "普通成员", "unknown": "查不到"}
 
 # 长度上限：**先挡一道，省一次必然失败的调用**，但只挡"明显是误操作"的量级。
 #
@@ -156,6 +169,11 @@ async def execute(
     见 `group_admin.execute` 的说明（同一套改造，2026-10-01）。
     它原来收 `transport=` + `registry=`，也就是插件拿到了活的传输层。
 
+    `roles` 也**由核心递进来**（`stage3_main.execute_action` 传 `self.self_roles`）：
+    插件不问、不查、不缓存角色，只拿核心给的那个角色回答"够不够做这个动作"
+    （2026-10-05 用户："身份/权限事实并进核心"）。它是 `None` 时一律拒绝——
+    fail-closed，并记一行 `owner_action_no_role_source`。
+
     **没有 `protected_ids`**（与 `group_admin.py` 的差别，见模块头"修正"一段）：
     这一族动作不会伤到被 @ 的人，把超管/管理员排除在外只会让"给我自己设个管理员"
     这种最自然的用法直接失败。
@@ -185,8 +203,12 @@ async def execute(
         return str(exc)
 
     # 角色现查：不是群主（或该动作允许的管理员）就不做，并说清她在这个群是什么身份。
+    #
+    # **角色来源是核心递进来的**（`stage3_main.execute_action` 给的是核心那份
+    # `self_roles`），本模块不查、不缓存（用户 2026-10-05：身份/权限事实归核心）。
     if roles is None:
-        # 没接角色查询（装配漏了）——**要出声**，否则看起来只是"她查不到自己"。
+        # 没接角色来源（核心那边还没落地 / 装配漏了）——**要出声**，
+        # 否则看起来只是"她查不到自己"。
         logger.warning("owner_action_no_role_source action=%s group=%s", spec.action, group_id)
     role = await roles.role(group_id) if roles is not None else ""
     allowed = {ROLE_OWNER} if spec.owner_only else {ROLE_OWNER, ROLE_ADMIN}
@@ -215,7 +237,11 @@ async def execute(
             logger.warning("owner_action_rejected action=%s retcode=%s", spec.action, retcode)
             if retcode == 100:
                 # 100 = 权限不足或对象不对，最常见的原因就是她其实不是群主了。
-                roles.forget(group_id)
+                # 顺手让核心那份角色来源忘掉这一条（**缓存归核心**）：核心没提供
+                # `forget` 就算了，这里不替它记、也不许自己留一份。
+                forget = getattr(roles, "forget", None)
+                if callable(forget):
+                    forget(group_id)
             return f"{spec.label}被对面拒绝（retcode={retcode}）。"
     if spec.action == "set_group_admin":
         return f"已{'设置' if spec.enable else '取消'} {target_id} 的群管理员。"
