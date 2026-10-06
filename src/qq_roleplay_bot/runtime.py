@@ -139,6 +139,65 @@ def build_knowledge_base():
     )
 
 
+# --- 模型 / 凭据自检（2026-10-06）--------------------------------------------
+
+
+#: 面板上"某一路的 key"这项配置 → 它管哪个 `usage_role` 的 client。
+#:
+#: 2026-10-06 加了 `letter_api_key` / `vision_api_key`：这两个用途以前**没有**面板
+#: 入口（识图那把 key 甚至没有装配点，见汇报里的清单）。它们的取值方式与
+#: 其余几路一字不差——都走 `model_config` 的用途解析。
+_KEY_SETTING_ROLES: dict[str, str] = {
+    "api_key": "dialogue",
+    "reply_api_key": "dialogue",
+    "judge_api_key": "judge",
+    "memory_api_key": "memory",
+    "review_api_key": "review",
+    "letter_api_key": "letter",
+    "vision_api_key": "vision",
+}
+
+#: `model_config` 的用途名 → 账本 / client 上的 `usage_role`。
+#: 两者是同一件事的两个叫法：账本按 `usage_role` 分桶（历史名字），
+#: 三层配置按用途名分条。（只有 reply 与 dialogue 不同名，其余同名；写全是为了不许猜。）
+_TASK_TO_ROLE: dict[str, str] = {
+    "reply": "dialogue",
+    "letter": "letter",
+    "judge": "judge",
+    "memory": "memory",
+    "review": "review",
+    "vision": "vision",
+}
+
+#: 反过来。**从 `_TASK_TO_ROLE` 现算**，不另抄一份（两份表会漂移）。
+_ROLE_TO_TASK: dict[str, str] = {role: task for task, role in _TASK_TO_ROLE.items()}
+
+
+def _log_model_config_self_check() -> list[str]:
+    """启动自检：每个用途一行，**只打名字与"有值没有"**。
+
+    这一行是给"今晚那种事"准备的：`.env` 里全局地址指着 mimo、主 key 是 mimo 那把，
+    而判定 / 记忆 / 审核的 key 是 deepseek 那把 —— 于是那三个子系统拿 deepseek 的
+    key 打 mimo，全 401，而这**在日志里一点痕迹都没有**（只看到一排 401）。
+
+    现在每个用途都报：provider 名 / 模型名 / key 从哪个变量来（有值没有）。
+    **key 的值绝不出现**（`model_config.TaskEndpoint.safe_summary` 只认变量名）。
+    地址的来源就是 key 那条所绑的 provider，所以上下两行必须同家；不同家一眼可见。
+
+    返回那几行（测试直接断言它，不必去抓日志）。
+    """
+
+    from .model_config import self_check_lines
+
+    lines = self_check_lines()
+    for line in lines:
+        logger.info("模型配置 %s", line)
+    missing = [line for line in lines if "**缺**" in line]
+    if missing:
+        logger.warning("有用途没有可用的 key：%s", "；".join(missing))
+    return lines
+
+
 # --- 面板接缝：配置 / prompt / 记忆 / 审计 -----------------------------------
 #
 # 面板（Stage 4 插件）不能自己碰引擎，只能调这里装配出来的那几个闭包。
@@ -204,11 +263,24 @@ def apply_overrides(engine, payload: dict[str, object], *,
         from .provider_registry import base_url_of, known as provider_known
 
         if provider_known(chosen_provider) and chosen_provider != "custom":
+            # 「换供应商」的实质是**换那个供应商的地址**（三层配置里的 providers 那一层）。
+            # 它不该再把 `QQBOT_API_BASE_URL` 铺给所有 client——那正是"A 家 key 打
+            # B 家地址"的来源。只有"没有自己那条 key、按兼容档那一对在走"的用途
+            # 需要跟着兼容档地址走，所以这里也把兼容档地址一起改掉，然后逐用途重算。
             url = base_url_of(chosen_provider)
             config.values["api_base_url"] = url
-            apply_client_overrides(base_url=url)
-            # 回复 agent 有专属地址时，换全局供应商不该把它一起换掉。
-            _reapply_reply_overrides(base_url=True)
+            os.environ["QQBOT_API_BASE_URL"] = url
+            # **兼容档那一对现在是这个供应商的**：把声明也写上（`QQBOT_API_PROVIDER`），
+            # 绑定在别家 key 上的用途仍然按它们自己那条走（下一步重算）。
+            from .model_config import COMPAT_PROVIDER_ENV
+
+            if os.environ.get("QQBOT_API_KEY", "").strip():
+                os.environ[COMPAT_PROVIDER_ENV] = chosen_provider
+            # 有自己那条 key 的用途（判定 / 记忆 / 审核 / 识图 / 写信，以及配了
+            # 专属地址的回复）要按**自己那条来源**重算并盖回去——否则面板切一次
+            # 全局供应商就会造出"deepseek 的 key + mimo 的地址"，
+            # 那正是 2026-10-06 那个 401 的形状。
+            _reapply_pairing_all()
             applied["provider"] = {"applied": "live", "detail": f"地址已切到 {url}"}
         elif chosen_provider == "custom":
             applied["provider"] = {"applied": "live",
@@ -236,9 +308,8 @@ def _apply_live(engine, key: str, value: str, *, config=None) -> bool | None:
             return None
         flags.set(key, truthy)
         return True
-    if key in {"api_key", "reply_api_key", "judge_api_key", "memory_api_key", "review_api_key"}:
-        role = {"api_key": "dialogue", "reply_api_key": "dialogue", "judge_api_key": "judge",
-                "memory_api_key": "memory", "review_api_key": "review"}[key]
+    if key in _KEY_SETTING_ROLES:
+        role = _KEY_SETTING_ROLES[key]
         from . import dev_config as _cfg
 
         env = operator_config.env_name(key)
@@ -278,14 +349,24 @@ def _apply_live(engine, key: str, value: str, *, config=None) -> bool | None:
             if not main_key:
                 return False
             apply_client_overrides(api_key=main_key, usage_role=role)
+            _reapply_pairing(role)
             return True
         # 只改那一类 client（判定 key 不该顺手把回复的也改了）。
-        apply_client_overrides(api_key=value, usage_role=role)
+        #
+        # **先把值写进环境，再解析那一对**：`model_config` 是按环境里的**当前**值
+        # 解析"这条 key 属于谁"的，顺序反了就会拿到旧 key 的供应商。
         os.environ[env] = value
+        endpoint = _endpoint_of(_ROLE_TO_TASK[role])
+        apply_client_overrides(api_key=value, base_url=endpoint.base_url, usage_role=role)
         if key == "api_key":
             apply_client_overrides(api_key=value)
             # 上面这次是"全局"改写，回复 agent 有专属 key 时要盖回去。
             _reapply_reply_overrides(api_key=True)
+        else:
+            # **地址要跟着 key 走**：换了某一路的 key，就把那一路的地址按"这条 key
+            # 所绑的供应商"重新解析一次。没有这一步，内存里的 client 会保留旧地址，
+            # 重启之后又变回去——那正是"面板显示的和实际生效的不一样"。
+            _reapply_pairing(role)
         return True
     if key in {"api_model", "memory_model"}:
         model = str(value).strip()
@@ -309,14 +390,33 @@ def _apply_live(engine, key: str, value: str, *, config=None) -> bool | None:
 
         apply_client_overrides(model=_cfg.reply_api_model(), usage_role="dialogue")
         return True
+    if key == "api_provider":
+        # **那把主 key 属于哪一家**（`model_config.COMPAT_PROVIDER_ENV`）。
+        # 改它等于改"兼容档那一对是哪家的"——兼容档的地址也跟着它算，
+        # 所以改完要按新的那家逐用途重算一遍。
+        provider = str(value).strip().casefold()
+        env = operator_config.env_name(key)
+        if not provider:
+            os.environ.pop(env, None)
+            if config is not None:
+                config.values.pop(key, None)
+        else:
+            from .model_config import PROVIDERS
+
+            if provider not in PROVIDERS:
+                return False
+            os.environ[env] = provider
+        _reapply_pairing_all()
+        return True
     if key == "api_base_url":
         url = str(value).strip()
         if not url:
             return False
         apply_client_overrides(base_url=url)
         os.environ[operator_config.env_name(key)] = url
-        # 同上：回复 agent 有专属地址时，全局改写之后要盖回去。
-        _reapply_reply_overrides(base_url=True)
+        # **有自己那条 key 的用途不许被搬走**：全局地址只对"没有自己 key、
+        # 因此按兼容档那一对在走"的用途有效（回复专属地址也一样）。
+        _reapply_pairing_all()
         return True
     if key == "reply_api_base_url":
         # 回复 agent 的地址可以单独换。**空值 = 回落全局地址**（清掉覆盖层那一项）。
@@ -327,9 +427,8 @@ def _apply_live(engine, key: str, value: str, *, config=None) -> bool | None:
             os.environ[env] = url
         elif config is not None:
             config.values.pop(key, None)
-        from . import dev_config as _cfg
-
-        apply_client_overrides(base_url=_cfg.reply_api_base_url(), usage_role="dialogue")
+        # 清掉之后地址回落到**reply 那条 key 所绑的那家**（不是"全局地址"）。
+        _reapply_pairing("dialogue")
         return True
     if key == "provider":
         # 由 `apply_overrides` 在循环之后统一处理（要与显式地址比优先级）。
@@ -337,18 +436,21 @@ def _apply_live(engine, key: str, value: str, *, config=None) -> bool | None:
     return None
 
 
-def _reapply_reply_overrides(*, base_url: bool = False, model: bool = False,
-                             api_key: bool = False) -> None:
+def _reapply_reply_overrides(*, model: bool = False, api_key: bool = False) -> None:
     """全局改动之后，把**回复 agent 已配好的专属值**再盖回去。
 
-    语义是"**全局 = 默认值，reply 专属 = 覆盖它**"（见 `dev_config.reply_api_*`）。
-    没有这一步，面板改一次全局地址/模型/key 就会把已经配好的回复专属值在**内存里**
-    冲掉，而重启之后它又回来了——那正是"面板显示的和实际生效的不一样"。
+    语义是"**兼容档 = 默认值，reply 专属（任务级覆盖）= 覆盖它**"
+    （见 `dev_config.reply_api_*`）。没有这一步，面板改一次全局模型 / 主 key 就会把
+    已经配好的 reply 专属值在**内存里**冲掉，而重启之后它又回来了——那正是
+    "面板显示的和实际生效的不一样"。
 
-    **只在"专属值真的配了"时才盖回去**（判据就是那三个环境变量非空）：
+    **只在"专属值真的配了"时才盖回去**（判据就是那两个环境变量非空）：
     没配的时候全局那次改动本来就是对的，再"盖回去"等于把刚设的全局值又还原成
-    旧常量（实测：`provider` 换供应商那一趟不写环境变量，于是这一步会把
-    回复 client 的地址拽回 `.env` 里那个旧值）。
+    旧值。
+
+    ⚠️ 2026-10-06：**地址那一档从这个函数里撤掉了**。地址不再由"全局 vs 专属"
+    决定，而是按"这条 key 属于谁"解析——那是 `_reapply_pairing` /
+    `_reapply_pairing_all` 的事（见它们的说明）。
     """
 
     from . import dev_config as _cfg
@@ -356,12 +458,49 @@ def _reapply_reply_overrides(*, base_url: bool = False, model: bool = False,
     def _specific(name: str) -> str:
         return os.environ.get(name, "").strip()
 
-    if base_url and _specific("QQBOT_REPLY_API_BASE_URL"):
-        apply_client_overrides(base_url=_cfg.reply_api_base_url(), usage_role="dialogue")
     if model and _specific("QQBOT_REPLY_API_MODEL"):
         apply_client_overrides(model=_cfg.reply_api_model(), usage_role="dialogue")
     if api_key and _specific("QQBOT_REPLY_API_KEY"):
         apply_client_overrides(api_key=_cfg.reply_api_key(), usage_role="dialogue")
+
+
+def _reapply_pairing(usage_role: str) -> None:
+    """某一路的 key 改过之后，把**它那一对的地址**按同一条重新解析并盖回去。
+
+    这是"base 与 key 成对取自同一条"在**热更路径**上的落点：面板换了判定那把 key，
+    判定 client 的内存地址就要跟着换成那条 key 所绑的供应商的地址。少了这一步，
+    内存里会留下"新 key + 旧地址"，而那正是今晚那种 401 的形状——只是这次由
+    面板自己造出来，重启后自愈，所以更难查。
+    """
+
+    task = _ROLE_TO_TASK.get(str(usage_role), "")
+    if not task:
+        return
+    from .model_config import resolve
+
+    endpoint = resolve(task)
+    apply_client_overrides(base_url=endpoint.base_url, usage_role=usage_role)
+
+
+def _reapply_pairing_all() -> None:
+    """把所有 client 的地址按**每个用途自己那条来源**重算一遍。
+
+    什么时候需要它：面板改了"全局地址 / 全局供应商"。那时**只能**影响那些
+    "没有自己那条 key、因此按兼容档那一对在走"的用途；有自己那条 key 的用途
+    （判定 / 记忆 / 审核 / 识图 / 写信，配了自己变量的那些）地址必须留在自己那家——
+    否则面板切一次全局供应商就会造出"deepseek 的 key + mimo 的地址"，
+    而那正是 2026-10-06 那个 401 的形状。
+
+    判据全部来自 `model_config.resolve`（地址就是它算出来的那一个），这里**不重算**
+    任何东西——重算就等于又开了一条能拼出混搭的路径。
+    """
+
+    from .model_config import TASK_NAMES, resolve
+
+    for task in TASK_NAMES:
+        endpoint = resolve(task)
+        apply_client_overrides(base_url=endpoint.base_url,
+                               usage_role=_TASK_TO_ROLE.get(task, task))
 
 
 def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
@@ -401,6 +540,13 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
     usage_store = ApiUsageStore(enabled=state_persistence_enabled())
     global _USAGE_STORE
     _USAGE_STORE = usage_store
+    # **启动自检**（2026-10-06）：每个用途一行，只打 provider 名 / 模型名 /
+    # key 从哪个变量来（有值没有）——**绝不打 key 的值**（见 `model_config`）。
+    #
+    # 为什么放在装配最前面：今晚那种事（deepseek 的 key 打 mimo 的地址）在这里
+    # 一眼就能看出来——地址的来源就是 key 那条所绑的 provider，所以那一行里的
+    # provider 名与 key 变量名必须同家；缺 key 的那一行带 `**缺**`。
+    _log_model_config_self_check()
     client = OpenAICompatibleClient(
         *_reply_endpoint(),
         # 按 agent 隔离 KVCache 与调度（同一账号下生效，与 API Key 无关）。
@@ -1047,20 +1193,31 @@ def _factory_api_key(env_name: str, fallback: str) -> str:
 def _reply_endpoint() -> tuple[str, str, str]:
     """回复 agent 这一套 `(base_url, api_key, model)`。
 
-    **每个 agent 各用各的**（2026-10-05 用户要求）：回复那一路可以单独换供应商，
-    而判定 / 记忆 / 审核 / 写信仍按全局那一套组装。三个值都走
-    `dev_config.reply_api_*`——那几个函数是"**调用时现读环境**"的，
-    所以面板热更与新会话 client 都拿得到新值。
+    **每个 agent 各用各的**（2026-10-05 用户要求），而现在这件事有了来源：
+    `model_config.resolve("reply")` —— 地址与 key **成对取自同一条 key 条目**
+    （reply 那条绑 mimo）。判定 / 记忆 / 审核 / 写信各走自己那条。
 
-    没配 `QQBOT_REPLY_API_*` 时它返回的就是全局那一套，**逐字不变**。
+    没配 `QQBOT_REPLY_API_*` 时它返回的仍是全局那一套，**逐字不变**。
     """
 
-    return (dev_config.reply_api_base_url(), dev_config.reply_api_key(),
-            dev_config.reply_api_model())
+    return _endpoint_of("reply").triple()
+
+
+def _endpoint_of(task: str):
+    """某个用途解析出来的"一个客户端"（缺 key 时 `MissingCredential` 明确抛出）。
+
+    这是**唯一**允许构造模型客户端来源的地方：地址、key、模型名由
+    `model_config` 从同一条 key 条目解析出来，所以"用 A 家 key 打 B 家地址"
+    在这里没有落点。
+    """
+
+    from .model_config import require as _require
+
+    return _require(task)
 
 
 def _dialogue_client_factory(session_id: str) -> OpenAICompatibleClient:
-    base_url, api_key, model = _reply_endpoint()
+    base_url, api_key, model = _endpoint_of("reply").triple()
     return OpenAICompatibleClient(
         base_url,
         api_key,
@@ -1072,10 +1229,11 @@ def _dialogue_client_factory(session_id: str) -> OpenAICompatibleClient:
 
 
 def _judge_client_factory(session_id: str) -> OpenAICompatibleClient:
+    base_url, api_key, model = _endpoint_of("judge").triple()
     return OpenAICompatibleClient(
-        os.environ.get("QQBOT_API_BASE_URL", dev_config.API_BASE_URL),
-        _factory_api_key("QQBOT_JUDGE_API_KEY", dev_config.JUDGE_API_KEY),
-        os.environ.get("QQBOT_JUDGE_MODEL", dev_config.API_MODEL),
+        base_url,
+        api_key,
+        model,
         user_id=dev_config.session_user_id(dev_config.JUDGE_USER_ID, session_id),
         usage_store=_USAGE_STORE,
         usage_role="judge",
@@ -1083,14 +1241,21 @@ def _judge_client_factory(session_id: str) -> OpenAICompatibleClient:
 
 
 def _build_judge_client(usage_store=None):
-    """判定 agent 的 client；未启用双 agent 模式时返回 None（退回单 agent）。"""
+    """判定 agent 的 client；未启用双 agent 模式、或没有可用的 key 时返回 None。"""
 
-    if not (dev_config.JUDGE_API_KEY and dev_config.DUAL_AGENT_ENABLED):
+    if not dev_config.DUAL_AGENT_ENABLED:
+        return None
+    from .model_config import MissingCredential
+
+    try:
+        base_url, api_key, model = _endpoint_of("judge").triple()
+    except MissingCredential as exc:
+        logger.warning("判定 agent 缺少凭据，本次不启用：%s", exc)
         return None
     return OpenAICompatibleClient(
-        dev_config.API_BASE_URL,
-        dev_config.JUDGE_API_KEY,
-        os.environ.get("QQBOT_JUDGE_MODEL", dev_config.API_MODEL),
+        base_url,
+        api_key,
+        model,
         user_id=dev_config.JUDGE_USER_ID,
         usage_store=usage_store if usage_store is not None else _USAGE_STORE,
         usage_role="judge",
@@ -1118,16 +1283,22 @@ def _build_style_reviewer(usage_store=None):
     if not dev_config.REVIEW_ENABLED:
         logger.info("风格审核未启用（QQBOT_STYLE_REVIEW=0 / 未配 QQBOT_REVIEW_API_KEY）")
         return None
-    key = dev_config.REVIEW_API_KEY or dev_config.API_KEY
+    from .model_config import MissingCredential
+
+    try:
+        base_url, key, model = _endpoint_of("review").triple()
+    except MissingCredential as exc:
+        logger.warning("风格审核已开启但没有任何可用 key，本次不启用：%s", exc)
+        return None
     if not key:
         logger.warning("风格审核已开启但没有任何可用 key，本次不启用")
         return None
     logger.info("风格审核已启用：每条回复发送前看一眼（只判不改，判不过就重写一次）")
     return StyleReviewer(
         OpenAICompatibleClient(
-            dev_config.API_BASE_URL,
+            base_url,
             key,
-            os.environ.get("QQBOT_REVIEW_MODEL", dev_config.API_MODEL),
+            model,
             user_id=dev_config.REVIEW_USER_ID,
             usage_store=usage_store if usage_store is not None else _USAGE_STORE,
             usage_role="review",
@@ -1140,16 +1311,19 @@ def _build_letter_client() -> OpenAICompatibleClient:
 
     为什么单独一份：信的 prompt 前缀又大又恒定（人设 + 信件规矩 + 已确定事实），
     跟群聊共用一份缓存隔离空间只会互相挤；分开之后它的命中率与成本都能单独看。
-    `QQBOT_MAIL_API_KEY` 不配就回落主 key。
+
+    凭据走 `model_config` 的 **letter** 那个用途：自己的 key
+    （`QQBOT_LETTER_API_KEY`）→ 回落 reply 那把 **mimo** key → 兼容档。
 
     留在核心（而不是跟着装配搬去 `background_plugins.py`）：它要往**核心的用量账本**
     （`_USAGE_STORE`）里记一笔，那是核心状态。
     """
 
+    base_url, api_key, model = _endpoint_of("letter").triple()
     return OpenAICompatibleClient(
-        dev_config.API_BASE_URL,
-        dev_config.MAIL_API_KEY or dev_config.API_KEY,
-        os.environ.get("QQBOT_MAIL_MODEL", dev_config.API_MODEL),
+        base_url,
+        api_key,
+        model,
         user_id=dev_config.MAIL_USER_ID,
         usage_store=_USAGE_STORE,
         usage_role="letter",
@@ -1319,17 +1493,38 @@ class _LazyGroupRoles:
             service.forget(group_id, user_id)
 
 
+def _memory_endpoint():
+    """记忆服务的凭据来源：`model_config` 的 **memory** 那个用途。
+
+    没有可用的 key → 返回 `None`（调用方照旧"仅启用命令"）。判据仍然是**那把 key**
+    （见 `tests/config_support.py` 里那段说明），只是它现在从三层配置里解析出来，
+    而不是直接读某个常量——这样地址与 key 一定同家。
+    """
+
+    from .model_config import resolve
+
+    endpoint = resolve("memory")
+    if endpoint.api_key:
+        return endpoint
+    logger.warning(
+        "未设置 %s（也没配同家回落项）；仅启用命令，普通对话和长期记忆维护暂不可用",
+        endpoint.key_env,
+    )
+    return None
+
+
 def _start_memory(engine: DialogueEngine, client) -> MemoryService | None:
     """长期记忆服务。未配置 key 时返回 None，对话照常。"""
 
-    if not dev_config.MEMORY_API_KEY:
-        logger.warning("未设置 QQBOT_MEMORY_API_KEY / QQBOT_API_KEY；仅启用命令，普通对话和长期记忆维护暂不可用")
+    endpoint = _memory_endpoint()
+    if endpoint is None:
         return None
     settings = MemorySettings.from_environment()
+    base_url, api_key, model = endpoint.triple()
     maintenance_client = OpenAICompatibleClient(
-        dev_config.API_BASE_URL,
-        dev_config.MEMORY_API_KEY,
-        os.environ.get("QQBOT_MEMORY_MODEL", dev_config.API_MODEL),
+        base_url,
+        api_key,
+        model,
         timeout=settings.model_timeout - 1,
         max_tokens=4096,
         user_id=dev_config.MEMORY_USER_ID,

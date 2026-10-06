@@ -50,22 +50,43 @@ SETTINGS: dict[str, dict[str, object]] = {
     # 不懂就问（2026-10-04）：关掉即退回"被叫到就直接答"。
     "ask_when_unsure": {"kind": "bool", "applies": "live", "env": "QQBOT_ASK_WHEN_UNSURE"},
     # --- 模型与供应商（live：client 是就地改属性的） ---
+    #
+    # 2026-10-06：**用途 → key → 供应商**这件事现在归 `model_config`（三层配置）。
+    # 面板这一层的键名保持原样（老部署与老测试都按它们写），含义变成"给那个用途
+    # 的任务级覆盖/兼容档设值"；地址与 key 在装配时**成对取自同一条**。
     "provider": {"kind": "str", "applies": "live", "env": "QQBOT_PROVIDER"},
     "api_base_url": {"kind": "str", "applies": "live", "env": "QQBOT_API_BASE_URL"},
+    # **那把主 key 属于哪一家**（可选；见 `model_config.COMPAT_PROVIDER_ENV`）。
+    # 多供应商的机器应当写上它，否则自检那一行会显示"兼容档·未声明"。
+    "api_provider": {"kind": "str", "applies": "live", "env": "QQBOT_API_PROVIDER"},
     "api_model": {"kind": "str", "applies": "live", "env": "QQBOT_API_MODEL"},
     "memory_model": {"kind": "str", "applies": "live", "env": "QQBOT_MEMORY_MODEL"},
     # 回复 agent 专属的一套（2026-10-05 用户："每个 agent 各用各的 base URL/key"）：
-    # 只影响**回复**那一路，判定 / 记忆 / 审核照旧走上面的全局那套。
-    # 留空 = 回落全局（这三项都可以从面板清回去）。
+    # 它现在就是 `model_config` 里 reply 那个用途的任务级覆盖。
+    # 留空 = 回落到**reply 那条 key 所绑的供应商**与默认模型（这三项都可以从面板清回去）。
     "reply_api_base_url": {"kind": "str", "applies": "live",
                            "env": "QQBOT_REPLY_API_BASE_URL"},
     "reply_api_model": {"kind": "str", "applies": "live", "env": "QQBOT_REPLY_API_MODEL"},
+    # 写信（长文）那一套（2026-10-06）：自己的 key 条目 + 自己的模型名。
+    # 三个都可以留空——key 会回落到 reply 那把 **mimo** key（同家，不会再出现
+    # "deepseek 的 key 打 mimo 的地址"那种组合）。
+    "letter_api_base_url": {"kind": "str", "applies": "live",
+                            "env": "QQBOT_LETTER_API_BASE_URL"},
+    "letter_api_model": {"kind": "str", "applies": "live", "env": "QQBOT_LETTER_API_MODEL"},
+    # 识图那一套（2026-10-06）：识图是插件，但"用哪条 key"这件事归三层配置。
+    "vision_api_base_url": {"kind": "str", "applies": "live",
+                            "env": "QQBOT_VISION_API_BASE_URL"},
+    "vision_api_model": {"kind": "str", "applies": "live", "env": "QQBOT_VISION_API_MODEL"},
     # --- 凭据（live：同上；值**绝不回显**，见 webui_data.mask_settings） ---
+    # `api_key` / `reply_api_key` 是**兼容档**那对（`QQBOT_API_KEY` + `QQBOT_API_BASE_URL`）；
+    # 下面那几条各管一个用途，缺了各自按 `model_config.KEYS` 的表回落。
     "api_key": {"kind": "secret", "applies": "live", "env": "QQBOT_API_KEY"},
     "reply_api_key": {"kind": "secret", "applies": "live", "env": "QQBOT_REPLY_API_KEY"},
+    "letter_api_key": {"kind": "secret", "applies": "live", "env": "QQBOT_LETTER_API_KEY"},
     "judge_api_key": {"kind": "secret", "applies": "live", "env": "QQBOT_JUDGE_API_KEY"},
     "memory_api_key": {"kind": "secret", "applies": "live", "env": "QQBOT_MEMORY_API_KEY"},
     "review_api_key": {"kind": "secret", "applies": "live", "env": "QQBOT_REVIEW_API_KEY"},
+    "vision_api_key": {"kind": "secret", "applies": "live", "env": "QQBOT_VISION_API_KEY"},
     # --- 审批策略（restart：策略对象在装配时构造） ---
     "auto_approve_join": {"kind": "bool", "applies": "restart", "env": "QQBOT_AUTO_APPROVE_JOIN"},
     "approve_whitelist": {"kind": "csv", "applies": "restart", "env": "QQBOT_APPROVE_WHITELIST"},

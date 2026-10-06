@@ -15,8 +15,13 @@
 from __future__ import annotations
 
 #: 供应商 → 默认 base_url。键就是面板下拉框里的值。
+#:
+#: 2026-10-06：加上 `mimo`（小米 MiMo）。它本来就在 `model_config.PROVIDERS`
+#: 里（回复 / 写信那两路绑的是它），面板下拉框少一个选项就会让"换供应商"报错——
+#: 那两个表必须能对上，否则用户看得见的选项与实际能用的那家会分叉。
 PROVIDERS: dict[str, str] = {
     "deepseek": "https://api.deepseek.com",
+    "mimo": "https://api.xiaomimimo.com/v1",
     "openai": "https://api.openai.com/v1",
     "moonshot": "https://api.moonshot.cn/v1",
     "dashscope": "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -27,6 +32,7 @@ PROVIDERS: dict[str, str] = {
 #: 给面板看的中文标签。
 LABELS: dict[str, str] = {
     "deepseek": "DeepSeek（官方）",
+    "mimo": "小米 MiMo",
     "openai": "OpenAI",
     "moonshot": "月之暗面 Kimi",
     "dashscope": "阿里云百炼（通义）",

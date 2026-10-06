@@ -9,6 +9,7 @@
 import json
 import os
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 from qq_roleplay_bot import runtime_flags
@@ -20,6 +21,34 @@ from qq_roleplay_bot.runtime import apply_overrides
 
 # 本机配置在不在的判定（干净 clone 只有 `.env.example`）——见 `tests/config_support.py`
 from config_support import skip_without_env
+
+#: 面板改地址 / 换供应商会**写进 `os.environ`**（重启后仍然生效，这是它该做的）。
+#: 于是后面那些测试文件会读到前一个文件留下的值——2026-10-06 实测到过：这个文件把
+#: `QQBOT_API_BASE_URL` 设成 `https://api.openai.com/v1` 之后，`test_reply_endpoint`
+#: 里"reply 没配覆盖就回落到兼容档那一对"那条读到的就是 openai 而不是 `.env` 的值。
+#:
+#: 那些变量是**进程级状态**，测试自己造出来的就得自己收拾：下面这个上下文管理器在
+#: 每个会改它的测试外面保存 / 清空 / 还原。不改产品行为。
+_ADDRESS_VARS = ("QQBOT_API_BASE_URL", "QQBOT_PROVIDER",
+                 "QQBOT_REPLY_API_BASE_URL", "QQBOT_REPLY_API_MODEL",
+                 "QQBOT_REPLY_API_KEY", "QQBOT_LETTER_API_KEY")
+
+
+@contextmanager
+def _clean_addresses():
+    """清掉"地址 / 供应商"这类进程级配置，跑完原样还回去。"""
+
+    saved = {name: os.environ.get(name) for name in _ADDRESS_VARS}
+    for name in _ADDRESS_VARS:
+        os.environ.pop(name, None)
+    try:
+        yield
+    finally:
+        for name in _ADDRESS_VARS:
+            os.environ.pop(name, None)
+        for name, value in saved.items():
+            if value is not None:
+                os.environ[name] = value
 
 
 class _Engine:
@@ -101,7 +130,7 @@ def test_api_key_change_keeps_client_identity_and_usage() -> None:
 
 
 def test_provider_switches_the_base_url() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp, _clean_addresses():
         runtime_flags.install(runtime_flags.build_flags())
         client = _client("dialogue")
         try:
@@ -123,7 +152,7 @@ def test_unknown_provider_is_rejected() -> None:
 
 
 def test_explicit_url_wins_over_provider() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp, _clean_addresses():
         runtime_flags.install(runtime_flags.build_flags())
         client = _client("dialogue")
         try:
@@ -133,6 +162,51 @@ def test_explicit_url_wins_over_provider() -> None:
             assert client.base_url == "https://mine.example/v1"
         finally:
             client.base_url = "https://old.example"
+
+
+def test_a_global_address_change_only_moves_purposes_without_their_own_key() -> None:
+    """**成对取自同一条**：全局改地址不许把"有自己那条 key"的用途搬走。
+
+    这是 2026-10-06 那个 401 的回归：全局地址指向 mimo、而判定那把 key 属于
+    deepseek —— 全局一动，判定就会拿着 deepseek 的 key 去打 mimo。
+    （"回复那一趟该不该跟着走"由 `test_reply_endpoint.py` 那条覆盖。）
+    """
+
+    with tempfile.TemporaryDirectory() as tmp, _clean_addresses():
+        runtime_flags.install(runtime_flags.build_flags())
+        saved = os.environ.get("QQBOT_JUDGE_API_KEY")
+        os.environ["QQBOT_JUDGE_API_KEY"] = "sk-judge-fake"
+        judge = _client("judge")
+        try:
+            apply_overrides(_Engine(), {"api_base_url": "https://api.xiaomimimo.com/v1"},
+                            store=_operator(tmp))
+            assert judge.base_url == "https://api.deepseek.com", \
+                "判定那把 key 属于 deepseek，地址不该被全局改成 mimo"
+        finally:
+            judge.base_url = "https://old.example"
+            if saved is None:
+                os.environ.pop("QQBOT_JUDGE_API_KEY", None)
+            else:
+                os.environ["QQBOT_JUDGE_API_KEY"] = saved
+
+
+def test_switching_the_global_provider_does_not_move_a_bound_purpose() -> None:
+    """换供应商同理：它只影响"按兼容档那一对在走"的用途。"""
+
+    with tempfile.TemporaryDirectory() as tmp, _clean_addresses():
+        runtime_flags.install(runtime_flags.build_flags())
+        saved = os.environ.get("QQBOT_JUDGE_API_KEY")
+        os.environ["QQBOT_JUDGE_API_KEY"] = "sk-judge-fake"
+        judge = _client("judge")
+        try:
+            apply_overrides(_Engine(), {"provider": "mimo"}, store=_operator(tmp))
+            assert judge.base_url == "https://api.deepseek.com"
+        finally:
+            judge.base_url = "https://old.example"
+            if saved is None:
+                os.environ.pop("QQBOT_JUDGE_API_KEY", None)
+            else:
+                os.environ["QQBOT_JUDGE_API_KEY"] = saved
 
 
 def test_empty_secret_means_fall_back_to_main_key() -> None:

@@ -59,9 +59,9 @@ def test_the_memory_guard_lets_a_configured_machine_run() -> None:
     """**本机配好了就必须放行**——这条抓的就是那个死守卫（它原来恒跳过）。"""
 
     from config_support import skip_unless_memory_enabled
-    from qq_roleplay_bot import dev_config
+    from qq_roleplay_bot import runtime
 
-    if not dev_config.MEMORY_API_KEY:
+    if runtime._memory_endpoint() is None:
         raise unittest.SkipTest("本机确实没有记忆 key，这条不适用")
 
     try:
@@ -74,19 +74,27 @@ def test_the_memory_guard_lets_a_configured_machine_run() -> None:
 def test_the_memory_guard_skips_when_there_is_no_key() -> None:
     """反过来也要成立：**没有 key 时必须真的跳过**。
 
-    守卫的判据必须是"真实前提"（`runtime._start_memory` 只看 `MEMORY_API_KEY`），
-    否则会矫枉过正——用"看着像开关"的东西（例如 `MemorySettings().enabled`，
-    它是 dataclass 默认值恒 `True`）当判据，守卫就**永不跳过**，
-    那条测试在干净 clone 上会直接红（`services` 空 → `services[0]` → IndexError）。
+    守卫的判据必须是"真实前提"（现在就是 `runtime._memory_endpoint()`，也就是
+    装配时用的那一个函数），否则会矫枉过正——用"看着像开关"的东西当判据，
+    守卫就**永不跳过**，那条测试在干净 clone 上会直接红
+    （`services` 空 → `services[0]` → IndexError）。
 
     这条测试就是抓住我第一版修法的那一条。
     """
 
+    import os
+
     from config_support import skip_unless_memory_enabled
     from qq_roleplay_bot import dev_config
 
-    saved = dev_config.MEMORY_API_KEY
-    dev_config.MEMORY_API_KEY = ""      # 模拟干净 clone（没有 .env）
+    names = ("QQBOT_MEMORY_API_KEY", "QQBOT_JUDGE_API_KEY", "QQBOT_API_KEY")
+    saved = {name: os.environ.get(name) for name in names}
+    saved_key = dev_config.API_KEY
+    for name in names:
+        os.environ.pop(name, None)
+    # `.env` 带入的那份也要清掉——`model_config` 的兼容档会看它，
+    # 留着它就等于"这台机器其实配了主 key"，记忆服务照样起得来。
+    dev_config.API_KEY = ""
     try:
         try:
             skip_unless_memory_enabled()
@@ -95,28 +103,44 @@ def test_the_memory_guard_skips_when_there_is_no_key() -> None:
         else:
             raise AssertionError("没有记忆 key 时守卫没有跳过——判据用错了东西")
     finally:
-        dev_config.MEMORY_API_KEY = saved
+        dev_config.API_KEY = saved_key
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def test_the_memory_guard_matches_what_the_runtime_actually_checks() -> None:
-    """守卫的判据必须与 `runtime._start_memory` 的**真实前提**一致。
+    """守卫的判据必须与 `runtime` 装配记忆服务时的**真实前提**一致。
 
     2026-10-02 的教训是双向的：第一版守卫读了一个不存在的属性（恒跳过），
-    第二版读了一个与实际前提无关的属性（恒不跳过）。所以这里把两者绑在一起——
-    `_start_memory` 在什么条件下返回 `None`，守卫就该在什么条件下跳过。
+    第二版读了一个与实际前提无关的属性（恒不跳过）。所以这里把两者绑在一起。
+
+    2026-10-06 三层配置落地后，判据不再是一个常量、而是
+    `runtime._memory_endpoint()`（`_start_memory` 的第一句就是它）：
+
+    - `_start_memory` 必须调 `_memory_endpoint()`；
+    - `_memory_endpoint` 必须走 `model_config.resolve("memory")`（那是"哪把 key"的唯一来源）；
+    - 守卫必须调同一个 `_memory_endpoint()`。
+
+    改任何一处，这条测试都会红——那正是提醒你去同步。
     """
 
-    import ast
     import inspect
+
+    from config_support import skip_unless_memory_enabled
 
     from qq_roleplay_bot import runtime
 
-    source = inspect.getsource(runtime._start_memory)
-    # 它读的必须就是 `dev_config.MEMORY_API_KEY`（改了这个，这条测试会红，
-    # 那正是提醒你回去同步 `config_support.skip_unless_memory_enabled`）
-    assert "MEMORY_API_KEY" in source, (
-        "`_start_memory` 不再看 MEMORY_API_KEY 了？"
+    start_source = inspect.getsource(runtime._start_memory)
+    endpoint_source = inspect.getsource(runtime._memory_endpoint)
+    guard_source = inspect.getsource(skip_unless_memory_enabled)
+    assert "_memory_endpoint()" in start_source, (
+        "`_start_memory` 不再用 `_memory_endpoint()` 了？"
         "请同步 tests/config_support.skip_unless_memory_enabled 的判据")
-    tree = ast.parse(inspect.getsource(runtime))
-    assert tree is not None   # 只为让上面的 ast 导入有意义（读源码不报错）
+    assert 'resolve("memory")' in endpoint_source, (
+        "`_memory_endpoint` 不再从 `model_config` 解析 memory 用途了？")
+    assert "_memory_endpoint()" in guard_source, (
+        "守卫没有问运行时那个判据（它又回去读某个常量了？）")
 

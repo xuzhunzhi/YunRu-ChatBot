@@ -29,13 +29,23 @@ def skip_without_env(name: str, why: str) -> None:
 def skip_unless_memory_enabled() -> None:
     """记忆服务没开就跳过（干净 clone 上 `QQBOT_MEMORY_*` 都没有）。
 
-    ## ⚠️ 2026-10-02 修正：这里原来是一道**死守卫**，把测试永久关掉了
+    ## 判据必须**就是运行时那个判据**（2026-10-06 又改了一次，如实交代）
 
-    原文是 `if not getattr(dev_config, "MEMORY_ENABLED", False)` ——
-    **`dev_config` 里从来没有这个属性**（全树 grep：`MEMORY_ENABLED` 只出现在
-    `memory_config.py:39` 的 `os.environ.get("QQBOT_MEMORY_ENABLED", "1")`、
-    `operator_config.py:45` 与 `test_env_config.py` 里）。于是
-    `getattr(..., False)` **恒为 `False`** → 这条守卫**恒跳过**。
+    这里的判据现在直接调 `runtime._memory_endpoint()` —— 那是记忆服务装配时
+    **同一个函数**。以前这里读 `dev_config.MEMORY_API_KEY` 这个常量，于是
+    "常量有值、而运行时按别的东西判断"这种漂移只能靠人去对齐
+    （`test_config_support.py` 里有一条测试专门盯这件事，它原来断言的是
+    "`_start_memory` 的源码里出现 `MEMORY_API_KEY` 这个字符串"）。
+
+    2026-10-06 三层配置落地后，记忆那把 key 由 `model_config.resolve("memory")`
+    解析（自己的 key → 同家回落 → 兼容档），所以**守卫也改成问同一件事**：
+    谁都不再依赖"某个常量是不是非空"这种间接信号。
+
+    ## ⚠️ 2026-10-02 那次修正（这段历史仍然有效）
+
+    原来这里写的是 `if not getattr(dev_config, "MEMORY_ENABLED", False)` ——
+    **`dev_config` 里从来没有这个属性**，于是 `getattr(..., False)` 恒为 `False`
+    → 这条守卫**恒跳过**。
 
     后果不是"保守"，是**真回归被静默跳过**：`test_memory` 里
     `test_startup_connects_service_and_successful_test_ack` 是**唯一**验
@@ -46,25 +56,14 @@ def skip_unless_memory_enabled() -> None:
     配好了却没跑的凭证。）*
 
     这就是我反复栽的那个模式：**属性名是推断的，不是查过的**。
-
-    ## 判据必须是"真实前提"，不能是"看着像"（我第一版修法也是错的）
-
-    那位审查者给的两个修法（`MemorySettings().enabled` / 读 `QQBOT_MEMORY_ENABLED`
-    环境变量）**都不对**——我照第一个改了一版，被 `tests/test_config_support.py` 里
-    "开关关掉时必须真的跳过"那条测试当场抓住。去读 `runtime._start_memory` 才看清：
-
-    * `MemorySettings()` 的 `enabled` 是 **dataclass 默认值 `True`**，与 env 无关
-      （生产 `MemoryService` 用的就是 `MemorySettings()`）；
-    * 读 env 的是 `MemorySettings.from_environment()`，而 `_start_memory` 用的正是
-      它 —— 但它**并不检查 `enabled`**；
-    * `_start_memory` 唯一的前提是 **`dev_config.MEMORY_API_KEY` 非空**，
-      否则直接 `return None`（原注释："未配置 key 时返回 None，对话照常"）。
-
-    所以判据是**那把 key**。用错判据的后果是**反方向**的：守卫会永不跳过，
-    那条测试在干净 clone 上直接红（`services` 空 → `services[0]` → IndexError）。
     """
 
-    skip_without_env("MEMORY_API_KEY", "这条走真实入口验'记忆服务接上了组装路径'，需要记忆 key")
+    from qq_roleplay_bot import runtime
+
+    if runtime._memory_endpoint() is None:
+        raise unittest.SkipTest(
+            "本机没有可用的记忆 key（干净 clone 只有 .env.example）："
+            "这条走真实入口验'记忆服务接上了组装路径'")
 
 
 def skip_unless_review_enabled() -> None:

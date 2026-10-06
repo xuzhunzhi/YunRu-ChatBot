@@ -119,8 +119,40 @@ def get(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
+# --- 模型 / 凭据 / 用途：三层配置（2026-10-06 重做）---------------------------
+#
+# 现场事故：`.env` 里全局地址指着 mimo、主 key 是 mimo 那把，而判定 / 记忆 / 审核的
+# key 是 deepseek 那把 —— **地址与 key 来自两个不同的地方**，于是那三个子系统
+# 拿 deepseek 的 key 去打 mimo，全 401。根因是形状，不是某个人配错了。
+#
+# 现在那件事归 `model_config`：providers（只放连接信息）/ keys（按用途分开、
+# 每条显式绑定属于哪家）/ tasks（用途 → 哪条 key + 哪个模型名）。
+# 一个客户端的三个字段**永远由同一条 key 条目解析出来** —— 见那个模块的说明。
+#
+# 这个文件里保留下来的东西是**兼容层**：下面这些名字改动前就在用，现在降级成
+# "默认值"那一档（新配置缺失时行为与改动前**逐字相同**，有测试钉住）。
+# 装配点不再直接读它们，而是调 `model_config` —— 单独留常量只会让旧读法复活。
+from . import model_config as _model_config  # noqa: E402 - 见上：这一段是兼容层的说明
+
+
+def _compat(name: str, fallback: str) -> str:
+    """兼容档取值：环境里没有这一项时用 `.env` 带入的那份（与改动前一致）。
+
+    `os.environ` 与"`.env` 的值"在改动前是同一条路（`load_env_file` 把后者填进前者），
+    但**测试会从环境里删掉某一项**来验"回落"，那时常量里那份仍在——所以这里要
+    两级都看，否则"清空某一项回落到 `.env`"会变成"回落不到"。给 `agent_api_key`
+    这类历史读法用的。
+    """
+
+    return os.environ.get(name, "").strip() or str(fallback or "").strip()
+
+
 def agent_api_key(env_name: str) -> str:
-    """按 agent 取 key；没配就回落用主 key（`QQBOT_API_KEY`）。
+    """按 agent 取 key（**兼容层，历史语义**）：没配就回落用主 key。
+
+    ⚠️ 装配点**不再用它**（核心改调 `model_config` 的用途解析）。留着它是因为
+    `tests/` 与外部部署在按它断言/取值，而且它的语义就是"改动前那一套"。
+    新代码要某一路的凭据，用 `model_config.resolve(用途).api_key`。
 
     **分 key 不等于分会话隔离**：同一个 DeepSeek 账号下的多把 key 共享并发限额与缓存
     容量，KVCache 隔离靠请求里的 `user_id`（与 key 无关）。分 key 的实际意义是
@@ -129,12 +161,31 @@ def agent_api_key(env_name: str) -> str:
     调用时才读环境，所以测试可以直接改环境变量验证回落行为。
     """
 
-    return get(env_name, "") or get("QQBOT_API_KEY", os.environ.get("API_KEY", ""))
+    return (get(env_name, "") or _compat("QQBOT_API_KEY", API_KEY)
+            or os.environ.get("API_KEY", ""))
 
 
-API_BASE_URL = get("QQBOT_API_BASE_URL", "https://api.deepseek.com")
-API_MODEL = get("QQBOT_API_MODEL", "deepseek-chat")
-API_KEY = get("QQBOT_API_KEY", os.environ.get("API_KEY", ""))
+# 兼容档的那份取值（`.env` 与真实环境变量都算，`get()` 已经把它们合并好了）。
+_ENV_API_BASE_URL = get("QQBOT_API_BASE_URL", "")
+_ENV_API_MODEL = get("QQBOT_API_MODEL", "")
+_ENV_API_KEY = get("QQBOT_API_KEY", os.environ.get("API_KEY", ""))
+
+# 把**主 key 那一对**所绑定/所用的值显式放进 `os.environ`：`model_config` 只从环境读，
+# 而"只配一把 key 的部署 / 只有 `.env` 的机器"必须能解析出那一对（改动前就是靠
+# `load_env_file` 填进环境的）。只补**没有**的键，绝不覆盖已有的值——
+# 优先级因此仍是 `运算符层 > 真实环境变量 > .env > 代码默认`。
+#
+# ⚠️ 为什么只补 key、不补地址与模型：地址与模型有"任务级覆盖"那一档，如果在这里
+# 把全局值写进环境，`_reapply_reply_overrides` 那种"看环境里有没有专属值"的判断
+# 就会把全局值误当成专属值。key 没有这个问题（它的回落路径本来就是读环境）。
+if _ENV_API_KEY and not os.environ.get("QQBOT_API_KEY"):
+    os.environ["QQBOT_API_KEY"] = _ENV_API_KEY
+
+#: 全局那一套的**最终默认值**（兼容档没配时用的）。地址取 `model_config` 里
+#: 代码默认那一家，模型名写**真名**（`deepseek-chat` 是随时会没的别名）。
+API_BASE_URL = _ENV_API_BASE_URL or _model_config.provider_base_url("deepseek")
+API_MODEL = _ENV_API_MODEL or _model_config.TASKS["judge"]["model"]
+API_KEY = _ENV_API_KEY
 # 三把 key 各管一摊：回复（API_KEY）、判定、记忆维护。后两者不配就回落主 key。
 JUDGE_API_KEY = agent_api_key("QQBOT_JUDGE_API_KEY")
 MEMORY_API_KEY = agent_api_key("QQBOT_MEMORY_API_KEY")
@@ -143,46 +194,43 @@ TARGET_GROUP_ID = "717151356"
 
 # --- 回复 agent 能不能单独换一套地址 / 模型 / key（2026-10-05）------------------
 #
-# 用户要求：**每个 agent 各用各的 base URL/key**。已有的 `QQBOT_API_BASE_URL` /
-# `QQBOT_API_KEY` / `QQBOT_API_MODEL` 是**全局那一套**（判定 / 记忆 / 审核 / 写信
-# 都按它组装，各自再配自己的 key）；这一节给**回复 agent** 一份可选的覆盖：
+# 用户要求：**每个 agent 各用各的 base URL/key**。这一节现在是 `model_config` 里
+# **reply 那个用途**的兼容视图（`QQBOT_REPLY_API_*` 就是它的任务级覆盖变量名）：
 #
-#     QQBOT_REPLY_API_BASE_URL / QQBOT_REPLY_API_MODEL / QQBOT_REPLY_API_KEY
+#     地址 = model_config.resolve("reply").base_url
+#           （任务级覆盖 → 全局地址 → **reply 那条 key 所绑的 provider 的地址**）
+#     模型 = 任务级覆盖 → 全局模型 → `tasks["reply"]` 里的真名
+#     key  = QQBOT_REPLY_API_KEY → 主 key
 #
-# **缺省行为逐字不变**：这三个都没配（或配了空串）时，回复 agent 拿到的就是
+# **缺省行为逐字不变**：三个都没配（或配了空串）时，回复 agent 拿到的仍是
 # 全局那一套——只配一把 key 的部署、干净 clone、测试全都照旧。
-# 反过来，只有回复那一路会换供应商：判定 / 记忆 / 审核仍然走全局地址。
 #
 # 写成函数而不是 import 期常量：面板热更与测试都靠"**调用时现读**环境"
 # （与 `agent_api_key` 同一条纪律）。空串一律当"没配"。
 
 
 def reply_api_base_url() -> str:
-    """回复 agent 的地址：专属的没配就回落全局地址（再没有就用代码默认）。"""
+    """回复 agent 的地址（= `model_config` 里 reply 那个用途的解析结果）。"""
 
-    return (get("QQBOT_REPLY_API_BASE_URL", "") or get("QQBOT_API_BASE_URL", "")
-            or API_BASE_URL)
+    return _model_config.resolve("reply").base_url
 
 
 def reply_api_model() -> str:
-    """回复 agent 的模型名：专属的没配就回落全局模型。"""
+    """回复 agent 的模型名（任务级覆盖 → 全局模型 → `tasks` 里的真名）。"""
 
-    return get("QQBOT_REPLY_API_MODEL", "") or get("QQBOT_API_MODEL", "") or API_MODEL
+    return _model_config.resolve("reply").model
 
 
 def reply_api_key() -> str:
     """回复 agent 的 key：专属的没配就回落主 key（`QQBOT_API_KEY`）。
 
-    与 `agent_api_key` 同一个语义：分 key 只是"出问题只吊销那一把"，
-    不比主 key 多出任何隔离（并发限额与缓存容量是账号级的）。
-
-    **空串要当成"没有设置"**（第三项那个常量兜底就是干这个的）：环境里留一个空值
-    会把 `.env` 的填充挡在门外（`load_env_file` 不覆盖已存在的键），
-    2026-10-01 出过一次这样的事故——回复 agent 的 key 变空、模型全 401。
+    **空串要当成"没有设置"**：环境里留一个空值会把 `.env` 的填充挡在门外
+    （`load_env_file` 不覆盖已存在的键），2026-10-01 出过一次这样的事故——
+    回复 agent 的 key 变空、模型全 401。所以最后那一项是 `.env` 带入的常量。
     """
 
-    return (get("QQBOT_REPLY_API_KEY", "") or get("QQBOT_API_KEY", "")
-            or get("API_KEY", "") or API_KEY)
+    return (_model_config.resolve("reply").api_key
+            or _compat("QQBOT_API_KEY", API_KEY) or get("API_KEY", ""))
 
 
 def _csv_ids(name: str) -> frozenset[str]:
@@ -292,8 +340,14 @@ MAIL_REPORT_MAX_TRIES = _int("QQBOT_MAIL_REPORT_MAX_TRIES", 3)
 # 以前写信借用的是**回复 agent** 的 client（同一把 key、同一个 user_id），
 # 于是"信"与"群聊"共用一份缓存隔离空间；信的 prompt 前缀又大又恒定，
 # 分开之后它才能自己吃满缓存，而且成本/排障也能分开看。
-# 不配 `QQBOT_MAIL_API_KEY` 时回落主 key（分 key 只是"出问题只吊销那一把"）。
-MAIL_API_KEY = get("QQBOT_MAIL_API_KEY", "")
+# 不配 `QQBOT_LETTER_API_KEY` 时：
+#   `model_config` 里 letter 那条 key 的回落项是 **reply 那把 mimo key**（同家，
+#   所以回落也不会造成"A 家 key 打 B 家地址"）；下面这个常量是**更老的**名字
+#   `QQBOT_MAIL_API_KEY` 的兼容读数——历史部署可能只填了它。
+LETTER_API_KEY = _compat("QQBOT_LETTER_API_KEY",
+                         _compat("QQBOT_MAIL_API_KEY", ""))
+#: 老名字，历史部署 / 测试可能在读。语义就是"写信那一路的 key"。
+MAIL_API_KEY = _compat("QQBOT_MAIL_API_KEY", "")
 MAIL_USER_ID = get("QQBOT_MAIL_USER_ID", "qqbot-letter")
 
 # --- 读信回信（2026-09-30 用户要求）-----------------------------------------
@@ -325,7 +379,7 @@ MAIL_REPLY_ENABLED = get("QQBOT_MAIL_REPLY", "1").lower() not in {"0", "false", 
 VISION_ENABLED = get("QQBOT_VISION", "1").lower() not in {"0", "false", "no", "off"}
 VISION_MODEL = get("QQBOT_VISION_MODEL", "deepseek-flash")
 VISION_USER_ID = get("QQBOT_VISION_USER_ID", "qqbot-vision")
-VISION_API_KEY = get("QQBOT_VISION_API_KEY", "")
+VISION_API_KEY = _compat("QQBOT_VISION_API_KEY", "")
 
 # --- 群管理（2026-09-30 用户要求；**只有超管能用**）--------------------------
 # 命令挂在 `/super` 下（`/super ban @某人 30` 等），所以群管理员那套碰不到。
@@ -397,7 +451,7 @@ MEMORY_USER_ID = get("QQBOT_MEMORY_USER_ID", "qqbot-memory")
 # 交回回复 agent 重写一次（判不过的轮次因此多一次调用）。它不再产出正文，
 # 所以上面那句"10 条改 5 条"是**历史**——见 `style_reviewer.py` 的模块说明。
 # 语义：配了 `QQBOT_REVIEW_API_KEY` 就自动启用；`QQBOT_STYLE_REVIEW=0/1` 可以强行关或开。
-REVIEW_API_KEY = get("QQBOT_REVIEW_API_KEY", "")
+REVIEW_API_KEY = _compat("QQBOT_REVIEW_API_KEY", "")
 REVIEW_ENABLED = _enabled("QQBOT_STYLE_REVIEW", "1" if REVIEW_API_KEY else "0")
 REVIEW_USER_ID = get("QQBOT_REVIEW_USER_ID", "qqbot-style-review")
 
