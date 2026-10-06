@@ -19,6 +19,14 @@ from . import wire
 
 
 def register(registry) -> None:
+    # **渠道自己声明**"我说的话可以算主人"（2026-10-06）：核心原来在 `runtime.py` 里
+    # 写死 `_OWNER_CHANNELS = ("mail",)`——核心知道有一个叫 mail 的渠道。现在反过来，
+    # 渠道在 `register()` 里说一句，核心只问"这个渠道声明过吗"。
+    # 不接也能跑（核心那份过渡引导项还留着，行为与改之前一致），接了才是正确形状。
+    # 声明**不授予任何命令权限**，最终仍要同时满足 `claims_owner is True`——
+    # 判定在核心（`runtime._SeamBinder`），见 `plugins.provide_owner_channel`。
+    registry.provide_owner_channel("mail")
+
     # **前置能力**：把"给操作者发一封普通邮件"开放给别的插件（`registry.mail`）。
     # 放在最前面：后置插件（`outage_notice`）的 `register()` 会**用它**，
     # 而 `discover()` 保证前置插件的 `register()` 先整个跑完（见 `REQUIRES`）。
