@@ -30,7 +30,10 @@ const TABS = [
   ["private", "私聊"],
   // 「记忆 → 人物画像」：画像就是记忆里的一类（`kind='profile'`，见 `viewPersonProfiles`）。
   ["memory", "记忆", { sub: ["memory_profile", "人物画像"] }],
-  ["knowledge", "知识库"],
+  // 「知识库 → 金句 / 黑话」（2026-10-06 用户："金句我看应该划到知识库里"、"还有黑话"）：
+  // 两样都是她**从群里学来的东西**（表情含义表 + 风格/语境笔记 / 黑话词条），
+  // 挂在「知识库」下面，不占顶层分区。同一条机制，`sub` 这次放了**两个**子项。
+  ["knowledge", "知识库", { sub: [["knowledge_quotes", "金句"], ["knowledge_slang", "黑话"]] }],
   ["plugins", "插件"],
 ];
 
@@ -76,12 +79,27 @@ function labelOf(id) {
   }
   for (const entry of TABS) {
     if (entry[0] === id) return entry[1];
-    // 子项：`["memory", "记忆", { sub: ["memory_profile", "人物画像"] }]`。
-    // 名字只写在**父项那一行**里——这就是"它属于谁"的唯一声明处。
-    const sub = entry[2] && entry[2].sub;
-    if (sub && sub[0] === id) return sub[1];
+    // 子项：名字只写在**父项那一行**里——这就是"它属于谁"的唯一声明处。
+    for (const [subId, label] of subItems(entry)) {
+      if (subId === id) return label;
+    }
   }
   return id;
+}
+
+/* 子项声明（`TABS` 里那一行的第三个字段）：可以放**一个**子项，写成一对
+ * `["memory_profile", "人物画像"]`；也可以放**一串**，写成一组对
+ * （`[["knowledge_quotes", "金句"], ["knowledge_slang", "黑话"]]`）。
+ * `subItems()` 把两种写法归一成"一串对"——取名（`labelOf`）只读归一后的结果，
+ * 所以"它属于谁"仍然**只在父项那一行声明一次**，不会多出第二个真相源。
+ *
+ * 为什么允许两种写法：一个子项写成扁平的那一对更好读（「记忆 → 人物画像」本来
+ * 就是这一种，2026-10-06 用户："我应该说过人物画像属于记忆的子项目"）；
+ * 两个以上就只能是"一串对"。归一放在这一处，别处只管用。 */
+function subItems(entry) {
+  const sub = entry[2] && entry[2].sub;
+  if (!sub || !sub.length) return [];
+  return typeof sub[0] === "string" ? [sub] : sub;
 }
 
 /* 左栏是**卡片**，每张卡片 = 一个功能区，卡片的子项（群聊/私聊、每个插件）就排在卡片里。
@@ -108,7 +126,11 @@ const CARDS = [
   // 见 `viewPersonProfiles` 那段注释）。子项写在**同一张卡里**并标 `sub: 1`：
   // 它不是顶层分区、也不挂账号页（用户原话就是"子项目"）。
   { title: "记忆", items: ["memory", { id: "memory_profile", sub: 1 }] },
-  { title: "知识库", items: ["knowledge"] },
+  { title: "知识库", items: ["knowledge",
+    // 「金句 / 黑话」是她**从群里学来的东西**（用户 2026-10-06："金句我看应该划到
+    // 知识库里"、"还有黑话"）。子项写在**同一张卡里**并标 `sub: 1`——它们不是顶层
+    // 分区，也不是同一层的第二个、第三个口（名字只写在 `TABS` 里那一次）。
+    { id: "knowledge_quotes", sub: 1 }, { id: "knowledge_slang", sub: 1 }] },
   // 插件卡：每个插件一个 tab（默认只列预装的）。
   { title: "插件", items: ["plugins"] },
   // ⚠️ 这四个是**运维页**，用户给的结构（账号与设备 + 聊天/记忆/知识库/插件）
@@ -162,6 +184,11 @@ const ICON_ALIAS = {
   private: "letter",       // 私聊：信件图标
   plugins: "add",          // 插件：加号（可插拔）
   memory_profile: "credential",  // 人物画像：也是"一个人"那张凭证图标（借）
+  // 「知识库 → 金句 / 黑话」两个子项也是**借**的图标（加新图标要走
+  // `data/tmp_miuix_icons.py`，不该手画）：金句是"她自己说过的话"，借信件那张；
+  // 黑话是一份带解释的词条表，借"规则清单"那种列表图标。
+  knowledge_quotes: "letter",
+  knowledge_slang: "approve_rule",
 };
 
 function icon(name, cls = "") {
@@ -191,6 +218,9 @@ const TAB_NOTES = {
   memory: "记忆只能删、不能改：写入只走记忆维护 agent，面板顶多把有问题的删掉（删前先归档）",
   memory_profile: "记忆里的「人物画像」：一个人一张，跟着人走、不按词检索；同样只能删不能改",
   knowledge: "知识库可以改：下面那份面板块能增 / 改 / 删；基准语料是只读的",
+  // 两个子项的副标题：`render()` 用 `textContent` 写它们，所以**不能**用 markdown 记号。
+  knowledge_quotes: "金句：从她自己的话里学来的——按群的表情含义表，以及风格 / 语境笔记（可纠正方向、可停用笔记）",
+  knowledge_slang: "黑话：她听到别人解释时记下来的词条（词 / 释义 / 谁解释的与原句 / 听到几次 / 改口）",
   plugins: "插件：每个插件一个 tab；预装的不给卸，webui 自己也不给卸（骨架，接口待接）",
 };
 
@@ -743,6 +773,215 @@ async function viewKnowledge() {
       ], chunks.rows || [], { widths: ["18%", "32%", "50%"] }));
 }
 
+/* ---------- 金句 / 黑话（知识库的两个**子项**）----------
+ *
+ * 用户 2026-10-06 定的位置：*"金句我看应该划到**知识库**里"*、*"还有**黑话**"*。
+ * 这两样都是她**从群里学来的东西**，本体为此开了一条接缝 `registry.ui.learned`
+ * （`UiSeams.learned`，七个函数）——面板这边只用它，**不读 `data/` 下的文件、
+ * 不碰记忆、不碰对话入口**。层级只在 `TABS` 那一行里声明（见 `subItems`）。
+ *
+ * 两页的分工（用户口径里的两句话就是这两页的开场白）：
+ *   `knowledge_quotes` 金句 —— 她**从她自己的话里**学来的：群里的表情是什么意思，
+ *                              以及她自己的说法与场合（风格 / 语境笔记）；
+ *   `knowledge_slang`  黑话 —— 她**听到别人解释**记下来的词条。
+ *                              她**不会主动发问**，所以这里只有"听到的"和"你写的"。
+ */
+
+//: 一页最多铺多少条词条（黑话最多 500 条；面板是小工具，不是全库浏览器）。
+const SLANG_LIMIT = 60;
+
+//: 「方向」那一列的四档**不在这里写**：选项由后端从核心的 `SENSE_LABELS` 里取来
+//: （`data.senses`），撤销人工改动的取值也从后端来（`data.auto_sense`）——
+//: 面板自己抄一份词表，迟早跟 `/super quote` 对不上。
+
+async function viewKnowledgeQuotes() {
+  const chosen = String(state.last.quoteGroup || "").trim();
+  const data = await api("/api/knowledge/quotes"
+    + (chosen ? "?group_id=" + encodeURIComponent(chosen) : ""));
+  const current = String(data.group_id || "");
+  const groups = (data.groups || []).map((id) => String(id));
+  // 手填过的群号可能不在候选里：把它一并列上，免得选择框跳回别的群。
+  const known = (current && !groups.includes(current)) ? [current].concat(groups) : groups;
+  const options = known.length
+    ? known.map((id) => `<option value="${esc(id)}"${
+      id === current ? " selected" : ""}>${esc(id)}</option>`).join("")
+    : '<option value="">（还没有群）</option>';
+  const picker = `<div class="row">
+      <select id="quote-group" aria-label="看哪个群">${options}</select>
+      <input id="quote-group-manual" type="text" placeholder="或手填群号">
+      <button id="quote-go">看这个群</button>
+    </div>
+    <p class="hint">候选群 = 她这会儿在听的群，加上黑话里出现过的群；都不在就手填群号。
+      金句是按群记的（同一个表情在不同群可以完全是两个意思）。</p>`;
+
+  const head = card("金句（知识库里的一个子项）", `
+    <p class="hint">这里的每一条都是<b>从她自己的话里学来的</b>：她说过一句、群里的人给它
+      贴了表情、贴完之后群里怎么接的——顺着这些线索，她记下两样东西：
+      <b>每个表情在这个群里是什么意思</b>，以及<b>她自己的说法与场合</b>
+      （风格 / 语境笔记）。</p>
+    <p class="hint">面板能改的是<b>方向</b>：某个表情在这个群被判歪了，就把它改成
+      赞成 / 不赞成 / 其它 / 还看不出来；改过的行上多一颗<b>恢复自动</b>，
+      点一下就把你那一下撤掉、回到她自己学的那份。笔记可以停用——停用之后她不再拿它当材料。</p>
+    ${data.path ? `<p class="hint">这份数据在 <code>${esc(data.path)}</code>；
+      面板只通过装配点给的接口读写它，不自己碰这个文件。</p>` : ""}
+    ${picker}`);
+
+  if (!data.available) {
+    return head + card("这一份现在读不到", `<p class="hint">可能是金句那块还没装上
+      （bot 刚起来、学习那边还没接上），也可能是这个群号是空的。换一个群，或者等一会儿刷新。
+      读不到的时候面板<b>不编一份空的给你看</b>——那会让人以为"她什么都没学到"。</p>`);
+  }
+
+  const senses = data.senses || [];
+  const sensesOf = (value) => senses.map((item) =>
+    `<option value="${esc(item.value)}"${item.value === value ? " selected" : ""}>${
+      esc(item.label)}</option>`).join("");
+  const meanings = data.meanings || [];
+  const meaningRows = meanings.map((item) => {
+    const group = String(data.group_id || "");
+    const emoji = String(item.emoji_id || "");
+    const label = item.sense_label || item.sense || "还看不出来";
+    const main = `<div class="pref-title mono">${esc(emoji)}</div>`
+      + `<div class="pref-summary">`
+      + `<span class="tag ${item.manual ? "restart" : "live"}">${
+        item.manual ? "你手工改过" : "她自己学的"}</span> `
+      + `${esc(label)}${item.note ? " · " + esc(item.note) : ""}</div>`;
+    return prefRow(main,
+      `<select class="q-sense" data-group="${esc(group)}" data-emoji="${esc(emoji)}"
+         aria-label="改成哪个方向">${sensesOf(item.sense)}</select>`
+      + `<button class="q-save" data-group="${esc(group)}" data-emoji="${esc(emoji)}">改</button>`
+      + (item.manual
+        ? `<button class="q-auto" data-group="${esc(group)}" data-emoji="${esc(emoji)}"
+             data-auto="${esc(data.auto_sense || "")}">恢复自动</button>`
+        : ""),
+      // `learned-row`：中等档与窄屏下把控件整行挪到标题下面（见 app.css 那一段）
+      // ——不然"恢复自动"四个字会被挤成竖排、下拉框里的字被截断（截图核对抓到）。
+      { icon: "judge", extra: " learned-row" });
+  }).join("");
+
+  const notes = data.notes || [];
+  const noteRows = notes.map((note) => prefRow(
+    `<div class="pref-title">${esc(note.when || "（没写场合）")}</div>`
+    + `<div class="pref-summary">${
+      note.kind === "style" ? "她自己的说法" : "什么场合说什么"} · ${esc(note.note)}</div>`,
+    `<input class="switch note-toggle" type="checkbox" data-id="${esc(note.id)}"${
+      note.enabled ? " checked" : ""} aria-label="这条笔记还让它用">`,
+    { icon: "edit" })).join("");
+
+  return head
+    + card(`表情含义表（群 ${data.group_id || "—"}）`, meanings.length
+      ? `<p class="hint">「她自己学的」是模型按群里的样本判的；「你手工改过」是你（或者
+         <code>/super quote</code>）压过的那一条——它优先于自动判的那份。</p>
+        <div class="pref-list">${meaningRows}</div>`
+      : `<p class="hint">这个群还没有表情含义表：她还没在这个群里攒够"谁给哪句话贴了什么表情"的样本。</p>`)
+    + card("她的说法与场合（笔记）", notes.length
+      ? `<p class="hint">停用一条之后，她<b>不再拿它当材料</b>（笔记本身还留在这里，随时能开回来）。
+        这些笔记<b>不按群分</b>：不论上面选的是哪个群，看到的都是同一份——它讲的是她自己的说法与场合。</p>
+        <div class="pref-list">${noteRows}</div>`
+      : `<p class="hint">还没有笔记。</p>`);
+}
+
+async function viewKnowledgeSlang() {
+  const chosen = String(state.last.slangGroup || "").trim();
+  const data = await api("/api/knowledge/slang"
+    + (chosen ? "?group_id=" + encodeURIComponent(chosen) : ""));
+  const entries = data.entries || [];
+  const groups = (data.groups || []).map((id) => String(id));
+  const options = '<option value="">所有群</option>' + groups.map((id) =>
+    `<option value="${esc(id)}"${id === chosen ? " selected" : ""}>${esc(id)}</option>`).join("");
+  const filter = `<div class="row">
+      <select id="slang-group" aria-label="看哪个群的黑话">${options}</select>
+      <button id="slang-group-go">只看这个群</button>
+      <span class="hint">词条是<b>按群</b>分开记的：同一个词在两个群里是两条。</span>
+    </div>`;
+
+  const head = card("黑话（知识库里的一个子项）", `
+    <p class="hint">这些是<b>她听到别人解释</b>、顺手记下来的词条：群里有人说
+      "X 就是 Y 的意思"，她就把 <b>X</b> 与<b>那句原话</b>一起收下来——
+      所以每条词条都能回溯到"谁在哪一句里这么说的"。</p>
+    <p class="hint"><b>她不会主动发问。</b>这里只会有两种来源：群里有人解释过（她听来的），
+      以及你在这里改的（面板记成一次改口）。所以词条少是正常的——那是这个群还没人解释过。</p>
+    <p class="hint">面板能改<b>释义</b>（改一次就记一次改口，原句证据留着）、能<b>标错</b>
+      （只动状态，释义与证据一个字不改）、能<b>删</b>。改释义也能顺手<b>新建</b>一条：
+      她没听过、但你知道的词，直接写进来就行。</p>
+    ${filter}`);
+
+  if (!data.available) {
+    return head + card("这一份现在读不到", `<p class="hint">黑话那块还没装上
+      （bot 刚起来、学习那边还没接上）。刷新一下再看——读不到时面板不编一份空的给你看。</p>`);
+  }
+  if (!entries.length) {
+    return head + card("还没有词条", `<p class="hint">${
+      chosen ? "这个群" : "哪个群"}都还没有听来的黑话。她只在有人<b>解释</b>的时候才记，
+      而且不会主动问——所以空着是正常的。</p>`);
+  }
+
+  const shown = entries.slice(0, SLANG_LIMIT);
+  const body = shown.map((entry) => {
+    const group = String(entry.group_id || "");
+    const word = String(entry.word || "");
+    const explainers = entry.explainers || [];
+    const revisions = entry.revisions || [];
+    // 「谁 / 什么时候 / 来自」挤成**一格三行**，而不是三列：
+    // 内容区在中等档只剩 ~575px，五列平摊时"什么时候"（19 个字符的时间戳）那一格
+    // 装不下，`nowrap` 会让它**溢到旁边那一列上、两列的字叠在一起**——2026-10-06
+    // 截图核对时抓到的（与「人物画像」里"类别"那一列同一个坑）。
+    // 现在只剩三列：长的那两列（原句、改口）拿到了一半以上的宽度。
+    const explainerTable = explainers.length ? table([
+      {
+        label: "谁解释的", html: true,
+        get: (r) => `<b>${esc(String(r.name || r.user_id || "（没留下是谁）"))}</b>`
+          + `<div class="hint">${r.source === "edited" ? "面板改的" : "她听到的"} · ${
+            esc(ts(r.at))}${Number(r.count) > 1 ? ` · 这么说过 ${num(r.count)} 次` : ""}</div>`,
+      },
+      { label: "那次的说法", get: (r) => String(r.definition || "—") },
+      { label: "原句证据", wide: true, get: (r) => String(r.quote || "（原句没留下）") },
+    ], explainers, {
+      cols: "cols-learned",
+      widths: ["26%", "24%", "50%"],
+    }) : '<p class="hint">这条没有留下"谁解释的"。</p>';
+    const revisionTable = revisions.length ? table([
+      {
+        label: "什么时候 / 谁", html: true,
+        get: (r) => `<b>${esc(ts(r.at))}</b><div class="hint">${esc(String(r.by || "—"))}</div>`,
+      },
+      { label: "从 → 到", wide: true, get: (r) => `${r.from || "（空）"} → ${r.to || "（空）"}` },
+      { label: "当时的原句", wide: true, get: (r) => String(r.quote || "（原句没留下）") },
+    ], revisions, { cols: "cols-revision", widths: ["24%", "30%", "46%"] }) : "";
+    const wrong = Boolean(entry.wrong);
+    return card(`${word} · 群 ${group}`, `
+      <p class="pref-summary">
+        <span class="tag ${wrong ? "restart" : "live"}">${wrong ? "你标过错" : "在用的"}</span>
+        听到 <b>${num(entry.times)}</b> 次 ·
+        第一次 ${esc(ts(entry.first_seen))} · 最近一次 ${esc(ts(entry.last_seen))} ·
+        ${num(explainers.length)} 个人解释过${revisions.length
+          ? ` · 改口 ${num(revisions.length)} 次` : ""}
+      </p>
+      <div class="card-inline">
+        <div class="pref-title">释义</div>
+        <div class="row">
+          <input class="s-def wide" type="text" value="${esc(entry.definition || "")}"
+                 aria-label="这个词的释义">
+          <button class="s-save" data-group="${esc(group)}" data-word="${esc(word)}">保存释义</button>
+          <button class="s-wrong" data-group="${esc(group)}" data-word="${esc(word)}"
+                  data-wrong="${wrong ? "1" : "0"}">${wrong ? "取消标错" : "标错"}</button>
+          <button class="s-del danger" data-group="${esc(group)}" data-word="${esc(word)}">删</button>
+        </div>
+        <p class="hint">保存会记一次改口（"从 → 到"在下面）；这个词要是本来不在库里，
+          保存就是新建一条。释义按她听到的原话存，太长或者不含信息量的会被护栏挡回来。</p>
+      </div>
+      <div class="pref-group-title">谁解释的（原句就是证据）</div>
+      ${explainerTable}
+      ${revisionTable ? `<div class="pref-group-title">改口修订</div>${revisionTable}` : ""}`);
+  }).join("");
+
+  const more = entries.length > SLANG_LIMIT
+    ? `<p class="hint">这一页只铺了前 ${SLANG_LIMIT} 条（现在一共 ${num(entries.length)} 条，
+       新的在前）。要全量看，用 <code>/super slang</code>，或者按群筛。</p>`
+    : "";
+  return head + more + body;
+}
+
 async function viewLogs() {
   const feature = state.last.logFeature || "reply";
   const data = await api("/api/logs?feature=" + encodeURIComponent(feature) + "&limit=20");
@@ -1202,6 +1441,68 @@ function bind() {
       state.last.memoryStatus = el.dataset.status;
       render();
     })) return;
+    // --- 知识库 → 金句 / 黑话（她学来的东西，2026-10-06）------------------------
+    // 这几颗控件长在页面里（不是左栏），所以走委托、不走 `init()`。
+    if (target.id === "quote-go") {
+      // 手填优先：候选列表里没有哪个群时，这是唯一能到那儿的入口。
+      state.last.quoteGroup = ($("quote-group-manual").value || "").trim()
+        || ($("quote-group") ? $("quote-group").value : "");
+      render();
+      return;
+    }
+    if (act("q-save", async (el) => {
+      const box = el.closest(".pref").querySelector(".q-sense");
+      const label = box.options[box.selectedIndex]
+        ? box.options[box.selectedIndex].text : box.value;
+      const done = await write("/api/knowledge/quotes", {
+        action: "correct", group_id: el.dataset.group, emoji_id: el.dataset.emoji,
+        sense: box.value,
+      }, "把表情 " + el.dataset.emoji + " 在这个群的方向改成「" + label + "」？");
+      if (done) render();
+    })) return;
+    if (act("q-auto", async (el) => {
+      const done = await write("/api/knowledge/quotes", {
+        action: "correct", group_id: el.dataset.group, emoji_id: el.dataset.emoji,
+        sense: el.dataset.auto,
+      }, "把表情 " + el.dataset.emoji + " 恢复成她自己学的方向？");
+      if (done) render();
+    })) return;
+    if (target.classList.contains("note-toggle")) {
+      const on = target.checked;
+      const done = await write("/api/knowledge/quotes", {
+        action: "note", note_id: target.dataset.id, enabled: on,
+      }, (on ? "恢复" : "停用") + "这条笔记？");
+      if (done) render();
+      // 取消时开关得**弹回去**：不然它会留在"已改"的样子，而库里什么都没变。
+      else target.checked = !on;
+      return;
+    }
+    if (target.id === "slang-group-go") {
+      state.last.slangGroup = $("slang-group").value;
+      render();
+      return;
+    }
+    if (act("s-save", async (el) => {
+      const box = el.closest(".card-inline").querySelector(".s-def");
+      const done = await write("/api/knowledge/slang", {
+        action: "update", group_id: el.dataset.group, word: el.dataset.word,
+        definition: box.value,
+      }, "把「" + el.dataset.word + "」的释义改成这句话？");
+      if (done) render();
+    })) return;
+    if (act("s-wrong", async (el) => {
+      const wrong = el.dataset.wrong !== "1";
+      const done = await write("/api/knowledge/slang", {
+        action: "mark_wrong", group_id: el.dataset.group, word: el.dataset.word, wrong: wrong,
+      }, wrong ? "把「" + el.dataset.word + "」标成错的？" : "取消「" + el.dataset.word + "」的标错？");
+      if (done) render();
+    })) return;
+    if (act("s-del", async (el) => {
+      const done = await write("/api/knowledge/slang", {
+        action: "delete", group_id: el.dataset.group, word: el.dataset.word,
+      }, "删掉「" + el.dataset.word + "」这条词条？删了就没了（原句证据也一起没）");
+      if (done) render();
+    })) return;
     if (target.id === "kb-search") {
       state.last.knowledgeQuery = $("kb-q").value;
       render();
@@ -1506,6 +1807,10 @@ const VIEWS = {
   overview: viewOverview, usage: viewUsage, memory: viewMemory, knowledge: viewKnowledge,
   // 记忆的子项（左栏「记忆」卡里的第二行）：一个人一张画像。
   memory_profile: viewPersonProfiles,
+  // 知识库的两个子项（左栏「知识库」卡里）：她**从群里学来的东西**。
+  // 金句 = 从她自己的话里学来的（表情含义表 + 风格/语境笔记）；
+  // 黑话 = 她听到别人解释记下来的词条。取数都只走 `registry.ui.learned`。
+  knowledge_quotes: viewKnowledgeQuotes, knowledge_slang: viewKnowledgeSlang,
   logs: viewLogs, settings: viewSettings, group: viewGroup, actions: viewActions,
   history: viewHistory,
   // ↓ 2026-10-03 按新架构开的五个口子（骨架；分组依据见 `CARDS` 上面的注释）

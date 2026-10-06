@@ -989,6 +989,39 @@ textarea.tall { min-height: 260px; }
 .cols-profile col:nth-child(3) { width: 44%; }
 .cols-profile col:nth-child(4) { width: 16%; }
 
+/* 「知识库 → 黑话」里那两张表（谁解释的 / 改口修订）。三列，不挤：
+   时间戳与"她听到的 / 面板改的"都挪进"谁"那一格里分两行——五列平摊时长的那一列
+   在中等档（内容区 ~575px）装不下，`nowrap` 会让它溢到旁边列上（实测抓到过）。
+   最后一列是原句（最长 200 字），给它一半宽度并允许任意位置断开。 */
+.cols-learned col:nth-child(1) { width: 26%; }
+.cols-learned col:nth-child(2) { width: 24%; }
+.cols-learned col:nth-child(3) { width: 50%; }
+.cols-revision col:nth-child(1) { width: 24%; }
+.cols-revision col:nth-child(2) { width: 30%; }
+.cols-revision col:nth-child(3) { width: 46%; }
+/* 表格单元格里那一行小字（谁解释的下面那行）不要额外留白 */
+td .hint { margin: 2px 0 0; }
+
+/* 「知识库 → 金句」里那几行（表情 / 方向 / 改 / 恢复自动）：中等档与窄屏下，
+   右端那三个控件塞不进 `.pref-end` 的 52%（2026-10-06 截图核对抓到："恢复自动"
+   被挤成竖排四个字、下拉框里的"其它（看热闹 / 取笑 / 说不上）"被截成"其它（看热…"）。
+   所以这一档让控件**整行换到标题下面**：`flex-wrap` + 两半各占满一行。
+   宽屏（≥1100px，内容栏 ~960px）不用动——那里一行放得下。 */
+@media (max-width: 1099px) {
+  .pref.learned-row { flex-wrap: wrap; }
+  .pref.learned-row .pref-main { flex: 1 1 100%; }
+  .pref.learned-row .pref-end {
+    flex: 1 1 100%;
+    max-width: none;
+    flex-wrap: wrap;
+  }
+}
+
+/* 黑话那条"释义"输入框：`.wide` 只给最小宽（220px），这里让它自己长。
+   基准取 220 而不是 260：中等档（内容区 ~543px 的表宽）里"输入框 + 保存释义 +
+   取消标错 + 删"刚好排得下一行（截图核对：260 时"删"会单独落到第二行）。 */
+.row input.s-def { flex: 1 1 220px; }
+
 /* 操作记录：一条一块（不用表格，六列在 1180px 里平摊必然撑爆） */
 .audit-item { padding: 12px 14px; }
 .audit-head {
