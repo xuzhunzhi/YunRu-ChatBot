@@ -385,5 +385,157 @@ class PersonProfilePlacementTests(unittest.TestCase):
                          "「记忆」页又把画像画了一遍——同一件事只在一个地方显示")
 
 
+class LearnedUnderKnowledgeTests(unittest.TestCase):
+    """判据（3）：**金句 / 黑话只许出现在知识库下面**（2026-10-06）。
+
+    用户原话：*"金句我看应该划到**知识库**里"*、*"还有**黑话**"*。两样都是她**从群里
+    学来的东西**，由本体那条窄接缝 `registry.ui.learned` 提供。这里钉四件事：
+
+    1. **位置**：`knowledge_quotes` / `knowledge_slang` 只出现在标题为「知识库」的那张
+       卡里，且必须是**子项**写法（`{ id: …, sub: 1 }`）——不是同层的第二、第三个口；
+    2. **层级只声明一处**：名字与从属关系只写在 `TABS` 的「知识库」那一行里，每个 id
+       在整张表里只出现一次（这一轮把 `sub` 从"一对"扩成"一串对"，见 `subItems()`）；
+    3. **不新开通道**：两个页面里每个 `api(...)` 都必须指向 `/api/knowledge/`，
+       页面代码里不许出现读文件/查库的字样（判据与「记忆 → 人物画像」那条同一套）；
+    4. **接线还在**：两个页签在 `VIEWS` 里注册了，写入动作也都打在 `/api/knowledge/` 上。
+    """
+
+    #: 两个子项的 id 与它们**只许出现**在的那张卡。
+    IDS = ("knowledge_quotes", "knowledge_slang")
+    PARENT = "知识库"
+    #: 这两个页面取数/写数只许用的前缀。
+    API_PREFIX = "/api/knowledge/"
+    #: `TABS` 里子项那一行——`sub` 是**一串对**（两个子项）。
+    SUB_VECTOR = (r"\[\s*\"knowledge\"\s*,\s*\"知识库\"\s*,\s*\{\s*sub:\s*\[\s*"
+                  r"\[\s*\"knowledge_quotes\"\s*,\s*\"金句\"\s*\]\s*,\s*"
+                  r"\[\s*\"knowledge_slang\"\s*,\s*\"黑话\"\s*\]")
+
+    def setUp(self) -> None:
+        self.js = _asset("app.js")
+        self.cards = _cards(self.js)
+
+    def _card(self, title: str) -> dict[str, object]:
+        for card in self.cards:
+            if card["title"] == title:
+                return card
+        self.fail(f"`CARDS` 里没有标题为「{title}」的卡")
+
+    def test_the_two_learned_pages_only_ever_appear_under_knowledge(self) -> None:
+        """金句与黑话**只许**出现在「知识库」那张卡里——别处一处都不许有。"""
+
+        for page in self.IDS:
+            with self.subTest(page=page):
+                holders = [card["title"] for card in self.cards
+                           if page in _card_ids(card)]
+                self.assertEqual(
+                    holders, [self.PARENT],
+                    f"`{page}` 出现在了这些卡里：{holders}——它只能是「知识库」的子项")
+
+    def test_the_two_children_are_child_entries_not_top_level_pages(self) -> None:
+        """在「知识库」卡里，两个都必须是**子项**写法（`{ id: …, sub: 1 }`）。
+
+        为什么判这个：用户要的是**子项目**。写成平铺的三个口，`CARDS` 上看起来就是
+        同层的三页——栏里也就没法用缩进把从属关系表达出来（缩进见 `app.css` 的
+        `.rail-card-items button[data-sub]`）。
+        """
+
+        knowledge = self._card(self.PARENT)
+        for page in self.IDS:
+            self.assertIn(page, _card_ids(knowledge),
+                          f"「{self.PARENT}」卡里没有 {page} 这个口")
+            self.assertRegex(
+                str(knowledge["items"]),
+                r"\{\s*id:\s*\"" + page + r"\"\s*,\s*sub:\s*1\s*\}",
+                f"{page} 没标成子项（该写成 `{{ id: \"{page}\", sub: 1 }}`）")
+        self.assertEqual(_top_level_ids(knowledge), ["knowledge"],
+                         "「知识库」卡里除 'knowledge' 之外还有平铺的口——金句与黑话要是子项")
+        for other in ("账号与设备", "记忆", "聊天"):
+            self.assertNotIn(self.IDS[0], _card_ids(self._card(other)),
+                             "金句挂到别的分区去了（用户明说过：它属于知识库）")
+
+    def test_the_children_are_declared_once_in_the_parent_line(self) -> None:
+        """`TABS` 里它们只写在「知识库」那一行的 `sub` 里，各出现一次。
+
+        "层级只在一处声明"就落在这条上：占一行（`["knowledge_quotes", "金句"]` 那样）
+        就是"顶层页"的形状，层级就没了。这一轮 `sub` 从"一对"扩成"一串对"
+        （`subItems()` 归一，两种写法都认）——扩展本身也钉在这里：
+        写成别的形状（比如两个并列的 `sub` 键）当场失败。
+        """
+
+        tabs_vector = re.search(r"const TABS = \[(.*?)\n\];", self.js, re.S)
+        self.assertIsNotNone(tabs_vector, "app.js 里找不到页签名表 `TABS`")
+        vector = tabs_vector.group(1)
+        self.assertRegex(
+            vector, self.SUB_VECTOR,
+            "`TABS` 里金句与黑话没有写成「知识库」那一行的 `sub`（一串对，见 `subItems`）")
+        for page in self.IDS:
+            self.assertEqual(
+                len(re.findall(r"\"" + page + r"\"", vector)), 1,
+                f"`TABS` 里 `{page}` 出现了不止一次——它只该在「知识库」那一行里声明一次")
+        for label in ("金句", "黑话"):
+            self.assertEqual(
+                len(re.findall(r"\"" + label + r"\"", vector)), 1,
+                f"`TABS` 里「{label}」这个名字出现了不止一次——名字只写父项那一行")
+        # 归一那一处还在：`labelOf` 必须走它，否则"一串对"根本取不到名字。
+        self.assertIn("subItems(entry)", _uncomment(_function_body(self.js, "labelOf")),
+                      "`labelOf()` 没有走 `subItems()` —— 多子项那串对取不到名字")
+
+    def test_the_two_pages_only_ask_the_learned_paths(self) -> None:
+        """取数/写数只走面板**既有的** `/api/knowledge/*`（背后是 `learned` 接缝）。
+
+        "别新开内部通道"这条只能落在**前端请求的路径**上：两个页面里每一个
+        `api("…")` 都必须指向 `/api/knowledge/`——出现别的路径就说明有人绕过那条接缝
+        去取数了（比如直接读 `data/quote/profile.json`）。
+        """
+
+        for name in ("viewKnowledgeQuotes", "viewKnowledgeSlang"):
+            with self.subTest(view=name):
+                body = _uncomment(_function_body(self.js, name, kind="async"))
+                calls = re.findall(r"api\((`[^`]*`|\"[^\"]*\")", body)
+                self.assertTrue(calls, f"`{name}()` 里一个 `api(...)` 都没有")
+                for call in calls:
+                    self.assertIn(
+                        self.API_PREFIX, call,
+                        f"{name} 去打了 {call}——它的取数口只有 `/api/knowledge/*`")
+                for forbidden in ("sqlite", "open(", "readFile", "data/"):
+                    self.assertNotIn(forbidden, body.casefold(),
+                                     f"{name}() 里出现了 {forbidden}——取数只能走接缝")
+
+    def test_the_two_pages_are_wired_and_their_writes_go_the_same_way(self) -> None:
+        """两个页签在 `VIEWS` 里注册了，写入动作也只打在 `/api/knowledge/` 上。
+
+        反向钉住"别为了加页面把功能接线弄丢"：四类控件（改方向 / 恢复自动 / 停用笔记 /
+        黑话的三个动作）都在 `bind()` 的委托里，且 `write("…")` 的路径都是知识库那两个口。
+        """
+
+        views = _uncomment(_function_body(self.js, "render"))
+        self.assertIn("VIEWS[state.tab]", views, "`render()` 不再按 `VIEWS` 取页面")
+        vector = re.search(r"const VIEWS = \{(.*?)\n\};", self.js, re.S)
+        self.assertIsNotNone(vector, "app.js 里找不到 `VIEWS`")
+        for page, name in (("knowledge_quotes", "viewKnowledgeQuotes"),
+                           ("knowledge_slang", "viewKnowledgeSlang")):
+            self.assertRegex(vector.group(1), page + r":\s*" + name,
+                             f"`VIEWS` 里没有把 {page} 接到 {name}()")
+
+        bound = _uncomment(_function_body(self.js, "bind"))
+        # 认的是**真的接上**的那个形状（`if (act("q-save", async (el) => {`），
+        # 不是"文件里出现过这个名字"——按后者时，`if (false && act("q-auto"…` 这种
+        # "把控件禁掉"的改法照样能溜过去（变异核对里抓到的）。
+        for handler in ("q-save", "q-auto", "s-save", "s-wrong", "s-del"):
+            self.assertRegex(
+                bound, r"if \(act\(\"" + handler + r"\", async",
+                f"`bind()` 里 {handler} 那颗控件没有接上"
+                f"（要写成 `if (act(\"{handler}\", async (el) => {{ …`）")
+        self.assertRegex(
+            bound, r"if \(target\.classList\.contains\(\"note-toggle\"\)\)",
+            "`bind()` 里笔记那个开关（`note-toggle`）没有接上")
+        writes = re.findall(r"write\(\"(/api/[^\"]*)\"", bound)
+        self.assertTrue(writes, "`bind()` 里一个 `write(...)` 都没有")
+        learned_writes = [path for path in writes if path.startswith("/api/knowledge/")]
+        self.assertGreaterEqual(
+            len(learned_writes), 5,
+            f"金句/黑话的写入没有全走 `/api/knowledge/`：{writes}")
+
+
 if __name__ == "__main__":
     unittest.main()
