@@ -288,7 +288,7 @@ def test_a_plugin_cannot_impersonate_anyone_through_the_chat_seam() -> None:
 
 
 def test_the_owner_channel_whitelist_is_the_only_authorisation_switch() -> None:
-    """`_OWNER_CHANNELS` 是"身份由核心盖章"里**唯一的授权开关**，必须有守门测试。
+    """**能声明主人的渠道**是"身份由核心盖章"里唯一的授权开关，必须有守门测试。
 
     ## 为什么专门补这一条（2026-10-02 外部审查第四轮）
 
@@ -300,24 +300,45 @@ def test_the_owner_channel_whitelist_is_the_only_authorisation_switch() -> None:
 
     这条测试从三个方向钉它：
 
-    1. **白名单内容被钉死**——加宽它（例如为了新渠道顺手加一条）必须让这条红；
-    2. **在白名单里但 `claims_owner=False` 不算主人**——只认白名单是错的，
+    1. **能声明主人的渠道被钉死**——加宽它（例如为了新渠道顺手加一条）必须让这条红；
+    2. **在名单里但 `claims_owner=False` 不算主人**——只认名单是错的，
        两半是**与**关系；
-    3. **不在白名单里、声明 `True` 也不算主人**——把条件写成 `or True` 必须红。
+    3. **不在名单里、声明 `True` 也不算主人**——把条件写成 `or True` 必须红。
+
+    ## 2026-10-06（rebase 到"渠道自己声明"之后）：开关变成**两半**
+
+    核心原来写死 `_OWNER_CHANNELS = ("mail",)`（"核心知道有一个叫 mail 的渠道"）。
+    现在拆成：**核心那条过渡引导项** `_OWNER_CHANNELS_BUILTIN`（只剩 `mail`，
+    留着是为了不要求插件侧同时改）+ **渠道自己的声明**
+    `registry.provide_owner_channel(...)`（新渠道一律走这条，`mail` 插件已经在
+    `register()` 里声明了它自己）。所以第 1 条现在钉**两半都得对**：引导项逐字是
+    `("mail",)`，接缝上那份**有效清单**（引导项 ∪ 声明）也只有 `mail`。
+    判定那一侧（声明→算主人、没声明→不算、判定点只有一处）由本体侧
+    `tests/test_owner_channel_seam.py` 钉；这里钉的是**插件侧真的声明了、
+    而且清单没有被放宽**。
     """
 
+    from plugin_support import plugin_registry
     from qq_roleplay_bot import runtime
-    from qq_roleplay_bot.plugins import DeliveredMessage
+    from qq_roleplay_bot.plugins import DeliveredMessage, attach_plugins
 
-    # 1) 白名单本身：加一条渠道是**核心改动**，必须显式、且在这里被看见
-    assert runtime._OWNER_CHANNELS == ("mail",), (
-        "主人渠道白名单变了——这是授权开关，改它要同时改这条测试并说明理由。"
-        f"现在是 {runtime._OWNER_CHANNELS!r}")
+    # 1a) 开关的一半：核心那条**过渡引导项**——加一条渠道必须让这条红
+    assert runtime._OWNER_CHANNELS_BUILTIN == ("mail",), (
+        "主人渠道的过渡引导项变了——这是授权开关，改它要同时改这条测试并说明理由。"
+        f"现在是 {runtime._OWNER_CHANNELS_BUILTIN!r}")
+
+    # 1b) 开关的另一半：**渠道自己声明**（`mail` 插件接上了这一口，不再靠核心兜着）
+    registry = plugin_registry()
+    attach_plugins(registry)                     # 真装配：各插件的 register() 全跑一遍
+    assert registry.declared_owner_channels() == ("mail",), (
+        "能声明主人的渠道变了（`registry.provide_owner_channel`）——"
+        "这是授权开关，改它要同时改这条测试并说明理由。"
+        f"现在是 {registry.declared_owner_channels()!r}")
 
     engine = _Engine()
     seams = chat_seams_of(engine)
-    # 接缝暴露给插件看的那一份必须就是定义的那一份（两处漂移过就麻烦）
-    assert tuple(seams.owner_channels) == tuple(runtime._OWNER_CHANNELS)
+    # 接缝暴露给插件看的那一份必须就是**有效清单**（引导项 ∪ 声明），不许两处漂移
+    assert tuple(seams.owner_channels) == ("mail",), seams.owner_channels
 
     # 2) 在白名单里，但渠道**没有**声明自己是主人 → 只是普通发件人
     asyncio.run(seams.run(DeliveredMessage(
