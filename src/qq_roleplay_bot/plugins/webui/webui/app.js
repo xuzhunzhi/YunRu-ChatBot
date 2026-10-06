@@ -1363,18 +1363,71 @@ function lock(on) {
   }
 }
 
-//: 拿一个令牌去问一次**受保护**的接口：只有 200 才算过。
-//: 连不上也当没过——宁可让人停在登录页，也不放进去看到一个 401 的空面板。
-async function tokenWorks(value) {
-  if (!value) return false;
+/*: 拿一个令牌去问一次**受保护**的接口：只有 200 才算过。
+ *
+ * 连不上也当没过——宁可让人停在登录页，也不放进去看到一个 401 的空面板。
+ *
+ * 返回值是**一个结果**而不是布尔（2026-10-06 用户："令牌怎么输都不对"，实际是
+ * `/api/overview` 抛 ImportError 回了 500）：只回 true/false 的话，前端没法区分
+ * "你令牌错了"与"后台崩了"，于是把两种完全不同的情况都说成"令牌不对"，
+ * 把人往错的方向带（用户连试了两份 token）。`reason` 就是给文案用的三种情况。
+ */
+async function checkToken(value) {
+  if (!value) return { ok: false, status: 0, reason: "empty", detail: "" };
   try {
     const response = await fetch("/api/overview", {
       headers: { Authorization: `Bearer ${value}`, Accept: "application/json" },
     });
-    return response.ok;
+    let detail = "";
+    if (!response.ok) {
+      try {
+        const body = await response.json();
+        detail = String((body && (body.detail || body.error)) || "");
+      } catch (error) {
+        detail = "";
+      }
+    }
+    const reason = response.ok ? ""
+      : (response.status === 401 ? "bad_token"
+        : (response.status === 429 ? "throttled" : "backend"));
+    return { ok: response.ok, status: response.status, reason, detail };
   } catch (error) {
-    return false;
+    // fetch 自己抛 = 根本连不上（进程没起 / 端口不通），与令牌无关。
+    return { ok: false, status: 0, reason: "offline", detail: "" };
   }
+}
+
+//: 登录失败时给用户看的那句话。**分开说**，别把"后台崩了"说成"令牌不对"。
+//: 注意：这些文字是用 `textContent` 写进页面的，**不能出现 markdown 记号**
+//: （`**` 会原样显示出来）。
+function loginFailureText(result) {
+  const detail = result.detail ? " · " + result.detail : "";
+  if (result.reason === "bad_token") {
+    return "这个令牌不对。它是正在跑的那个实例的 data/webui_token"
+      + "（生产实例在 run/，开发实例在各自那棵树里——两份不一样），"
+      + "并且会随重启、换目录而变。";
+  }
+  if (result.reason === "throttled") {
+    return "试错次数太多，服务端先拦了一会儿（HTTP 429）。等一分钟再试。";
+  }
+  if (result.reason === "backend") {
+    return "后台报错了：面板连上了 bot，但这个接口自己崩了"
+      + "（HTTP " + result.status + detail
+      + "）。这不是令牌的问题，去看 bot 那边的日志。";
+  }
+  if (result.reason === "offline") {
+    return "连不上 bot：面板进程没在跑，或者地址、端口不对。";
+  }
+  return "";
+}
+
+//: 把失败原因写到登录卡上（成功时清掉）。
+function showLoginFailure(result) {
+  const box = $("login-error");
+  if (!box) return;
+  const text = loginFailureText(result);
+  box.hidden = !text;
+  box.textContent = text;
 }
 
 function init() {
@@ -1418,12 +1471,12 @@ function init() {
     event.preventDefault();
     const value = $("login-token").value.trim();
     if (!value) return;
-    if (!(await tokenWorks(value))) {
-      const box = $("login-error");
-      box.hidden = false;
-      box.textContent = "这个令牌不对（或者 bot 没在跑）。再看一眼 data/webui_token。";
+    const result = await checkToken(value);
+    if (!result.ok) {
+      showLoginFailure(result);      // 令牌不对 / 后台崩了 / 连不上，分开说
       return;
     }
+    showLoginFailure({ reason: "" });
     state.token = value;
     localStorage.setItem("yunru_panel_token", value);
     lock(false);
@@ -1463,11 +1516,20 @@ function init() {
   });
   bind();
   drawTabs();
-  // 登录门（2026-10-04 用户："打开webui首先打开登录页而非在左下角输入令牌"）：
+  // 登录门（2026-10-04 用户："打开 webui 首先打开登录页而非在左下角输入令牌"）：
   // **先验一次本地令牌**，过了才画面板；没过就停在登录页，不浪费一次 401 渲染。
-  tokenWorks(state.token).then((ok) => {
-    lock(!ok);
-    if (!ok) return;
+  //
+  // 2026-10-06：没过的时候要**把原因写在登录卡上**。以前这一步只 `lock(true)` 就完事，
+  // 于是"后台 500"跟"令牌不对"在屏幕上长得一模一样（用户的原话是"令牌怎么输都不对"）
+  // ——现在 5xx/连不上会直接显示"后台报错了……去看 bot 那边的日志"。
+  // 手里根本没有令牌（第一次打开）时不写任何字：那不是出错，别吓人。
+  checkToken(state.token).then((result) => {
+    if (!result.ok) {
+      if (state.token) showLoginFailure(result);
+      lock(true);
+      return;
+    }
+    lock(false);
     render();
     // 插件清单要联网取；拿到之后**重画一次侧栏**，插件卡里才会长出每个插件的 tab。
     loadPlugins().then(() => { drawTabs(); });
