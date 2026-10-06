@@ -6,9 +6,9 @@
 user 段的 DATA 区、不在 system 段"——那一条要在 import `stage3_runtime` **之前**
 改源码才有意义（模块级常量在 import 时就渲染好了，同一个进程里改文件已经晚了）。
 
-所以突变验证（把材料挪进 system / 写成命令式）要用**新进程 + 单文件**跑：
+所以突变验证（把材料挪进 system / 写成命令式）要用**新进程 + 单文件**跑::
 
-    .\.venv\Scripts\python.exe tests\run_single.py tests\test_quote_injection_shape.py
+    .\\.venv\\Scripts\\python.exe tests\\run_single.py tests\\test_quote_injection_shape.py
 
 普通情况下没人需要它；它是给"验一条判据真的能红"用的工具，跟
 `tests/check_module_removal.py` 同一类（门槛必须在仓库里，不能只写在文档里）。

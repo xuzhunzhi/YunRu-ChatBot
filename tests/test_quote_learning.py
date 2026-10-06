@@ -417,13 +417,19 @@ def test_an_empty_sample_set_does_not_produce_an_empty_note_and_costs_nothing() 
 
 
 def test_a_note_that_is_a_slice_of_her_own_line_is_dropped() -> None:
-    """**验收 3**：与样本原句逐字重合的笔记**丢掉**（注入的是风格，不是让她背的句子）。"""
+    """**验收 3**：与样本原句逐字重合的笔记**丢掉**（注入的是风格，不是让她背的句子）。
+
+    两种都要丢：整条就是原句，以及**"整条不等于原句、但里面抄了她一整句"**——
+    2026-10-06 拿真模型跑出来的第一批正是后面这种
+    （`直接拆开：'识别和翻译是两套'`），所以判据落在"有没有一段够长的原句"上。
+    """
 
     output = json.dumps({
         "reaction_meanings": [],
         "style_notes": [
-            {"when": "被问事实", "note": "WIN11那个只做了前半段"},     # 原句的一截 → 丢
-            {"when": "被问事实", "note": "先给结论，再补一句为什么"},  # 风格 → 留
+            {"when": "被问事实", "note": "WIN11那个只做了前半段"},          # 整条就是原句 → 丢
+            {"when": "被问事实", "note": "直接拆开：'识别和翻译是两套'"},   # 抄了一整句 → 丢
+            {"when": "被问事实", "note": "别人把两件事说混了就当场拆开"},   # 风格 → 留
         ],
         "context_notes": [],
     }, ensure_ascii=False)
@@ -433,10 +439,17 @@ def test_a_note_that_is_a_slice_of_her_own_line_is_dropped() -> None:
         _write_log(Path(tmp) / "chat.jsonl", _quote_rows(emoji_id=POSITIVE_EMOJI))
         assert asyncio.run(agent.run_once()) == 1
         notes = [item["note"] for item in agent.store.notes]
-        assert notes == ["先给结论，再补一句为什么"]
+        assert notes == ["别人把两件事说混了就当场拆开"]
+        dumped = json.dumps(agent.store.notes, ensure_ascii=False)
+        assert "识别和翻译是两套" not in dumped
+        assert "WIN11那个只做了前半段" not in dumped
         # 短口吻（几个字）是放行的：那是说法，不是句子。
-        assert "少来，别贫" not in notes
-        assert "WIN11那个只做了前半段" not in json.dumps(agent.store.notes, ensure_ascii=False)
+        short = parse_learning_output(json.dumps({
+            "reaction_meanings": [],
+            "style_notes": [{"when": "被夸", "note": "一句'少来'带过"}],
+            "context_notes": [],
+        }, ensure_ascii=False), source_text=HER_LINE)
+        assert [item["note"] for item in short["notes"]] == ["一句'少来'带过"]
 
 
 def test_over_long_and_imperative_notes_are_dropped() -> None:

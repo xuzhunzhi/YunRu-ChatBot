@@ -15,13 +15,11 @@
 它跑的是与 `test_quote_learning.py` 同一组判据（材料必须在 user 段的 DATA 区、
 措辞必须是交谈视角），只是把依赖砍到只剩"组装那一步"：
 
-    # 突变：把材料塞进 system 段
-    .\.venv\Scripts\python.exe tests\run_offline.py ...      # 全套会红
-    .\.venv\Scripts\python.exe -m unittest tests.slash_...   # 见下面那条命令（本文件单独跑）
+    # 突变：把材料塞进 system 段之后——
+    .\\.venv\\Scripts\\python.exe tests\\run_offline.py            # 全套也会红
+    .\\.venv\\Scripts\\python.exe tests\\run_single.py tests\\test_quote_injection_shape.py
 
-单独跑法（突变验证时用的就是它）：
-
-    .\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_quote_injection_shape.py"
+单独跑法就是上面第二条（突变验证时用的就是它）。
 """
 import unittest
 from unittest.mock import patch

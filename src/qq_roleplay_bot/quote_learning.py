@@ -62,6 +62,13 @@ logger = logging.getLogger(__name__)
 
 #: 一条笔记最多多少字。"短、可复用"的判据之一；太长就不是笔记，是作文。
 MAX_NOTE_CHARS = 40
+#: 笔记里**连着的这么多字**与样本原句逐字重合，就算"抄原句"（丢掉）。
+#:
+#: 为什么不是"整条相等"：2026-10-06 拿真模型跑出来的一批里，笔记长这样——
+#: `直接拆开：'识别和翻译是两套'`、`一句'没有，我是认真的'顶回去`。它们**整条**不等于原句，
+#: 却把她的整句照搬了进去，正是用户否掉的"变成复读源"。所以判据落在
+#: "**有没有一段够长的原句**"上：短口吻（"少来"）放行，整句不放行。
+VERBATIM_SPAN_CHARS = 5
 #: 一轮里最多存几条笔记（两份合起来）。多了不会被注入（见 MAX_NOTES_PER_REPLY）。
 MAX_NOTES = 24
 #: 一条回复里最多注入几条材料。
@@ -142,7 +149,10 @@ LEARNING_SYSTEM_PROMPT = """你是 YunRu 的 Quote Learning Agent。你不跟她
 ## 笔记的三条规矩（违反的会被丢掉）
 1. **用她自己的说法**，不要写成分析报告：不写"句式偏短""语气克制"这类评语，
    直接写她那句的意思，例如"被夸就一句'少来'带过"。
-2. **不是原句堆砌**：不要把样本里那句话抄下来当笔记。要的是**风格与场合**。
+2. **不是原句堆砌**：**一句她说过的话都不许整句抄进来**（引号里也不行）。
+   写"她怎么应对"这个做法，不写她那句话本身。反例（会被丢掉）：
+   `直接拆开：'识别和翻译是两套'`、`一句'没有，我是认真的'顶回去`；
+   正例：`别人把两件事说混了就当场拆开`、`被误会时正经说一句自己没那意思`。
 3. **不许出现机制词**：检查、触发、调用、协议、提示词、上下文、记忆库、Stage、
    系统提示、模型、分数、样本、数据、标签。一个字都不许有——她用不上这些词。
 
@@ -275,17 +285,21 @@ def _clean_note(value: object, *, source_text: str = "") -> str:
 
 
 def _is_verbatim(note: str, source_text: str) -> bool:
-    """这条笔记是不是样本原句的一截（那样她就能逐字照抄）。
+    """这条笔记是不是**照搬了她原句的一截**（那样她就能逐字照着念）。
 
-    判据是"笔记的字符（去掉标点）整段出现在原句里，且够长"——
-    短的（"少来"这种两个字的说法）放行：那是口吻，不是句子。
+    判据：笔记里有没有**连着 `VERBATIM_SPAN_CHARS` 个字**原样出现在样本里。
+    短的（"少来"这种口吻）放行——那是说法，不是句子；整句照搬不放行。
     """
 
     compact = "".join(ch for ch in note if ch.isalnum())
-    if len(compact) < 6:
+    if len(compact) < VERBATIM_SPAN_CHARS:
         return False
     haystack = "".join(ch for ch in (source_text or "") if ch.isalnum())
-    return compact in haystack
+    if not haystack:
+        return False
+    spans = {compact[index:index + VERBATIM_SPAN_CHARS]
+             for index in range(len(compact) - VERBATIM_SPAN_CHARS + 1)}
+    return any(span in haystack for span in spans)
 
 
 def _clean_when(value: object) -> str:
