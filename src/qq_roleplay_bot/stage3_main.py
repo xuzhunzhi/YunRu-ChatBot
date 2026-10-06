@@ -2401,9 +2401,12 @@ class DialogueEngine:
         who = ""
         if explainers:
             last = explainers[-1]
-            name = str(last.get("name") or last.get("user_id") or "")
             when = _format_clock(float(last.get("at") or 0.0))
-            who = f"——{name} 说于 {when}"
+            if last.get("source") == "edited":
+                who = f"——操作者改于 {when}"
+            else:
+                name = str(last.get("name") or last.get("user_id") or "")
+                who = f"——{name} 说于 {when}"
         return (f"· {where}{item.get('word', '')} = {item.get('definition', '')}{mark}"
                 f"（听过 {times} 次{who}）")
 
@@ -2425,7 +2428,8 @@ class DialogueEngine:
                 name = str(row.get("name") or row.get("user_id") or "")
                 quote = str(row.get("quote") or "")
                 dropped = "（原话含不该留的词，没存下来）" if row.get("evidence_dropped") else ""
-                lines.append(f"· {name}"
+                act = "操作者改的" if row.get("source") == "edited" else f"{name} 说的"
+                lines.append(f"· {act}"
                              f"（{_format_clock(float(row.get('at') or 0.0))}）："
                              f"{quote or '—'}{dropped}")
         revisions = list(item.get("revisions") or [])

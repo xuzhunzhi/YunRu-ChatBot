@@ -427,12 +427,16 @@ class SlangStore:
 
     def apply_explanation(self, group_id: object, word: object, definition: object, *,
                           by_user_id: object = "", by_name: object = "", quote: object = "",
-                          at: float | None = None, message_id: object = "") -> str:
+                          at: float | None = None, message_id: object = "",
+                          source: str = "heard") -> str:
         """把"某人在某个群里解释了一个词"并进库里。
 
         返回 `"new"`（新建）/ `"merged"`（同一个说法又听了一遍）/ `"revised"`（改口）
         / `""`（护栏挡掉了，什么都没写）。**写盘失败也不抛**（返回的是"并进去了什么"，
         盘上有没有那份数据看 `last_error`）。
+
+        `source` 区分**听来的**（`heard`）与**操作者改的**（`edited`）——两条都会记进
+        `explainers`，因为"这个释义是谁给的"这件事两种来源都要能回溯；界面上分开显示。
         """
 
         clean_word = _clean_word(word)
@@ -485,7 +489,8 @@ class SlangStore:
         entry["times"] = int(entry.get("times") or 0) + 1
         self._remember_explainer(entry, by_user_id=by_user_id, by_name=by_name,
                                  definition=clean_definition, quote=evidence, at=stamp,
-                                 message_id=message_id, evidence_dropped=evidence_dropped)
+                                 message_id=message_id, evidence_dropped=evidence_dropped,
+                                 source=source)
         self.updated_at = stamp
         saved = self.save()
         if not saved:
@@ -505,7 +510,8 @@ class SlangStore:
         """
 
         action = self.apply_explanation(group_id, word, definition,
-                                        by_user_id=_text(by), at=at, quote=quote)
+                                        by_user_id=_text(by), at=at, quote=quote,
+                                        source="edited")
         return action != ""
 
     def mark_wrong(self, group_id: object, word: object, wrong: bool = True) -> bool:
@@ -528,7 +534,7 @@ class SlangStore:
 
     def _remember_explainer(self, entry: dict, *, by_user_id: object, by_name: object,
                             definition: str, quote: str, at: float, message_id: object,
-                            evidence_dropped: bool) -> None:
+                            evidence_dropped: bool, source: str) -> None:
         """把"谁解释的"记一笔。同一个人的**同一条说法**只记一次（重复记没信息量）。"""
 
         rows = list(entry.get("explainers") or [])
@@ -547,6 +553,7 @@ class SlangStore:
         rows.append({
             "user_id": user_id, "name": _text(by_name), "at": at, "definition": definition,
             "quote": quote, "message_id": _text(message_id), "count": 1,
+            "source": "edited" if source == "edited" else "heard",
             "evidence_dropped": 1 if evidence_dropped else 0,
         })
         entry["explainers"] = rows[-MAX_EXPLAINERS:]

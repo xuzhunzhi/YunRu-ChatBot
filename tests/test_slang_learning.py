@@ -526,6 +526,24 @@ def test_a_quote_note_can_be_disabled_and_restored_from_the_command() -> None:
         assert _parse_quote_override("/super quote 277 不赞成 在损她") == ("277", "不赞成", "在损她")
 
 
+def test_an_operator_edit_is_recorded_as_such_not_as_what_someone_said() -> None:
+    """`explainers` 里分得清"听来的"与"操作者改的"：列表不许把操作者写成"他说"。"""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = SlangStore(Path(tmp) / "entries.json")
+        engine = DialogueEngine(None, super_admin_user_ids=frozenset({"1"}),
+                                slang_library=store)
+        store.apply_explanation(GROUP, "电赛", "电子设计竞赛", by_user_id="9", by_name="witelb",
+                                at=1.0)
+        assert store.find(GROUP, "电赛")["explainers"][0]["source"] == "heard"
+        engine._slang_reply(_super("/super slang set 电赛 电子设计大赛"))
+        assert store.find(GROUP, "电赛")["explainers"][-1]["source"] == "edited"
+        listed = engine._slang_reply(_super("/super slang"))
+        assert "操作者改于" in listed and "witelb 说于" not in listed
+        why = engine._slang_reply(_super("/super slang why 电赛"))
+        assert "操作者改的" in why and "witelb 说的" in why
+
+
 def test_the_definition_budget_is_enforced() -> None:
     """释义太长不成其为"释义"（上限在模块常量里，不是随手一个数）。"""
 
