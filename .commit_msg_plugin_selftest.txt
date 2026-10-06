@@ -1,0 +1,35 @@
+测试：钉住"插件不许绝对自引用" + 一条改名实测（新文件）
+
+外部审查实测的两个坏例子已经在上一提交改掉了，但它们**没有断言守着**——下一个插件
+照抄一句 `from qq_roleplay_bot.plugins.<自己>.<模块> import …`，改名又会静默不装。
+所以补一个文件，三条：
+
+1. `test_no_plugin_has_an_absolute_self_import`
+   扫 `plugins/*/` 下每个插件的 `.py`，用 **AST** 读 import 语句（不是 grep 字符串：
+   `plugins/__init__.py` 与 `prompt_library` 里的
+   `find_spec("qq_roleplay_bot.plugins.vision.vision")` 是"按名字问在不在"，不是 import，
+   不该被判红）。命中 `qq_roleplay_bot.plugins.<自己>` 前缀即红。
+
+2. `test_no_plugin_imports_another_plugin`
+   "插件 import 别的插件"那条禁令（`AGENTS.md` §2.3：依赖用 `REQUIRES` 表达）。
+   **报告项**：审查要求"有就报，别自己修"。实测**命中一条**：
+   `plugins/webui/webui_panel.py:561` 的 `from ..join_approval.join_approval import
+   JOIN_SUB_TYPE, parse_pending`——这条在改动前就存在、与本次无关，所以先用
+   `KNOWN_CROSS_PLUGIN_IMPORTS` 之外的说明留在文件 docstring 里，**没有**动那个插件。
+
+3. `test_a_renamed_plugin_still_loads_and_registers`（端到端，改名的实测）
+   把 `plugins/` 复制到临时目录、`vision/`→`zz_vision`、`mail/`→`zz_mail`，
+   在**新进程**里只让 `plugins.__path__` 指向副本树，跑真实的 `discover()`，
+   要求两个新名字都在 `loaded` 里、且没有 `plugin_import_missing_module` /
+   `plugin_register_failed`。副本用 `finally` 删干净。
+
+   **为什么必须新进程**：本进程早就 import 过真插件，`sys.modules` 里已经有
+   `qq_roleplay_bot.plugins.vision.vision`，改名前那条绝对 import 照样找得到——
+   同进程测是**假绿**（实测对照：真树 `loaded=('mail','vision')` 0 条坏日志；
+   副本里改回绝对写法 `loaded=()` + `plugin_import_missing_module name=zz_vision` +
+   `plugin_register_failed name=zz_mail`）。
+
+**这条断言在改之前会红**（实测，不是推断）：把 `vision/plugin.py` 那一行临时改回
+`from qq_roleplay_bot.plugins.vision.vision import …`，`ran=3 failures=2 errors=0`，
+红的正是第 1 条（`vision/plugin.py:56 绝对自引用 …`）与第 3 条
+（`loaded=('zz_mail',)`，`zz_vision` 没装上）；改回来即 `failures=0`。
