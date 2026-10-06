@@ -456,17 +456,21 @@ class _Hidden:
 def test_the_fail_closed_placeholder_is_only_for_a_broken_assembly() -> None:
     """`stage3_main.execute_action` 里那句"这条部署没有群管理能力。"的**可达性**。
 
-    实测（本机，2026-10-05）的三种装配：
+    实测（本机）的三种装配：
 
     | 装配 | `/super ban` 的结果 | 走到那句占位了吗 |
     | --- | --- | --- |
     | 正常（`plugins/` 在） | 真发 `set_group_ban` | 没有（本文件第 2 节就是它） |
     | **整个 `plugins/` 不在** | 命令**根本没注册** → 超管收到"没认出来" | 没有（`resolve()` 就返回 None） |
-    | 命令注册了、但**执行端模块不在** | 那句占位 + 零 action | **走到了** |
+    | 命令注册了、但**执行端没接上**（注册表上没有那一组工厂） | 那句占位 + 零 action | **走到了** |
 
     所以它是 fail-closed 的**兜底**：真收到这两种 `ActionRequest` 而执行端不在时，
-    不执行、不崩，回一句人话。第三行只有"装配错了"（插件目录被拆散）才会出现，
+    不执行、不崩，回一句人话。第三行是"插件没接这一口 / 装配漏了"的形态，
     但不能因此让它没有测试——它是"装配漏了也不许静默执行"这条底线的落点。
+
+    2026-10-06 改（rebase 到"核心不再按模块名 import 执行函数"之后）：第三行原来用
+    `_Hidden("…group_admin.group_admin")` 造，赌的是"核心自己 import 那个模块"——
+    那个前提已经没了（核心只问注册表）。现在改成**把插件那一口摘掉再装配**，见下。
     """
 
     # 对照：正常装配下这条命令是真发动作的
@@ -476,13 +480,24 @@ def test_the_fail_closed_placeholder_is_only_for_a_broken_assembly() -> None:
     assert writes == [("set_group_ban", {"group_id": int(GROUP), "user_id": int(MEMBER),
                                          "duration": 600})], (reply, writes)
 
-    # 执行端模块不在：命令还认得（插件注册表里还有），但一个 action 都发不出去
-    with _Hidden("qq_roleplay_bot.plugins.group_admin.group_admin"):
+    # 执行端**没接上**：命令还认得（插件注册表里还有），但一个 action 都发不出去。
+    # 2026-10-06 改：原来这里是 `_Hidden("…group_admin.group_admin")`（藏执行端模块），
+    # 前提是"核心自己 import 那个模块"。现在核心只问注册表，所以这一档改成
+    # "**注册表上没有这一组工厂**"——插件没接这一口（例如装的还是接这一口之前的
+    # 旧插件），或者装配漏了。`provide_group_action(None)` 不收，所以把工厂置 `None`
+    # 就等于"没有登记"。
+    from qq_roleplay_bot.plugins.group_admin import plugin as group_admin_plugin
+
+    original_factory = group_admin_plugin.build_group_admin
+    group_admin_plugin.build_group_admin = None
+    try:
         engine, transport = assembly()
         assert engine.commands.resolve(message("/super ban @某人 10",
                                                mentions=(MEMBER,))) is not None
         reply, writes = asyncio.run(_dispatch(engine, transport, "/super ban @某人 10",
                                               mentions=(MEMBER,)))
+    finally:
+        group_admin_plugin.build_group_admin = original_factory
     assert writes == [], writes
     assert reply is not None and "没有群管理能力" in reply, reply
 
