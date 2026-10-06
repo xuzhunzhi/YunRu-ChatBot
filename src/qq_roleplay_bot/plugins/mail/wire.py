@@ -37,10 +37,10 @@ def build_daily_report(report, *, registry=None):
     if not dev_config.MAIL_REPORT_ENABLED:
         logger.info("每日汇报未启用（QQBOT_MAIL_REPORT=0）")
         return None
-    from ...plugins.mail.daily_report import DailyReporter
-    from ...plugins.mail.letter_writer import LetterWriter
-    from ...plugins.mail.mail_client import MailClient
-    from ...plugins.mail.mail_state import MailStateStore
+    from .daily_report import DailyReporter
+    from .letter_writer import LetterWriter
+    from .mail_client import MailClient
+    from .mail_state import MailStateStore
 
     mail = MailClient(dev_config.MAIL_CLI, workdir=mail_workdir())
     store = MailStateStore()
@@ -132,7 +132,7 @@ def build_operator_mail_sender(seams):
     真要换，显式调 `registry.mail.provide(...)`（它自己仍然是后到者覆盖先到者）。
     """
 
-    from ...plugins.mail.mail_client import MailClient
+    from .mail_client import MailClient
 
     existing = getattr(seams, "operator_sender", None)
     if callable(existing):
@@ -173,9 +173,9 @@ def build_mail_channel(chat):
     if not (dev_config.MAIL_OWNER_FROM and dev_config.MAIL_OWNER_USER_ID):
         logger.warning("读信回信没配主人地址或 QQ 号，本次不启用")
         return None
-    from ...plugins.mail.mail_channel import MailChannel
-    from ...plugins.mail.mail_client import MailClient
-    from ...plugins.mail.mail_state import MailStateStore
+    from .mail_channel import MailChannel
+    from .mail_client import MailClient
+    from .mail_state import MailStateStore
 
     # 邮件进来时走的是"私聊"这条路，主人那份用他自己的 QQ 号；陌生发件人由通道在
     # 收到信时**自己登记**进私聊白名单（策略留在 Stage 4 通道里，引擎的判定不动）。

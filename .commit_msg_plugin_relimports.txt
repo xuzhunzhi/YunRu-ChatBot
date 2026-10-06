@@ -1,0 +1,23 @@
+插件：9 处绝对自引用改成相对 import（改名不再静默不装）
+
+外部审查实测：`vision` / `mail` 两个插件把自己**文件夹名**刻进了源码。把文件夹改名
+（`vision` → `zz_vision`）之后 `discover()` 只记一行 `plugin_import_missing_module`
+就静默跳过，插件从清单里消失，而部署方看不出是"改名改坏了"。对照组
+`group_admin` / `join_approval` / `webui` 用的是相对 import，改名照装。
+
+改动（每一处都是 `qq_roleplay_bot.plugins.<自己>` → 相对 import）：
+
+- `plugins/vision/plugin.py:48` → `from .vision import ImageDescriber, VISION_SYSTEM_PROMPT`
+  （并删掉上面那段"绝对 import 是刻意的"注释——它的理由经核实是假的：
+  它说的是**测试文件**用 `spec_from_file_location` 加载会没有父包，而本模块永远
+  以 `qq_roleplay_bot.plugins.vision.plugin` 的身份被执行）
+- `plugins/mail/wire.py:40,41,42,43` → `from .daily_report/.letter_writer/.mail_client/.mail_state import …`
+- `plugins/mail/wire.py:135` → `from .mail_client import MailClient`
+- `plugins/mail/wire.py:176,177,178` → `from .mail_channel/.mail_client/.mail_state import …`
+
+没动的（核对过，不是自引用）：`plugins/vision/plugin.py` 的 `from qq_roleplay_bot import
+dev_config` / `llm_client`（插件 import 核心是允许方向）、`plugins/webui/webui_panel.py`
+的 `from ..join_approval.join_approval import …`（webui 用**另一个**插件的函数——
+这是"插件 import 别的插件"那条禁令，只报不改，见汇报）、`plugins/__init__.py`
+与 `prompt_library` 里的 `find_spec("qq_roleplay_bot.plugins.vision.vision")`
+（按名字问"在不在"，不是 import）。`outage_notice` 的 `REQUIRES = ("mail",)` 是合法声明，未动。

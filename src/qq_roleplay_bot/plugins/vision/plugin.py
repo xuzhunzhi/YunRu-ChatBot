@@ -39,13 +39,21 @@ from __future__ import annotations
 
 import logging
 
-# **绝对 import 是刻意的**：测试用 `spec_from_file_location(名字, 路径)` 加载测试文件
-# （`tests/run_offline.py` 就是这么干的），于是测试 import 本模块时 `__package__` 是
-# **测试文件的名字**、不是一个包——相对 import 会抛 `attempted relative import with
-# no known parent package`，而 `test_vision.py` / `test_media_segments.py` 是在**顶层**
-# 直接 import 本模块的。插件 import 核心本来就是允许的方向，写成绝对路径没有代价。
+# 同目录那个模块用**相对 import**取（与 `group_admin/plugin.py` 同一写法）：
+# 本文件永远以 `qq_roleplay_bot.plugins.vision.plugin` 这个身份被执行
+# （`discover()` 走 `importlib.import_module`，测试走
+# `from qq_roleplay_bot.plugins.vision import plugin`），所以父包一定在。
+#
+# **这里原来写的是绝对 import，理由是假的**（2026-10-06 外部审查实测指出）：
+# 那句"测试用 `spec_from_file_location` 直接加载本模块、相对 import 会抛
+# `no known parent package`"指的是**测试文件**被那样加载，而测试文件 import 的是
+# 包里的 `qq_roleplay_bot.plugins.vision.vision`（正常包路径），不是本文件。
+# 真正的代价是：写成绝对路径等于把**插件自己的文件夹名 `vision`** 刻进源码——
+# 文件夹一改名（`zz_vision`），这行就 `ModuleNotFoundError`，而 `discover()` 只会
+# 记一行 `plugin_import_missing_module` 然后**静默不装**，插件从此隐身。
 from qq_roleplay_bot import dev_config
-from qq_roleplay_bot.plugins.vision.vision import ImageDescriber, VISION_SYSTEM_PROMPT
+
+from .vision import ImageDescriber, VISION_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
