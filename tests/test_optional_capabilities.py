@@ -43,6 +43,16 @@ roles 插件明确拒绝装配"，后者验"撤掉插件的识图登记后 `engi
 留在这里的三条都不需要插件文件存在：`control_audit` 缺席、`available()` 可读、
 `backfill_all()` 不伪造缺席那套 prompt（后两条把识图那套 prompt 藏起来，
 验的正是"少了它照样起"）。断言一字未改。
+
+## 2026-10-06（rebase 到本体 `a23f748` 之后）：藏模块要连**登记**一起造
+
+本体把"识图这套 prompt 在不在"的判据从 `find_spec("…plugins.vision.vision")`
+改成了"**插件登记过这一套没有**"（`prompt_library._provided_prompt` 读注册表）。
+于是光把子模块 `vision.vision` 藏起来不再等于缺席：注册表上那一轮登记还在
+（实测：藏子模块 + 再装配一次，`available()` 里照样有 `vision`）。
+下面两条现在按新判据造缺席——**藏整个插件包**（`_Hidden("…plugins.vision")`，
+`discover()` 就装不上它）**再装配一次**（`build_engine` 每次新造注册表，
+"最新那一份"上于是真的没有识图这一条）。断言一字未改。
 """
 import sys
 
@@ -150,7 +160,11 @@ def test_every_available_prompt_is_readable() -> None:
 
     from qq_roleplay_bot.prompt_library import PromptLibrary
 
-    with _Hidden("qq_roleplay_bot.plugins.vision.vision"):
+    with _Hidden("qq_roleplay_bot.plugins.vision"):
+        # 2026-10-06：判据是"插件**登记过**这一套没有"，所以缺席要这样造——
+        # 藏掉整个插件包，再装配一次，让"最新那一份注册表"上真的没有识图这一条
+        # （见模块头那段）。
+        runtime.build_engine(_FakeTransport())
         library = PromptLibrary()
         names = library.available()
         assert "persona" in names and "vision" not in names, names
@@ -171,7 +185,8 @@ def test_backfill_all_skips_a_missing_capability_without_faking_a_prompt() -> No
     from qq_roleplay_bot.prompt_library import PromptLibrary
 
     with tempfile.TemporaryDirectory() as tmp:
-        with _Hidden("qq_roleplay_bot.plugins.vision.vision"):
+        with _Hidden("qq_roleplay_bot.plugins.vision"):
+            runtime.build_engine(_FakeTransport())   # 同上面那条：缺席要造在登记那一侧
             library = PromptLibrary(Path(tmp))
             added = library.backfill_all()
         # 五套真的存在，识图那套被跳过

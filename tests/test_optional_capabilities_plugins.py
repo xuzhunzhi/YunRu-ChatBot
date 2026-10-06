@@ -64,8 +64,10 @@ def test_build_engine_survives_a_missing_vision_module() -> None:
     prompt 改由插件在 `register()` 里 `registry.provide_prompt("vision", …)` 登记。
     所以分两半验，各用**可靠**的那个手段：
 
-    1. **prompt 那一侧**（藏模块）：`builtin("vision")` 必须给 `PromptRejected`、
-       `available()` 必须把识图滤掉。这条只依赖插件模块本身，`_Hidden` 挡得住。
+    1. **prompt 那一侧**（藏插件包 + 重新装配）：`builtin("vision")` 必须给
+       `PromptRejected`、`available()` 必须把识图滤掉。2026-10-06（rebase 到本体
+       `a23f748` 之后）：判据从"那个模块名在不在"改成"**插件登记过这一套没有**"，
+       所以光藏子模块不够——要藏**整个插件包**再装配一次，见 `_Hidden` 那段说明。
     2. **核心那一侧**（把插件的登记撤掉）：`engine.vision` 的唯一来源是插件经
        `registry.vision` 放上来的工厂——工厂不在就该是 `None`。**不藏模块**是因为
        "藏模块"在进程内不可靠：`plugin.py` 一旦被执行过就把 `vision.vision` 绑进了自己
@@ -74,7 +76,9 @@ def test_build_engine_survives_a_missing_vision_module() -> None:
        撤掉登记直接验的是**核心的契约**：没有那个工厂 = 没有识图。
     """
 
-    with _Hidden("qq_roleplay_bot.plugins.vision.vision"):
+    with _Hidden("qq_roleplay_bot.plugins.vision"):
+        # 按新判据造缺席：插件包藏掉之后装配一次，"最新那一份注册表"上就没有识图
+        runtime.build_engine(_FakeTransport())
         # builtin 必须给一个**受控**的拒绝，而不是放 ModuleNotFoundError 出去
         try:
             PromptLibrary.builtin("vision")
