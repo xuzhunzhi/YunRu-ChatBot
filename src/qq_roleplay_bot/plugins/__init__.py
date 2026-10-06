@@ -36,6 +36,7 @@ plugins/
     registry.provide_roles(cache)     # 前置插件：把共享能力放上来
     registry.provide_prompts(plugin)  # prompt 扩展（恋人/剧情那类）
     registry.provide_prompt(name, t)  # 某套 prompt 的**内置原稿**（识图那套走这里）
+    registry.provide_group_action(g, f)  # 群管理动作的**执行函数**（见下）
     registry.vision = factory         # 一个"看一眼图"的工厂（`(usage_store) -> 识图器`）
 
 **这里没有 `engine`**（2026-10-01 改）：引擎上有 `transport` 与三份权限名单，
@@ -53,6 +54,25 @@ plugins/
   2026-10-05 起这句是**结构上**成立的：核心连"识图"这个模块名都不提了——识图器由
   `vision` 插件经 `registry.vision` 给一个工厂、它的 prompt 由
   `registry.provide_prompt("vision", …)` 登记，删掉那个文件夹就是"这次部署没有识图"。
+- **群管理动作也走这条口**（2026-10-06 补）：动作的**判定与执行仍在核心**
+  （`stage3_main.execute_action` 判权限、过闸门、审计），核心只是不再自己去
+  `import` 插件里的执行函数——`group_admin` 插件在 `register()` 里用
+  `registry.provide_group_action("group_admin", factory)` /
+  `("group_owner", factory)` 把**执行函数**放上来，核心用
+  `getattr(registry, "group_action", None)` 取（工厂形状见下表）。
+  在改这条之前，核心那两句 `from .plugins.group_admin.group_admin import execute`
+  是**按模块名**找函数的：把那个插件文件夹改个名字，功能会**静默消失**
+  （`except ModuleNotFoundError` 吞掉，回一句"这条部署没有群管理能力"），
+  而 `discover()` 那边一切正常——所以这是"核心认识具体插件"，不是"插件提供能力"。
+  登记进注册表的是一个**工厂**（形状同 `registry.vision`）：核心先把用量账本递进去、
+  拿到执行函数，之后每次动作只调那个执行函数：
+
+  | 名字 | 登记进注册表的工厂 | 它交出来的 `execute` |
+  | --- | --- | --- |
+  | `"group_admin"` | `(usage_store) -> execute` | `execute(kind, *, call, group_id, actor_id, target_id, minutes, message_id, mentioned, protected_ids, enabled)` |
+  | `"group_owner"` | `(usage_store) -> execute` | `execute(kind, *, call, roles, group_id, actor_id, target_id, text, mentioned, enabled)` |
+
+  取不到时**保持 fail-closed**：不执行、记一行日志、回一句"这条部署没有群管理能力"。
 - **依赖方向清楚**：插件 import 核心；核心**不 import 具体插件**，只调 `discover()`。
 - **"掉线通知"也是插件**（2026-10-06 用户："记住这个也是插件"）：本体侧只做两件事——
   把看门狗本来就有的状态变成**确定的边沿**（`在线 → 掉线` 算一段），再在
@@ -502,7 +522,7 @@ class PluginRegistry:
     __slots__ = ("call_action", "notify", "roles", "loop", "chat", "report", "ui",
                  "link", "vision", "action_caller", "commands", "backgrounds",
                  "_shared_roles", "_commands", "_prompts", "_prompt_defaults",
-                 "_disconnect_receivers", "loaded")
+                 "_group_actions", "_disconnect_receivers", "loaded")
 
     def __init__(self, *, call_action=None, notify=None, roles=None,
                  loop=None, chat: ChatSeams | None = None,
@@ -555,6 +575,12 @@ class PluginRegistry:
         #: 这里登记的是"整套 prompt 的默认文本"（识图那一套），`prompt_library.builtin()`
         #: 读它。**它替代了核心原来那句 `from .vision import VISION_SYSTEM_PROMPT`**。
         self._prompt_defaults: dict[str, str] = {}
+        #: **群管理动作的执行函数**：`{分组名: 函数}`，由插件经 `provide_group_action()`
+        #: 登记，核心的 `stage3_main.execute_action` 按 `ActionRequest.group` 取。
+        #: 与 `_prompt_defaults` 同一套形状（一个名字一个东西、后到者覆盖先到者）：
+        #: 核心因此**不认识任何插件模块名**——把 `plugins/group_admin/` 改名不会让功能
+        #: 静默消失，只会变成"这次部署没有群管理能力"（fail-closed，那句话本身是对的）。
+        self._group_actions: dict[str, object] = {}
         #: 装上了哪些插件（`discover()` 的返回值）。**发现只跑一次**：
         #: 跑两次会让同一个插件被登记两遍（同一条命令认两次、两份角色缓存）。
         self.loaded: tuple[str, ...] = ()
@@ -676,6 +702,49 @@ class PluginRegistry:
         """取插件登记的某套 prompt 原稿；没人登记就返回 `None`（调用方自己决定怎么降级）。"""
 
         return self._prompt_defaults.get(str(name))
+
+    def provide_group_action(self, group: str, execute: object) -> None:
+        """登记**某一组群动作的执行函数**：`{分组名: 函数}`，供核心的 `execute_action` 取。
+
+        分组名就是 `ActionRequest.group`（`"group_admin"` / `"group_owner"`），
+        与 `registry.vision` 同一个形状：**插件把自己的东西放上来，核心只按名字取**。
+
+        为什么要这个口（2026-10-06 外部审查实测的那处耦合）：核心原来在
+        `stage3_main.execute_action` 里直接
+        `from .plugins.group_admin.group_admin import execute`——
+        也就是**按插件模块名**找执行函数。插件文件夹改个名字，插件照样装上、
+        `discover()` 照样说它装上了，而这条命令**静默**回一句"这条部署没有群管理能力"
+        （`except ModuleNotFoundError` 吞掉）。那不是"插件提供能力"，是核心认识具体插件。
+
+        这一口只登记**执行函数**，不改变任何边界：权限判定（`_plugin_level_allowed`）、
+        动作白名单（`capabilities` 那道闸）、护栏与审计**仍在核心**，
+        函数拿到的还是核心造的**已过闸门**的 `call`（见 `_group_action_caller`），
+        不是 transport。
+
+        **同名后到者覆盖先到者**（同 `provide_prompt`）：发现机制本来就是"一个名字一个
+        目录"，同名只可能出现在测试里手造两个注册表或热重载的情形。
+        """
+
+        if execute is not None:
+            self._group_actions[str(group)] = execute
+
+    def group_action(self, group: str) -> object | None:
+        """取某一组群动作的执行函数；没人登记就返回 `None`。
+
+        调用方（`stage3_main.execute_action`）拿到 `None` 时**必须 fail-closed**：
+        不执行、记一行日志、回一句"这条部署没有群管理能力"。
+        """
+
+        return self._group_actions.get(str(group))
+
+    def provided_group_actions(self) -> tuple[str, ...]:
+        """已经登记了执行函数的分组名（按名字排序）。
+
+        给测试与面板用：**"到底装上了什么"必须是可读的事实**，而不是只能靠
+        `grep` 核心源码去猜（这正是 2026-10-06 那处耦合藏了这么久的原因）。
+        """
+
+        return tuple(sorted(self._group_actions))
 
     def register_reporter(self, reporter: object) -> None:
         """登记"每日汇报器"（面板要读它判断今天发没发）。同 `provide_roles` 的道理。"""

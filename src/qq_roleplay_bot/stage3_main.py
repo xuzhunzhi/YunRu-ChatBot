@@ -1844,7 +1844,8 @@ class DialogueEngine:
 
         插件负责"认出命令、解析出目标与参数"，这里负责"能不能做、怎么做、记什么账"：
         权限档位在 `_plugin_level_allowed` 判过了，动作白名单在 `capabilities` 那道闸里，
-        目标与参数护栏在 `group_admin.py` / `group_owner.py` 里，全是 WARNING 审计。
+        目标与参数护栏在插件那一侧的 `group_admin.py` / `group_owner.py` 里（执行函数由
+        插件经 `registry.provide_group_action()` 放上来），全是 WARNING 审计。
         插件从头到尾没拿到 `transport`。
 
         2026-10-01：取参与分发拆开了——`execute_action` 是那部分，这里只负责
@@ -1880,48 +1881,70 @@ class DialogueEngine:
         from .command_plugins import ActionRequest
 
         assert isinstance(request, ActionRequest)  # pragma: no cover - 调用方已经判过
-        # 群管理与群主动作的**执行端在插件目录里**（`plugins/group_admin/`）：它们只
-        # 解析与声明意图，护栏、权限、调用仍在这里。插件目录整个不在时（只要 Stage 3
-        # 的那份部署），下面两句 import 会失败 → **fail-closed**：不执行、记一行日志。
-        # 这条分支上不会有插件产出这两种 `ActionRequest`，真收到只能是装配错了。
+        # 群管理与群主动作的**执行端在插件里**（`plugins/group_admin/`）：它们只
+        # 解析与声明意图，护栏、权限、调用仍在这里。插件在 `register()` 里用
+        # `registry.provide_group_action("<分组名>", execute)` 把执行函数放上来，
+        # 这里只按 `request.group` 取——**核心不认识那个插件的模块名**。
+        #
+        # 2026-10-06 改（外部审查实测的那处耦合）：原来是两句
+        # `from .plugins.group_admin.group_admin import execute` /
+        # `…group_owner import execute`，被 `except ModuleNotFoundError` 兜住。
+        # 于是把插件文件夹改个名字 = `discover()` 一切正常、命令**静默**回
+        # "这条部署没有群管理能力"——核心还拴在具体插件上。现在换成
+        # `getattr(self.plugin_registry, "group_action", None)`，与
+        # `runtime.build_engine` 取识图工厂（`getattr(registry, "vision", None)`）同一形状。
+        #
+        # 取不到时**保持 fail-closed**：不执行、记一行日志、回那句话（那句话本身是对的）。
+        #
+        # 两个来源（与 `_group_action_caller` 同一套写法）：
+        # 1. `engine.group_actions`——生产走这条（`runtime._build_group_actions` 已经把
+        #    工厂调好、账本递进去了）；
+        # 2. **没有它时现取注册表里的工厂**（只造一台 `DialogueEngine` 的测试是这种：
+        #    它们不走 `build_engine`，但会往注册表里登记一个假工厂看核心有没有走这条路）。
+        runner = getattr(self, "group_actions", {}).get(request.group) \
+            if isinstance(getattr(self, "group_actions", None), dict) else None
+        if not callable(runner):
+            registry = getattr(self, "plugin_registry", None)
+            taker = getattr(registry, "group_action", None)
+            factory = taker(request.group) if callable(taker) else None
+            if callable(factory):
+                try:
+                    runner = factory(getattr(self, "usage_store", None))
+                except TypeError:
+                    runner = factory()
         if request.group in {"group_admin", "group_owner"}:
-            try:
-                if request.group == "group_admin":
-                    from .plugins.group_admin.group_admin import execute as run_group_action
-
-                    return await run_group_action(
-                        request.kind,
-                        # **一个已过闸门的调用函数**，不是活的 transport
-                        # （2026-10-01 适配：原来这里传 `transport=self.transport`，
-                        # 也就是插件目录里的函数拿到了传输层，而本函数的 docstring
-                        # 还写着"插件从头到尾没拿到 transport"——那句当时是假的）。
-                        call=self._group_action_caller("group_manage"),
-                        group_id=group_id,
-                        actor_id=actor_id,
-                        target_id=request.target_id,
-                        minutes=request.text,
-                        message_id=message_id or request.message_id,
-                        mentioned=mentioned or request.mentioned,
-                        protected_ids=frozenset(self._protected_group_ids()),
-                        enabled=dev_config.GROUP_MANAGE_ENABLED,
-                    )
-                from .plugins.group_admin.group_owner import execute as run_owner_action
-
-                return await run_owner_action(
-                    request.kind,
-                    call=self._group_action_caller("group_owner"),
-                    roles=getattr(self, "group_roles", None),
-                    group_id=group_id,
-                    actor_id=actor_id,
-                    target_id=request.target_id,
-                    text=request.text,
-                    mentioned=mentioned or request.mentioned,
-                    enabled=dev_config.GROUP_OWNER_ENABLED,
-                )
-            except ModuleNotFoundError:
+            if not callable(runner):
                 logger.warning("group_action_unavailable group=%s kind=%s",
                                request.group, request.kind)
                 return "这条部署没有群管理能力。"
+            if request.group == "group_admin":
+                return await runner(
+                    request.kind,
+                    # **一个已过闸门的调用函数**，不是活的 transport
+                    # （2026-10-01 适配：原来这里传 `transport=self.transport`，
+                    # 也就是插件里的函数拿到了传输层，而本函数的 docstring
+                    # 还写着"插件从头到尾没拿到 transport"——那句当时是假的）。
+                    call=self._group_action_caller("group_manage"),
+                    group_id=group_id,
+                    actor_id=actor_id,
+                    target_id=request.target_id,
+                    minutes=request.text,
+                    message_id=message_id or request.message_id,
+                    mentioned=mentioned or request.mentioned,
+                    protected_ids=frozenset(self._protected_group_ids()),
+                    enabled=dev_config.GROUP_MANAGE_ENABLED,
+                )
+            return await runner(
+                request.kind,
+                call=self._group_action_caller("group_owner"),
+                roles=getattr(self, "group_roles", None),
+                group_id=group_id,
+                actor_id=actor_id,
+                target_id=request.target_id,
+                text=request.text,
+                mentioned=mentioned or request.mentioned,
+                enabled=dev_config.GROUP_OWNER_ENABLED,
+            )
         logger.warning("Stage 3 unknown plugin action group=%s", request.group)
         return "这个动作没有对应的执行通道，已拒绝。"
 

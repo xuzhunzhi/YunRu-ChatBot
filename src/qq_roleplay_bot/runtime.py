@@ -699,6 +699,15 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
     # **其余一切照旧**。这正是判据"删掉它，Stage 3 照样跑得起来"。
     build_vision = getattr(registry, "vision", None)
     engine.vision = build_vision(usage_store) if callable(build_vision) else None
+    # **群管理动作的执行函数**同样由插件给（`registry.provide_group_action(...)`）：
+    # 核心不再 `from .plugins.group_admin.group_admin import execute`——那个写法把
+    # 插件模块名写进了核心，改名就等于**静默丢功能**（见 `plugins/__init__.py` 那段）。
+    # 这里把账本递进去、结果挂在 `engine.group_actions` 上，`execute_action` 只按
+    # `ActionRequest.group` 取。没有插件 = 空字典 = 那两句回 fail-closed 的文案。
+    #
+    # 形状与识图那一行同一套：登记的是**工厂**（`(usage_store) -> execute`），
+    # 因为执行函数要用核心的账本记 API 用量，而账本在装配时才现造。
+    _build_group_actions(engine, registry, usage_store)
     # **prompt 扩展**（恋人 / 剧情 / 关系那类）在这里并进汇聚口。
     # 走 `PromptSources`：插件写的东西是不可信 DATA（过 sanitize + 长度上限 + 标来源），
     # **碰不到 system 前缀**——那正是"人格稳定"的地基。
@@ -1493,6 +1502,43 @@ def _build_letter_client() -> OpenAICompatibleClient:
         usage_store=_USAGE_STORE,
         usage_role="letter",
     )
+
+
+def _build_group_actions(engine: DialogueEngine, registry, usage_store) -> None:
+    """把插件登记的群动作**工厂**变成 `engine.group_actions`（`{分组名: 执行函数}`）。
+
+    由来（2026-10-06 外部审查实测的那处耦合）：`stage3_main.execute_action` 原来直接
+    `from .plugins.group_admin.group_admin import execute`——核心**按插件模块名**找执行
+    函数。把那个文件夹改个名字，`discover()` 照样说它装上了（`loaded` 里有它），
+    而那条命令**静默**回一句"这条部署没有群管理能力"：改名 = 丢功能，且没有任何测试
+    会红。现在执行函数由插件用 `registry.provide_group_action("<分组名>", 工厂)` 放上来，
+    核心只按 `ActionRequest.group` 取。
+
+    形状（与识图那条 `registry.vision` 同一套）：登记的是**工厂**
+    `(usage_store) -> execute`，因为执行函数要用核心的用量账本记 API 用量，
+    而账本在装配时才现造（`ApiUsageStore`）。插件侧不碰那个账本，只收一个只读引用。
+
+    降级：没有插件（或它没登记）时 `engine.group_actions` 就是空字典，
+    `execute_action` 回那句 fail-closed 的文案，其余一切照旧。
+    """
+
+    taker = getattr(registry, "group_action", None)
+    if not callable(taker):
+        engine.group_actions = {}
+        return
+    provided = getattr(registry, "provided_group_actions", None)
+    names = provided() if callable(provided) else ()
+    built: dict[str, object] = {}
+    for name in names:
+        factory = taker(name)
+        if not callable(factory):
+            continue
+        try:
+            built[str(name)] = factory(usage_store)
+        except TypeError:
+            # 更窄的实现可能不吃账本；退一步再试一次（同 `ReportSeams.log_io` 的规矩）。
+            built[str(name)] = factory()
+    engine.group_actions = built
 
 
 def _plugin_action_seams(engine: DialogueEngine, transport: QQTransport):
