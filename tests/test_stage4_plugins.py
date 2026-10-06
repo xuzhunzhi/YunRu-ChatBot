@@ -13,7 +13,8 @@
 """
 import asyncio
 
-from plugin_support import transport_seam, wired_command_registry
+from plugin_support import (attach_plugins, plugin_registry, transport_seam,
+                            wired_command_registry)
 from qq_roleplay_bot.command_plugins import ActionRequest, level_of
 # 角色事实在核心（2026-10-05："行，进核心"）：`plugins/roles/` 已删除，
 # 这里用核心那一份（`group_roles.GroupRoles`），它的构造口是**可调用**。
@@ -71,12 +72,23 @@ def message(text: str, *, user_id: str = SUPER, mentions=()) -> IncomingMessage:
 def engine_with(transport, *, role: str = ROLE_OWNER) -> DialogueEngine:
     # 命令由插件认领，所以注册表必须走真实装配；角色事实用**核心**那一份
     # （`group_roles.GroupRoles`，2026-10-05 起为唯一来源：`plugins/roles/` 已删）。
-    registry = wired_command_registry(call_action=transport_seam(transport))
+    # 装配顺序照 `runtime.build_engine`：先造带窄接缝的 `PluginRegistry`，
+    # 再 `attach_plugins()` 拿到命令注册表。
+    registry = plugin_registry(call_action=transport_seam(transport))
     engine = DialogueEngine(NeverCalled(), super_admin_user_ids=frozenset({SUPER}),
                             admin_user_ids=frozenset({SUPER}),
-                            command_registry=registry)
+                            command_registry=attach_plugins(registry))
     engine.transport = transport
     engine.group_roles = GroupRoles(role_seam(role))
+    # **执行端经注册表取**（2026-10-06：核心不再
+    # `from .plugins.group_admin.group_admin import execute`）。生产由
+    # `runtime._build_group_actions` 把工厂调好放进 `engine.group_actions`；这里只造一台
+    # `DialogueEngine`，所以把注册表挂上去——核心取不到 `engine.group_actions` 时会退回
+    # "现取注册表里那一组工厂"（见 `stage3_main.execute_action` 的两个来源）。
+    # （`registry.action_caller` 没接线，所以 `call` 那一步仍走
+    #  `_group_action_caller` 在核心这一侧现造的退路——那条由
+    #  `test_group_action_execution.py` 的模块头交代。）
+    engine.plugin_registry = registry
     return engine
 
 
