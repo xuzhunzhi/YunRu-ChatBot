@@ -391,7 +391,7 @@ class DeliveryIntent:
 ```powershell
 .\.venv\Scripts\python.exe tests\run_offline.py          # 期望 ALL_OFFLINE_TESTS_PASSED
 .\.venv\Scripts\python.exe -m pyflakes src tests          # 期望无输出
-.\.venv\Scripts\python.exe tests\check_module_removal.py  # 期望 7 个可插能力全"能"，退出码 0
+.\.venv\Scripts\python.exe tests\check_module_removal.py  # 期望 **六项**可插能力全"能"，退出码 0
 ```
 
 ### 第 2 步：把「收信/回信」搬进核心（**这是撤掉被禁接缝的那一步**）

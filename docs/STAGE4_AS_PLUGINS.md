@@ -152,6 +152,9 @@ engine.commands   = ['ping', 'help', 'balance', 'group_manage', 'group_owner', '
 registry.backgrounds = ['join-approval', 'mail-channel']
 tests/run_offline.py       817 全绿、0 跳过（与改动前基线相同）
 tests/check_module_removal.py  7 个可插能力全"能拔掉而核心照跑"
+                              （⚠️ 那是**当时**的快照：2026-10-06 `qq_roles` 进核心后
+                               `DEFAULT_MODULES` 是**六项**，那条线的当前口径见
+                               `AGENTS.md` §三那段"为什么是六项、不是七项"）
 ```
 
 ### 7.3 更正：这一节原来列的"没做"**大部分已经做完了**（2026-10-05）
