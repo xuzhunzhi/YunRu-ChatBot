@@ -6,7 +6,8 @@
   （外加 `close()`——那一条原来是文档里写了却没人调，顺手对齐了实现）；
 - **拿不到 `transport`、拿不到 `engine`**。它手上只有装配点注入的一串闭包：
   `state_reader` / `apply_overrides` / `execute_action` / `memory_ops` / `prompt_library`
-  / `knowledge` / `control_audit` / `self_id`。权限判定（token / 口令）在 `webui_access`，
+  / `knowledge` / `learned`（她学来的金句 / 黑话，见 `UiSeams.learned`）
+  / `control_audit` / `self_id`。权限判定（token / 口令）在 `webui_access`，
   动作执行在核心——插件只做"把 HTTP 翻译成闭包调用"。
 - **HTTP 服务跑在线程里**（标准库的阻塞式 `ThreadingHTTPServer`），异步的节拍只负责
   "看好它、崩了拉起来、退出时收干净"。这样不占事件循环，也不用把每个请求都塞进 asyncio。
@@ -49,6 +50,17 @@ STATIC: dict[str, str] = {
 }
 #: 面板自己的节拍：只做"看护线程"。
 PANEL_TICK_SECONDS = 30.0
+
+#: 「她学来的东西」那七个口，逐字对齐 `plugins.LearnedSeams` 的字段名
+#: （核心那一侧由 `tests/test_learned_seams.py` 逐个钉住）。面板**要哪一个口就取哪一个**：
+#: 缺一个只坏对应的那一件事，不会把整页读成空白。
+LEARNED_CALLS = ("quote_view", "quote_correct", "quote_note_enabled",
+                 "slang_list", "slang_update", "slang_delete", "slang_mark_wrong")
+
+#: 「恢复自动」送的那个取值。**取值表在核心**（`stage3_main.QUOTE_OVERRIDE_AUTO`：
+#: `auto` 与几个中文同义词都认），面板只挑其中一个用——两边各留一份表迟早分叉。
+#: 所以这个常量由 `tests/test_webui_panel.py` 对着核心那张表钉住。
+QUOTE_AUTO = "auto"
 
 #: 跨线程跑协程的闭包（`runtime` 装配时用 `install_async_runner` 填）。
 #: 定义放在模块顶部：`_call` 在运行时读它，**不能依赖"定义在文件后面"**
@@ -398,6 +410,15 @@ class Panel:
                 return json_response(_envelope(self._knowledge_chunks(query, limit, offset)))
             if path == "/api/knowledge/operator":
                 return json_response(_envelope(self._operator_chunks()))
+            # 「知识库 → 金句 / 黑话」（2026-10-06）：她**从群里学来的东西**。
+            # 数据只从装配点注入的 `registry.ui.learned` 来——面板**不许**自己去读
+            # `data/quote/profile.json` / `data/slang/profile.json`，也不许碰记忆。
+            if path == "/api/knowledge/quotes":
+                return json_response(_envelope(
+                    self._quotes_view(str(query.get("group_id") or ""))))
+            if path == "/api/knowledge/slang":
+                return json_response(_envelope(
+                    self._slang_view(str(query.get("group_id") or ""))))
             if path == "/api/approvals/pending":
                 return self._pending_approvals()
             if path == "/api/actions/preview":
@@ -452,6 +473,10 @@ class Panel:
             return self._prompt_write(payload, source)
         if path == "/api/knowledge/operator":
             return self._knowledge_write(payload, source)
+        if path == "/api/knowledge/quotes":
+            return self._quotes_write(payload, source)
+        if path == "/api/knowledge/slang":
+            return self._slang_write(payload, source)
         if path == "/api/knowledge/rebuild":
             return self._knowledge_rebuild(source)
         return failure("not_found", status=404)
@@ -838,6 +863,218 @@ class Panel:
         return {"available": True, "rows": rows, "total": total,
                 "limit": capped, "offset": skip,
                 "overview": index_overview(index)}
+
+    # --- 「知识库 → 金句 / 黑话」：她**从群里学来的东西**（2026-10-06）----------
+    #
+    # 用户口径：*"金句我看应该划到知识库里"*、*"还有黑话"*。两份数据的读写**只走**
+    # 装配点注入的 `registry.ui.learned`（七个函数，见 `plugins.LearnedSeams`）：
+    # 面板不许自己去读 `data/quote/profile.json` / `data/slang/profile.json`，
+    # 也不许碰记忆或对话入口。所以这一段的每个口都是一对一的转发，
+    # 判据落在 `tests/test_webui_panel.py`（接缝调用）与
+    # `tests/test_webui_layout_assertions.py`（前端只请求 `/api/knowledge/*`）。
+
+    def _learned_fn(self, name: str):
+        """取 `learned` 里的一个函数；取不到就是"这一件事没接上"。
+
+        `learned` 是一个**只放那七个函数**的对象——按名字取，别假设它还有别的属性。
+        """
+
+        learned = self._seam("learned")
+        if learned is None:
+            return None
+        func = getattr(learned, name, None)
+        return func if callable(func) else None
+
+    def _learned_groups(self) -> list[str]:
+        """群选择器的候选：**她这会儿在听的群** ∪ **黑话里出现过的群**。
+
+        `quote_view` 是**按群**读的（一次只能问一个群），而接缝里没有一个
+        "金句里有哪些群"的口——那就用**面板上已经有的那两个来源**兜出候选：
+        启用的群（`state_reader`，与总览页同一条）与黑话自己说的群
+        （`learned.slang_list`）。两者都不是新通道，也都不读 `data/` 下的文件。
+        页面上另给一个手填群号的入口，兜住"某个群既没启用、也还没黑话"那一档。
+        """
+
+        groups: set[str] = set()
+        state = webui_data.read_state(self._seam("state_reader"), self.root)
+        for key in ("enabled_group_ids", "enabled_groups"):
+            for item in (state.get(key) or []):
+                if str(item):
+                    groups.add(str(item))
+        if state.get("target_group_id"):
+            groups.add(str(state["target_group_id"]))
+        lister = self._learned_fn("slang_list")
+        if lister is not None:
+            try:
+                for row in lister(None) or []:
+                    group = str((row or {}).get("group_id") or "")
+                    if group:
+                        groups.add(group)
+            except Exception:  # noqa: BLE001 - 候选读不到不该让整页读不出来
+                logger.warning("webui_learned_groups_failed", exc_info=True)
+        return sorted(groups)
+
+    def _quotes_view(self, group_id: str) -> dict[str, object]:
+        """金句（读）：按群的**表情含义表** + **风格 / 语境笔记**。
+
+        只调 `learned.quote_view`，一个字节都不从 `data/` 里自己读。
+        """
+
+        groups = self._learned_groups()
+        group = str(group_id or "").strip() or (groups[0] if groups else "")
+        base: dict[str, object] = {
+            "available": False, "group_id": group, "groups": groups,
+            "meanings": [], "notes": [], "senses": [], "auto_sense": QUOTE_AUTO,
+            "path": "",
+        }
+        viewer = self._learned_fn("quote_view")
+        if viewer is None or not group:
+            return base
+        try:
+            view = viewer(group) or {}
+        except Exception:  # noqa: BLE001 - 接缝坏了只说"读不到"，不把面板带崩
+            logger.warning("webui_learned_quotes_failed", exc_info=True)
+            return base
+        if not view:
+            # `quote_view` 取不到时回 `{}`（金句那份还没装上 / 群号为空），
+            # 与"这个群还什么都没有"（那会回一个带空列表的 dict）**是两回事**：
+            # 这里如实说"读不到"，不拿一个空表冒充"她什么都没学到"。
+            return base
+        from ...quote_learning import SENSE_LABELS
+
+        return {
+            **base,
+            "available": True,
+            "group_id": str(view.get("group_id") or group),
+            "meanings": list(view.get("meanings") or []),
+            "notes": list(view.get("notes") or []),
+            "path": str(view.get("path") or ""),
+            # 方向的可选值**只从这里来**（核心那份 `SENSE_LABELS`，`/super quote`
+            # 与状态行用的是同一份）：面板不自己抄一张词表。
+            "senses": [{"value": value, "label": label}
+                       for value, label in SENSE_LABELS.items()],
+        }
+
+    def _slang_view(self, group_id: str) -> dict[str, object]:
+        """黑话（读）：词条列表。`group_id` 空 = 所有群（`learned.slang_list(None)`）。"""
+
+        groups = self._learned_groups()
+        group = str(group_id or "").strip()
+        base: dict[str, object] = {"available": False, "group_id": group,
+                                   "groups": groups, "entries": []}
+        lister = self._learned_fn("slang_list")
+        if lister is None:
+            return base
+        try:
+            rows = lister(group or None) or []
+        except Exception:  # noqa: BLE001 - 同上
+            logger.warning("webui_learned_slang_failed", exc_info=True)
+            return base
+        return {**base, "available": True,
+                "entries": [dict(row) for row in rows]}
+
+    def _quotes_write(self, payload: dict[str, object], source: str) -> Response:
+        """金句（写）：纠正某个表情的方向，或停用 / 恢复一条笔记。
+
+        `quote_correct` 的 `sense` 传 `auto` = **撤销人工覆盖**（回到模型学的那份）。
+        合法取值由**核心那三张表**判（`SENSE_LABELS` / `SENSE_ALIASES` /
+        `QUOTE_OVERRIDE_AUTO`），面板不另写一张——但也不把垃圾直接塞给接缝：
+        塞进去会落下一条"把它算成看不出来"的覆盖，那是**悄悄改了行为**。
+        """
+
+        action = str(payload.get("action") or "").strip()
+        group = str(payload.get("group_id") or "").strip()
+        if action == "note":
+            func = self._learned_fn("quote_note_enabled")
+            if func is None:
+                return failure("learned_unavailable", status=503)
+            note_id = str(payload.get("note_id") or "").strip()
+            if not note_id:
+                return failure("bad_request", detail="缺 note_id", status=400)
+            enabled = bool(payload.get("enabled"))
+            result = func(note_id, enabled) or {}
+            if not result or not result.get("written"):
+                return failure("learned_write_failed",
+                               detail="没写进去（这份笔记读不到，或者写盘失败）", status=503)
+            self._audit("quote_note", {"note_id": note_id, "enabled": enabled},
+                        "written", source)
+            return json_response(_envelope({"ok": True, "id": note_id, "enabled": enabled}))
+        if action != "correct":
+            return failure("bad_request", detail="不认识的 action", status=400)
+        func = self._learned_fn("quote_correct")
+        if func is None:
+            return failure("learned_unavailable", status=503)
+        emoji = str(payload.get("emoji_id") or "").strip()
+        sense = str(payload.get("sense") or "").strip()
+        if not group or not emoji or not sense:
+            return failure("bad_request",
+                           detail="缺 group_id / emoji_id / sense", status=400)
+        from ...quote_learning import SENSE_ALIASES, SENSE_LABELS
+        from ...stage3_main import QUOTE_OVERRIDE_AUTO
+
+        allowed = {item.casefold() for item in
+                   (*SENSE_LABELS, *SENSE_ALIASES, *QUOTE_OVERRIDE_AUTO)}
+        if sense.casefold() not in allowed:
+            return failure("bad_request", detail="不认识的方向", status=400)
+        result = func(group, emoji, sense, str(payload.get("note") or "")) or {}
+        if not result:
+            return failure("learned_unavailable", status=503)
+        if not result.get("written"):
+            return failure("learned_write_failed", detail="没写进盘", status=503)
+        self._audit("quote_correct",
+                    {"group_id": group, "emoji_id": emoji, "sense": sense},
+                    f"cleared={bool(result.get('cleared'))}", source)
+        return json_response(_envelope({"ok": True, **result}))
+
+    def _slang_write(self, payload: dict[str, object], source: str) -> Response:
+        """黑话（写）：改释义 / 删 / 标错。
+
+        改释义走的是 `slang_update`——词条**不存在时它自己新建一条**（核心那个写口
+        就是这么定的：操作者手工加词与改词是同一条路）。所以面板上不需要另开
+        "新增"入口，也不该假装自己有。
+        """
+
+        action = str(payload.get("action") or "").strip()
+        group = str(payload.get("group_id") or "").strip()
+        word = str(payload.get("word") or "").strip()
+        if not group or not word:
+            return failure("bad_request", detail="缺 group_id 或 word", status=400)
+        if action == "delete":
+            func = self._learned_fn("slang_delete")
+            if func is None:
+                return failure("learned_unavailable", status=503)
+            if not func(group, word):
+                return failure("not_found", detail="这条词条不在了（可能刚被删过）", status=404)
+            self._audit("slang_delete", {"group_id": group, "word": word}, "deleted", source)
+            return json_response(_envelope({"ok": True, "deleted": True}))
+        if action == "mark_wrong":
+            func = self._learned_fn("slang_mark_wrong")
+            if func is None:
+                return failure("learned_unavailable", status=503)
+            wrong = bool(payload.get("wrong", True))
+            entry = func(group, word, wrong) or {}
+            if not entry:
+                return failure("not_found", detail="这条词条不在了", status=404)
+            self._audit("slang_mark_wrong", {"group_id": group, "word": word},
+                        f"wrong={wrong}", source)
+            return json_response(_envelope({"ok": True, "entry": entry}))
+        if action != "update":
+            return failure("bad_request", detail="不认识的 action", status=400)
+        func = self._learned_fn("slang_update")
+        if func is None:
+            return failure("learned_unavailable", status=503)
+        definition = str(payload.get("definition") or "").strip()
+        if not definition:
+            return failure("bad_request", detail="释义不能是空的", status=400)
+        entry = func(group, word, definition) or {}
+        if not entry:
+            return failure("learned_rejected",
+                           detail="没写进去（护栏挡了，或者写盘失败）", status=400)
+        # 审计里只记**长度**，不记释义正文（与 prompt 那条同一套口径）。
+        self._audit("slang_update",
+                    {"group_id": group, "word": word, "chars": len(definition)},
+                    "saved", source)
+        return json_response(_envelope({"ok": True, "entry": entry}))
 
     # --- 审计 -------------------------------------------------------------
 

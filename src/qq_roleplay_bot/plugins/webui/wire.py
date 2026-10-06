@@ -146,6 +146,17 @@ def _panel_seams(ui, call_action) -> dict[str, object]:
     knowledge = getattr(ui, "knowledge", None)
     if knowledge is not None:
         seams["knowledge"] = knowledge
+    # **她学来的东西**（金句 / 黑话，2026-10-06）：面板里「知识库 → 金句 / 黑话」两个
+    # 子项要能看能改这两份数据。给的是核心的 `LearnedSeams`——**一串函数**，里面
+    # 只有那七个口（读/改表情方向、停用笔记、读/改/删/标错词条），
+    # 没有记忆入口、也没有对话入口（`tests/test_learned_seams.py` 逐个钉住函数清单）。
+    #
+    # **不加 `_Lazy`**：`LearnedSeams` 自己的每个函数在**调用时**才去引擎上取 store
+    # （见 `runtime._SeamBinder.learned_quote_store`），所以这里存下来的那一刻是不是
+    # "金句 store 已经装上了"不影响它——加了反而会多一层假延迟。
+    learned = getattr(ui, "learned", None)
+    if learned is not None:
+        seams["learned"] = learned
     # 数据根目录：**算好再给**（面板不自己猜路径）。以前这里只传 `QQBOT_DATA_DIR`
     # 环境变量，没配就是空串，`Panel.root` 返回 None，面板于是自己回落到
     # `webui_data._data_root()`——那个函数搬过家之后指到了 `src/data`。
