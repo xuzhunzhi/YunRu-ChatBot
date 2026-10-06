@@ -215,7 +215,12 @@ def read_session_messages(root: Path, session_id: str, *, limit: int = 50) -> di
 def read_usage(root: Path | None = None) -> dict[str, object]:
     """账本（跨重启累计）+ 按 agent 的命中率表。角色名复用 `APICHECK_ROLES`。"""
 
-    from ...api_usage import APICHECK_ROLES
+    # `APICHECK_ROLES`（role → 中文名）现在住在核心入口 `stage3_main`：
+    # `/super apicheck` 就是照它列 agent 的，面板再抄一份就成了第二个真相来源。
+    # 这一段原来写的是 `from ...api_usage import APICHECK_ROLES`——本体重构时那个常量
+    # 搬去了 `stage3_main`，这里没跟着改，于是 `/api/usage` 一直 500
+    # （总览页与账号页的"用量"整块读不出来，实测）。
+    from ...stage3_main import APICHECK_ROLES
 
     data = _read_json((root or _data_root()) / "api_usage.json") or {}
     roles: dict[str, dict[str, int]] = {}
@@ -545,21 +550,49 @@ def read_logs(feature: str, *, root: Path | None = None, limit: int = 20) -> dic
             "features": list(LOG_FEATURES)}
 
 
+def _port_in_use(host: str, port: int) -> bool:
+    """这个端口上已经有人监听了吗（面板的"bot 在不在跑"就靠它）。
+
+    **用 bind 探，不用 connect 探**（与核心 `stage3_main._port_in_use` 同一手法）：
+    连一下确实也能探出"有人在听"，但那半截连接会被对面当成一次失败的握手，
+    在**现有实例**的日志里留一条异常堆栈（核心那边的注释记着这次踩坑）。
+    bind 不产生连接：端口被占就直接 `WSAEADDRINUSE`。
+
+    **探针留在这里，不再从核心取**（2026-10-06）：这段代码原来写的是
+    `from ...onebot_ws import port_in_use`，而那个名字**从来没有存在过**
+    （`onebot_ws.py` 里只有消息解析那几个函数）→ `/health` 与 `/api/overview`
+    每次都 ImportError → 500；前端那道登录门正是拿 `/api/overview` 验令牌的，
+    于是**令牌再对也进不去**（截图抓到：一直停在登录页）。
+    核心那个同名函数是 `stage3_main._port_in_use`：私有，而且是"防重复启动"的
+    内部细节，不是给插件用的接缝——面板自己探一次更干净，也不用顺着核心内部拿东西。
+    """
+
+    import socket
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind((host, port))
+    except OSError:
+        return True
+    finally:
+        probe.close()
+    return False
+
+
 def read_health(*, attached: bool = False, started_at: float = 0.0) -> dict[str, object]:
     """面板自己的健康 + bot 进程是否活着（**用 bind 探法**，不产生半截连接）。
 
     `attached` 由调用方给（面板自己知道核心那侧接上没有）——这里不该反过来去问引擎。
     """
 
-    # 2026-10-01：原来是 `from ...stage3_main import _port_in_use, ONEBOT_WS_HOST,
-    # ONEBOT_WS_PORT`——面板顺着核心内部拿东西。三样都不是核心的内部细节：
-    # 主机/端口本来就是 `dev_config` 的，端口探针是 WS 传输层自己的工具。
+    # 主机/端口本来就是 `dev_config` 的（2026-10-01：原来连 `stage3_main` 里的
+    # `ONEBOT_WS_HOST` / `ONEBOT_WS_PORT` 都顺着拿，那两样不该从核心内部取）。
+    # 端口探针见 `_port_in_use`。
     from ... import dev_config
-    from ...onebot_ws import port_in_use
 
     live = False
     try:
-        live = bool(port_in_use(dev_config.ONEBOT_WS_HOST, dev_config.ONEBOT_WS_PORT))
+        live = bool(_port_in_use(dev_config.ONEBOT_WS_HOST, dev_config.ONEBOT_WS_PORT))
     except Exception:  # noqa: BLE001 - 探不到就报"不知道"，不猜
         live = False
     return {
