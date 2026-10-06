@@ -41,15 +41,6 @@
     <p class="rail-sub">控制面板</p>
   </div>
   <nav id="tabs" aria-label="页面导航"></nav>
-  <div class="rail-foot">
-    <span id="health" class="badge">连接中…</span>
-    <span id="source" class="badge dim"></span>
-    <div class="rail-actions">
-      <button id="refresh" type="button">刷新</button>
-      <button id="theme" class="icon-btn" type="button" title="切换浅色 / 深色">深色</button>
-      <button id="signout" class="icon-btn" type="button" title="退出登录">退出</button>
-    </div>
-  </div>
 </aside>
 
 <main class="content">
@@ -57,8 +48,13 @@
     <!-- 窄屏（手机）下左栏与内容分开显示，这个按钮负责退回卡片列表。
          桌面与中等屏由 CSS 隐藏（那里两栏同时在，不需要"返回"）。 -->
     <button id="back" class="icon-btn" type="button" title="返回卡片列表">← 返回</button>
-    <h2 id="page-title">总览</h2>
-    <p id="page-nav" class="page-nav"></p>
+    <div class="page-head-main">
+      <h2 id="page-title">总览</h2>
+      <p id="page-nav" class="page-nav"></p>
+    </div>
+    <!-- 「刷新」放**内容区顶栏**而不是左栏底部（2026-10-06 挪）：它拉的就是
+         "当前这一页"的数据（`render()` 重画当前页），所以属于每一页自己。 -->
+    <button id="refresh" class="icon-btn" type="button" title="重新拉这一页的数据">刷新</button>
   </header>
   <p id="error" class="error" hidden></p>
   <section id="view">加载中…</section>

@@ -9,6 +9,15 @@
  *  3) 页面只做展示与表单，**不做任何判定**：哪些项要重启、哪些动作有护栏，都由后端说。
  */
 
+/* 页签 id → 显示名。**这个表也是按层级写的**（2026-10-06）：
+ * 「人物画像」写在「记忆」的 `sub` 里，而不是平铺成一个顶层条目。
+ *
+ * 为什么：用户原话是"人物画像**属于记忆的子项目**"。写成平铺的话，光看这份表就像
+ * 多了一个顶层页——而左栏的层级（`CARDS`）与这里的层级就成了两个真相源，
+ * 以后谁顺手照 TABS 添一项，就会在别处冒出"记忆之外的人物画像"。
+ * 现在**只有一处**能声明它属于谁。层级渲染见 `drawTabs()`；
+ * `tests/test_webui_layout_assertions.py` 钉住它不许跑到记忆之外。
+ */
 const TABS = [
   ["account", "账号"],
   ["device", "设备"],
@@ -19,7 +28,8 @@ const TABS = [
   ["overview", "总览"],
   ["group", "群聊"],
   ["private", "私聊"],
-  ["memory", "记忆"],
+  // 「记忆 → 人物画像」：画像就是记忆里的一类（`kind='profile'`，见 `viewPersonProfiles`）。
+  ["memory", "记忆", { sub: ["memory_profile", "人物画像"] }],
   ["knowledge", "知识库"],
   ["plugins", "插件"],
 ];
@@ -40,14 +50,38 @@ function cards() {
     ? { ...entry, items: pluginTabs() } : entry));
 }
 
-//: 页签的显示名：普通页签查 `TABS`，插件页签查清单里的 `title`。
+/* 卡片里的条目有两种写法：
+ *   `"memory"`                       → 顶层的口
+ *   `{ id: "memory_profile", sub: 1 }` → **子项**：它属于前面那个口（如"记忆 → 人物画像"）
+ * 为什么要能表达"子项"（2026-10-06 用户："我应该说过**人物画像属于记忆的子项目**"）：
+ * 左栏是**导航**，光把两个口并排摆在"记忆"卡里，看起来只是同一层的两个页
+ * ——用户要的是**从属关系**看得见。所以子项在栏里缩进一档、图标块收小一号，
+ * 并挂 `data-sub` 给断言用（`tests/test_webui_layout_assertions.py` 钉住它属于记忆）。
+ * 这些条目是数据（`CARDS`），渲染只读 `id` 与 `sub` 两个字段。 */
+function itemId(entry) {
+  return typeof entry === "string" ? entry : entry.id;
+}
+
+//: 卡片里的**全部**口（含子项），按显示顺序。
+function cardItems(entry) {
+  return entry.items.map(itemId);
+}
+
+//: 页签的显示名：普通页签查 `TABS`（**含它的子项**），插件页签查清单里的 `title`。
 function labelOf(id) {
   if (id.startsWith(PLUGIN_PREFIX)) {
     const name = id.slice(PLUGIN_PREFIX.length);
     const found = (state.plugins || []).find((item) => item.name === name);
     return (found && (found.title || found.name)) || name;
   }
-  return (TABS.find(([key]) => key === id) || [, id])[1];
+  for (const entry of TABS) {
+    if (entry[0] === id) return entry[1];
+    // 子项：`["memory", "记忆", { sub: ["memory_profile", "人物画像"] }]`。
+    // 名字只写在**父项那一行**里——这就是"它属于谁"的唯一声明处。
+    const sub = entry[2] && entry[2].sub;
+    if (sub && sub[0] === id) return sub[1];
+  }
+  return id;
 }
 
 /* 左栏是**卡片**，每张卡片 = 一个功能区，卡片的子项（群聊/私聊、每个插件）就排在卡片里。
@@ -69,7 +103,11 @@ const CARDS = [
   { title: "账号与设备", items: ["account", "device"] },
   // 四个功能区。
   { title: "聊天", items: ["overview", "group", "private"] },
-  { title: "记忆", items: ["memory"] },
+  // 记忆下面**两个**口：记忆本身，以及"人物画像"这个**子项**（用户 2026-10-06：
+  // "我应该说过人物画像属于记忆的子项目"——它确实是记忆里的一类 `kind='profile'`，
+  // 见 `viewPersonProfiles` 那段注释）。子项写在**同一张卡里**并标 `sub: 1`：
+  // 它不是顶层分区、也不挂账号页（用户原话就是"子项目"）。
+  { title: "记忆", items: ["memory", { id: "memory_profile", sub: 1 }] },
   { title: "知识库", items: ["knowledge"] },
   // 插件卡：每个插件一个 tab（默认只列预装的）。
   { title: "插件", items: ["plugins"] },
@@ -123,6 +161,7 @@ const ICON_ALIAS = {
   storage: "logs",         // 占用空间：文档图标
   private: "letter",       // 私聊：信件图标
   plugins: "add",          // 插件：加号（可插拔）
+  memory_profile: "credential",  // 人物画像：也是"一个人"那张凭证图标（借）
 };
 
 function icon(name, cls = "") {
@@ -150,6 +189,7 @@ const TAB_NOTES = {
   group: "群聊：启停群、群管理动作（以云茹自己的名义执行）",
   private: "私聊：跟谁聊过、聊了几轮（骨架，数据待接）",
   memory: "记忆只能删、不能改：写入只走记忆维护 agent，面板顶多把有问题的删掉（删前先归档）",
+  memory_profile: "记忆里的「人物画像」：一个人一张，跟着人走、不按词检索；同样只能删不能改",
   knowledge: "知识库可以改：下面那份面板块能增 / 改 / 删；基准语料是只读的",
   plugins: "插件：每个插件一个 tab；预装的不给卸，webui 自己也不给卸（骨架，接口待接）",
 };
@@ -164,6 +204,8 @@ const state = {
   //: 插件清单（`/api/plugins`）。初值是空数组——卡片据此退回占位口。
   plugins: [],
   pluginsError: "",
+  //: 最近一次 `/api/overview` 读失败的原因（左栏的徽章撤掉之后，这句话由总览页显示）。
+  healthError: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -445,23 +487,41 @@ function rate(value) {
 /* ---------- 各页 ---------- */
 
 async function refreshHealth() {
-  // 顶栏那三个徽章（在不在跑 / 数据来源 / 版本）原来只在"总览"页被填，
-  // 于是停在别的页签上时就一直显示"连接中…"。这里让它跟页签无关，每轮都刷。
+  // 每轮都拉一次 `/api/overview` 并缓存（各页复用，免得同一个接口在一轮里请求两遍）。
+  //
+  // 2026-10-06：这里原来往左栏底部那两个徽章（`#health` / `#source`）里写字，
+  // 左栏清空之后徽章没了——状态改成**总览「运行」卡里的两格**（`viewOverview` 与这里
+  // 共用同一份 `state.overview`）。读失败时不再写 DOM（那时候页签自己也会报错），
+  // 只把它记在 `state.healthError` 上，由总览页如实显示一行。
   try {
-    const data = await api("/api/overview");
-    const health = data.health || {};
-    const st = data.state || {};
-    $("health").className = "badge " + (health.bot_live ? "ok" : "warn");
-    $("health").textContent = health.bot_live ? "bot 在运行" : "bot 未运行";
-    $("source").className = "badge dim";
-    $("source").textContent = st.source === "live" ? "活快照"
-      : st.source === "files" ? "文件快照" : "读不到状态";
-    state.overview = data;
+    state.overview = await api("/api/overview");
+    state.healthError = "";
   } catch (error) {
-    $("health").className = "badge bad";
-    $("health").textContent = /unauthorized|401/.test(error.message) ? "需要令牌" : "读取失败";
-    $("source").textContent = "";
+    state.overview = null;
+    state.healthError = error.message || "读取失败";
   }
+}
+
+//: 现在是不是深色（手动选过就按选的那套，没选过就跟随系统）。
+function currentDark() {
+  const chosen = document.documentElement.getAttribute("data-theme");
+  return chosen ? chosen === "dark"
+    : window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
+
+//: 本体状态：左栏底部那两枚徽章（bot 在运行 / 活快照）搬到这里**合成一整行**。
+//: 合成一格是刻意的：`运行`卡里剩下的 5 格正好排成 3 + 2（"启用群"是最后那整行的一格），
+//: 再拆成两格就会多出一行落单的（截图核对过：落单那格旁边空两格，像排版坏了）。
+//: 值仍用 `badge` 小胶囊，颜色语言（绿=在跑 / 灰=活快照）与搬走之前一致。
+function statusRow(health, st) {
+  const live = health.bot_live;
+  const source = st.source;
+  const sourceText = source === "live" ? "活快照"
+    : source === "files" ? "文件快照" : "读不到状态";
+  return kv("本体状态",
+    `<span class="badge ${live ? "ok" : "warn"}">${live ? "bot 在运行" : "bot 未运行"}</span>`
+    + ` <span class="badge ${source === "live" ? "dim" : "warn"}">${esc(sourceText)}</span>`,
+    { html: true, wide: true });
 }
 
 async function viewOverview() {
@@ -475,8 +535,16 @@ async function viewOverview() {
   const latency = st.latency || {};
   const errors = (data.errors || []).slice();
   const warns = errors.length ? card("读取提示", errors.map((e) => `<p class="hint">${esc(e)}</p>`).join("")) : "";
-  return warns
+  // 读不到 `/api/overview` 时如实说一行（原来这句话是写在左栏底部那枚徽章上的，
+  // 2026-10-06 面板状态搬进这一页，失败提示也跟着来）。
+  const healthWarn = state.healthError
+    ? card("状态读不出来", `<p class="hint">${esc(state.healthError)}</p>`) : "";
+  return warns + healthWarn
     + card("运行", `<div class="grid">`
+      // 这一格是从左栏底部搬过来的（2026-10-06 用户："左边边栏下面的这个卡片不明所以…
+      // 这个不应该在 system 页面吗"）。放这里最顺：这张卡就是"她现在在不在跑"，
+      // 与下面那几格同属"本体运行状态"，不用新开一张卡、也不重复。
+      + statusRow(health, st)
       + kv("对话开关", st.enabled ? "开" : "关")
       + kv("短期会话", (st.sessions || []).length)
       + kv("已运行", st.uptime_seconds ? duration(st.uptime_seconds) : "—")
@@ -556,10 +624,9 @@ async function viewMemory() {
   // 提示词那边本来就只用 `status='active'`，所以这里对齐它。
   const statusFilter = state.last.memoryStatus || "active";
   const query = statusFilter ? `&status=${encodeURIComponent(statusFilter)}` : "";
-  // 画像与旧事**分两块取**：
-  //   `kind=profile` → 一条人一条、跟着人走、不进按词检索（docs/MEMORY_PEOPLE.md 第八节）
-  //   默认（不带 kind）→ 旧事，后端已排除画像
-  const profiles = await api(`/api/memory/records?limit=50&kind=profile${query}`);
+  // 画像**不在这张页里取了**（2026-10-06）：它是记忆的子项，有自己的页
+  // （左栏「记忆 → 人物画像」，`viewPersonProfiles`）。这里只取旧事——后端默认
+  // 就排除 `kind='profile'`（`docs/MEMORY_PEOPLE.md` 第八节）。
   const records = await api(`/api/memory/records?limit=50${query}`);
   const archive = await api("/api/memory/archive?limit=20");
   const relationships = await api("/api/memory/relationships?limit=50");
@@ -582,25 +649,19 @@ async function viewMemory() {
         <div class="row"><button class="danger" id="purge">删除勾选的</button>
         <span class="hint">一次最多 100 条</span></div>`
       : `<p class="hint">没有筛出可疑记录。记忆本身是只读的——这里没有新增、也没有编辑。</p>`)
+    // 画像**不再在这张表里重复列**（2026-10-06）：它是记忆的一个子项，有自己的页
+    // ——左栏「记忆 → 人物画像」（`viewPersonProfiles`）。同一条事实在两个地方显示，
+    // 改一处忘一处，所以这里只留一句指路；这一页仍然把"生效的旧事"列全。
     + card("人物画像（一条人一条）", `
-        <p class="hint">这里是她对这个人的整体印象：跟着人走、不跟话题走，所以不按词检索，
-          说话人一开口就整段带上。一批记忆里最多动一条，大多数批次不该动——印象变了才更新。
-          画像同样只能删、不能改。</p>`
-      + (profiles.rows && profiles.rows.length
-        ? table([
-          { label: "关于谁", get: (r) => r.about || "（无归属人）" },
-          { label: "画像", get: (r) => r.content },
-          { label: "更新", get: (r) => ts(r.updated_at), nowrap: true },
-          { label: "版本", get: (r) => `r${num(r.revision)}`, nowrap: true },
-        ], profiles.rows, {
-          cols: "cols-memory",
-          widths: ["16%", "58%", "14%", "12%"],
-        })
-        : `<p class="hint">还没有画像（她对这个人的印象还没成形）。</p>`))
+        <p class="hint">画像单独一页了：左栏「记忆 → 人物画像」——那里是<b>一个人一张</b>，
+          有"这个人是谁"，也有挂在这个人名下的零散记录。这一页不再重复列它
+          （同一条事实只在一个地方显示）。</p>
+        <p class="hint">画像同样只能删、不能改；删除入口在下面「问题记忆」那张卡里。</p>`)
     + card("你记得的旧事（两层混排）", `
         <div class="row">${statusTabs}
           <span class="hint">「已被顶替 / 已删」是记忆更新留下的旧版，不算重复——
-            提示词那边只用「生效中」的那些。画像不在这一块，上面单独列。</span></div>`
+            提示词那边只用「生效中」的那些。画像不在这一块——它在左栏
+            「记忆 → 人物画像」那一页，按人排。</span></div>`
       + table([
         { label: "层", get: (r) => (r.tier === "long" ? "长期" : "中短期"), nowrap: true },
         // 「关于谁」这一列是关键：记忆是**跟人对应**的（docs/MEMORY_PEOPLE.md），
@@ -857,9 +918,20 @@ async function viewSettings() {
     </div>`).join("");
 
   const overridden = data.overridden || [];
+  // 「面板」这一组是**这台浏览器**的观感设置（主题），与 `/api/settings` 那套覆盖层
+  // 无关——所以这一行**没有 `data-key`**（"保存改动"时不会被上报、也不会被拒），
+  // 点一下立即生效。它是从左栏底部那颗"深色"按钮搬过来的（2026-10-06）。
+  const panelGroup = `<div class="pref-group"><div class="pref-group-title">面板</div>
+    <div class="pref-list">${prefRow(
+    prefTitle("深色主题") + '<div class="pref-summary">只影响这个面板的外观；存在这台浏览器的'
+      + '本地存储里，不写 <code>data/</code>、也不进覆盖层</div>',
+    `<input class="switch" type="checkbox" id="panel-theme"${
+      currentDark() ? " checked" : ""} aria-label="深色主题">`,
+    { icon: "settings" })}</div></div>`;
   return `<div class="row"><button id="save-settings" class="primary">保存改动</button>
       <span class="hint">留空表示"不改"；留空密钥表示清掉这一项、回落主密钥。
       面板改的东西写 <code>data/operator_config.json</code>，<b>不碰 .env</b>。</span></div>`
+    + panelGroup
     + groups
     + card("六套 prompt", `<p class="hint">保存前会校验：缺必需片段或含机制措辞会被拒绝。
        改完立即生效（回复/判定/记忆/审核/识图都每次现取）。</p>
@@ -986,6 +1058,22 @@ function bind() {
         "关闭群 " + el.dataset.id + " 的对话？");
       if (done) render();
     })) return;
+    // --- 从左栏底部搬过来的两样（2026-10-06）--------------------------------
+    // 它们的 DOM 长在页面内容里（调参页 / 账号页），所以走委托、不走 `init()`。
+    if (target.id === "panel-theme") {
+      // 主题是**这台浏览器**的偏好（localStorage），不进 data/、也不进覆盖层——
+      // 所以它不走 `/api/settings` 那套"保存改动"，点一下立即生效。
+      const next = target.checked ? "dark" : "light";
+      localStorage.setItem("yunru_panel_theme", next);
+      applyTheme(next);
+      return;
+    }
+    if (target.id === "signout") {
+      localStorage.removeItem("yunru_panel_token");
+      state.token = "";
+      lock(true);            // 回到登录页（面板本身照旧在跑）
+      return;
+    }
     if (target.id === "group-on") {
       const done = await write("/api/groups", { group_id: $("group-add").value, enabled: true },
         "开启这个群的对话？");
@@ -1245,6 +1333,151 @@ function viewPluginList() {
     '<p class="hint">正在向装配点要插件清单…</p>');
 }
 
+/* ---------- 人物画像（记忆的一个**子项**）----------
+ *
+ * 用户 2026-10-06："我应该说过人物画像属于记忆的子项目"。事实核对（不是照猜）：
+ * 画像就是记忆里的**一类**——`kind='profile'`（本机 `memory_model.py`：
+ * "2026-09-29 加的第七类：人物画像——她对某个人整体的印象"），落在**长期**表里，
+ * `/super profile @某人` 看的是同一份。所以它是「记忆」下面的子项，不占顶层分区。
+ *
+ * 组织方式：**一个人一张卡**——这个人是谁（名册里的名字 + QQ + 群）、她对这个人的
+ * 整体印象（`kind='profile'` 那条），以及挂在这个人身上的零散记录（称呼 / 边界 /
+ * 偏好这类）。取数全部走面板**既有**的记忆读取口（`/api/memory/*`：只读打开记忆库，
+ * 与「记忆」页同一套；没有新开任何内部通道），写入路径一条都没变——面板仍然**只能删**，
+ * 删除入口仍在「记忆」页。
+ */
+//: 一页最多看多少条（面板是本机小工具；再多就该去 `/super profile @某人` 看）。
+const PROFILE_LIMIT = 200;
+
+//: 一条记忆"关于谁"：优先 `subject_user_id`（隔离那一维），退回 `subjects`（关联人）。
+function personKey(row) {
+  const direct = String(row.subject_user_id || "").trim();
+  if (direct) return direct;
+  const subjects = Array.isArray(row.subjects) ? row.subjects : [];
+  return String(subjects[0] || "").trim();
+}
+
+//: `about` 是后端按 `people` 表拼好的显示名（没有就是 QQ 号本身）。
+function personName(row) {
+  return String(row.about || "").trim();
+}
+
+async function viewPersonProfiles() {
+  const profiles = await api(`/api/memory/records?limit=${PROFILE_LIMIT}&kind=profile`);
+  const records = await api(`/api/memory/records?limit=${PROFILE_LIMIT}`);
+  if (!profiles.available || !records.available) {
+    return card("人物画像", `<p class="hint">读不到记忆库（bot 正在写，或索引不存在）。
+      画像与旧事都在这一个库里，读不到就两样都看不到。</p>`);
+  }
+  // 名册与关系两轴：这两样都是**按人**的读数，正好配"一个人一张卡"。
+  const people = await api(`/api/memory/people?limit=${PROFILE_LIMIT}`);
+  const rels = await api(`/api/memory/relationships?limit=${PROFILE_LIMIT}`);
+  const names = {};
+  (people.rows || []).forEach((row) => {
+    const uid = String(row.user_id || "").trim();
+    if (!uid || !row.name) return;
+    (names[uid] = names[uid] || []).push(
+      esc(row.name) + (row.group_id ? `（群 <span class="mono">${esc(row.group_id)}</span>）` : ""));
+  });
+  const relation = {};
+  (rels.rows || []).forEach((row) => {
+    relation[String(row.user_id || "").trim()] = row;
+  });
+
+  // 按人分组：画像与被顶替的旧版分开（默认只把**生效的**那条当"她的印象"）。
+  const impression = new Map();
+  const superseded = new Map();
+  (profiles.rows || []).forEach((row) => {
+    const key = personKey(row) || "（无归属人）";
+    const bucket = row.status === "active" ? impression : superseded;
+    if (!bucket.has(key)) bucket.set(key, []);
+    bucket.get(key).push(row);
+  });
+  const mentions = new Map();
+  (records.rows || []).forEach((row) => {
+    const key = personKey(row);
+    if (!key) return;
+    if (!mentions.has(key)) mentions.set(key, []);
+    mentions.get(key).push(row);
+  });
+  // 生效的那条：同一人有多条时取版本最高的（正常情况下按人只有一条 active）。
+  impression.forEach((rows_, key) => {
+    rows_.sort((a, b) => Number(b.revision || 0) - Number(a.revision || 0));
+    impression.set(key, rows_);
+  });
+
+  const keys = [...impression.keys()].sort((a, b) => {
+    const left = impression.get(a)[0].updated_at || 0;
+    const right = impression.get(b)[0].updated_at || 0;
+    return Number(right) - Number(left);
+  });
+
+  const head = card("人物画像（记忆里的一个子项）", `
+    <p class="hint">这里是<b>一个人一张</b>：她对这个人的整体印象（记忆里 <code>kind=profile</code>
+      那一类），加上挂在这个人名下的零散记录（称呼、边界、偏好这类）。
+      画像跟着人走、不跟话题走，所以不按词检索；一批记忆里最多动一条。</p>
+    <p class="hint">面板对记忆**只能删、不能改**：写入只走记忆维护 agent。
+      删除入口在「记忆」页（问题记忆那张卡），这里只读。</p>
+    ${profiles.total > PROFILE_LIMIT || records.total > PROFILE_LIMIT
+      ? `<p class="hint">这一页每类最多看 ${PROFILE_LIMIT} 条（现在画像 ${num(profiles.total)} 条、
+         旧事 ${num(records.total)} 条），超出的没列出来——不是没有。</p>` : ""}`);
+
+  if (!keys.length) {
+    return head + card("还没有画像", `<p class="hint">她对这些人的印象还没成形。
+      画像由记忆维护 agent 在真的看出"这个人的整体样子"时才写一条，不是每人一条。</p>`);
+  }
+
+  const cards = keys.map((key) => {
+    const rows_ = impression.get(key);
+    const main = rows_[0];
+    const older = (superseded.get(key) || []).length;
+    const identity = [];
+    if (key !== "（无归属人）") identity.push(`<span class="mono">${esc(key)}</span>`);
+    if (names[key] && names[key].length) identity.push(names[key].join("、"));
+    if (main.scope_key) {
+      identity.push(`群 <span class="mono">${esc(main.scope_key)}</span>`);
+    }
+    const relation_ = relation[key];
+    const relationLine = relation_
+      ? `亲近 ${esc(String(relation_.closeness ?? "—"))} · 戒备 ${
+        esc(String(relation_.guardedness ?? "—"))} · 更新于 ${esc(ts(relation_.updated_at))}`
+      : "还没有关系两轴读数（她还没跟这个人来回够多）";
+    const own = mentions.get(key) || [];
+    // 「类别」这一列**不许 nowrap**：类别名有长有短（`alias` / `preference` / `boundary`），
+    // 在中等档（内容区只剩 ~575px）里最短的那一列装不下最长的类别名，而 `nowrap`
+    // 会让它**溢到旁边「键」那一列下面**、两列的字叠在一起（2026-10-06 截图核对抓到的）。
+    // 让它自己折行就没有这个问题——`table-layout: fixed` 下折行不会把列撑宽。
+    const ownTable = table([
+      { label: "类别", key: "kind", mono: true },
+      { label: "键", key: "normalized_key", mono: true, wide: true },
+      { label: "内容", get: (r) => r.content },
+      { label: "更新", get: (r) => ts(r.updated_at), nowrap: true },
+    ], own, { cols: "cols-profile", widths: ["20%", "20%", "44%", "16%"] });
+    return card(personName(main) || (key === "（无归属人）" ? "（无归属人）" : key), `
+      <p class="pref-summary">${identity.join(" · ") || "名册里还没有这个人的名字"}</p>
+      <div class="card-inline">
+        <div class="pref-title">她对这人的整体印象${
+          main.revision ? `（r${num(main.revision)}）` : ""}</div>
+        <div class="impression">${esc(main.content || "（空）")}</div>
+        ${older ? `<p class="hint">另有 ${num(older)} 条旧版（被顶替）；按状态筛选能在「记忆」页看到。</p>` : ""}
+      </div>
+      <p class="pref-summary">关系两轴：${relationLine}</p>
+      <div class="pref-group-title">这个人的零散记录（${num(own.length)} 条）</div>
+      ${own.length ? ownTable : '<p class="hint">这个人名下还没有别的记录。</p>'}`);
+  });
+
+  // 有记录、但还没有画像的人：如实列一行，别让人以为"她只记得这几个人"。
+  const withoutProfile = [...mentions.keys()].filter((key) => !impression.has(key));
+  const tail = withoutProfile.length
+    ? card("有记录、但还没成形像", `<p class="hint">这些人名下有零散记录，但还没有"整体印象"那一条：
+        ${withoutProfile.slice(0, 60).map((key) => `<span class="mono">${
+          esc(personName((mentions.get(key) || [])[0]) || key)}</span>`).join("、")}${
+        withoutProfile.length > 60 ? ` …（共 ${num(withoutProfile.length)} 人）` : ""}</p>`)
+    : "";
+  return head + cards.join("") + tail;
+}
+
+
 /* 骨架阶段的占位页：新开的五个口子还没有数据源，就**如实写"还没接"**——
  * 面板最容易犯的错是"看着有内容"，其实是编的。 */
 function viewStub(title, planned) {
@@ -1253,17 +1486,30 @@ function viewStub(title, planned) {
     + `<div class="kv">${rows}</div>`);
 }
 
+//: 账号页：目前只有"退出登录"是真的（它是**账号**的动作，2026-10-06 从左栏底部搬来），
+//: 其余内容仍是骨架——等"每用途凭据"那条接缝定下来再接（不提前建页，见 `CARDS` 注释）。
+function viewAccount() {
+  return card("面板登录", `<div class="pref-list">${prefRow(
+    prefTitle("退出登录") + '<div class="pref-summary">清掉这台浏览器里存的令牌，回到登录页。'
+      + '面板进程照旧在跑，重新填一次令牌就回来。</div>',
+    '<button type="button" id="signout" class="danger">退出</button>',
+    { icon: "credential" })}</div>`)
+    + viewStub("账号", [
+      ["她自己的号", "self_id"], ["供应商与模型", "provider_registry"],
+      ["余额", "与 /balance 同一账本"],
+      ["用量", "按 agent 对账：调用次数与缓存命中率（与 /super apicheck 同一账本）"],
+      ["超管名单", "脱敏后只显示数量"],
+    ]);
+}
+
 const VIEWS = {
   overview: viewOverview, usage: viewUsage, memory: viewMemory, knowledge: viewKnowledge,
+  // 记忆的子项（左栏「记忆」卡里的第二行）：一个人一张画像。
+  memory_profile: viewPersonProfiles,
   logs: viewLogs, settings: viewSettings, group: viewGroup, actions: viewActions,
   history: viewHistory,
   // ↓ 2026-10-03 按新架构开的五个口子（骨架；分组依据见 `CARDS` 上面的注释）
-  account: () => viewStub("账号", [
-    ["她自己的号", "self_id"], ["供应商与模型", "provider_registry"],
-    ["余额", "与 /balance 同一账本"],
-    ["用量", "按 agent 对账：调用次数与缓存命中率（与 /super apicheck 同一账本）"],
-    ["超管名单", "脱敏后只显示数量"],
-  ]),
+  account: viewAccount,
   // 设备页：用户原话"此设备这里塞关于、占用空间之类"——**这两样是这个页面里的内容**，
   // 不是左栏的两个页签（2026-10-04 纠正：我原来把它拆成了 `device` + `storage` 两个页签）。
   device: () => viewStub("设备", [
@@ -1282,15 +1528,24 @@ function drawTabs() {
   // 左栏 = 一列**卡片**：卡片标题是功能区，卡内是自己的 tab 条。
   // 布局依据见 `CARDS` 上面那段注释（用户 2026-10-03 定的）。
   // 插件卡的条目是动态的（`cards()` 会问 `state.plugins`）。
-  $("tabs").innerHTML = cards().map((card) => {
-    const on = card.items.includes(state.tab);
-    const items = card.items.map((id) =>
-      `<button data-tab="${id}" class="${state.tab === id ? "on" : ""}">`
-      + `<span class="rail-chip">${icon(id)}</span>`
-      + `<span class="rail-label">${esc(labelOf(id))}</span>`
-      + '<span class="rail-chevron" aria-hidden="true"></span></button>').join("");
+  //
+  // **左栏只放导航**（用户 2026-10-06："在左边切换设置项"）：卡里只有 tab 按钮，
+  // 没有操作类控件——`bot 在运行` / `活快照` / 刷新 / 深色 / 退出 那几样都搬去了
+  // 各自的页面（见 `viewOverview` / `index.html` 的 `#refresh` / `viewSettings` /
+  // `viewAccount`）。所以这里出现的每个 `<button>` 都必须带 `data-tab`。
+  $("tabs").innerHTML = cards().map((entry) => {
+    const ids = cardItems(entry);
+    const on = ids.includes(state.tab);
+    const items = entry.items.map((item) => {
+      const id = itemId(item);
+      const sub = typeof item === "object" && item.sub ? ' data-sub="1"' : "";
+      return `<button data-tab="${id}"${sub} class="${state.tab === id ? "on" : ""}">`
+        + `<span class="rail-chip">${icon(id)}</span>`
+        + `<span class="rail-label">${esc(labelOf(id))}</span>`
+        + '<span class="rail-chevron" aria-hidden="true"></span></button>';
+    }).join("");
     return `<section class="rail-card${on ? " is-active" : ""}">`
-      + `<h2 class="rail-card-title">${esc(card.title)}</h2>`
+      + `<h2 class="rail-card-title">${esc(entry.title)}</h2>`
       + `<div class="rail-card-items">${items}</div></section>`;
   }).join("");
 }
@@ -1315,11 +1570,9 @@ async function render() {
     $("view").innerHTML = await view();
     replayEnter();
   } catch (error) {
+    // 401 不再往左栏徽章里写了（那枚徽章没了）：登录门与登录卡自己会说清楚
+    // （见 `checkToken` / `loginFailureText`），这一页照旧显示读不出来的原因。
     $("view").innerHTML = `<p class="hint">这一页读不出来：${esc(error.message)}</p>`;
-    if (/unauthorized|401/.test(error.message)) {
-      $("health").className = "badge bad";
-      $("health").textContent = "需要令牌";
-    }
   }
 }
 
@@ -1340,12 +1593,10 @@ function applyTheme(mode) {
   } else {
     document.documentElement.removeAttribute("data-theme");
   }
-  const button = $("theme");
-  if (button) {
-    const dark = mode ? mode === "dark"
-      : window.matchMedia("(prefers-color-scheme: dark)").matches;
-    button.textContent = dark ? "浅色" : "深色";
-  }
+  // 左栏那颗"深色/浅色"按钮已经撤掉（2026-10-06），现在这份状态由**调参页的开关**
+  // 表达：开关在页面上时同步它的勾选状态（不在就什么都不用做）。
+  const toggle = $("panel-theme");
+  if (toggle) toggle.checked = currentDark();
 }
 
 /* ---- 登录门（2026-10-04 用户："打开webui首先打开登录页而非在左下角输入令牌"）----
@@ -1445,7 +1696,6 @@ function init() {
   const themeHash = (hash.match(/(?:^#|&)theme=(dark|light)/) || [])[1];
 
   applyTheme(themeHash || localStorage.getItem("yunru_panel_theme") || "");
-
   // `#settings` 这种直接定位到某个页签（刷新后也保持当前页）。
   // 注意：`token=` / `theme=` 是保留段，别把它们的值当页签名——
   // 令牌里不含 `=`，所以整串会被切成 `token`、`theme=dark`、`settings` 三段，
@@ -1457,14 +1707,10 @@ function init() {
   // 深链接（`#memory` 这种）在窄屏上应当直接进内容态，否则手机打开会停在卡片列表，
   // 看着像"链接没生效"。桌面/中等屏这行没有视觉效果。
   if (tabHash) document.body.classList.add("is-reading");
-  $("theme").addEventListener("click", () => {
-    const current = document.documentElement.getAttribute("data-theme");
-    const isDark = current ? current === "dark"
-      : window.matchMedia("(prefers-color-scheme: dark)").matches;
-    const next = isDark ? "light" : "dark";
-    localStorage.setItem("yunru_panel_theme", next);
-    applyTheme(next);
-  });
+  // 主题与退出的**按钮**原来是左栏底部那两颗（`#theme` / `#signout`），2026-10-06
+  // 撤掉左栏那块之后它们分别搬去了调参页（开关 `#panel-theme`）与账号页（按钮
+  // `#signout`）——那两样都长在**页面内容**里，`init()` 这一刻 DOM 里还没有，
+  // 所以监听放在 `bind()` 的委托里（见那里 `target.id === "panel-theme"` / `"signout"`）。
   // 登录门（2026-10-04 用户："打开webui首先打开登录页而非在左下角输入令牌"）。
   // 令牌存在浏览器本地；**先验一次**再放人进去，验不过就停在登录页。
   $("login-form").addEventListener("submit", async (event) => {
@@ -1481,11 +1727,6 @@ function init() {
     localStorage.setItem("yunru_panel_token", value);
     lock(false);
     render();
-  });
-  $("signout").addEventListener("click", () => {
-    localStorage.removeItem("yunru_panel_token");
-    state.token = "";
-    lock(true);
   });
   $("refresh").addEventListener("click", render);
   // 窄屏（手机）是"左栏 / 内容"二选一：点卡内 tab 进内容态，「返回」退回卡片列表。
