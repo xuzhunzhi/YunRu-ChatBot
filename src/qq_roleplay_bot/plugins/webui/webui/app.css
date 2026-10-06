@@ -325,9 +325,9 @@ body {
  *
  *   ┌──────────┬────────────────────────────┐
  *   │ 侧栏 426 │ 内容（独立滚动）           │
- *   │ 品牌     │ 大标题 + 副标题            │
+ *   │ 品牌     │ 大标题 + 副标题    [刷新]  │
  *   │ 页签列表 │ 卡片                       │
- *   │ 状态/按钮│                            │
+ *   │（只有导航）                           │
  *   └──────────┴────────────────────────────┘
  *
  * 侧栏自己也是一块"浮起来的表面"（圆角 16dp + 一层淡阴影），而不是给整页换底色——
@@ -469,30 +469,12 @@ nav button:hover { background: var(--secondary-container); }
 nav button.on { background: var(--surface-container-high); color: var(--on-surface); }
 nav button.on:hover { background: var(--surface-container-high); }
 
-.rail-foot {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 16px 20px 4px;
-  border-top: 1px solid var(--divider);
-  margin-top: 14px;
-}
-.rail-actions { display: flex; gap: 8px; }
-/* 底部这三颗按钮（刷新 / 深色 / 退出）不许被折成两行。
-   由来：宽屏档原来是 240px 的侧栏，脚卡里能用的宽度只有
-   `240 − 12×2(外边距) − 12×2(内边距) = 192px`，三颗等宽 + 两个 8px 间隙 → 每颗 58.7px，
-   而全局 `button` 是 16px×2 内边距 + 2 个汉字 32px = 需要 64px > 58.7px，于是每颗都折成
-   "刷 / 新"（截图核对时看见的）。
-   宽度已经改成 426px（见 `.rail`），宽屏这边不再紧张；但**中等档最窄那头**（700px 窗口，
-   栏体 ≈ 40% × 664 ≈ 266px → 脚卡内容 ~218px，每颗 ~67px）仍然离 64px 不远，
-   换个字号或字体就会再折——所以 `nowrap` 与收窄的内边距都留着当护栏。 */
-.rail-actions button {
-  flex: 1 1 0;
-  min-width: 0;
-  padding: 9px 6px;
-  font-size: 14px;
-  white-space: nowrap;
-}
+/* 左栏底部那块（bot 在运行 / 活快照 / 刷新 / 深色 / 退出）**已撤掉**（2026-10-06，
+   用户："左边边栏下面的这个卡片不明所以，我为什么要在左边栏显示……这个不应该在
+   system 页面吗"）。左栏从此**只放导航**（那是用户一开始就定的规格："在左边切换
+   设置项"）。那几样东西分别搬去了：本体状态 → 总览「运行」卡；刷新 → 每一页的内容区
+   顶栏（`#refresh`）；深色 → 调参页的「面板」分组；退出登录 → 账号页。
+   所以这里连 `.rail-foot` / `.rail-actions` 的样式一起删了，不是留一段死 CSS。 */
 
 /* --- 右侧内容 -------------------------------------------------------------- */
 
@@ -504,7 +486,24 @@ nav button.on:hover { background: var(--surface-container-high); }
   color: var(--on-background);
 }
 
-.page-head { margin-bottom: 16px; }
+/* 内容区顶栏：`[返回] 标题+副标题 ……… [刷新]`。
+   `#back` 只在窄屏的阅读态出现（见文件末尾），桌面/中等屏它 `display:none`，
+   标题自然贴左；「刷新」用 `margin-left:auto` 顶到右边，与标题同一行。 */
+.page-head {
+  margin-bottom: 16px;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.page-head-main { flex: 1 1 auto; min-width: 0; }
+#refresh {
+  flex: 0 0 auto;
+  margin-left: auto;
+  min-width: 0;
+  padding: 9px 14px;
+  font-size: 14px;
+  white-space: nowrap;
+}
 .page-head h2 {
   margin: 0;
   font-size: 32px;                  /* title1 */
@@ -901,6 +900,15 @@ td.wrap-anywhere { overflow-wrap: anywhere; }
   padding: 14px 16px;
   margin-bottom: 10px;
 }
+/* 「人物画像」页里那一整段"她对这人的整体印象"：是**正文**，不是 `.preview`
+   （那个是给日志用的等宽块），也不是 `.md`（那是知识库的 markdown 渲染）。 */
+.impression {
+  margin-top: 6px;
+  font-size: 15px;
+  line-height: 1.75;
+  color: var(--on-surface);
+  overflow-wrap: anywhere;
+}
 ul.picks { list-style: none; margin: 0; padding: 0; }
 ul.picks li { padding: 10px 2px; border-bottom: 1px solid var(--divider); }
 ul.picks li:last-child { border-bottom: none; }
@@ -972,6 +980,14 @@ textarea.tall { min-height: 260px; }
 .cols-memory col:nth-child(2) { width: 56%; }
 .cols-memory col:nth-child(3) { width: 14%; }
 .cols-memory col:nth-child(4) { width: 14%; }
+
+/* 人物画像：某人的零散记录（类别 / 键 / 内容 / 更新）。
+   第一列（类别）给 20%：`preference` 这种长类别名在中等档（内容区 ~575px）里
+   12% 装不下，会溢进「键」那一列（2026-10-06 截图核对抓到）。 */
+.cols-profile col:nth-child(1) { width: 20%; }
+.cols-profile col:nth-child(2) { width: 20%; }
+.cols-profile col:nth-child(3) { width: 44%; }
+.cols-profile col:nth-child(4) { width: 16%; }
 
 /* 操作记录：一条一块（不用表格，六列在 1180px 里平摊必然撑爆） */
 .audit-item { padding: 12px 14px; }
@@ -1259,13 +1275,27 @@ nav { padding: 0 12px; }
 .rail-chip .icon { width: 20px; height: 20px; }
 .rail-chevron { width: 8px; height: 8px; }
 
-/* 底部那一块（运行状态 / 令牌 / 刷新 / 主题）也做成一张白卡 */
-.rail-foot {
-  background: var(--surface-variant);
-  border-radius: var(--radius-card);
-  margin: 0 12px 12px;
-  padding: 12px;
+/* **子项**（如「记忆 → 人物画像」）：缩进一档、图标块收小一号，让它一眼看出是
+   挂在上面那个口下面的，而不是同一层的第二个页。依据：用户 2026-10-06
+   "我应该说过人物画像属于记忆的子项目"——数据里就是 `{ id, sub: 1 }`
+   （见 app.js 的 `itemId`）。为什么连图标块一起收小：只缩进、图标还留 38px 的话，
+   子项看起来比父项还重，层级正好反了。 */
+.rail-card-items button[data-sub] {
+  margin-left: 22px;
+  min-height: 44px;
+  font-size: 15px;
 }
+.rail-card-items button[data-sub] .rail-chip {
+  width: 26px;
+  height: 26px;
+  border-radius: 9px;
+  background: var(--surface-container-high);
+  color: var(--on-surface);
+}
+.rail-card-items button[data-sub] .rail-chip .icon { width: 16px; height: 16px; }
+
+/* 底部那块白卡（运行状态 / 令牌 / 刷新 / 主题）2026-10-06 撤掉了——左栏只放导航。
+   沿 `nav` 那条渐隐线索仍然留着（它是导航的一部分，见 `nav` 那一段）。 */
 .rail-brand { padding: 0 12px 16px; }
 .rail-brand h1 { font-size: 26px; }
 
