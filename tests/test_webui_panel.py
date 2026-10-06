@@ -54,6 +54,10 @@ READ_PATHS = (
     "/api/knowledge/overview",
     "/api/knowledge/chunks",
     "/api/knowledge/operator",
+    # 「知识库 → 金句 / 黑话」（她学来的东西）：接缝没接上时也必须回 200、
+    # 并且**如实说读不到**（见 `LearnedSeamTests`），不是 500、也不是编一份空表。
+    "/api/knowledge/quotes?group_id=717151356",
+    "/api/knowledge/slang",
     "/api/approvals/pending",
     "/api/actions/preview",
     "/api/history",
@@ -185,6 +189,331 @@ class AuthorizationTests(_PanelCase):
         response = self.request("POST", "/api/groups", body)
         self.assertEqual(response.status, 400)
         self.assertEqual(self.payload(response)["error"], "needs_confirmation")
+
+
+class LearnedSeamTests(unittest.TestCase):
+    """「知识库 → 金句 / 黑话」：**只走** `registry.ui.learned` 那七个函数。
+
+    用户 2026-10-06 的位置口径是*"金句我看应该划到知识库里"*、*"还有黑话"*，
+    而这两份数据都是 Stage 3 的（`AGENTS.md` §2.3）。所以这一组用例钉三件事：
+
+    1. 读：`/api/knowledge/quotes` → `learned.quote_view`，`/api/knowledge/slang`
+       → `learned.slang_list`；写：四个动作各自只调对应的那一个函数；
+    2. 接缝**没接上**（或少了某一个函数）时的降级：读如实说"读不到"、写回 503
+       ——不许 500、不许编一份空数据、更不许自己去 `data/` 里翻 JSON；
+    3. 取值表不复制：`QUOTE_AUTO` 必须是核心 `QUOTE_OVERRIDE_AUTO` 里的一个，
+       而"不认识的方向"要在**碰接缝之前**就被挡住（塞进去会落一条静默改行为的覆盖）。
+    """
+
+    TOKEN = TOKEN
+
+    def _panel(self, learned) -> Panel:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        env = mock.patch.dict(os.environ, {"QQBOT_DATA_DIR": tmp.name})
+        env.start()
+        self.addCleanup(env.stop)
+        return Panel({"data_root": tmp.name, "learned": learned},
+                     WebAccess(mode=LOCAL, token=TOKEN))
+
+    @staticmethod
+    def _call(panel: Panel, method: str, path: str, body: dict | None = None):
+        raw = json.dumps(body or {}).encode() if method != "GET" else b""
+        return panel.handle(method, path, raw,
+                            {"accept": "application/json",
+                             "authorization": "Bearer " + TOKEN}, "127.0.0.1")
+
+    class _FakeLearned:
+        """七个口，逐个记账。返回的形状**照核心那份契约**（见 `LearnedSeams`）。"""
+
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+
+        def quote_view(self, group_id):
+            self.calls.append(("quote_view", group_id))
+            if group_id != "717151356":
+                return {}
+            return {"group_id": group_id,
+                    "meanings": [{"emoji_id": "76", "sense": "positive",
+                                  "sense_label": "赞成（好句子）", "note": "这是捧她",
+                                  "manual": False}],
+                    "notes": [{"id": "abc123", "kind": "style", "when": "被夸",
+                               "note": "一句少来带过", "enabled": True}],
+                    "path": "D:/isolated/quote/profile.json"}
+
+        def quote_correct(self, group_id, emoji_id, sense, note=""):
+            self.calls.append(("quote_correct", group_id, emoji_id, sense, note))
+            return {"group_id": group_id, "emoji_id": emoji_id, "sense": sense,
+                    "cleared": sense == "auto", "written": True}
+
+        def quote_note_enabled(self, note_id, enabled):
+            self.calls.append(("quote_note_enabled", note_id, enabled))
+            return {"id": note_id, "enabled": bool(enabled), "written": True}
+
+        def slang_list(self, group_id=None):
+            self.calls.append(("slang_list", group_id))
+            return [{"id": "717151356:电赛", "group_id": "717151356", "word": "电赛",
+                     "definition": "电子设计竞赛", "status": "ok", "wrong": False,
+                     "times": 2, "first_seen": 1.0, "last_seen": 2.0,
+                     "explainers": [{"user_id": "1", "name": "甲", "at": 2.0,
+                                     "definition": "电子设计竞赛",
+                                     "quote": "电赛就是电子设计竞赛", "count": 1,
+                                     "source": "heard"}],
+                     "revisions": []}]
+
+        def slang_update(self, group_id, word, definition):
+            self.calls.append(("slang_update", group_id, word, definition))
+            return {"group_id": group_id, "word": word, "definition": definition}
+
+        def slang_delete(self, group_id, word):
+            self.calls.append(("slang_delete", group_id, word))
+            return True
+
+        def slang_mark_wrong(self, group_id, word, wrong=True):
+            self.calls.append(("slang_mark_wrong", group_id, word, wrong))
+            return {"group_id": group_id, "word": word, "wrong": wrong}
+
+    def _request(self, learned, method, path, body=None):
+        panel = self._panel(learned)
+        return panel, self._call(panel, method, path, body)
+
+    @staticmethod
+    def _data(response) -> dict:
+        return json.loads(response.body.decode("utf-8"))["data"]
+
+    def test_the_seven_names_are_the_core_contract(self) -> None:
+        """面板认的七个名字**就是** `LearnedSeams` 的字段（多一个少一个都红）。"""
+
+        from dataclasses import fields
+
+        from qq_roleplay_bot.plugins import LearnedSeams
+        from qq_roleplay_bot.plugins.webui.webui_panel import LEARNED_CALLS
+
+        self.assertEqual(tuple(item.name for item in fields(LearnedSeams)), LEARNED_CALLS)
+
+    def test_the_auto_value_comes_from_the_core_table(self) -> None:
+        """「恢复自动」送的取值必须在核心那张表里（面板不另立一份）。"""
+
+        from qq_roleplay_bot.plugins.webui.webui_panel import QUOTE_AUTO
+        from qq_roleplay_bot.stage3_main import QUOTE_OVERRIDE_AUTO
+
+        self.assertIn(QUOTE_AUTO, QUOTE_OVERRIDE_AUTO)
+
+    def test_quotes_read_goes_through_quote_view_only(self) -> None:
+        learned = self._FakeLearned()
+        _, response = self._request(learned, "GET", "/api/knowledge/quotes?group_id=717151356")
+        self.assertEqual(response.status, 200)
+        data = self._data(response)
+        self.assertTrue(data["available"])
+        self.assertEqual(data["meanings"][0]["emoji_id"], "76")
+        self.assertEqual(data["notes"][0]["id"], "abc123")
+        # 方向的可选值来自核心那份 `SENSE_LABELS`，不是面板自己写的表。
+        from qq_roleplay_bot.quote_learning import SENSE_LABELS
+
+        self.assertEqual([item["value"] for item in data["senses"]], list(SENSE_LABELS))
+        self.assertEqual([call for call in learned.calls if call[0] == "quote_view"],
+                         [("quote_view", "717151356")])
+
+    def test_quotes_view_that_returns_nothing_reads_as_unavailable(self) -> None:
+        """接缝在、但这一份读不到（`{}`）→ `available: false`，**不冒充空表**。"""
+
+        learned = self._FakeLearned()
+        _, response = self._request(learned, "GET", "/api/knowledge/quotes?group_id=999999")
+        data = self._data(response)
+        self.assertFalse(data["available"])
+        self.assertEqual(data["meanings"], [])
+
+    def test_correct_calls_quote_correct_and_refuses_a_bogus_sense(self) -> None:
+        learned = self._FakeLearned()
+        panel, response = self._request(learned, "POST", "/api/knowledge/quotes",
+                                        {"confirm": True, "action": "correct",
+                                         "group_id": "717151356", "emoji_id": "76",
+                                         "sense": "negative"})
+        self.assertEqual(response.status, 200)
+        self.assertIn(("quote_correct", "717151356", "76", "negative", ""), learned.calls)
+
+        # 垃圾取值：**接缝一次都不许被碰到**（塞进去会落一条静默改行为的覆盖）。
+        before = list(learned.calls)
+        _, bad = self._request(learned, "POST", "/api/knowledge/quotes",
+                               {"confirm": True, "action": "correct",
+                                "group_id": "717151356", "emoji_id": "76",
+                                "sense": "banana"})
+        self.assertEqual(bad.status, 400)
+        self.assertEqual(learned.calls, before)
+
+    def test_note_toggle_calls_quote_note_enabled(self) -> None:
+        learned = self._FakeLearned()
+        _, response = self._request(learned, "POST", "/api/knowledge/quotes",
+                                    {"confirm": True, "action": "note",
+                                     "note_id": "abc123", "enabled": False})
+        self.assertEqual(response.status, 200)
+        self.assertIn(("quote_note_enabled", "abc123", False), learned.calls)
+
+    def test_slang_writes_hit_one_function_each(self) -> None:
+        learned = self._FakeLearned()
+        self._request(learned, "POST", "/api/knowledge/slang",
+                      {"confirm": True, "action": "update", "group_id": "717151356",
+                       "word": "电赛", "definition": "电子设计竞赛"})
+        self._request(learned, "POST", "/api/knowledge/slang",
+                      {"confirm": True, "action": "mark_wrong", "group_id": "717151356",
+                       "word": "电赛"})
+        self._request(learned, "POST", "/api/knowledge/slang",
+                      {"confirm": True, "action": "delete", "group_id": "717151356",
+                       "word": "电赛"})
+        self.assertIn(("slang_update", "717151356", "电赛", "电子设计竞赛"), learned.calls)
+        self.assertIn(("slang_mark_wrong", "717151356", "电赛", True), learned.calls)
+        self.assertIn(("slang_delete", "717151356", "电赛"), learned.calls)
+
+    def test_an_empty_definition_is_refused_before_the_seam(self) -> None:
+        learned = self._FakeLearned()
+        _, response = self._request(learned, "POST", "/api/knowledge/slang",
+                                    {"confirm": True, "action": "update",
+                                     "group_id": "717151356", "word": "电赛",
+                                     "definition": "   "})
+        self.assertEqual(response.status, 400)
+        self.assertEqual(learned.calls, [])
+
+    def test_without_the_seam_reads_say_so_and_writes_are_503(self) -> None:
+        """接缝没接上：读**如实说读不到**（200）、写回 503——都不是 500。"""
+
+        for path in ("/api/knowledge/quotes?group_id=717151356", "/api/knowledge/slang"):
+            with self.subTest(path=path):
+                _, response = self._request(None, "GET", path)
+                self.assertEqual(response.status, 200)
+                self.assertFalse(self._data(response)["available"])
+        _, write = self._request(None, "POST", "/api/knowledge/quotes",
+                                 {"confirm": True, "action": "note",
+                                  "note_id": "abc123", "enabled": True})
+        self.assertEqual(write.status, 503)
+
+    def test_a_half_wired_seam_only_breaks_its_own_page(self) -> None:
+        """少一个函数只坏对应那一件事：`slang_list` 缺席不该让金句也读不出来。"""
+
+        learned = self._FakeLearned()
+        learned.slang_list = None            # 核心没给这个口
+        _, quotes = self._request(learned, "GET", "/api/knowledge/quotes?group_id=717151356")
+        _, slang = self._request(learned, "GET", "/api/knowledge/slang")
+        self.assertTrue(self._data(quotes)["available"])
+        self.assertFalse(self._data(slang)["available"])
+
+    def test_the_shapes_are_the_ones_the_core_really_returns(self) -> None:
+        """**真 store + 真接缝函数 + 真 `Panel`**：面板读到的形状就是核心给的那一份。
+
+        前面那些用例用的是假接缝，只证明"面板会调那几个函数"。这一条把契约钉在真东西上：
+        `quote_learning.QuoteStore` / `slang_learning.SlangStore` 落到临时文件，
+        经 `runtime._SeamBinder(...).learned_seams()`（**核心装配点用的就是它**）交给面板，
+        再按页面上真正用到的字段逐个核对——包括"你手工改过"（`manual`）、
+        "这条笔记停用了"（`enabled`）、改口后的释义与 `revisions`、原句证据。
+        """
+
+        import types
+
+        from qq_roleplay_bot import runtime
+        from qq_roleplay_bot.quote_learning import QuoteStore, note_id
+        from qq_roleplay_bot.slang_learning import SlangStore
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = pathlib.Path(tmp.name)
+
+        quotes = QuoteStore(root / "quote.json")
+        quotes.apply_run(
+            notes=[{"kind": "style", "when": "被夸", "note": "一句少来带过"}],
+            meanings={"717151356": {"76": {"sense": "positive", "note": "这是捧她"}}},
+            seen=[])
+        quotes.override_sense("717151356", "76", "negative")
+        quotes.set_note_enabled(note_id("被夸", "一句少来带过"), False)
+
+        slang = SlangStore(root / "slang.json")
+        slang.apply_explanation("717151356", "电赛", "电子设计竞赛", by_user_id="10001",
+                                by_name="甲", quote="电赛就是电子设计竞赛", at=1000.0)
+        slang.apply_explanation("717151356", "电赛", "电子设计大赛", by_user_id="10002",
+                                by_name="乙", quote="我们说的电赛是电子设计大赛", at=2000.0)
+        slang.mark_wrong("717151356", "电赛", True)
+
+        engine = types.SimpleNamespace(
+            quote_profile=types.SimpleNamespace(store=quotes), slang_library=slang)
+        binder = runtime._SeamBinder(engine)
+        self.addCleanup(runtime._ENGINES.pop, binder.token, None)
+
+        panel = self._panel(binder.learned_seams())
+
+        quotes_data = self._data(self._call(
+            panel, "GET", "/api/knowledge/quotes?group_id=717151356"))
+        self.assertTrue(quotes_data["available"])
+        meaning = quotes_data["meanings"][0]
+        self.assertEqual(meaning["emoji_id"], "76")
+        self.assertEqual(meaning["sense"], "negative")        # 覆盖压过模型判的
+        self.assertTrue(meaning["manual"])                     # "你手工改过"
+        self.assertIn("不赞成", meaning["sense_label"])
+        note = quotes_data["notes"][0]
+        self.assertEqual((note["kind"], note["when"], note["note"]),
+                         ("style", "被夸", "一句少来带过"))
+        self.assertFalse(note["enabled"])                      # 停用了
+        self.assertTrue(quotes_data["path"].endswith("quote.json"))
+
+        slang_data = self._data(self._call(panel, "GET", "/api/knowledge/slang"))
+        entry = slang_data["entries"][0]
+        self.assertEqual((entry["group_id"], entry["word"]), ("717151356", "电赛"))
+        self.assertEqual(entry["definition"], "电子设计大赛")   # 改口之后的那份
+        self.assertEqual(entry["times"], 2)
+        self.assertTrue(entry["wrong"])                        # 标错了
+        self.assertEqual([row["quote"] for row in entry["explainers"]],
+                         ["电赛就是电子设计竞赛", "我们说的电赛是电子设计大赛"])
+        self.assertEqual([row["name"] for row in entry["explainers"]], ["甲", "乙"])
+        self.assertEqual([(row["from"], row["to"]) for row in entry["revisions"]],
+                         [("电子设计竞赛", "电子设计大赛")])
+
+        # 写回去也落在真 store 上：恢复自动 → 回到模型学的那份。
+        response = self._call(panel, "POST", "/api/knowledge/quotes",
+                              {"confirm": True, "action": "correct",
+                               "group_id": "717151356", "emoji_id": "76",
+                               "sense": "auto"})
+        self.assertEqual(response.status, 200)
+        after = self._data(self._call(panel, "GET", "/api/knowledge/quotes?group_id=717151356"))
+        self.assertEqual(after["meanings"][0]["sense"], "positive")
+        self.assertFalse(after["meanings"][0]["manual"])
+
+    def test_the_panel_never_reads_the_learned_files_itself(self) -> None:
+        """`self._seam("learned")` **只在一处**取（`_learned_fn`），而且没有读那两份文件的代码。
+
+        ⚠️ 判据落在**语法树**上，不是源码文本上：这一段的注释里就写着那两个文件名
+        （"面板不许自己去读 `data/quote/profile.json`"），按文本扫会把注释也算成违规
+        ——第一版就是这么写的，红得毫无道理。注释与 docstring 都不是"代码在做什么"。
+        """
+
+        source = pathlib.Path(
+            importlib.import_module("qq_roleplay_bot.plugins.webui.webui_panel").__file__
+        ).read_text(encoding="utf-8")
+        self.assertEqual(source.count('self._seam("learned")'), 1,
+                         "`learned` 接缝在多处被取——那说明某一页绕开了 `_learned_fn`")
+
+        tree = ast.parse(source)
+        # `QuoteStore` / `SlangStore` / `profile_path`：核心那两个 store 的名字。
+        # 面板直接碰它们就等于绕开接缝自己读文件。
+        attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+        identifiers = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+        for forbidden in ("QuoteStore", "SlangStore", "profile_path"):
+            self.assertNotIn(forbidden, attributes | identifiers,
+                             f"面板直接拿到了 {forbidden}——那一份只能走 `learned` 接缝")
+        # 字符串常量（**跳过 docstring**）：不该出现这两个文件名。
+        docstrings = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                     ast.AsyncFunctionDef)):
+                continue
+            body = getattr(node, "body", [])
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                docstrings.add(id(body[0].value))
+        strings = [node.value for node in ast.walk(tree)
+                   if isinstance(node, ast.Constant) and isinstance(node.value, str)
+                   and id(node) not in docstrings]
+        for forbidden in ("quote/profile.json", "slang/profile.json"):
+            hits = [text for text in strings if forbidden in text]
+            self.assertEqual(hits, [],
+                             f"面板里出现了她学来的那份文件名 {forbidden}：{hits}")
 
 
 class PortProbeTests(unittest.TestCase):
