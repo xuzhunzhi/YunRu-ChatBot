@@ -380,6 +380,18 @@ nav {
   padding: 0 12px;                  /* ExpandedItemHorizontalMargin */
   overflow-y: auto;
   flex: 1 1 auto;
+  /* **"下面还有"的提示**（2026-10-06 截图核对时发现的问题）：
+   *
+   * 全局把滚动条藏掉了（用户 2026-10-01 要求："能改掉 webui 里面的翻页滚动条吗"），
+   * 于是侧栏列表比栏体长的时候**没有任何线索**——1440×900 上"插件 / 系统"两张卡
+   * 整个在可视区之外，看起来就像侧栏到此为止，用户不会知道要滚。
+   *
+   * 一条很淡的底部渐隐就是 HyperOS 那种"回收边"的做法，也正好补上藏掉的滚动条
+   * 该给的那点暗示。它跟着栏体走（不随内容滚），所以滚到底时最后一行会被轻微压暗
+   * ——18px 的过渡，看得出有内容、又不至于把字吃掉。
+   */
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 18px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 18px), transparent 100%);
 }
 /* --- 左栏卡片（2026-10-03 新架构的骨架）-------------------------------------
  *
@@ -454,7 +466,18 @@ nav button.on:hover { background: var(--surface-container-high); }
   margin-top: 14px;
 }
 .rail-actions { display: flex; gap: 8px; }
-.rail-actions button { flex: 1 1 0; min-width: 0; }
+/* 底部这三颗按钮（刷新 / 深色 / 退出）在**宽屏那条 240px 的侧栏**里必须挤得下，
+   否则"刷新"会被折成"刷 / 新"两行——截图核对时看到的就是这样，很难看。
+   算一下：栏 240 − 脚卡左右外边距(12×2) − 脚卡内边距(12×2) = 192px，
+   三颗等宽 + 两个 8px 间隙 → 每颗 58.7px。2 个汉字 14px 字号 = 28px，
+   所以左右内边距最多各 15px：这里取 6px，并显式 `nowrap` 钉死"不许换行"。 */
+.rail-actions button {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 9px 6px;
+  font-size: 14px;
+  white-space: nowrap;
+}
 
 /* --- 右侧内容 -------------------------------------------------------------- */
 
@@ -498,12 +521,10 @@ nav button.on:hover { background: var(--surface-container-high); }
 .badge.warn { background: rgba(242, 163, 60, 0.18); color: var(--warn); }
 .badge.dim { background: var(--secondary-container); color: var(--text-3); }
 
-.token {
-  display: flex; gap: 8px; align-items: center;
-  color: var(--text-4); font-size: 13px;
-}
-.token input { flex: 1 1 auto; min-width: 0; padding: 8px 12px; font-size: 13.5px; min-height: 36px; }
-.token button { flex: 0 0 auto; padding: 8px 12px; min-height: 36px; min-width: 0; font-size: 13.5px; }
+/* 这里原来有一段 `.token`（侧栏左下角那个令牌输入框的样式）。2026-10-04 用户
+   "打开 webui 首先打开登录页而非在左下角输入令牌" 之后，那个输入框从 `index.html`
+   里删掉了，样式却留着——`grep -n 'class="token' app.js index.html` 一处都没有，
+   是死代码（顺带一提：用户这次给的规格里也写着"不要底部 token 框"）。删掉。 */
 
 input[type=password], input[type=text], input[type=number], textarea, select {
   background: var(--secondary-variant);
@@ -754,22 +775,36 @@ section.card h2 {
 }
 
 .grid {
-  /* 原来是 `auto-fill minmax(180px, 1fr)`：列数由宽度自己算，于是 9 格排成 5+4，
-   * 第二行右边空一截、最后那个格子孤零零挂着（截图核对时看到的）。
-   * 固定 3 列后 9 格 = 3×3、6 格 = 3×2，都排满；格子也宽了，号码/时间不容易折行。
-   * 窄屏在下面的媒体查询里降到 2 列。 */
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  /* 一格一格的读数块（`.kv`）。**布局用 flex，不用 grid**：
+   *
+   * 原来写的是 `grid-template-columns: repeat(3, minmax(0,1fr))`，9 格时是漂亮的
+   * 3×3，但格数不是 3 的倍数时**行尾会留空洞**——"运行"那张卡是 5 格 + 1 个
+   * 整行格，于是"内存"右边空两格、"目标群"右边空两格，看着像排版坏了（截图核对时
+   * 看到的）。CSS grid 没法让"落单的那一格"自动铺开，flex 可以：每格 `flex-basis: 30%`
+   * （4 个就超过一行 → 每行最多 3 格），同一行里 `flex-grow` 把宽度分匀，
+   * **落单的那一格自己占满一行**，任何格数都不会留洞。
+   *
+   * `min-width: 0` 还是要留着：不然长号码/长文件名会把格子撑破（同 .content 那条）。
+   */
+  display: flex;
+  flex-wrap: wrap;
   gap: 10px;
 }
+.grid .kv {
+  /* 每格**固定占三分之一**（减去两个 10px 间隙），`flex-grow: 0`：
+   * 落单的那一格跟别的格子一样宽，不会拉成一条通栏——第一版让它
+   * `flex-grow: 1`，于是"内存""目标群"各占满一整行，比空洞更难看（截图对比过）。 */
+  flex: 0 1 calc((100% - 20px) / 3);
+  min-width: 0;
+}
+/* 内容需要整行铺开的那一格（比如"启用群"那一串号码） */
+.grid .kv.span-all { flex-basis: 100%; }
 
 .kv {
   background: var(--surface-container-high);   /* #E8E8E8，比卡片深一档 */
   border-radius: var(--radius-control);
   padding: 11px 14px;
 }
-/* 内容需要整行铺开的那一格（比如"启用群"那一串号码） */
-.kv.span-all { grid-column: 1 / -1; }
 .kv .k { color: var(--text-3); font-size: 12px; margin-bottom: 2px; }
 .kv .v { font-size: 16px; font-weight: 500; overflow-wrap: anywhere; }
 
@@ -1097,7 +1132,8 @@ code {
   body.is-reading #back { display: inline-flex; }
   .page-head h2 { font-size: 24px; }
   section.card { padding: 14px; }
-  .grid { grid-template-columns: minmax(0, 1fr); }
+  /* 一格一行（`.grid` 在基础样式里是 flex，见那一段的说明） */
+  .grid .kv { flex-basis: 100%; }
 }
 
 /* 「返回」只在窄屏的"阅读态"出现——桌面与中等屏没有这个概念 */

@@ -481,9 +481,11 @@ async function viewOverview() {
       + kv("短期会话", (st.sessions || []).length)
       + kv("已运行", st.uptime_seconds ? duration(st.uptime_seconds) : "—")
       + kv("内存", st.memory_bytes ? bytes(st.memory_bytes) : "—")
-      // 群号可能五六个：单独一行铺开，用号码片折行（挤在窄格里会被从数字中间折断）
-      + kv("启用群", chips(st.enabled_group_ids), { html: true, wide: true })
       + kv("目标群", st.target_group_id || "—")
+      // 群号可能五六个：单独一行铺开，用号码片折行（挤在窄格里会被从数字中间折断）。
+      // **放在最后**：整行那一格夹在中间时，它前面的行尾会只剩一格（"内存"旁边空两格）
+      // ——截图核对时看着像排版坏了；挪到最后，前面的 5 格正好排成 3 + 2。
+      + kv("启用群", chips(st.enabled_group_ids), { html: true, wide: true })
       + `</div>`)
     + card("计数（本次 / 全时）", `<div class="grid">`
       + kv("收到消息", `${num(counts.accepted_messages)} / ${num(all.accepted_messages)}`)
