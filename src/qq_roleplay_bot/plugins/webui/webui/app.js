@@ -9,14 +9,17 @@
  *  3) 页面只做展示与表单，**不做任何判定**：哪些项要重启、哪些动作有护栏，都由后端说。
  */
 
-/* 页签 id → 显示名。**这个表也是按层级写的**（2026-10-06）：
- * 「人物画像」写在「记忆」的 `sub` 里，而不是平铺成一个顶层条目。
+/* 页签 id → 显示名。**每一项都只写自己的一行**（2026-10-06 更正过一轮）。
  *
- * 为什么：用户原话是"人物画像**属于记忆的子项目**"。写成平铺的话，光看这份表就像
- * 多了一个顶层页——而左栏的层级（`CARDS`）与这里的层级就成了两个真相源，
- * 以后谁顺手照 TABS 添一项，就会在别处冒出"记忆之外的人物画像"。
- * 现在**只有一处**能声明它属于谁。层级渲染见 `drawTabs()`；
- * `tests/test_webui_layout_assertions.py` 钉住它不许跑到记忆之外。
+ * 「人物画像」属于**「记忆」这张卡（这个分区）**——用户原话是"我应该说过人物画像
+ * 属于记忆的子项目"，而 2026-10-06 他指着面板把这句话说全了：
+ * *"webui那里，**人物画像和记忆 tab 是同等级的，都在记忆卡片下**"*、*"金句黑话同理"*。
+ *
+ * 所以"属于"由**卡片**表达（`CARDS` 里同一张卡下面的条目就是这一张卡的项），
+ * **不是**"挂在上面那个条目下面"：同一张卡里的项在左栏里**看起来就是同级的并列项**。
+ * 之前这里写过 `{ sub: [...] }`（还配了缩进/缩小/层级线），那是把"属于这张卡"
+ * 读成了"挂在那个条目下面"——已经被用户否掉，改回平级（`SubLevelEntriesTests` 钉住
+ * "同一张卡下面的项渲染完全一样"，谁再给某一项单独缩进/改尺寸都会红）。
  */
 const TABS = [
   ["account", "账号"],
@@ -28,12 +31,16 @@ const TABS = [
   ["overview", "总览"],
   ["group", "群聊"],
   ["private", "私聊"],
-  // 「记忆 → 人物画像」：画像就是记忆里的一类（`kind='profile'`，见 `viewPersonProfiles`）。
-  ["memory", "记忆", { sub: ["memory_profile", "人物画像"] }],
-  // 「知识库 → 金句 / 黑话」（2026-10-06 用户："金句我看应该划到知识库里"、"还有黑话"）：
-  // 两样都是她**从群里学来的东西**（表情含义表 + 风格/语境笔记 / 黑话词条），
-  // 挂在「知识库」下面，不占顶层分区。同一条机制，`sub` 这次放了**两个**子项。
-  ["knowledge", "知识库", { sub: [["knowledge_quotes", "金句"], ["knowledge_slang", "黑话"]] }],
+  // 「记忆」卡里的两个口（**同级并列**）：记忆本身，以及与它同级的「人物画像」
+  // ——画像就是记忆里的一类（`kind='profile'`，见 `viewPersonProfiles`）。
+  ["memory", "记忆"],
+  ["memory_profile", "人物画像"],
+  // 「知识库」卡里的三个口（同样**同级并列**）：知识库本身，加上「金句」「黑话」。
+  // 后两样是她**从群里学来的东西**（表情含义表 + 风格/语境笔记 / 黑话词条），
+  // 由 `registry.ui.learned` 提供（用户 2026-10-06："金句我看应该划到知识库里"、"还有黑话"）。
+  ["knowledge", "知识库"],
+  ["knowledge_quotes", "金句"],
+  ["knowledge_slang", "黑话"],
   ["plugins", "插件"],
 ];
 
@@ -53,24 +60,19 @@ function cards() {
     ? { ...entry, items: pluginTabs() } : entry));
 }
 
-/* 卡片里的条目有两种写法：
- *   `"memory"`                       → 顶层的口
- *   `{ id: "memory_profile", sub: 1 }` → **子项**：它属于前面那个口（如"记忆 → 人物画像"）
- * 为什么要能表达"子项"（2026-10-06 用户："我应该说过**人物画像属于记忆的子项目**"）：
- * 左栏是**导航**，光把两个口并排摆在"记忆"卡里，看起来只是同一层的两个页
- * ——用户要的是**从属关系**看得见。所以子项在栏里缩进一档、图标块收小一号，
- * 并挂 `data-sub` 给断言用（`tests/test_webui_layout_assertions.py` 钉住它属于记忆）。
- * 这些条目是数据（`CARDS`），渲染只读 `id` 与 `sub` 两个字段。 */
+/* 卡片里的条目只有**一种**写法：一个页签 id 字符串（`"memory"` / `"memory_profile"`）。
+ * 同一张卡下面的条目就是这一张卡的项，**在左栏里看起来完全同级**——"谁属于谁"
+ * 由卡片（`CARDS` 的 `title`）表达，别在条目上再挂层级标记（见 `TABS` 上面那段）。 */
 function itemId(entry) {
   return typeof entry === "string" ? entry : entry.id;
 }
 
-//: 卡片里的**全部**口（含子项），按显示顺序。
+//: 卡片里的**全部**口，按显示顺序。
 function cardItems(entry) {
   return entry.items.map(itemId);
 }
 
-//: 页签的显示名：普通页签查 `TABS`（**含它的子项**），插件页签查清单里的 `title`。
+//: 页签的显示名：普通页签查 `TABS`，插件页签查清单里的 `title`。
 function labelOf(id) {
   if (id.startsWith(PLUGIN_PREFIX)) {
     const name = id.slice(PLUGIN_PREFIX.length);
@@ -79,30 +81,12 @@ function labelOf(id) {
   }
   for (const entry of TABS) {
     if (entry[0] === id) return entry[1];
-    // 子项：名字只写在**父项那一行**里——这就是"它属于谁"的唯一声明处。
-    for (const [subId, label] of subItems(entry)) {
-      if (subId === id) return label;
-    }
   }
   return id;
 }
 
-/* 子项声明（`TABS` 里那一行的第三个字段）：可以放**一个**子项，写成一对
- * `["memory_profile", "人物画像"]`；也可以放**一串**，写成一组对
- * （`[["knowledge_quotes", "金句"], ["knowledge_slang", "黑话"]]`）。
- * `subItems()` 把两种写法归一成"一串对"——取名（`labelOf`）只读归一后的结果，
- * 所以"它属于谁"仍然**只在父项那一行声明一次**，不会多出第二个真相源。
- *
- * 为什么允许两种写法：一个子项写成扁平的那一对更好读（「记忆 → 人物画像」本来
- * 就是这一种，2026-10-06 用户："我应该说过人物画像属于记忆的子项目"）；
- * 两个以上就只能是"一串对"。归一放在这一处，别处只管用。 */
-function subItems(entry) {
-  const sub = entry[2] && entry[2].sub;
-  if (!sub || !sub.length) return [];
-  return typeof sub[0] === "string" ? [sub] : sub;
-}
-
-/* 左栏是**卡片**，每张卡片 = 一个功能区，卡片的子项（群聊/私聊、每个插件）就排在卡片里。
+/* 左栏是**卡片**，每张卡片 = 一个功能区，卡里的项（群聊/私聊、金句/黑话、每个插件）
+ * 就**平级地**排在卡片里——"谁属于谁"由卡片本身表达，不用条目上的层级标记。
  *
  * 由来（2026-10-03 用户）："我认为需要按照实际功能分区来构建架构。主要要设置的有
  * 聊天、记忆、知识库和插件四部分，此外最上面是账号和此设备（仿照小米的设置架构），
@@ -121,16 +105,16 @@ const CARDS = [
   { title: "账号与设备", items: ["account", "device"] },
   // 四个功能区。
   { title: "聊天", items: ["overview", "group", "private"] },
-  // 记忆下面**两个**口：记忆本身，以及"人物画像"这个**子项**（用户 2026-10-06：
-  // "我应该说过人物画像属于记忆的子项目"——它确实是记忆里的一类 `kind='profile'`，
-  // 见 `viewPersonProfiles` 那段注释）。子项写在**同一张卡里**并标 `sub: 1`：
-  // 它不是顶层分区、也不挂账号页（用户原话就是"子项目"）。
-  { title: "记忆", items: ["memory", { id: "memory_profile", sub: 1 }] },
-  { title: "知识库", items: ["knowledge",
-    // 「金句 / 黑话」是她**从群里学来的东西**（用户 2026-10-06："金句我看应该划到
-    // 知识库里"、"还有黑话"）。子项写在**同一张卡里**并标 `sub: 1`——它们不是顶层
-    // 分区，也不是同一层的第二个、第三个口（名字只写在 `TABS` 里那一次）。
-    { id: "knowledge_quotes", sub: 1 }, { id: "knowledge_slang", sub: 1 }] },
+  // 记忆卡下面**两个平级的口**：记忆本身，与「人物画像」。
+  // 2026-10-06 用户把口径说全了："webui那里，**人物画像和记忆 tab 是同等级的，
+  // 都在记忆卡片下**"。画像确实是记忆里的一类（`kind='profile'`，见
+  // `viewPersonProfiles`），但它在左栏里**与「记忆」平级**——"属于记忆"由**这张卡**
+  // 表达，不是"挂在「记忆」那个条目下面"。
+  { title: "记忆", items: ["memory", "memory_profile"] },
+  // 知识库卡下面**三个平级的口**：知识库本身，以及她**从群里学来的东西**
+  // （「金句」「黑话」，用户 2026-10-06："金句我看应该划到知识库里"、"还有黑话"，
+  // 紧接着："**金句黑话同理**"——同样是同一张卡下面的平级项）。
+  { title: "知识库", items: ["knowledge", "knowledge_quotes", "knowledge_slang"] },
   // 插件卡：每个插件一个 tab（默认只列预装的）。
   { title: "插件", items: ["plugins"] },
   // ⚠️ 这四个是**运维页**，用户给的结构（账号与设备 + 聊天/记忆/知识库/插件）
@@ -184,7 +168,7 @@ const ICON_ALIAS = {
   private: "letter",       // 私聊：信件图标
   plugins: "add",          // 插件：加号（可插拔）
   memory_profile: "credential",  // 人物画像：也是"一个人"那张凭证图标（借）
-  // 「知识库 → 金句 / 黑话」两个子项也是**借**的图标（加新图标要走
+  // 「金句 / 黑话」这两个口也是**借**的图标（加新图标要走
   // `data/tmp_miuix_icons.py`，不该手画）：金句是"她自己说过的话"，借信件那张；
   // 黑话是一份带解释的词条表，借"规则清单"那种列表图标。
   knowledge_quotes: "letter",
@@ -218,7 +202,7 @@ const TAB_NOTES = {
   memory: "记忆只能删、不能改：写入只走记忆维护 agent，面板顶多把有问题的删掉（删前先归档）",
   memory_profile: "记忆里的「人物画像」：一个人一张，跟着人走、不按词检索；同样只能删不能改",
   knowledge: "知识库可以改：下面那份面板块能增 / 改 / 删；基准语料是只读的",
-  // 两个子项的副标题：`render()` 用 `textContent` 写它们，所以**不能**用 markdown 记号。
+  // 这两个口的副标题：`render()` 用 `textContent` 写它们，所以**不能**用 markdown 记号。
   knowledge_quotes: "金句：从她自己的话里学来的——按群的表情含义表，以及风格 / 语境笔记（可纠正方向、可停用笔记）",
   knowledge_slang: "黑话：她听到别人解释时记下来的词条（词 / 释义 / 谁解释的与原句 / 听到几次 / 改口）",
   plugins: "插件：每个插件一个 tab；预装的不给卸，webui 自己也不给卸（骨架，接口待接）",
@@ -654,8 +638,8 @@ async function viewMemory() {
   // 提示词那边本来就只用 `status='active'`，所以这里对齐它。
   const statusFilter = state.last.memoryStatus || "active";
   const query = statusFilter ? `&status=${encodeURIComponent(statusFilter)}` : "";
-  // 画像**不在这张页里取了**（2026-10-06）：它是记忆的子项，有自己的页
-  // （左栏「记忆 → 人物画像」，`viewPersonProfiles`）。这里只取旧事——后端默认
+  // 画像**不在这张页里取了**（2026-10-06）：它属于「记忆」这一档、有自己的页
+  // （左栏「记忆」卡里的「人物画像」，与「记忆」**平级**，见 `CARDS`）。这里只取旧事——后端默认
   // 就排除 `kind='profile'`（`docs/MEMORY_PEOPLE.md` 第八节）。
   const records = await api(`/api/memory/records?limit=50${query}`);
   const archive = await api("/api/memory/archive?limit=20");
@@ -679,11 +663,12 @@ async function viewMemory() {
         <div class="row"><button class="danger" id="purge">删除勾选的</button>
         <span class="hint">一次最多 100 条</span></div>`
       : `<p class="hint">没有筛出可疑记录。记忆本身是只读的——这里没有新增、也没有编辑。</p>`)
-    // 画像**不再在这张表里重复列**（2026-10-06）：它是记忆的一个子项，有自己的页
-    // ——左栏「记忆 → 人物画像」（`viewPersonProfiles`）。同一条事实在两个地方显示，
+    // 画像**不再在这张表里重复列**（2026-10-06）：它属于「记忆」这一档、有自己的页
+    // ——左栏「记忆」卡里与「记忆」**平级**的「人物画像」（`viewPersonProfiles`）。同一条事实在两个地方显示，
     // 改一处忘一处，所以这里只留一句指路；这一页仍然把"生效的旧事"列全。
     + card("人物画像（一条人一条）", `
-        <p class="hint">画像单独一页了：左栏「记忆 → 人物画像」——那里是<b>一个人一张</b>，
+        <p class="hint">画像单独一页了：左栏「记忆」卡里那一项「人物画像」——它与「记忆」平级、
+          都在同一张卡下面。那里是<b>一个人一张</b>，
           有"这个人是谁"，也有挂在这个人名下的零散记录。这一页不再重复列它
           （同一条事实只在一个地方显示）。</p>
         <p class="hint">画像同样只能删、不能改；删除入口在下面「问题记忆」那张卡里。</p>`)
@@ -691,7 +676,7 @@ async function viewMemory() {
         <div class="row">${statusTabs}
           <span class="hint">「已被顶替 / 已删」是记忆更新留下的旧版，不算重复——
             提示词那边只用「生效中」的那些。画像不在这一块——它在左栏
-            「记忆 → 人物画像」那一页，按人排。</span></div>`
+            「记忆」卡里那项「人物画像」（与「记忆」平级），按人排。</span></div>`
       + table([
         { label: "层", get: (r) => (r.tier === "long" ? "长期" : "中短期"), nowrap: true },
         // 「关于谁」这一列是关键：记忆是**跟人对应**的（docs/MEMORY_PEOPLE.md），
@@ -773,12 +758,14 @@ async function viewKnowledge() {
       ], chunks.rows || [], { widths: ["18%", "32%", "50%"] }));
 }
 
-/* ---------- 金句 / 黑话（知识库的两个**子项**）----------
+/* ---------- 金句 / 黑话（知识库这一档里的两个**平级**的口）----------
  *
- * 用户 2026-10-06 定的位置：*"金句我看应该划到**知识库**里"*、*"还有**黑话**"*。
+ * 用户 2026-10-06 定的位置：*"金句我看应该划到**知识库**里"*、*"还有**黑话**"*，
+ * 紧接着把层级也说清了：*"**金句黑话同理**"*——它们与「知识库」**同一张卡下的平级项**，
+ * 不是嵌在「知识库」那个条目下面（见 `CARDS` / `TABS` 上面那两段）。
  * 这两样都是她**从群里学来的东西**，本体为此开了一条接缝 `registry.ui.learned`
  * （`UiSeams.learned`，七个函数）——面板这边只用它，**不读 `data/` 下的文件、
- * 不碰记忆、不碰对话入口**。层级只在 `TABS` 那一行里声明（见 `subItems`）。
+ * 不碰记忆、不碰对话入口**。
  *
  * 两页的分工（用户口径里的两句话就是这两页的开场白）：
  *   `knowledge_quotes` 金句 —— 她**从她自己的话里**学来的：群里的表情是什么意思，
@@ -814,7 +801,7 @@ async function viewKnowledgeQuotes() {
     <p class="hint">候选群 = 她这会儿在听的群，加上黑话里出现过的群；都不在就手填群号。
       金句是按群记的（同一个表情在不同群可以完全是两个意思）。</p>`;
 
-  const head = card("金句（知识库里的一个子项）", `
+  const head = card("金句（知识库这一档）", `
     <p class="hint">这里的每一条都是<b>从她自己的话里学来的</b>：她说过一句、群里的人给它
       贴了表情、贴完之后群里怎么接的——顺着这些线索，她记下两样东西：
       <b>每个表情在这个群里是什么意思</b>，以及<b>她自己的说法与场合</b>
@@ -895,7 +882,7 @@ async function viewKnowledgeSlang() {
       <span class="hint">词条是<b>按群</b>分开记的：同一个词在两个群里是两条。</span>
     </div>`;
 
-  const head = card("黑话（知识库里的一个子项）", `
+  const head = card("黑话（知识库这一档）", `
     <p class="hint">这些是<b>她听到别人解释</b>、顺手记下来的词条：群里有人说
       "X 就是 Y 的意思"，她就把 <b>X</b> 与<b>那句原话</b>一起收下来——
       所以每条词条都能回溯到"谁在哪一句里这么说的"。</p>
@@ -1634,12 +1621,16 @@ function viewPluginList() {
     '<p class="hint">正在向装配点要插件清单…</p>');
 }
 
-/* ---------- 人物画像（记忆的一个**子项**）----------
+/* ---------- 人物画像（「记忆」这一档里的一个**平级**口）----------
  *
- * 用户 2026-10-06："我应该说过人物画像属于记忆的子项目"。事实核对（不是照猜）：
- * 画像就是记忆里的**一类**——`kind='profile'`（本机 `memory_model.py`：
- * "2026-09-29 加的第七类：人物画像——她对某个人整体的印象"），落在**长期**表里，
- * `/super profile @某人` 看的是同一份。所以它是「记忆」下面的子项，不占顶层分区。
+ * 用户 2026-10-06 的两句话要一起读：先说"我应该说过人物画像**属于记忆**的子项目"
+ * （= 它属于「记忆」这个分区），后来指着面板把层级说全了：
+ * "webui那里，**人物画像和记忆 tab 是同等级的，都在记忆卡片下**"。
+ * 所以左栏里它与「记忆」**平级**、同在那张卡下面（`CARDS` 里两个普通条目）。
+ *
+ * 事实核对（不是照猜）：画像就是记忆里的**一类**——`kind='profile'`
+ * （本机 `memory_model.py`："2026-09-29 加的第七类：人物画像——她对某个人整体的印象"），
+ * 落在**长期**表里，`/super profile @某人` 看的是同一份。
  *
  * 组织方式：**一个人一张卡**——这个人是谁（名册里的名字 + QQ + 群）、她对这个人的
  * 整体印象（`kind='profile'` 那条），以及挂在这个人身上的零散记录（称呼 / 边界 /
@@ -1713,7 +1704,7 @@ async function viewPersonProfiles() {
     return Number(right) - Number(left);
   });
 
-  const head = card("人物画像（记忆里的一个子项）", `
+  const head = card("人物画像（记忆这一档）", `
     <p class="hint">这里是<b>一个人一张</b>：她对这个人的整体印象（记忆里 <code>kind=profile</code>
       那一类），加上挂在这个人名下的零散记录（称呼、边界、偏好这类）。
       画像跟着人走、不跟话题走，所以不按词检索；一批记忆里最多动一条。</p>
@@ -1805,9 +1796,9 @@ function viewAccount() {
 
 const VIEWS = {
   overview: viewOverview, usage: viewUsage, memory: viewMemory, knowledge: viewKnowledge,
-  // 记忆的子项（左栏「记忆」卡里的第二行）：一个人一张画像。
+  // 「记忆」卡里与「记忆」**平级**的那一项：一个人一张画像。
   memory_profile: viewPersonProfiles,
-  // 知识库的两个子项（左栏「知识库」卡里）：她**从群里学来的东西**。
+  // 「知识库」卡里与「知识库」**平级**的两项：她**从群里学来的东西**。
   // 金句 = 从她自己的话里学来的（表情含义表 + 风格/语境笔记）；
   // 黑话 = 她听到别人解释记下来的词条。取数都只走 `registry.ui.learned`。
   knowledge_quotes: viewKnowledgeQuotes, knowledge_slang: viewKnowledgeSlang,
@@ -1838,13 +1829,16 @@ function drawTabs() {
   // 没有操作类控件——`bot 在运行` / `活快照` / 刷新 / 深色 / 退出 那几样都搬去了
   // 各自的页面（见 `viewOverview` / `index.html` 的 `#refresh` / `viewSettings` /
   // `viewAccount`）。所以这里出现的每个 `<button>` 都必须带 `data-tab`。
+  // 卡里的每一项都用**同一个模板**画：同一张卡下面的条目在栏里就是**同级的并列项**
+  // （2026-10-06 用户："人物画像和记忆 tab 是同等级的，都在记忆卡片下"，
+  // "金句黑话同理"）。所以这里**没有**"某几项缩进/变小"的分支——谁要再给某一张卡里的
+  // 某一项单开一档，`SubLevelEntriesTests` 会红。
   $("tabs").innerHTML = cards().map((entry) => {
     const ids = cardItems(entry);
     const on = ids.includes(state.tab);
     const items = entry.items.map((item) => {
       const id = itemId(item);
-      const sub = typeof item === "object" && item.sub ? ' data-sub="1"' : "";
-      return `<button data-tab="${id}"${sub} class="${state.tab === id ? "on" : ""}">`
+      return `<button data-tab="${id}" class="${state.tab === id ? "on" : ""}">`
         + `<span class="rail-chip">${icon(id)}</span>`
         + `<span class="rail-label">${esc(labelOf(id))}</span>`
         + '<span class="rail-chevron" aria-hidden="true"></span></button>';

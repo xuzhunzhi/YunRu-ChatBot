@@ -1,6 +1,6 @@
-"""左栏布局与「记忆 → 人物画像」从属关系的**静态断言**（不起浏览器、不连网）。
+"""左栏布局与「同一张卡下面的项是平级的」的**静态断言**（不起浏览器、不连网）。
 
-两条判据是用户当天定的，各有一个容易被后来的改动悄悄破掉的地方：
+三条判据是用户当天定的，各有一个容易被后来的改动悄悄破掉的地方：
 
 1. **左栏里不许出现操作类控件**（2026-10-06 用户："左边边栏下面的这个卡片不明所以，
    我为什么要在左边栏显示 bot 在运行，显示个活快照，显示个刷新深色和退出。这个不应该
@@ -11,13 +11,17 @@
    它们各自有新的落点：本体状态 → 总览「运行」卡；刷新 → 内容区顶栏；
    深色 → 调参页「面板」分组的开关；退出 → 账号页。
 
-2. **人物画像不许出现在记忆之外的分区**（用户："我应该说过人物画像属于记忆的子项目"；
-   事实核对：`memory_model.py` 里它是第七类 `kind='profile'`）。
-   判据落在**数据**上（`CARDS`）：`memory_profile` 只能出现在标题为"记忆"的那张卡里、
-   带 `sub: 1`（= 子项），而且不是顶层页签、不挂账号页。
+2. **人物画像属于「记忆」这张卡，且与「记忆」平级**（用户 2026-10-06 两句要一起读：
+   "我应该说过人物画像属于记忆的子项目" = 它属于这个分区；
+   "webui那里，**人物画像和记忆 tab 是同等级的，都在记忆卡片下**" = 左栏里两个是平级项）。
+   ⚠️ 这一条被理解反过一轮：曾按"挂在上面那个条目下面"做了缩进/缩小/层级线，并钉
+   "子项必须与父项不同级"——那是错的，已整个撤掉（见 `SubLevelEntriesTests`）。
+   现在钉的是**反面**：同一张卡里的项**渲染完全一样**，谁再给某一项单开一档就红。
 
-为什么走静态断言：这两条都是**结构**约束，离线套件里能算出来；真机像素宽度只能靠
-截图（见提交信息里那三张 1440 / 1024 / 500）。`test_webui_panel.py` 里那条宽度断言
+3. **金句 / 黑话与「知识库」平级**（用户："**金句黑话同理**"）——判据与第 2 条同一套。
+
+为什么走静态断言：这些都是**结构**约束，离线套件里能算出来；真机观感只能靠截图
+（见提交信息里那三张 1440 / 1024 / 500）。`test_webui_panel.py` 里那条宽度断言
 是同一个路子。
 
 ⚠️ 解析这一层**不许用正则截函数体**：正文里到处是缩进的右花括号（对象、模板串），
@@ -300,7 +304,16 @@ class LeftRailTests(unittest.TestCase):
 
 
 class PersonProfilePlacementTests(unittest.TestCase):
-    """判据（2）：人物画像属于记忆，只能是它的子项。"""
+    """判据（2）：人物画像属于「记忆」这张卡，且与「记忆」是**同一张卡下的平级项**。
+
+    用户 2026-10-06 的两句话要一起读：*"我应该说过**人物画像属于记忆的子项目**"*
+    （= 它属于「记忆」这个分区）与 *"webui那里，**人物画像和记忆 tab 是同等级的，
+    都在记忆卡片下**"*（= 左栏里两个是**平级的并列项**，不是嵌在「记忆」条目下面）。
+
+    所以这一组钉两件事：**只许出现在「记忆」那张卡里**（别处一处都不许有），
+    以及**在那张卡里它就是个普通条目**——不写成 `{ id, sub }` 那种"挂在上面那一项
+    下面"的形状，`TABS` 里也自己占一行。渲染上的"同级"由 `SubLevelEntriesTests` 钉。
+    """
 
     def setUp(self) -> None:
         self.js = _asset("app.js")
@@ -319,37 +332,47 @@ class PersonProfilePlacementTests(unittest.TestCase):
                    if "memory_profile" in _card_ids(card)]
         self.assertEqual(
             holders, ["记忆"],
-            f"`memory_profile` 出现在了这些卡里：{holders}——它只能是「记忆」的子项")
+            f"`memory_profile` 出现在了这些卡里：{holders}——它属于「记忆」这一档")
 
-    def test_the_profile_is_a_child_entry_not_a_top_level_page(self) -> None:
-        """在"记忆"卡里，它必须是**子项**写法（`{ id: "memory_profile", sub: 1 }`）。
+    def test_the_profile_is_a_plain_entry_of_the_memory_card(self) -> None:
+        """在"记忆"卡里它是**普通条目**（与「记忆」平级），不是嵌在它下面的一项。
 
-        为什么判这个：用户原话是"**子项目**"。若写成平铺的第二个口，`CARDS` 上看起来
-        就是同层的两个页——层级没了，栏里也就没法缩进表达。同样地，**显示名表 `TABS`
-        里它也只许写在"记忆"那一行的 `sub` 里**，不许自己占一行（占一行就是"顶层页"
-        的形状）；也不许挂账号页。
+        用户原话是*"人物画像和记忆 tab 是同等级的，都在记忆卡片下"*。所以：
+
+        * `CARDS` 里它是**平铺的第二个口**（`"memory_profile"` 字符串），
+          **不许**写成 `{ id: "memory_profile", sub: 1 }`（那是"挂在上面那一项下面"的形状，
+          左栏里就会画成低一级——那一套已经被用户否掉、整个撤掉了）；
+        * `TABS` 里它**自己占一行**（与别的页签一样），不再塞在「记忆」那一行的 `sub` 里；
+        * 仍然不许挂到账号页去。
         """
 
         memory = self._card("记忆")
         self.assertIn("memory_profile", _card_ids(memory),
                       "「记忆」卡里没有人物画像这个口")
-        self.assertEqual(_top_level_ids(memory), ["memory"],
-                         "「记忆」卡里除 'memory' 之外还有平铺的口——人物画像要写成子项")
-        self.assertRegex(
-            str(memory["items"]), r"\{\s*id:\s*\"memory_profile\"\s*,\s*sub:\s*1\s*\}",
-            "人物画像没标成子项（该写成 `{ id: \"memory_profile\", sub: 1 }`）")
+        self.assertEqual(_card_ids(memory), ["memory", "memory_profile"],
+                         "「记忆」卡里的项不是「记忆 + 人物画像」这两个平级项")
+        self.assertEqual(
+            _top_level_ids(memory), _card_ids(memory),
+            "「记忆」卡里有条目写成了 `{ id, sub }`——人物画像与「记忆」是同一张卡下的"
+            "平级项（用户 2026-10-06：\"人物画像和记忆 tab 是同等级的，都在记忆卡片下\"）")
 
         tabs_vector = re.search(r"const TABS = \[(.*?)\n\];", self.js, re.S)
         self.assertIsNotNone(tabs_vector, "app.js 里找不到页签名表 `TABS`")
+        vector = tabs_vector.group(1)
         self.assertRegex(
-            tabs_vector.group(1), r"\[\s*\"memory\"\s*,\s*\"记忆\"[^\]]*sub:\s*\[\s*\"memory_profile\"",
-            "`TABS` 里人物画像没有写在「记忆」那一行的 `sub` 里")
+            vector, r"\[\s*\"memory_profile\"\s*,\s*\"人物画像\"\s*\]",
+            "`TABS` 里人物画像没有自己的一行（它现在与「记忆」平级）")
         self.assertEqual(
-            len(re.findall(r"\"memory_profile\"", tabs_vector.group(1))), 1,
-            "`TABS` 里 `memory_profile` 出现了不止一次——它只该在「记忆」的 sub 里声明一次")
+            len(re.findall(r"\"memory_profile\"", vector)), 1,
+            "`TABS` 里 `memory_profile` 出现了不止一次——它只该声明一次")
+        self.assertNotIn(
+            "sub", vector,
+            "`TABS` 里又出现了 `sub` ——那是被用户否掉的「挂在上面那一项下面」的写法")
+        self.assertNotIn("subItems", self.js,
+                         "`subItems()` 那套「归一子项」的机制已经撤掉了（同一张卡里就是平级）")
         self.assertNotIn(
             "memory_profile", _card_ids(self._card("账号与设备")),
-            "人物画像挂到账号页了（用户明说过：它是记忆的子项）")
+            "人物画像挂到账号页了（它属于「记忆」这一档）")
 
     def test_the_profile_page_takes_its_data_from_the_existing_memory_seam(self) -> None:
         """取数只走面板**既有**的记忆读接口 `/api/memory/*`，不新开通道、不读库文件。
@@ -386,29 +409,27 @@ class PersonProfilePlacementTests(unittest.TestCase):
 
 
 class LearnedUnderKnowledgeTests(unittest.TestCase):
-    """判据（3）：**金句 / 黑话只许出现在知识库下面**（2026-10-06）。
+    """判据（3）：**金句 / 黑话只许出现在知识库那张卡里，且与「知识库」平级**。
 
-    用户原话：*"金句我看应该划到**知识库**里"*、*"还有**黑话**"*。两样都是她**从群里
-    学来的东西**，由本体那条窄接缝 `registry.ui.learned` 提供。这里钉四件事：
+    用户原话：*"金句我看应该划到**知识库**里"*、*"还有**黑话**"*，紧接着把层级也说了：
+    *"**金句黑话同理**"*（同理于"人物画像和记忆 tab 是同等级的，都在记忆卡片下"）。
+    两样都是她**从群里学来的东西**，由本体那条窄接缝 `registry.ui.learned` 提供。
+    这里钉四件事：
 
     1. **位置**：`knowledge_quotes` / `knowledge_slang` 只出现在标题为「知识库」的那张
-       卡里，且必须是**子项**写法（`{ id: …, sub: 1 }`）——不是同层的第二、第三个口；
-    2. **层级只声明一处**：名字与从属关系只写在 `TABS` 的「知识库」那一行里，每个 id
-       在整张表里只出现一次（这一轮把 `sub` 从"一对"扩成"一串对"，见 `subItems()`）；
+       卡里（别处一处都没有）；
+    2. **同级**：在卡里它们是**平铺的普通条目**（不是 `{ id, sub }` 那种嵌套写法），
+       `TABS` 里各占一行、各只声明一次——那套 `sub`（缩进/缩小/层级线）已经整个撤掉；
     3. **不新开通道**：两个页面里每个 `api(...)` 都必须指向 `/api/knowledge/`，
-       页面代码里不许出现读文件/查库的字样（判据与「记忆 → 人物画像」那条同一套）；
+       页面代码里不许出现读文件/查库的字样（判据与「人物画像」那条同一套）；
     4. **接线还在**：两个页签在 `VIEWS` 里注册了，写入动作也都打在 `/api/knowledge/` 上。
     """
 
-    #: 两个子项的 id 与它们**只许出现**在的那张卡。
+    #: 两个页签的 id 与它们**只许出现**在的那张卡。
     IDS = ("knowledge_quotes", "knowledge_slang")
     PARENT = "知识库"
     #: 这两个页面取数/写数只许用的前缀。
     API_PREFIX = "/api/knowledge/"
-    #: `TABS` 里子项那一行——`sub` 是**一串对**（两个子项）。
-    SUB_VECTOR = (r"\[\s*\"knowledge\"\s*,\s*\"知识库\"\s*,\s*\{\s*sub:\s*\[\s*"
-                  r"\[\s*\"knowledge_quotes\"\s*,\s*\"金句\"\s*\]\s*,\s*"
-                  r"\[\s*\"knowledge_slang\"\s*,\s*\"黑话\"\s*\]")
 
     def setUp(self) -> None:
         self.js = _asset("app.js")
@@ -429,56 +450,60 @@ class LearnedUnderKnowledgeTests(unittest.TestCase):
                            if page in _card_ids(card)]
                 self.assertEqual(
                     holders, [self.PARENT],
-                    f"`{page}` 出现在了这些卡里：{holders}——它只能是「知识库」的子项")
+                    f"`{page}` 出现在了这些卡里：{holders}——它属于「知识库」这一档")
 
-    def test_the_two_children_are_child_entries_not_top_level_pages(self) -> None:
-        """在「知识库」卡里，两个都必须是**子项**写法（`{ id: …, sub: 1 }`）。
+    def test_the_two_learned_pages_are_plain_entries_of_the_knowledge_card(self) -> None:
+        """在「知识库」卡里，两个都是**平级的普通条目**（不是嵌在「知识库」下面）。
 
-        为什么判这个：用户要的是**子项目**。写成平铺的三个口，`CARDS` 上看起来就是
-        同层的三页——栏里也就没法用缩进把从属关系表达出来（缩进见 `app.css` 的
-        `.rail-card-items button[data-sub]`）。
+        用户原话*"金句黑话同理"*——同理于"人物画像和记忆 tab 是同等级的，都在记忆卡片下"。
+        所以 `CARDS` 里它们是两个普通字符串；写成 `{ id: …, sub: 1 }` 就是被否掉的
+        "挂在上面那个条目下面"的形状（左栏里会被画成低一级），当场失败。
         """
 
         knowledge = self._card(self.PARENT)
         for page in self.IDS:
             self.assertIn(page, _card_ids(knowledge),
                           f"「{self.PARENT}」卡里没有 {page} 这个口")
-            self.assertRegex(
-                str(knowledge["items"]),
-                r"\{\s*id:\s*\"" + page + r"\"\s*,\s*sub:\s*1\s*\}",
-                f"{page} 没标成子项（该写成 `{{ id: \"{page}\", sub: 1 }}`）")
-        self.assertEqual(_top_level_ids(knowledge), ["knowledge"],
-                         "「知识库」卡里除 'knowledge' 之外还有平铺的口——金句与黑话要是子项")
+        self.assertEqual(_card_ids(knowledge),
+                         ["knowledge", "knowledge_quotes", "knowledge_slang"],
+                         "「知识库」卡里的项不是「知识库 + 金句 + 黑话」这三个平级项")
+        self.assertEqual(
+            _top_level_ids(knowledge), _card_ids(knowledge),
+            "「知识库」卡里有条目写成了 `{ id, sub }`——金句与黑话和「知识库」是同一张卡"
+            "下面的平级项（用户 2026-10-06：\"金句黑话同理\"）")
         for other in ("账号与设备", "记忆", "聊天"):
             self.assertNotIn(self.IDS[0], _card_ids(self._card(other)),
                              "金句挂到别的分区去了（用户明说过：它属于知识库）")
 
-    def test_the_children_are_declared_once_in_the_parent_line(self) -> None:
-        """`TABS` 里它们只写在「知识库」那一行的 `sub` 里，各出现一次。
+    def test_the_two_names_are_declared_once_and_as_ordinary_rows(self) -> None:
+        """`TABS` 里它们**各占一行**、各只出现一次（与别的页签完全一样的写法）。
 
-        "层级只在一处声明"就落在这条上：占一行（`["knowledge_quotes", "金句"]` 那样）
-        就是"顶层页"的形状，层级就没了。这一轮 `sub` 从"一对"扩成"一串对"
-        （`subItems()` 归一，两种写法都认）——扩展本身也钉在这里：
-        写成别的形状（比如两个并列的 `sub` 键）当场失败。
+        "一处缩进一处拍平"是不可能的了：`sub` 那套（连同 `subItems()` 归一）已经撤掉，
+        所以这里钉的是**反面**——`TABS` 里再出现 `sub`、或者名字没自己占一行，
+        都当场失败。
         """
 
         tabs_vector = re.search(r"const TABS = \[(.*?)\n\];", self.js, re.S)
         self.assertIsNotNone(tabs_vector, "app.js 里找不到页签名表 `TABS`")
         vector = tabs_vector.group(1)
-        self.assertRegex(
-            vector, self.SUB_VECTOR,
-            "`TABS` 里金句与黑话没有写成「知识库」那一行的 `sub`（一串对，见 `subItems`）")
-        for page in self.IDS:
-            self.assertEqual(
-                len(re.findall(r"\"" + page + r"\"", vector)), 1,
-                f"`TABS` 里 `{page}` 出现了不止一次——它只该在「知识库」那一行里声明一次")
-        for label in ("金句", "黑话"):
-            self.assertEqual(
-                len(re.findall(r"\"" + label + r"\"", vector)), 1,
-                f"`TABS` 里「{label}」这个名字出现了不止一次——名字只写父项那一行")
-        # 归一那一处还在：`labelOf` 必须走它，否则"一串对"根本取不到名字。
-        self.assertIn("subItems(entry)", _uncomment(_function_body(self.js, "labelOf")),
-                      "`labelOf()` 没有走 `subItems()` —— 多子项那串对取不到名字")
+        for page, label in (("knowledge_quotes", "金句"), ("knowledge_slang", "黑话")):
+            with self.subTest(page=page):
+                self.assertRegex(
+                    vector, r"\[\s*\"" + page + r"\"\s*,\s*\"" + label + r"\"\s*\]",
+                    f"`TABS` 里 {page} 没有自己的一行（它与「知识库」平级）")
+                self.assertEqual(
+                    len(re.findall(r"\"" + page + r"\"", vector)), 1,
+                    f"`TABS` 里 `{page}` 出现了不止一次——它只该声明一次")
+                self.assertEqual(
+                    len(re.findall(r"\"" + label + r"\"", vector)), 1,
+                    f"`TABS` 里「{label}」这个名字出现了不止一次——它只该声明一次")
+        self.assertNotIn("sub", vector,
+                         "`TABS` 里又出现了 `sub` ——那是被用户否掉的「挂在上面那一项下面」的写法")
+        # `labelOf` 回到"查表"这一件事：不再有归一子项那一步。
+        body = _uncomment(_function_body(self.js, "labelOf"))
+        self.assertIn("for (const entry of TABS)", body,
+                      "`labelOf()` 不是按 `TABS` 逐行查名字了")
+        self.assertNotIn("subItems", body, "`labelOf()` 里还留着 `subItems()` 那一步")
 
     def test_the_two_pages_only_ask_the_learned_paths(self) -> None:
         """取数/写数只走面板**既有的** `/api/knowledge/*`（背后是 `learned` 接缝）。
@@ -535,6 +560,57 @@ class LearnedUnderKnowledgeTests(unittest.TestCase):
         self.assertGreaterEqual(
             len(learned_writes), 5,
             f"金句/黑话的写入没有全走 `/api/knowledge/`：{writes}")
+
+
+class SubLevelEntriesTests(unittest.TestCase):
+    """判据（4）：**同一张卡下面的项是平级的**（2026-10-06 用户口径，两处都算）。
+
+    用户原话：*"webui那里，**人物画像和记忆 tab 是同等级的，都在记忆卡片下**"*、
+    *"**金句黑话同理**"*。层级由**卡片**（`CARDS` 的 `title`）表达——同一张卡里的项，
+    在左栏里**渲染完全一样**（与「聊天」卡里的「总览 / 群聊 / 私聊」同一套样式）。
+
+    ⚠️ 这一条被理解反过一轮：曾按"挂在上面那个条目下面"给「人物画像」「金句」「黑话」
+    做了缩进 / 图标收小 / 层级线（`data-sub` + `{ id, sub }` + `subItems()`），并钉了
+    "子项必须与父项不同级"。那是错的，已经**整个撤掉**。现在钉的是**反面**：
+    谁要是再给某一张卡里的某一项单开一档，这两条当场红——这也就同时保证了
+    "两处用同一种做法"（因为已经不存在"另一套做法"）。
+    """
+
+    def setUp(self) -> None:
+        self.js = _asset("app.js")
+        self.css = _asset("app.css")
+
+    def test_every_entry_in_a_card_is_drawn_by_the_same_template(self) -> None:
+        """`drawTabs()` 里只有一个按钮模板，而且没有"是不是子项"的分岔。"""
+
+        body = _uncomment(_function_body(self.js, "drawTabs"))
+        self.assertNotIn("data-sub", body,
+                         "左栏又给某一项挂了 `data-sub`（那会把它画成低一级）")
+        self.assertNotIn("rail-sub-group", body,
+                         "左栏又给某一项套了「子项组」的壳（同一张卡里应当平级）")
+        self.assertNotIn("item.sub", body,
+                         "`drawTabs()` 里又按某个字段分岔了——那就是层级分支")
+        buttons = re.findall(r"<button[^>]*>", body)
+        self.assertEqual(len(buttons), 1,
+                         f"`drawTabs()` 里出现了不止一个按钮模板：{buttons}"
+                         "——同一张卡里的项就不一样了")
+        for tag in buttons:
+            self.assertIn("data-tab=", tag, f"左栏渲染出了一颗不是导航条目的按钮：{tag}")
+
+    def test_no_entry_gets_its_own_indent_or_size(self) -> None:
+        """`app.css` 里不许有"按某一项/某一类项"写的缩进与尺寸。
+
+        ⚠️ 扫的是**去掉注释之后**的 CSS：那一段注释里正好写着 `[data-sub]`
+        （"谁要再给它单开一档…当场红"），按原文扫会把注释也算成违规。
+        """
+
+        css = re.sub(r"/\*.*?\*/", " ", self.css, flags=re.S)   # 注释里的话不算数
+        self.assertNotIn("[data-sub]", css,
+                         "`app.css` 里还留着 `[data-sub]` 那一套缩进/尺寸")
+        self.assertEqual(re.findall(r"\[data-tab=[^\]]*\]", css), [],
+                         "`app.css` 里出现了按具体页签写死的样式（等于给某一项单开一档）")
+        self.assertNotIn("rail-sub-group", css,
+                         "`app.css` 里还留着「子项组」那套（层级线 / 再缩进）")
 
 
 if __name__ == "__main__":
