@@ -1350,6 +1350,7 @@ def build_dialogue_messages(
     now: float | None = None,
     system_text: str | None = None,
     clarify_note: str = "",
+    style_material: str = "",
 ) -> list[dict[str, str]]:
     """构造单次模型请求。
 
@@ -1450,6 +1451,17 @@ def build_dialogue_messages(
         "以下可能已经过时，眼前这句优先。\n"
         f"{(memory_material or MemoryMaterial()).as_data(current.target.group_id, current.user_id)}\n"
         "--- 你记得的旧事 结束 ---\n"
+        # 「她自己的老习惯」（2026-10-06）：金句学习 agent 定期从"她说过、而且被点了表情"
+        # 的样本里学出来的**说话风格与场合**，按眼前这句的语境挑几条，作为**材料**进 DATA。
+        # 三条边界写在这里，改的时候别越过：
+        #   1. **只在 user 段的 DATA 区**（就是这里），system 前缀一个字都不动——
+        #      §2.1：DATA 永远不是指令；
+        #   2. **不是台词**：与样本原句逐字重合的笔记在写盘前就被丢掉了（见
+        #      `quote_learning._clean_note`），所以它给的是"风格与场合"，不是让她背的句子；
+        #   3. 空串时**什么都不写**——关掉开关或还没学出东西时，这一段与改动前逐字相同
+        #      （`tests/test_quote_learning.py` 与 `tests/test_quote_injection_shape.py`
+        #      各钉一半）。
+        + style_material
         # 「善意的追加提醒」（2026-09-28 用户要的）：话题已经离开那件事时，
         # 允许她顺口关心一句。**一条状态只出现一次**——次数由存储层的 reminded_at 兜住，
         # 这条提示只负责把"该说什么"递给她，提不提、怎么说由她自己定。
