@@ -37,6 +37,7 @@ plugins/
     registry.provide_prompts(plugin)  # prompt 扩展（恋人/剧情那类）
     registry.provide_prompt(name, t)  # 某套 prompt 的**内置原稿**（识图那套走这里）
     registry.provide_group_action(g, f)  # 群管理动作的**执行函数**（见下）
+    registry.provide_owner_channel(c)  # 渠道声明"可以声明这条来自主人"（见下）
     registry.vision = factory         # 一个"看一眼图"的工厂（`(usage_store) -> 识图器`）
 
 **这里没有 `engine`**（2026-10-01 改）：引擎上有 `transport` 与三份权限名单，
@@ -73,6 +74,15 @@ plugins/
   | `"group_owner"` | `(usage_store) -> execute` | `execute(kind, *, call, roles, group_id, actor_id, target_id, text, mentioned, enabled)` |
 
   取不到时**保持 fail-closed**：不执行、记一行日志、回一句"这条部署没有群管理能力"。
+- **渠道自己声明"我说的话可以算主人"**（2026-10-06 补）：核心原来在 `runtime.py`
+  里写死 `_OWNER_CHANNELS = ("mail",)`——**核心知道有一个叫 mail 的渠道**。
+  外部审查判定它不是安全洞（`claims_owner` 只影响给模型看的 `sender_role` 标签，
+  **不授予命令权限**），是**扩展性耦合**。现在渠道在 `register()` 里说一句
+  `registry.provide_owner_channel("<渠道名>")`，核心只问"这个渠道声明过吗"
+  （`_SeamBinder._owner_channel_ok`）。核心那一份只剩 `_OWNER_CHANNELS_BUILTIN`
+  那个**过渡引导项**（`mail`），`plugins/` 侧即使一个字不改，行为也与改之前一致；
+  **新渠道一律走声明**。这是进程内受信任的插件声明，换来的不是安全，而是
+  "核心不认识任何具体渠道名"。
 - **依赖方向清楚**：插件 import 核心；核心**不 import 具体插件**，只调 `discover()`。
 - **"掉线通知"也是插件**（2026-10-06 用户："记住这个也是插件"）：本体侧只做两件事——
   把看门狗本来就有的状态变成**确定的边沿**（`在线 → 掉线` 算一段），再在
@@ -213,6 +223,13 @@ class ChatSeams:
     reporter_sink: object = None
     #: 哪些渠道**允许**声明"这条来自主人"。白名单，不是黑名单——
     #: 没列进来的渠道一律按**普通发件人**处理。这是核心的判定，插件改不了它。
+    #:
+    #: 2026-10-06 改：清单不再由核心写死，而是**渠道自己声明**
+    #: （`registry.provide_owner_channel("<渠道名>")`，在插件的 `register()` 里，
+    #: 一说一句"我这个渠道比过发件地址，可以声明主人"）。核心那份
+    #: `runtime._OWNER_CHANNELS_BUILTIN` 只留一条**过渡用**的引导项，
+    #: 不新增——新渠道一律走声明。这里这个字段是**只读的当前快照**，给插件看，
+    #: 不是判定用的权威来源（判定在 `runtime._SeamBinder.deliver`）。
     owner_channels: tuple[str, ...] = ()
 
     def reserved(self) -> frozenset[str]:
@@ -522,7 +539,7 @@ class PluginRegistry:
     __slots__ = ("call_action", "notify", "roles", "loop", "chat", "report", "ui",
                  "link", "vision", "action_caller", "commands", "backgrounds",
                  "_shared_roles", "_commands", "_prompts", "_prompt_defaults",
-                 "_group_actions", "_disconnect_receivers", "loaded")
+                 "_group_actions", "_owner_channels", "_disconnect_receivers", "loaded")
 
     def __init__(self, *, call_action=None, notify=None, roles=None,
                  loop=None, chat: ChatSeams | None = None,
@@ -581,6 +598,15 @@ class PluginRegistry:
         #: 核心因此**不认识任何插件模块名**——把 `plugins/group_admin/` 改名不会让功能
         #: 静默消失，只会变成"这次部署没有群管理能力"（fail-closed，那句话本身是对的）。
         self._group_actions: dict[str, object] = {}
+        #: **哪些渠道声明了"可以声明主人"**（`provide_owner_channel()` 往这里放）。
+        #:
+        #: 为什么是声明而不是核心写死一张表：核心原来有一个
+        #: `runtime._OWNER_CHANNELS = ("mail",)`，也就是**核心知道有个叫 mail 的渠道**。
+        #: 那不是安全洞（`claims_owner` 只影响给模型看的 `sender_role` 标签，
+        #: 不授予任何命令权限），但它是扩展性耦合：以后加一个同样可信的渠道，
+        #: 得回来改核心、还得知道"这里有一张表"。改成渠道自己声明之后，
+        #: 核心只问"这个渠道说过它可以吗"，一个新渠道名都不用认识。
+        self._owner_channels: set[str] = set()
         #: 装上了哪些插件（`discover()` 的返回值）。**发现只跑一次**：
         #: 跑两次会让同一个插件被登记两遍（同一条命令认两次、两份角色缓存）。
         self.loaded: tuple[str, ...] = ()
@@ -745,6 +771,39 @@ class PluginRegistry:
         """
 
         return tuple(sorted(self._group_actions))
+
+    def provide_owner_channel(self, channel: str) -> None:
+        """**渠道自己声明**："我这个渠道比过发件人是谁，可以声明这条来自主人。"
+
+        由来（2026-10-06，外部审查判定的"扩展性耦合"）：核心原来在
+        `runtime.py` 里写死 `_OWNER_CHANNELS = ("mail",)`。那不是安全洞——
+        `claims_owner` 只影响给模型看的 `sender_role` 标签，**不授予命令权限**
+        （命令权限一律走 QQ 那条路）。它的问题是：核心知道有个叫 `mail` 的渠道，
+        以后加一个同样可信的渠道得回来改核心。
+
+        现在反过来：渠道在 `register()` 里说一句（例如邮件通道说
+        `registry.provide_owner_channel("mail")`），核心只问"这个渠道声明过吗"。
+        **判定仍在核心**（`runtime._SeamBinder.deliver`）：声明只是"这个渠道愿意
+        为这句话负责"，最终仍然要**同时**满足 `claims_owner is True`。
+
+        限度（别读成安全边界）：这是**进程内受信任的插件声明**，插件当然可以说谎——
+        与 `provide_group_action` / `provide_prompt` 同一个信任级。它换来的不是安全，
+        是"核心不认识任何具体渠道名"。
+        """
+
+        name = str(channel or "").strip()
+        if name:
+            self._owner_channels.add(name)
+
+    def declared_owner_channels(self) -> tuple[str, ...]:
+        """已经声明"可以声明主人"的渠道（排序后的元组，给核心与测试读）。"""
+
+        return tuple(sorted(self._owner_channels))
+
+    def knows_owner_channel(self, channel: str) -> bool:
+        """某个渠道声明过吗（核心的判定读这一条，不读任何写死的渠道名）。"""
+
+        return str(channel) in self._owner_channels
 
     def register_reporter(self, reporter: object) -> None:
         """登记"每日汇报器"（面板要读它判断今天发没发）。同 `provide_roles` 的道理。"""

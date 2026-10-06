@@ -752,13 +752,25 @@ def _chat_seams_for(engine: DialogueEngine) -> ChatSeams:
     return _SeamBinder(engine).chat_seams()
 
 
-#: 哪些渠道**允许**声明"这条来自主人"。白名单，不是黑名单。
+#: 哪些渠道**允许**声明"这条来自主人"——**引导项**，不是清单本身。
 #:
-#: 目前只有邮件：`MAIL_OWNER_FROM` 是配置里写死的主人的发件地址，
-#: 通道比对过发件地址才敢声明 `claims_owner`。别的渠道（以后新增的）默认**不在**这张表里，
-#: 也就是它们无论如何声明都只是普通发件人——要么在这里加一条（核心改动，看得见），
-#: 要么就没有主人权限。
-_OWNER_CHANNELS: tuple[str, ...] = ("mail",)
+#: ## 清单的主人是**渠道自己**（2026-10-06 改）
+#:
+#: 这个常量原来叫 `_OWNER_CHANNELS`、是一条 `("mail",)` 的白名单，也就是
+#: **核心知道有一个叫 mail 的渠道**。外部审查判定它是"扩展性耦合"而不是安全洞：
+#: `claims_owner` 只影响给模型看的 `sender_role` 标签，**不授予任何命令权限**
+#: （命令权限一律走 QQ 那条路，见 `stage3_main._is_super_admin_control`），
+#: 但每加一个同样可信的渠道都得回来改核心。
+#:
+#: 现在改成**渠道自己声明**（`registry.provide_owner_channel("<名字>")`，
+#: 在插件的 `register()` 里，见 `plugins.PluginRegistry.provide_owner_channel`），
+#: 核心只问"这个渠道说过它可以吗"（`_SeamBinder._owner_channel_ok`）。
+#:
+#: 这里留的这一条是**过渡用的引导项**，理由是"改动要能单独落地、不能要求插件侧
+#: 同时改"：`mail` 那条通道即使还没加那句声明，行为也一字不变。
+#: **新渠道一律走声明，不许往这里加。** 那句"新渠道要在这里加一条"的注释
+#: 连同这张写死的表一起删掉了——现在唯一的接缝是 `provide_owner_channel`。
+_OWNER_CHANNELS_BUILTIN: tuple[str, ...] = ("mail",)
 
 #: 接缝用的"不透明令牌 → 引擎/传输层"私表。见 `_SeamBinder`。
 _ENGINES: dict[str, "DialogueEngine"] = {}
@@ -987,10 +999,11 @@ class _SeamBinder:
              （**子类也算**）就**原样返回、不再拷**。于是一个 `__str__` 返回"会变脸的
              str 子类"的对象照样穿透。`_exact_text` 补上这一步。
         2. **身份不是插件说了算**：`sender` 只是"渠道说这是谁"。主人那一档由
-           `_OWNER_CHANNELS` 白名单 + 渠道的 `claims_owner` 共同决定，而
-           **`claims_owner` 是插件给的布尔、不可信**——所以它只影响 `sender_role`
-           这个给模型看的标签，**不授予任何命令权限**（命令权限一律走 QQ 那条路，
-           见 `stage3_main._is_super_admin_control`）。
+           渠道**自己声明**（`registry.provide_owner_channel`，过渡期另加核心那条
+           引导项）+ 渠道的 `claims_owner` 共同决定（判定在 `_owner_channel_ok`），
+           而 **`claims_owner` 是插件给的布尔、不可信**——所以它只影响
+           `sender_role` 这个给模型看的标签，**不授予任何命令权限**（命令权限一律走
+           QQ 那条路，见 `stage3_main._is_super_admin_control`）。
         3. **每封必须有渠道内唯一的 id**：见 `DeliveredMessage.message_id`
            （原来核心自己拼了个常量，导致同一个发件人的后续来信被去重器静默丢掉）。
         4. **特权命令的形状判定要与引擎的解析口径一致**：`privileged_command_level`
@@ -1016,7 +1029,7 @@ class _SeamBinder:
         sender = _exact_text(parcel.sender)
         channel = _exact_text(parcel.channel)
         namespace = _exact_text(parcel.session_namespace) or channel
-        is_owner = bool(parcel.claims_owner) and channel in _OWNER_CHANNELS
+        is_owner = bool(parcel.claims_owner) and self._owner_channel_ok(channel, engine)
         # 3) 渠道内唯一的 id（渠道没给就退回"渠道+发件人"，至少不比以前差）。
         inner = _exact_text(parcel.message_id) or f"{namespace}:{sender}"
         message = IncomingMessage(
@@ -1040,6 +1053,38 @@ class _SeamBinder:
     def reporter_sink(self, reporter: object) -> None:
         self._require().daily_reporter = reporter
 
+    def _owner_channel_ok(self, channel: str, engine) -> bool:
+        """这个渠道**允许**声明"这条来自主人"吗。**核心不认识任何具体渠道名。**
+
+        两个来源，缺一不可地合成一张当前清单：
+
+        1. **渠道自己声明的**（`registry.provide_owner_channel("<名字>")`）——
+            以后新增渠道走这条；
+        2. 核心那份**过渡引导项**（模块级那个元组，目前只有 `mail`）——
+            为了"这次改动不要求插件侧同时改"而留的，行为与改之前一致。
+
+        判定仍然是核心的：声明只表示"这个渠道愿意为这句话负责"，
+        最终还要**同时**满足 `claims_owner is True`（见 `deliver`）。
+        """
+
+        if not str(channel):
+            return False
+        registry = getattr(engine, "plugin_registry", None) if engine is not None else None
+        knows = getattr(registry, "knows_owner_channel", None)
+        if callable(knows) and knows(channel):
+            return True
+        return str(channel) in _OWNER_CHANNELS_BUILTIN
+
+    def owner_channels(self, engine) -> tuple[str, ...]:
+        """当前"允许声明主人"的渠道清单（**只读快照**，给接缝与测试看）。"""
+
+        declared = ()
+        registry = getattr(engine, "plugin_registry", None) if engine is not None else None
+        taker = getattr(registry, "declared_owner_channels", None)
+        if callable(taker):
+            declared = tuple(str(item) for item in taker())
+        return tuple(sorted(set(_OWNER_CHANNELS_BUILTIN) | set(declared)))
+
     def chat_seams(self) -> ChatSeams:
         return ChatSeams(reserved_user_ids=self.reserved_user_ids,
                          allow_private=self.allow_private,
@@ -1047,7 +1092,9 @@ class _SeamBinder:
                          take_follow_ups=self.take_follow_ups,
                          roles_sink=self.roles_sink,
                          reporter_sink=self.reporter_sink,
-                         owner_channels=_OWNER_CHANNELS)
+                         # 只读快照：清单是"渠道声明的 + 那条过渡引导项"，
+                         # 不再是核心写死的一张表。
+                         owner_channels=self.owner_channels(self._require()))
 
     # --- ReportSeams -----------------------------------------------------
 

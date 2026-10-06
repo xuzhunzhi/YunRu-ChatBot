@@ -60,7 +60,7 @@
 | `runtime.py:824-827`、`runtime.py:348-356` | `report_note_letter` → `ReportSeams.remember_letter()`：把"她刚写过这封信"灌回核心 |
 | `runtime.py:801-802`、`runtime.py:902-908` | `reporter_sink` / `_reporter_sink_for`：日报器经 `register_reporter()` 挂到 `engine.daily_reporter` |
 | `runtime.py:485-513`、`runtime.py:736-792` | `_chat_seams_for` / `_SeamBinder.deliver`：**邮件正文进对话的那条路**（见下一小节） |
-| `runtime.py:516-522` | `_OWNER_CHANNELS = ("mail",)`：**核心**的白名单——只有邮件渠道允许声明"这条来自主人" |
+| `runtime.py:752-773` | `_OWNER_CHANNELS_BUILTIN = ("mail",)`：**2026-10-06 起这只是一条"过渡引导项"**——主人档的清单改由**渠道自己声明**（`registry.provide_owner_channel("<名字>")`，见 `plugins.PluginRegistry.provide_owner_channel`），核心只问"这个渠道说过它可以吗"（`_SeamBinder._owner_channel_ok`）。名字改了（原 `_OWNER_CHANNELS`）、语义也窄了：**新渠道一律走声明，不许往这里加**。行为与改之前一致（`mail` 仍允许声明主人） |
 | `stage3_main.py:2334-2371` | `_mail_status()`：读 `engine.daily_reporter.status()` 拼 `/super mail` 的回复 |
 | `stage3_main.py:2373-2382` | `_mail_send_now()`：`/super mail now` → `reporter.run_once(self, force=True)`——**把引擎当 `report` 递进去**（`self` 不是 `ReportSeams`，是签名不符但"能跑"的旧形状） |
 | `stage3_main.py:2386-2400` | `note_letter()`：最近几封寄出的信（内存副本），`LETTER_HISTORY_LIMIT` 上限 |
