@@ -37,6 +37,12 @@ JSON；`sense` 取 `positive / negative / other / unclear`。覆盖一旦写下�
 也换成操作者写的版本。`/super quote` 看得到，`/super quote <emoji_id> <方向> [说明]`
 改一个字就生效（下一轮回复就读到）。
 
+**停用一条笔记**（2026-10-06 加，面板与命令都要用）：`QuoteStore.set_note_enabled(id, False)`
+把那条笔记的**内容指纹**（`note_id`）记进 `disabled_notes`。为什么不直接删掉它：
+`notes` 是模型每一轮的产物，删了下轮就长回来；停用是按内容记的，重写多少遍都还在。
+读侧（`QuoteProfile.notes_for`）不再给这条材料，而文件里、`/super quote` 里照样看得到它
+（标着"已停用"）——操作者要能看见自己停用了什么，也能恢复。
+
 ## 落盘（都在 `data/`，已 gitignored）
 
 | 文件 | 什么 | 轮转 |
@@ -47,6 +53,7 @@ JSON；`sense` 取 `positive / negative / other / unclear`。覆盖一旦写下�
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -91,6 +98,8 @@ MAX_SAMPLES_PER_RUN = 8
 MAX_BATCHES_PER_RUN = 2
 #: 幂等账本最多记多少条（防它无限长大；只用于"不再重复学同一批"）。
 MAX_SEEN = 2000
+#: 最多能"停用"多少条笔记。停用的是**内容指纹**（见 `note_id`），不是下标。
+MAX_DISABLED_NOTES = 200
 #: 单次学习的超时（秒）。失败只记一笔，绝不影响对话。
 DEFAULT_TIMEOUT_SECONDS = 60.0
 
@@ -311,6 +320,23 @@ def _clean_when(value: object) -> str:
     return when
 
 
+def note_id(when: object, note: object) -> str:
+    """一条笔记的**稳定 id**：由 `when` + `note` 的原文算出来（12 位十六进制）。
+
+    为什么不能用下标：每一轮学习都会**整份替换** `notes`（`apply_run`），
+    "第 3 条"活不过一轮——操作者刚停用的那条，下一轮就指到别人身上去了。
+    用**内容**算 id，同样的内容重写回来 id 不变（停用状态跟着内容走），
+    内容改了就是另一条（那时该重新看一眼，而不是继承一个"已停用"）。
+
+    ⚠️ 算 id 用的是**存进文件里的原文**，不是 `_clean_note` / `_clean_when` 清洗后的值：
+    两处各算一次就会得到两个 id（清洗会剥掉句末标点），于是"停用"静默失效。
+    读侧（`notes_for`）、命令、面板三处都调这一个函数，不许各写一遍。
+    """
+
+    body = "\x1f".join((_text(when), _text(note)))
+    return hashlib.sha1(body.encode("utf-8")).hexdigest()[:12]
+
+
 class QuoteStore:
     """`data/quote/profile.json` 的读写：笔记、按群的表情含义表、操作者覆盖、幂等账。
 
@@ -328,6 +354,9 @@ class QuoteStore:
         self.meanings: dict[str, dict[str, dict[str, object]]] = {}
         self.overrides: dict[str, dict[str, dict[str, str]]] = {}
         self.seen: list[str] = []
+        #: 被操作者**停用**的笔记 id（见 `note_id`）。停用只影响"给不给材料"，
+        #: 笔记本身还在文件里（操作者看得见自己停用了哪几条，也能恢复）。
+        self.disabled_notes: list[str] = []
         self.updated_at = 0.0
         self.last_error = ""
         self._mtime = 0.0
@@ -346,6 +375,7 @@ class QuoteStore:
             return
         self._mtime = mtime
         self.notes, self.meanings, self.overrides, self.seen = [], {}, {}, []
+        self.disabled_notes = []
         self.updated_at = 0.0
         self.last_error = ""
         if not mtime:
@@ -382,6 +412,9 @@ class QuoteStore:
         seen = data.get("seen")
         if isinstance(seen, list):
             self.seen = [str(item) for item in seen][-MAX_SEEN:]
+        disabled = data.get("disabled_notes")
+        if isinstance(disabled, list):
+            self.disabled_notes = [str(item) for item in disabled if str(item)][-MAX_DISABLED_NOTES:]
 
     def snapshot(self) -> dict[str, object]:
         return {
@@ -389,6 +422,7 @@ class QuoteStore:
             "notes": len(self.notes),
             "groups": sorted(self.meanings),
             "overrides": sum(len(table) for table in self.overrides.values()),
+            "disabled_notes": len(self.disabled_notes),
             "seen": len(self.seen),
             "updated_at": self.updated_at,
             "last_error": self.last_error,
@@ -456,6 +490,29 @@ class QuoteStore:
                 self.overrides.pop(str(group_id), None)
             self.save()
 
+    # --- 停用一条笔记（操作者 / 面板）-------------------------------------
+
+    def note_disabled(self, note_id_value: object) -> bool:
+        return _text(note_id_value) in self.disabled_notes
+
+    def set_note_enabled(self, note_id_value: object, enabled: bool) -> bool:
+        """停用 / 恢复一条笔记。返回**写盘成没成**（`False` = 没写进去）。
+
+        为什么是按 id 停用而不是直接把那条笔记删掉：`notes` 是**模型每一轮的产物**，
+        删掉它下一轮就长回来了。停用记在 `disabled_notes` 里，模型重写多少遍都还在
+        （同样的内容 → 同样的 id），而**读侧**（`notes_for`）据此不给材料。
+        """
+
+        key = _text(note_id_value)
+        if not key:
+            return False
+        kept = [item for item in self.disabled_notes if item != key]
+        if not enabled:
+            kept.append(key)
+        self.disabled_notes = kept[-MAX_DISABLED_NOTES:]
+        self.updated_at = self.clock()
+        return self.save()
+
     def apply_run(self, *, notes: list[dict[str, object]], meanings: dict[str, dict[str, dict]],
                   seen: list[str]) -> None:
         """把一轮学习的成果并进去（笔记整份替换，含义表按群合并，见 `_merge_meanings`）。"""
@@ -493,6 +550,7 @@ class QuoteStore:
             "notes": self.notes,
             "meanings": self.meanings,
             "overrides": self.overrides,
+            "disabled_notes": self.disabled_notes,
             "seen": self.seen,
         }
         try:
@@ -543,12 +601,15 @@ class QuoteProfile:
         cap = max_notes_per_reply() if limit is None else max(0, int(limit))
         if not cap or not self.store.notes:
             return []
+        disabled = set(self.store.disabled_notes)
         query = f"{text} {topic}".strip()
         candidates: list[tuple[str, str]] = []
         for item in self.store.notes:
             note = _clean_note(item.get("note"))
             when = _clean_when(item.get("when"))
-            if note and when:
+            # **停用判据按原文算 id**（与视图/命令/面板同一个 `note_id`），
+            # 不能用清洗后的值——那样两处会得到两个 id，停用静默失效。
+            if note and when and note_id(item.get("when"), item.get("note")) not in disabled:
                 candidates.append((when, note))
         picked = [(when, note, _overlap(when, query)) for when, note in candidates]
         picked = [row for row in picked if row[2] >= NOTE_BIGRAM_MIN]
@@ -794,7 +855,9 @@ class QuoteLearningAgent:
             for item in self.store.notes[:limit]:
                 when = str(item.get("when") or "")
                 note = str(item.get("note") or "")
-                lines.append(f"· {when}——{note}")
+                mark = "（已停用）" if self.store.note_disabled(
+                    note_id(item.get("when"), item.get("note"))) else ""
+                lines.append(f"· {when}——{note}{mark}")
             if len(self.store.notes) > limit:
                 lines.append(f"… 还有 {len(self.store.notes) - limit} 条（文件：{self.store.path}）")
         return lines

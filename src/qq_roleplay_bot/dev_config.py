@@ -567,6 +567,23 @@ QUOTE_LEARN_MAX = _int("QQBOT_QUOTE_LEARN_MAX", 5)
 QUOTE_LEARN_INTERVAL = _float("QQBOT_QUOTE_LEARN_INTERVAL", 86400.0)
 QUOTE_PROFILE_FILE = get("QQBOT_QUOTE_PROFILE", "data/quote/profile.json")
 
+# --- 黑话词条（2026-10-06，用户口径："还有**黑话**"）--------------------------
+# 设计稿在 `docs/STAGE3_PENDING_DESIGNS.md` §②；实现只有一份：
+# `slang_learning.py`（判解释句 / 词条库 / 被动观察者）。
+#
+# **它是被动的**：她在群里听到别人解释就记下来。用户已经否掉"不懂就问"
+# （`docs/PENDING.md`：*"别做不懂就问"*），所以那条路上**没有发问的动作**
+# ——观察者上连一个能发消息的东西都没有（有测试钉住）。
+#
+# - **默认开**，`QQBOT_SLANG_LEARN=0` 关掉：关掉＝一条都不记，**但面板/命令
+#   照样看得到已经学出来的那份**（"关掉"是"不再记新的"，不是"数据没了"）。
+# - `QQBOT_SLANG_PROFILE`：那份 JSON 的位置（词条 + 证据 + 修订）。
+#   默认 `<项目根>/data/slang/entries.json`（`data/` 已 gitignored）。
+# - **没有模型调用、没有节拍**：判解释句是确定性正则（理由写在那个模块里），
+#   所以这里没有"多久跑一次"这种配置——它每条消息都只是扫一眼。
+SLANG_LEARN_ENABLED = _enabled("QQBOT_SLANG_LEARN")
+SLANG_PROFILE_FILE = get("QQBOT_SLANG_PROFILE", "data/slang/entries.json")
+
 
 def session_user_id(base: str, session_id: str) -> str:
     """把会话 id 变成服务商能接受的 user_id 后缀。

@@ -244,12 +244,21 @@ SUPER_QUOTE_PATTERN = re.compile(
     r"^[/#]super\s+(?:quote|quotes|金句|表情含义)(?:\s.*)?$",
     re.IGNORECASE,
 )
+# `/super slang`：她**被动听来的黑话词条**（只读），后面可以跟"改释义 / 删 / 标错"。
+# 与 `/super quote` 同一形状（列 + 改 + 删），同样单独一条模式而不是塞进共享 topic 组：
+# 它后面跟的是"词"与自由文字，塞进去会顺手让 `/super restart slang` 变成合法命令。
+SUPER_SLANG_PATTERN = re.compile(
+    r"^[/#]super\s+(?:slang|黑话|词条)(?:\s.*)?$",
+    re.IGNORECASE,
+)
 # 群管理与群主命令的解析**已经搬进插件**（`builtin_group_commands.py`，2026-09-30
 # 用户要求"stage4 的内容都用插件实现"）。核心不再认识这些命令的字面形状，只保留：
 # 档位判定（`_plugin_level_allowed`）与动作执行（`_plugin_action_reply`）。
 # `/super admin list` 最多列这么多行：出站正文上限是 1000 字符，
 # 名单长了要主动截断并说明还有多少人，不能撞上限被静默截掉。
 ADMIN_LIST_MAX_ROWS = 30
+# `/super slang` 一趟最多列几条词条（出站正文上限 1000 字符，列不完要说明还有多少）。
+SLANG_LIST_MAX_ROWS = 20
 # 关系缓存的有效期（秒）。写入时我们会主动失效，所以"当轮变冷"不依赖它；
 # TTL 是给维护 agent 那条通道兜底的——它在别的线程改库，引擎并不知情。
 STANCE_CACHE_TTL_SECONDS = 60.0
@@ -392,6 +401,7 @@ class SuperAction(str, Enum):
     MEMORY_ARCHIVE = "memory_archive"
     PROFILE = "profile"
     QUOTE = "quote"
+    SLANG = "slang"
 
 
 def parse_super_command(text: str) -> SuperAction | None:
@@ -426,6 +436,10 @@ def parse_super_command(text: str) -> SuperAction | None:
     # 金句学习的表情含义表：同理，先于通用模式。
     if SUPER_QUOTE_PATTERN.fullmatch(stripped):
         return SuperAction.QUOTE
+    # 黑话词条（她被动听来的那些）：同样先于通用模式，否则 `/super 词条 x y`
+    # 会被当成 `/super <topic>` 掉进记忆那一条。
+    if SUPER_SLANG_PATTERN.fullmatch(stripped):
+        return SuperAction.SLANG
     # **群管理与群主命令不在这里**：它们是插件（`builtin_group_commands.py`），
     # 在 `handle()` 的插件分发那段就被认领掉了，核心只认"档位"与"动作执行"。
     mail = SUPER_MAIL_PATTERN.fullmatch(stripped)
@@ -547,9 +561,93 @@ def _parse_quote_override(text: str) -> tuple[str, str, str] | None:
     note = (match.group("note") or "").strip()
     if not emoji_id or not sense:
         return None
+    # `note` / `笔记` 是**留给"停用一条笔记"那个形状的**（见 `_parse_quote_note_toggle`）：
+    # 不在这里挡掉的话，`/super quote note off` 会写成"emoji=note、方向=off"，
+    # 操作者以为停用了笔记，实际往覆盖表里塞了一个不存在的表情。
+    if emoji_id.casefold() in {"note", "笔记"}:
+        return None
     if sense.casefold() in QUOTE_OVERRIDE_AUTO:
         return emoji_id, "auto", note
     return emoji_id, sense, note
+
+
+# `/super quote note <笔记id> off|on`：停用 / 恢复**某一条笔记**。
+# 笔记的 id 是**内容指纹**（`quote_learning.note_id`），`/super quote` 那一列里印出来；
+# 模型每一轮都会整份重写笔记，所以只有按内容记的停用才活得下去。
+_QUOTE_NOTE_PATTERN = re.compile(
+    r"^[/#]super\s+(?:quote|quotes|金句|表情含义)\s+(?:note|笔记)\s+(?P<id>\S+)\s+"
+    r"(?P<state>\S+)$",
+    re.IGNORECASE,
+)
+#: 停用 / 恢复的关键字。
+QUOTE_NOTE_OFF = frozenset({"off", "no", "0", "停用", "关", "关闭", "别用"})
+QUOTE_NOTE_ON = frozenset({"on", "yes", "1", "恢复", "启用", "开", "打开"})
+
+
+def _parse_quote_note_toggle(text: str) -> tuple[str, bool] | None:
+    """解析"停用/恢复一条笔记"那一段；不是这个形状就返回 None。"""
+
+    if not isinstance(text, str):
+        return None
+    match = _QUOTE_NOTE_PATTERN.fullmatch(text.strip())
+    if not match:
+        return None
+    note_id = match.group("id").strip()
+    state = match.group("state").strip().casefold()
+    if not note_id:
+        return None
+    if state in QUOTE_NOTE_OFF:
+        return note_id, False
+    if state in QUOTE_NOTE_ON:
+        return note_id, True
+    return None
+
+
+# `/super slang <动作> <词> [新释义]` 的动作词。给的是**中文与英文两套**写法
+# （与 `/super quote <方向>` 接受"正/不赞成/positive"同一套脾气：手机上打哪个都行）。
+SLANG_VERBS = {
+    "list": "list", "列表": "list", "看": "list",
+    "all": "all", "全部": "all", "所有群": "all",
+    "why": "why", "证据": "why", "原话": "why",
+    "set": "set", "改": "set", "改释义": "set", "update": "set",
+    "del": "del", "delete": "del", "删": "del", "删除": "del",
+    "wrong": "wrong", "标错": "wrong", "no": "wrong",
+    "ok": "ok", "取消标错": "ok", "恢复": "ok", "yes": "ok",
+}
+
+
+def _parse_slang_edit(text: str) -> tuple[str, str, str]:
+    """解析 `/super slang ...` → `(动作, 词, 新释义)`。
+
+    形状（与 `/super quote` 同一套脾气：**不给动作就是"看"**）：
+
+    | 输入 | 结果 |
+    | --- | --- |
+    | `/super slang` / `list` | `("list", "", "")` |
+    | `/super slang all` | `("all", "", "")` |
+    | `/super slang why 电赛` | `("why", "电赛", "")` |
+    | `/super slang set 电赛 电子设计竞赛` | `("set", "电赛", "电子设计竞赛")` |
+    | `/super slang 电赛 电子设计竞赛` | 同上（动作可以省） |
+    | `/super slang 电赛` | `("why", "电赛", "")`（只给词 = 看它的证据） |
+    | `/super slang del 电赛` | `("del", "电赛", "")` |
+    """
+
+    if not isinstance(text, str):
+        return "list", "", ""
+    body = re.sub(r"^[/#]super\s+(?:slang|黑话|词条)\s*", "", text.strip(), flags=re.IGNORECASE)
+    tokens = body.split()
+    if not tokens:
+        return "list", "", ""
+    verb = SLANG_VERBS.get(tokens[0].casefold(), "")
+    if verb:
+        word = tokens[1] if len(tokens) > 1 else ""
+        definition = " ".join(tokens[2:]).strip()
+        return verb, word, definition
+    word = tokens[0]
+    definition = " ".join(tokens[1:]).strip()
+    if not definition:
+        return "why", word, ""
+    return "set", word, definition
 
 
 # 公开帮助。不再是写死的常量：正文由各命令插件自述的行汇总而成，
@@ -878,6 +976,7 @@ class DialogueEngine:
         vision=None,
         host: HostServices | None = None,
         quote_profile=None,
+        slang_library=None,
     ) -> None:
         self.client = client
         # **宿主能力**（出站表现、卡片渲染、机器探测、审计、余额、角色、检索）。
@@ -962,6 +1061,13 @@ class DialogueEngine:
         # 它只是"读一份本地 JSON 挑几条"，**热路径上一次模型调用都没有**；
         # 关掉开关或没有材料时回复 prompt 与改动前**逐字相同**（有测试钉住）。
         self.quote_profile = quote_profile
+        # 黑话词条（她**被动听来**的那份，`slang_learning.SlangStore`）。
+        # 与金句那份一样：**读一份本地 JSON**，热路径上一次模型调用都没有；
+        # `runtime` 装配时把它接上，没接上（测试、干跑）时 `/super slang` 如实说"没有接入"。
+        # `slang_watcher` 是**收消息那一侧**的观察者，由 `runtime` 挂上——
+        # 引擎自己不调它（对话路径一个字都不用改）。
+        self.slang_library = slang_library
+        self.slang_watcher = None
         # 「没把握就别断言」这条路（2026-10-04 起叫"不懂就问"，2026-10-05 晚改口径）：
         # **没有限量器了**。旧版有一个 `AskBudget`（同一话题最多问一次），因为那时
         # "以问回应"会被她每句都用一遍；现在那条路拆掉了，兜底是"打回重写一次"——
@@ -1633,6 +1739,8 @@ class DialogueEngine:
             return self._profile_reply(message)
         if action is SuperAction.QUOTE:
             return self._quote_reply(message)
+        if action is SuperAction.SLANG:
+            return self._slang_reply(message)
         if action is SuperAction.PROCESSES:
             mode = parse_super_topic(message.text) or "default"
             note = None
@@ -2144,12 +2252,25 @@ class DialogueEngine:
         store.reload(force=True)
         # 方向的中文说法与 `quote_learning` 共用一份（两处漂移就会出现"命令里写不赞成、
         # 存下来是别的意思"）。**本地 import**：那个模块是可拔的，核心不该在顶部认识它。
-        from .quote_learning import SENSE_LABELS
+        from .quote_learning import SENSE_LABELS, note_id
 
         group_id = message.target.group_id or (message.session_id.split(":", 1)[-1])
-        taken = _parse_quote_override(message.text or "")
         changed = ""
-        if taken is not None:
+        # **先判"停用一条笔记"**：它和"改一个表情的方向"共用 `/super quote` 这个前缀，
+        # 判反了就会往覆盖表里塞一个叫 note 的假表情（见 `_parse_quote_override`）。
+        toggle = _parse_quote_note_toggle(message.text or "")
+        taken = None if toggle is not None else _parse_quote_override(message.text or "")
+        if toggle is not None:
+            note_key, enabled = toggle
+            known = {note_id(item.get("when"), item.get("note")) for item in store.notes}
+            if note_key not in known:
+                changed = (f"没有找到这条笔记（id {note_key}）——可能是模型又重写了笔记，"
+                           f"发 `/super quote` 看现在这一份的 id。")
+            else:
+                store.set_note_enabled(note_key, enabled)
+                changed = (f"已{'恢复' if enabled else '停用'}那条笔记（{note_key}）。"
+                           + ("" if enabled else "下一句回复就不再带它了。"))
+        elif taken is not None:
             emoji_id, sense, note = taken
             if sense == "auto":
                 store.clear_override(group_id, emoji_id)
@@ -2190,12 +2311,129 @@ class DialogueEngine:
         if store.notes:
             lines.append("她自己的老习惯（学来的，都是短句）：")
             for item in store.notes[:6]:
-                lines.append(f"· {item.get('when', '')}——{item.get('note', '')}")
+                key = note_id(item.get("when"), item.get("note"))
+                mark = "（已停用）" if store.note_disabled(key) else ""
+                lines.append(f"· [{key}] {item.get('when', '')}——{item.get('note', '')}{mark}")
             hidden = len(store.notes) - 6
             if hidden > 0:
                 lines.append(f"… 还有 {hidden} 条")
         lines.append("改：/super quote <表情id> <赞成|不赞成|其它|不确定> [说明]")
         lines.append("撤：/super quote <表情id> auto")
+        lines.append("停用/恢复一条笔记：/super quote note <笔记id> off|on")
+        lines.append(f"（文件：{store.path}）")
+        return "\n".join(lines)
+
+    def _slang_reply(self, message: IncomingMessage) -> str:
+        """`/super slang`：看她**被动听来的黑话词条**，并**改 / 删 / 标错**。
+
+        由来（2026-10-06 用户口径）：*"金句我看应该划到**知识库**里"*、*"还有**黑话**"*。
+        形状照 `/super quote`（列 + 改 + 删），因为它解决的是同一类问题：
+        "要能被操作者看到与纠正，不许它自己闷头学歪"。
+
+        词条是**群里真人解释的原话**（谁、什么时候、哪个群、原句都在），
+        不是模型编的释义——所以这里能做的只有四件事：看、改一个字、删、标错。
+        **这一条命令不进模型、不碰记忆库、也不改人格**；它读写的只有
+        `data/slang/entries.json` 那一份（`data/` 已 gitignored）。
+        """
+
+        store = getattr(self, "slang_library", None)
+        if store is None or not hasattr(store, "entries_for"):
+            return "当前没有接入黑话词条（这一版没有它也能照常说话）。"
+        store.reload(force=True)
+        group_id = message.target.group_id or (message.session_id.split(":", 1)[-1])
+        verb, word, definition = _parse_slang_edit(message.text or "")
+        changed = ""
+        if verb == "set" and word and definition:
+            if store.update_definition(group_id, word, definition, by=f"超管 {message.user_id}"):
+                changed = f"已改：本群的「{word}」= {definition}（旧的那条记进修订了）。"
+            else:
+                changed = (f"这一条没法记（词或释义不合格，或者含不该出现的词）："
+                           f"{word} / {definition}")
+        elif verb == "del" and word:
+            changed = (f"已删掉本群的「{word}」。" if store.delete(group_id, word)
+                       else f"本群没有「{word}」这条词条。")
+        elif verb in {"wrong", "ok"} and word:
+            wrong = verb == "wrong"
+            if store.mark_wrong(group_id, word, wrong):
+                changed = f"已{'标错' if wrong else '取消标错'}：{word}"
+            else:
+                changed = f"本群没有「{word}」这条词条。"
+        elif verb == "why" and word:
+            return self._slang_detail(store, group_id, word)
+
+        lines: list[str] = []
+        if changed:
+            lines.append(changed)
+        watcher = getattr(self, "slang_watcher", None)
+        if watcher is not None:
+            stats = watcher.snapshot()
+            line = (f"黑话：听过 {stats.get('captured', 0)} 条   词条 {stats.get('entries', 0)} 条"
+                    f"   群 {len(stats.get('groups') or [])} 个")
+            if stats.get("failures"):
+                line += f"   没记成 {stats.get('failures')} 次"
+            lines.append(line)
+        scope = None if verb == "all" else group_id
+        rows = store.entries_for(scope)
+        if not rows:
+            lines.append(f"还没有词条（{'所有群' if scope is None else f'本群 {group_id}'}）："
+                         f"群里有人解释一个词，她就记下来——不用她发问。")
+        else:
+            lines.append("词条：" + ("（所有群）" if scope is None else f"（本群 {group_id}）"))
+            for item in rows[:SLANG_LIST_MAX_ROWS]:
+                lines.append(self._slang_line(item, scope is None))
+            hidden = len(rows) - SLANG_LIST_MAX_ROWS
+            if hidden > 0:
+                lines.append(f"… 还有 {hidden} 条")
+        lines.append("看证据：/super slang why <词>")
+        lines.append("改释义：/super slang set <词> <新释义>（也可以直接 /super slang <词> <新释义>）")
+        lines.append("删：/super slang del <词>    标错/取消：/super slang wrong|ok <词>")
+        lines.append("看所有群：/super slang all")
+        lines.append(f"（文件：{store.path}）")
+        return "\n".join(lines)
+
+    def _slang_line(self, item: dict, with_group: bool) -> str:
+        """一条词条的一行（列表用）。**带出处**：谁说的、什么时候。"""
+
+        where = f"[{item.get('group_id', '')}] " if with_group else ""
+        mark = "（标错）" if item.get("wrong") else ""
+        times = int(item.get("times") or 0)
+        explainers = list(item.get("explainers") or [])
+        who = ""
+        if explainers:
+            last = explainers[-1]
+            name = str(last.get("name") or last.get("user_id") or "")
+            when = _format_clock(float(last.get("at") or 0.0))
+            who = f"——{name} 说于 {when}"
+        return (f"· {where}{item.get('word', '')} = {item.get('definition', '')}{mark}"
+                f"（听过 {times} 次{who}）")
+
+    def _slang_detail(self, store, group_id: str, word: str) -> str:
+        """`/super slang why <词>`：把这条词条的**原话证据**摊开给人看。"""
+
+        item = store.find(group_id, word)
+        if item is None:
+            return f"本群（{group_id}）没有「{word}」这条词条。"
+        lines = [f"【{item.get('word', '')}】= {item.get('definition', '')}"
+                 + ("（已标错）" if item.get("wrong") else "")]
+        lines.append(f"听过 {item.get('times', 0)} 次；"
+                     f"第一次 {_format_clock(float(item.get('first_seen') or 0.0))}，"
+                     f"最近 {_format_clock(float(item.get('last_seen') or 0.0))}")
+        explainers = list(item.get("explainers") or [])
+        if explainers:
+            lines.append("谁解释的（原话）：")
+            for row in explainers[-4:]:
+                name = str(row.get("name") or row.get("user_id") or "")
+                quote = str(row.get("quote") or "")
+                dropped = "（原话含不该留的词，没存下来）" if row.get("evidence_dropped") else ""
+                lines.append(f"· {name}"
+                             f"（{_format_clock(float(row.get('at') or 0.0))}）："
+                             f"{quote or '—'}{dropped}")
+        revisions = list(item.get("revisions") or [])
+        if revisions:
+            lines.append("改过口：")
+            for row in revisions[-4:]:
+                lines.append(f"· {_format_clock(float(row.get('at') or 0.0))} "
+                             f"{row.get('by', '')}：{row.get('from', '')} → {row.get('to', '')}")
         lines.append(f"（文件：{store.path}）")
         return "\n".join(lines)
 
@@ -2552,6 +2790,20 @@ class DialogueEngine:
                     + (f"   {stats.get('last_result', '')}" if stats.get("last_result") else "")
                 )
             lines.append("  看原文 / 改方向：/super quote")
+        # 黑话词条（2026-10-06）：与金句同一条口径——**学来的东西要看得见**。
+        # 概览只报计数与"在不在记"，词条原文与证据在 `/super slang`。
+        slang = getattr(self, "slang_watcher", None)
+        library = getattr(self, "slang_library", None)
+        if slang is not None or library is not None:
+            stats = slang.snapshot() if slang is not None else (library.snapshot() if library else {})
+            line = (f"黑话词条：{stats.get('entries', 0)} 条   "
+                    f"群 {len(stats.get('groups') or [])} 个")
+            if slang is not None:
+                line += f"   听过 {stats.get('captured', 0)} 条"
+                if stats.get("failures"):
+                    line += f"   没记成 {stats.get('failures')} 次"
+            lines.append(line)
+            lines.append("  看词条 / 改释义：/super slang")
         logs = snapshot.model_trace or {}
         if logs:
             parts = []

@@ -385,6 +385,49 @@ class UiSeams:
     #: `() -> tuple[dict, ...]`：**插件清单**（见 `inventory()`）。只读——面板拿它
     #: 列卡片里的 tab；"装/卸"不是面板点一下的事（预装的不给卸、webui 自己也不给卸）。
     plugins: object = None
+    #: 她**学来的东西**（金句 / 黑话）的读写接缝（见 `LearnedSeams`）。**只碰这两份数据**，
+    #: 没有记忆入口、也没有对话入口——那份函数清单由测试逐个钉住。
+    learned: object = None
+
+
+@dataclass(frozen=True, slots=True)
+class LearnedSeams:
+    """她**学来的东西**（金句 / 黑话）的读写接缝。**这里是函数，不是引擎、不是记忆。**
+
+    由来（2026-10-06 用户口径）：*"金句我看应该划到**知识库**里"*、*"还有**黑话**"*。
+    这两样都是 Stage 3 的数据（`AGENTS.md` §2.3：对话、记忆、知识库是 Stage 3 的地盘），
+    面板要能看、能改——但**绝不能**顺手把记忆入口或对话入口也放进来。§2.3 那张表里
+    被禁的正是"任何让插件读/写**长期记忆**、**知识库**的接缝"，而这一份是"她学来的
+    材料"这条独立的窄口：面板能改的只有这两份 JSON，**碰不到记忆库、也发不出话**。
+
+    判据是**函数集合本身**：`tests/test_learned_seams.py` 把下面这些字段名逐个钉住
+    （多一个、少一个都红），并按名字扫"有没有夹带记忆/对话入口"。
+    所以这份清单是**契约**，不是"顺便能用的东西"。
+
+    | 字段 | 形状 | 干什么 |
+    | --- | --- | --- |
+    | `quote_view` | `(group_id) -> dict` | 读：按群的表情含义表 + 风格/语境笔记 |
+    | `quote_correct` | `(group_id, emoji_id, sense, note="") -> dict` | 改：纠正某表情方向（`auto` 撤销） |
+    | `quote_note_enabled` | `(note_id, enabled) -> dict` | 改：停用 / 恢复某条笔记 |
+    | `slang_list` | `(group_id=None) -> list` | 读：黑话词条（`None` = 所有群） |
+    | `slang_update` | `(group_id, word, definition) -> dict` | 改：改释义（记一次修订） |
+    | `slang_delete` | `(group_id, word) -> bool` | 改：删词条 |
+    | `slang_mark_wrong` | `(group_id, word, wrong=True) -> dict` | 改：标错 / 取消标错 |
+
+    返回的都是**结构化数据**（dict / list / bool），不是给她看的话——面板要显示什么自己排版。
+    取不到数据时一律返回空结构（`{}` / `[]` / `False`），**不抛**：
+    面板不该因为"这份东西还没学出来"崩掉，核心也不该因为面板没接上而变样。
+    真正的读写口在核心（`quote_learning.QuoteStore` / `slang_learning.SlangStore`），
+    这一层**不自己存一份**——两份数据迟早会分叉。
+    """
+
+    quote_view: object = None
+    quote_correct: object = None
+    quote_note_enabled: object = None
+    slang_list: object = None
+    slang_update: object = None
+    slang_delete: object = None
+    slang_mark_wrong: object = None
 
 
 @dataclass(frozen=True, slots=True)

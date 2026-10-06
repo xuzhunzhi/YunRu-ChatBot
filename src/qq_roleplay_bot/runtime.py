@@ -61,6 +61,7 @@ from .stage3_main import (
 )
 from .plugins import (
     ChatSeams,
+    LearnedSeams,
     PluginRegistry,
     ReportSeams,
     UiSeams,
@@ -652,6 +653,13 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
     # （它原来是同步方法里调 async 取数，拿到的是协程对象）——所以即便有人接了
     # 它，也只会拿到空。要真用 `host.machine`，得先把 `sample` 改成 async。
     engine.host.machine = LocalMachineProbe(diagnostics)
+    # 黑话词条（2026-10-06 用户口径："还有**黑话**"）：**被动**听来的解释 → 一份本地 JSON。
+    # 装配点在这里把两半接上：
+    # - `engine.slang_library`：读/改写口，`/super slang` 与面板那条窄接缝用它；
+    # - `engine.slang_watcher`：观察者，由 `_message_loop` 在**收**那一侧顺手调一次。
+    # 它**没有** transport、没有 notify、没有模型 client，也没有 `async def`——
+    # "她因此问一句"在这条路上没有可调用的东西（`slang_learning` 的模块说明里写了）。
+    engine.slang_library, engine.slang_watcher = _build_slang_learning(engine)
     # **接插件**（发现只跑这一次，所以放在最后：引擎上该有的东西都已经就位）。
     # 命令插件进 `engine.commands`；后台插件留在 `engine.plugin_registry.backgrounds`
     # 给 `serve` 的节拍用。
@@ -1113,6 +1121,159 @@ class _SeamBinder:
             # 插件清单（**只读**）：面板"插件"卡拿它列 tab。给的是函数 `inventory`，
             # 不是某个对象——接缝一律是函数，理由见 `UiSeams` 的说明。
             plugins=inventory,
+            # 她**学来的东西**（金句 / 黑话）的读写：见下面 `learned_seams()`。
+            learned=self.learned_seams(),
+        )
+
+    # --- LearnedSeams（她学来的东西：金句 / 黑话）--------------------------
+    #
+    # 面板要能看、能改这两份数据，但**不许**碰记忆、也不许驱动对话
+    # （`AGENTS.md` §2.3）。所以这里只给七个函数，全部**转发到核心那两个 store**：
+    # `quote_learning.QuoteStore`（金句那份 JSON）与 `slang_learning.SlangStore`
+    # （黑话词条）。**接缝里不存第二份数据**——多一份就迟早分叉。
+    #
+    # 两个 store 都是**懒取**（`getattr(..., None)` 在**调用时**才求值）：
+    # `_ui_seams_for()` 是 `build_engine` 里跑的，那时 `engine.quote_profile` 还没装上
+    # （金句那份在 `serve` 里随学习 agent 一起接）；写成"装配时取值"会把面板锁死在
+    # "启动那一刻有什么"，与"改一个字下一轮就生效"直接冲突。
+
+    def learned_quote_store(self):
+        """金句那份 store（`quote_learning.QuoteStore`）。**复用它的读写口**，不另写一套。"""
+
+        profile = getattr(self._require(), "quote_profile", None)
+        store = getattr(profile, "store", profile)
+        if store is None or not hasattr(store, "effective_sense"):
+            return None
+        store.reload()
+        return store
+
+    def learned_slang_store(self):
+        """黑话那份 store（`slang_learning.SlangStore`）。"""
+
+        store = getattr(self._require(), "slang_library", None)
+        if store is None or not hasattr(store, "entries_for"):
+            return None
+        store.reload()
+        return store
+
+    def learned_quote_view(self, group_id: str) -> dict:
+        """读：某个群的**表情含义表 + 她的老习惯**（含"哪几条是人工改的 / 已停用"）。"""
+
+        from .quote_learning import SENSE_LABELS, note_id
+
+        store = self.learned_quote_store()
+        group = _exact_text(group_id)
+        if store is None or not group:
+            return {}
+        table = store.meanings.get(group) or {}
+        forced = store.overrides.get(group) or {}
+        meanings = []
+        for emoji in sorted(set(table) | set(forced), key=lambda key: (len(key), key)):
+            sense = store.effective_sense(group, emoji)
+            meanings.append({
+                "emoji_id": emoji,
+                "sense": sense,
+                "sense_label": SENSE_LABELS.get(sense, sense),
+                "note": store.effective_note(group, emoji),
+                "manual": bool((forced.get(emoji) or {}).get("sense")),
+            })
+        notes = []
+        for item in store.notes:
+            key = note_id(item.get("when"), item.get("note"))
+            notes.append({
+                "id": key,
+                "kind": _exact_text(item.get("kind")),
+                "when": _exact_text(item.get("when")),
+                "note": _exact_text(item.get("note")),
+                "enabled": not store.note_disabled(key),
+            })
+        return {"group_id": group, "meanings": meanings, "notes": notes,
+                "path": str(store.path)}
+
+    def learned_quote_correct(self, group_id: str, emoji_id: str, sense: object,
+                              note: object = "") -> dict:
+        """改：纠正某个表情在这个群的方向。`sense` 写 `auto`（或"撤掉"那类词）＝撤销覆盖。"""
+
+        store = self.learned_quote_store()
+        group = _exact_text(group_id)
+        emoji = _exact_text(emoji_id)
+        if store is None or not group or not emoji:
+            return {}
+        # 撤销那一档的取值与 `/super quote <emoji> auto` **共用一份**表：
+        # 两处各留一份，迟早出现"命令认得、面板不认得"。
+        from .stage3_main import QUOTE_OVERRIDE_AUTO
+
+        wanted = _exact_text(sense).casefold()
+        if wanted in QUOTE_OVERRIDE_AUTO:
+            store.clear_override(group, emoji)
+            return {"group_id": group, "emoji_id": emoji,
+                    "sense": store.effective_sense(group, emoji), "cleared": True,
+                    "written": store.last_error == ""}
+        normalized = store.override_sense(group, emoji, sense, _exact_text(note))
+        return {"group_id": group, "emoji_id": emoji, "sense": normalized,
+                "cleared": False, "written": store.last_error == ""}
+
+    def learned_quote_note_enabled(self, note_id_value: object, enabled: bool) -> dict:
+        """改：停用 / 恢复一条笔记（按**内容指纹**，模型重写多少遍都还停着）。"""
+
+        store = self.learned_quote_store()
+        key = _exact_text(note_id_value)
+        if store is None or not key:
+            return {}
+        written = store.set_note_enabled(key, bool(enabled))
+        return {"id": key, "enabled": bool(enabled), "written": bool(written)}
+
+    def learned_slang_list(self, group_id: object = None) -> list:
+        """读：黑话词条（`group_id` 给空 = 所有群）。"""
+
+        store = self.learned_slang_store()
+        if store is None:
+            return []
+        return store.entries_for(_exact_text(group_id) or None)
+
+    def learned_slang_update(self, group_id: str, word: str, definition: str) -> dict:
+        """改：改一个词的释义（记一次修订）。词不存在时**新建一条**（操作者手工加词）。"""
+
+        store = self.learned_slang_store()
+        group = _exact_text(group_id)
+        term = _exact_text(word)
+        if store is None or not group or not term:
+            return {}
+        if not store.update_definition(group, term, definition, by="面板"):
+            return {}
+        return store.find(group, term) or {}
+
+    def learned_slang_delete(self, group_id: str, word: str) -> bool:
+        """改：删一条词条。"""
+
+        store = self.learned_slang_store()
+        if store is None:
+            return False
+        return bool(store.delete(_exact_text(group_id), _exact_text(word)))
+
+    def learned_slang_mark_wrong(self, group_id: str, word: str, wrong: bool = True) -> dict:
+        """改：标错 / 取消标错（只动 `status`，释义与证据一个字不改）。"""
+
+        store = self.learned_slang_store()
+        group = _exact_text(group_id)
+        term = _exact_text(word)
+        if store is None or not group or not term:
+            return {}
+        if not store.mark_wrong(group, term, bool(wrong)):
+            return {}
+        return store.find(group, term) or {}
+
+    def learned_seams(self) -> LearnedSeams:
+        """七个函数的清单。**多一个都不给**——函数集合本身就是那份契约。"""
+
+        return LearnedSeams(
+            quote_view=self.learned_quote_view,
+            quote_correct=self.learned_quote_correct,
+            quote_note_enabled=self.learned_quote_note_enabled,
+            slang_list=self.learned_slang_list,
+            slang_update=self.learned_slang_update,
+            slang_delete=self.learned_slang_delete,
+            slang_mark_wrong=self.learned_slang_mark_wrong,
         )
 
 
@@ -1149,6 +1310,10 @@ def _ui_seams_for(engine: DialogueEngine) -> UiSeams:
     **面板权限最大，所以更不能拿引擎**：拿到就能顺着 `engine.transport` 发消息、
     顺着 `engine.super_admin_user_ids` 读名单，绕开它自己那套 token/CSRF 认证。
     这里逐项给**不受绑定方法与闭包泄漏影响**的接缝（`_SeamBinder`）。
+
+    2026-10-06 多了一项 `learned`（她学来的金句 / 黑话）：面板要能看能改这两份数据，
+    但那一份**只放七个函数**、只碰这两份 JSON——记忆入口、对话入口一个都不给，
+    函数清单由 `tests/test_learned_seams.py` 逐个钉住。
     """
 
     return _SeamBinder(engine).ui_seams()
@@ -1538,6 +1703,35 @@ def _start_memory(engine: DialogueEngine, client) -> MemoryService | None:
     # 记忆维护用的是**自己的 key**，命中率要单独算，所以把这个 client 记在引擎上。
     engine.memory_client = maintenance_client
     return memory
+
+
+def _build_slang_learning(engine: DialogueEngine):
+    """黑话词条的**装配**：读/写口（`engine.slang_library`）+ 被动观察者。
+
+    返回 `(store, watcher)`；关掉开关（`QQBOT_SLANG_LEARN=0`）时 `watcher` 是 `None`，
+    但 `store` **照样给**——"关掉"应当表现为"不再记新的"，而不是"面板上那份数据也没了"
+    （与金句那边"开关关掉时读侧照样在"同一条纪律）。
+
+    任何失败都降级成"没有观察者"：她该说的话一个字都不少。
+    """
+
+    try:
+        from .slang_learning import SlangStore, SlangWatcher, learning_enabled
+
+        store = SlangStore()
+    except Exception:  # noqa: BLE001 - 学不学黑话绝不能挡住启动
+        logger.warning("黑话词条未装配", exc_info=True)
+        return None, None
+    if not learning_enabled():
+        logger.info("黑话捕获未启用（QQBOT_SLANG_LEARN=0）")
+        return store, None
+    # `groups` 给的是**闭包**：她这会儿在听哪些群，是运行期会变的事实
+    # （`/admin enable|disable` 随时改），不能在这里取一次就固定下来。
+    watcher = SlangWatcher(
+        store, groups=lambda: set(engine.enabled_group_ids) if engine.enabled else set(),
+    )
+    logger.info("黑话捕获已挂上：写盘 %s，日志 %s", store.path, watcher.log_path)
+    return store, watcher
 
 
 def _start_quote_learning(engine: DialogueEngine, *, allowed_groups):
@@ -2002,6 +2196,16 @@ async def _message_loop(
     async def _handle_one(item: IncomingMessage, *, backlog: bool) -> bool:
         """处理一条消息并把它的出站投递掉。返回是否收到了重启指令。"""
 
+        # 黑话是**被动听来的**（2026-10-06 用户："还有黑话"）：在**收**这一侧顺手看一眼，
+        # 写不写词条与"她说不说"完全无关。放在 `engine.handle` **外面**是刻意的——
+        # 对话引擎（判定 / 回复 / 记忆）一个字都不用改，观察者也拿不到它的任何东西。
+        # 它自己的异常在这里就兜住：写盘失败只该表现为"少学一条"，不能影响这条消息。
+        watcher = getattr(engine, "slang_watcher", None)
+        if watcher is not None:
+            try:
+                watcher.observe(item)
+            except Exception:  # noqa: BLE001 - 观察者绝不影响对话
+                logger.warning("slang_observe_failed", exc_info=True)
         try:
             reply = await engine.handle(item)
             # 一条输入可能对应多条出站消息：首条是 handle() 的返回值，
