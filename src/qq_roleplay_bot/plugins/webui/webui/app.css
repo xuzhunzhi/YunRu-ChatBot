@@ -408,7 +408,7 @@ nav {
 /* --- 左栏卡片（2026-10-03 新架构的骨架）-------------------------------------
  *
  * 依据见 app.js 的 `CARDS`：左栏是一列卡片，每张卡片 = 一个功能区，
- * 卡片的子项（群聊/私聊、每个插件）就在卡片里。
+ * 卡里的项（群聊/私聊、每个插件）就**平级地**排在卡片里。
  * 这里只加"卡片外壳"的样式，**已有的 tab 药丸样式原样复用**（`nav button` 是
  * 后代选择器，卡片里的按钮照样命中）——所以这次没动任何既有视觉。
  */
@@ -1308,24 +1308,16 @@ nav { padding: 0 12px; }
 .rail-chip .icon { width: 20px; height: 20px; }
 .rail-chevron { width: 8px; height: 8px; }
 
-/* **子项**（如「记忆 → 人物画像」）：缩进一档、图标块收小一号，让它一眼看出是
-   挂在上面那个口下面的，而不是同一层的第二个页。依据：用户 2026-10-06
-   "我应该说过人物画像属于记忆的子项目"——数据里就是 `{ id, sub: 1 }`
-   （见 app.js 的 `itemId`）。为什么连图标块一起收小：只缩进、图标还留 38px 的话，
-   子项看起来比父项还重，层级正好反了。 */
-.rail-card-items button[data-sub] {
-  margin-left: 22px;
-  min-height: 44px;
-  font-size: 15px;
-}
-.rail-card-items button[data-sub] .rail-chip {
-  width: 26px;
-  height: 26px;
-  border-radius: 9px;
-  background: var(--surface-container-high);
-  color: var(--on-surface);
-}
-.rail-card-items button[data-sub] .rail-chip .icon { width: 16px; height: 16px; }
+/* **同一张卡下面的项是平级的**（2026-10-06 用户两条口径，两处都算）：
+ *   *"webui那里，人物画像和记忆 tab 是同等级的，都在记忆卡片下"*
+ *   *"金句黑话同理"*
+ *
+ * 所以这里**没有**"子项缩进 / 图标收小 / 层级线"那一套（写过，被否掉了）：
+ * 「记忆 / 人物画像」与「知识库 / 金句 / 黑话」都是同一张卡里的普通条目，
+ * 与「聊天」卡里的「总览 / 群聊 / 私聊」完全同一套样式。层级由**卡片**表达。
+ * 判据在 `tests/test_webui_layout_assertions.py::SubLevelEntriesTests`：
+ * 谁要给某一张卡里的某一项单开一档（`[data-sub]` 这类选择器），当场红。
+ */
 
 /* 底部那块白卡（运行状态 / 令牌 / 刷新 / 主题）2026-10-06 撤掉了——左栏只放导航。
    沿 `nav` 那条渐隐线索仍然留着（它是导航的一部分，见 `nav` 那一段）。 */
