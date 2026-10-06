@@ -489,6 +489,30 @@ RAW_EVENTS_DIR = get("QQBOT_RAW_EVENTS_DIR", "")
 # 与同一套 `RollingJsonlFile` 轮转，所以 `QQBOT_CHAT_LOG=0` 一起关掉、`CHAT_LOG_MAX` 一起
 # 管着。理由：它本来就是"对话日志里的一类记录"，另开一个开关只会多一条要对齐的配置。
 
+# --- 金句学习 agent（2026-10-06，用户第三批）----------------------------------
+# 用户原话：*"富群刚刚提出爆的金句都是优质 rl 训练轨迹…可以通过给消息点的表情来定位"*、
+# *"我认为金句更重要的是说话风格和上下文语境，需要调用一个 agent 来专门学习"*、
+# *"注意贴表情不是所有都是金句，比如贴祝（猪的谐音）就是不赞同或者 bot 回复不恰当"*。
+#
+# 四块都在 `quote_samples.py`（选取与上下文）与 `quote_learning.py`（学习 agent、
+# 表情含义表、落盘、注入材料）里。这里的配置只有下面四项：
+#
+# - **默认开**（用户要求的形状是"默认开、能一键关"）：`QQBOT_QUOTE_LEARN=0` 关掉之后
+#   **行为与改动前逐字相同**——回复 prompt 里一条材料都不加（有测试钉住这条）；
+# - `QQBOT_QUOTE_LEARN_MAX`：一条回复里最多注入几条材料（**不是全塞**）。上限 5，
+#   再多就该写进笔记而不是每轮都带；注入块另有一个 320 字的预算（见注入侧）。
+# - `QQBOT_QUOTE_LEARN_INTERVAL`：多久跑一次（秒）。**一天一次级别**，不是每轮；
+#   实现里还有 60 秒下限，防配置把它写成"每轮都问模型"。
+# - `QQBOT_QUOTE_PROFILE`：那份 JSON 的位置（笔记 + 按群的表情含义表 + 操作者覆盖）。
+#   默认 `<项目根>/data/quote/profile.json`（`data/` 已 gitignored）。
+#
+# **热路径零模型调用**：注入只读这份 JSON（按 mtime 缓存）＋算几个字符重叠，
+# 模型只在定期那一趟里被调一次。
+QUOTE_LEARN_ENABLED = _enabled("QQBOT_QUOTE_LEARN")
+QUOTE_LEARN_MAX = _int("QQBOT_QUOTE_LEARN_MAX", 5)
+QUOTE_LEARN_INTERVAL = _float("QQBOT_QUOTE_LEARN_INTERVAL", 86400.0)
+QUOTE_PROFILE_FILE = get("QQBOT_QUOTE_PROFILE", "data/quote/profile.json")
+
 
 def session_user_id(base: str, session_id: str) -> str:
     """把会话 id 变成服务商能接受的 user_id 后缀。

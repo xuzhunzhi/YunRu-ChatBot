@@ -153,6 +153,7 @@ SUPER_HELP = (
     "· /super lan 网卡流量（滚动 10 分钟，上传下载分别前 5）\n"
     "· /super fan 风扇转速（本机没暴露会直说）\n"
     "· /super status 本次重启后的概览（运行时长、内存、计数、日志）\n"
+    "· /super quote 看她学出来的表情含义表与老习惯；后面跟「<表情id> <方向> [说明]」可人工纠正\n"
     "· /super apicheck 按 agent 对账：回复/判定/记忆/风格审核/识图/写信 的命中率与余额\n"
     "· /super restart 重启 bot（几秒后回来；配置改动要靠它生效）\n"
     "人员\n"

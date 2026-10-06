@@ -37,6 +37,9 @@ FLAG_NOTES: dict[str, str] = {
                        "关掉＝退回从前：那两条确定性规则都不生效。"
                        "（2026-10-05 晚改口径：旧版是「不懂就问」——以问回应；那条路已拆。）"
                        "这一层一个字都不进常驻 system。",
+    "quote_enabled": "金句学习 agent（定期学「她怎么说、什么场合说什么」）。"
+                     "关掉＝**不再学**，也**不再往回复里加那几条材料**——"
+                     "回复 prompt 与改动前逐字相同。",
 }
 
 
@@ -104,6 +107,10 @@ class RuntimeFlags:
     def ask_when_unsure(self) -> bool:
         return self.get("ask_when_unsure")
 
+    @property
+    def quote_enabled(self) -> bool:
+        return self.get("quote_enabled")
+
 
 def _truthy(value: object) -> bool:
     return str(value).strip().casefold() in {"1", "true", "yes", "on"}
@@ -132,6 +139,8 @@ def build_flags(config=None) -> RuntimeFlags:
         "group_owner_enabled": bool(_cfg.GROUP_OWNER_ENABLED),
         # 不懂就问：默认开（用户点名要上的那条）。关掉即退回"被叫到就直接答"。
         "ask_when_unsure": bool(_cfg.ASK_WHEN_UNSURE),
+        # 金句学习：默认开（`QQBOT_QUOTE_LEARN=0` 关）。关掉时回复 prompt 与改动前逐字相同。
+        "quote_enabled": bool(_cfg.QUOTE_LEARN_ENABLED),
     }
     if config is not None:
         stored = getattr(config, "values", {}) or {}

@@ -1345,6 +1345,36 @@ def _start_memory(engine: DialogueEngine, client) -> MemoryService | None:
     return memory
 
 
+def _start_quote_learning(engine: DialogueEngine, *, allowed_groups):
+    """金句学习 agent（`quote_learning.py`）：**定期**学"她怎么说、什么场合说什么"。
+
+    三条装不上的情况都**静默降级**，对话一个字都不受影响：
+
+    - `QQBOT_QUOTE_LEARN=0`（或配置里关掉）→ 不装；
+    - 没有可用的 client → 不装；
+    - 它的节拍任务起不来 → 只是不学，回复路径那边读到的是空材料。
+
+    返回 `(agent, task)`；装不上时 `(None, None)`。**它绝不碰对话**：
+    唯一的接缝是 `engine.quote_profile`（读一份本地 JSON 挑几条材料），
+    模型调用只在它自己那条定期节拍里发生（`run()` 里 `sleep(interval)`）。
+    """
+
+    from .quote_learning import QuoteProfile, QuoteStore, build_quote_agent
+
+    client = getattr(engine, "memory_client", None) or getattr(engine, "client", None)
+    agent = build_quote_agent(client, allowed_groups=allowed_groups)
+    # **无论装没装上，读侧都要接上**：开关关掉时它照样存在，只是 `quote_enabled`
+    # 让 `DialogueEngine._style_material` 每次返回空串——"关掉＝与改动前逐字相同"
+    # 这条由**开关**守（有测试），不由装配守（那会让"关掉"变成另一种代码路径）。
+    store = agent.store if agent is not None else QuoteStore()
+    engine.quote_profile = QuoteProfile(store)
+    if agent is None:
+        logger.info("金句学习未启用（QQBOT_QUOTE_LEARN=0 或没有可用的模型 client）")
+        return None, None
+    engine.quote_agent = agent
+    return agent, asyncio.create_task(agent.run(), name="quote-learning")
+
+
 async def serve(transport: QQTransport, *, stage_label: str = "Stage 3") -> None:
     """装配并运行主循环，直到传输层关闭。
 
@@ -1416,6 +1446,15 @@ async def serve(transport: QQTransport, *, stage_label: str = "Stage 3") -> None
         asyncio.create_task(run_background_plugin(plugin), name=f"plugin-{plugin.name}")
         for plugin in background if plugin_enabled(plugin)
     ]
+    # 金句学习：**独立的一条节拍**（一天一次级别），不在插件那条循环里。
+    # 它是 Stage 3 的事（学的是"她怎么说、什么场合说什么"，直接进回复 prompt 的 DATA 段），
+    # 所以不按 Stage 4 插件包装；装配与降级见 `_start_quote_learning`。
+    quote_agent, quote_task = _start_quote_learning(
+        engine, allowed_groups=lambda: set(engine.enabled_group_ids) if engine.enabled else set())
+    if quote_task is not None:
+        background_tasks.append(quote_task)
+        logger.info("金句学习已挂上节拍：样本来自 %s，落盘 %s",
+                    quote_agent.chat_log_path, quote_agent.store.path)
     connection_task = asyncio.create_task(
         # 掉线事件的广播对象在**这里**造：`build_engine` 已经把插件装好了，
         # 所以插件经 `registry.link` 登记的接收者此刻就在名单里（没有插件就是空的）。

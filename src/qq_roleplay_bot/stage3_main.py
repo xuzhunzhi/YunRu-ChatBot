@@ -236,6 +236,14 @@ SUPER_PROFILE_PATTERN = re.compile(
     r"^[/#]super\s+(?:profile|画像|人物画像|portrait)(?:\s.*)?$",
     re.IGNORECASE,
 )
+# `/super quote`：金句学习学出来的**表情含义表 + 笔记**（只读），
+# 后面可以跟一段"人工改这个表情的方向"（`/super quote 128516 不赞成 在损她`）。
+# 单独一条模式而不是塞进共享的 topic 组：后面跟的是 emoji_id 与自由文字，
+# 塞进去会顺手让 `/super restart quote` 之类的组合变成合法命令（`permit` 踩过同样的坑）。
+SUPER_QUOTE_PATTERN = re.compile(
+    r"^[/#]super\s+(?:quote|quotes|金句|表情含义)(?:\s.*)?$",
+    re.IGNORECASE,
+)
 # 群管理与群主命令的解析**已经搬进插件**（`builtin_group_commands.py`，2026-09-30
 # 用户要求"stage4 的内容都用插件实现"）。核心不再认识这些命令的字面形状，只保留：
 # 档位判定（`_plugin_level_allowed`）与动作执行（`_plugin_action_reply`）。
@@ -383,6 +391,7 @@ class SuperAction(str, Enum):
     MEMORY_AUDIT = "memory_audit"
     MEMORY_ARCHIVE = "memory_archive"
     PROFILE = "profile"
+    QUOTE = "quote"
 
 
 def parse_super_command(text: str) -> SuperAction | None:
@@ -414,6 +423,9 @@ def parse_super_command(text: str) -> SuperAction | None:
     # 画像要在通用模式之前判：`/super profile ...` 不能被当成 `/super <topic>` 吃掉。
     if SUPER_PROFILE_PATTERN.fullmatch(stripped):
         return SuperAction.PROFILE
+    # 金句学习的表情含义表：同理，先于通用模式。
+    if SUPER_QUOTE_PATTERN.fullmatch(stripped):
+        return SuperAction.QUOTE
     # **群管理与群主命令不在这里**：它们是插件（`builtin_group_commands.py`），
     # 在 `handle()` 的插件分发那段就被认领掉了，核心只认"档位"与"动作执行"。
     mail = SUPER_MAIL_PATTERN.fullmatch(stripped)
@@ -504,6 +516,40 @@ def is_admin_help_command(text: str) -> bool:
     """识别 /admin help。只解析、不鉴权。"""
 
     return isinstance(text, str) and bool(ADMIN_HELP_PATTERN.fullmatch(text.strip()))
+
+
+# `/super quote <emoji_id> <方向> [说明]` 里"方向"那一段。emoji_id 实测是数字串
+# （`"424"`、`"128516"`），但**不假定它一定是数字**——照 `reactions.py` 那条纪律，
+# 它就是个字符串，所以这里只要求"不是空、没有空格"。
+_QUOTE_OVERRIDE_PATTERN = re.compile(
+    r"^[/#]super\s+(?:quote|quotes|金句|表情含义)\s+(?P<emoji>\S+)\s+(?P<sense>\S+)"
+    r"(?:\s+(?P<note>.+))?$",
+    re.IGNORECASE,
+)
+#: 撤掉人工方向的关键字（"改回它自己判的"）。
+QUOTE_OVERRIDE_AUTO = frozenset({"auto", "自动", "清除", "撤销", "复原", "默认"})
+
+
+def _parse_quote_override(text: str) -> tuple[str, str, str] | None:
+    """解析"人工改一个表情的方向"那一段；不是这个形状就返回 None（于是只读展示）。
+
+    返回 `(emoji_id, 方向或 "auto", 说明)`。方向**不在核心里查表**——它交给
+    `quote_learning.normalize_sense` 归一化，两处各留一份词表迟早漂移。
+    """
+
+    if not isinstance(text, str):
+        return None
+    match = _QUOTE_OVERRIDE_PATTERN.fullmatch(text.strip())
+    if not match:
+        return None
+    emoji_id = match.group("emoji").strip()
+    sense = match.group("sense").strip()
+    note = (match.group("note") or "").strip()
+    if not emoji_id or not sense:
+        return None
+    if sense.casefold() in QUOTE_OVERRIDE_AUTO:
+        return emoji_id, "auto", note
+    return emoji_id, sense, note
 
 
 # 公开帮助。不再是写死的常量：正文由各命令插件自述的行汇总而成，
@@ -831,6 +877,7 @@ class DialogueEngine:
         style_reviewer=None,
         vision=None,
         host: HostServices | None = None,
+        quote_profile=None,
     ) -> None:
         self.client = client
         # **宿主能力**（出站表现、卡片渲染、机器探测、审计、余额、角色、检索）。
@@ -911,6 +958,10 @@ class DialogueEngine:
         # 识图（可选）：有图的消息在**进判定之前**先看一眼，把 `[图片]` 换成一句描述。
         # 它只改正文，不新增决策路径——"要不要回、回什么"照旧全在原来那套里。
         self.vision = vision
+        # 金句学习学出来的那份**材料**（`quote_learning.QuoteProfile`，可选）。
+        # 它只是"读一份本地 JSON 挑几条"，**热路径上一次模型调用都没有**；
+        # 关掉开关或没有材料时回复 prompt 与改动前**逐字相同**（有测试钉住）。
+        self.quote_profile = quote_profile
         # 「没把握就别断言」这条路（2026-10-04 起叫"不懂就问"，2026-10-05 晚改口径）：
         # **没有限量器了**。旧版有一个 `AskBudget`（同一话题最多问一次），因为那时
         # "以问回应"会被她每句都用一遍；现在那条路拆掉了，兜底是"打回重写一次"——
@@ -1002,6 +1053,34 @@ class DialogueEngine:
     @self_roles.setter
     def self_roles(self, value) -> None:
         self.group_roles = value
+
+    def _style_material(self, message: IncomingMessage, state) -> str:
+        """「她自己的老习惯」那一段材料（**热路径上零模型调用**）。
+
+        来源是金句学习 agent 定期学出来的笔记（`quote_learning.QuoteProfile`）。三条纪律：
+
+        1. **只在开关打开时读**：`quote_enabled` 关掉 = 直接空串，于是请求与改动前逐字相同；
+        2. **任何异常都当"没有材料"**：读文件、挑笔记都是本地的，但仍然包一层
+           ——她这一轮说不说话。**绝不能因为材料读不到而影响回复**；
+        3. **不是指令、也不是台词**：渲染在 `quote_learning.inject_block` 里，
+           措辞是"她以前遇到这种时候"，进的是 user 段的 DATA 区（system 一个字不动）。
+        """
+
+        profile = getattr(self, "quote_profile", None)
+        if profile is None or not self._flags().quote_enabled:
+            return ""
+        try:
+            from .quote_learning import inject_block
+
+            notes = profile.notes_for(
+                message.target.group_id or "",
+                message.text or "",
+                state.context.topic or "",
+            )
+            return inject_block(notes)
+        except Exception:  # noqa: BLE001 - 材料拿不到不该影响这一轮回复
+            logger.warning("quote_material_failed", exc_info=True)
+            return ""
 
     def _review_context(self, message: IncomingMessage, state) -> str:
         """交给风格审核的一点现场：**谁在跟她说话、对方说了什么、现在聊的是什么**。
@@ -1552,6 +1631,8 @@ class DialogueEngine:
             return self._affinity_reply(message, reset=action is SuperAction.AFFINITY_RESET)
         if action is SuperAction.PROFILE:
             return self._profile_reply(message)
+        if action is SuperAction.QUOTE:
+            return self._quote_reply(message)
         if action is SuperAction.PROCESSES:
             mode = parse_super_topic(message.text) or "default"
             note = None
@@ -2038,6 +2119,86 @@ class DialogueEngine:
         blocks.extend(blocks_by_person.values())
         return "\n\n".join(blocks)
 
+    def _quote_reply(self, message: IncomingMessage) -> str:
+        """`/super quote`：看金句学习学出来的**表情含义表 + 她的老习惯**，并**改一个字**。
+
+        由来（2026-10-06 用户）：*"注意贴表情不是所有都是金句，比如贴祝（猪的谐音）就是
+        不赞同或者 bot 回复不恰当"*、*"要能被操作者看到与纠正…不许它自己闷头学歪"*。
+        所以这一条命令有两个动作，缺一不可：
+
+        - **只读**：把当前那个群的表情含义表（含"哪几条是人工改的"）和她的老习惯原文
+          发出来。**改一个字就生效**——覆盖写在 `data/quote/profile.json` 里，
+          回复路径每次按 mtime 重新读（下一轮回复就变）。
+        - **纠正**：`/super quote 128516 不赞成 在损她` —— 记下"这个表情在这个群里是
+          不赞成"并（可选）附一句说明；`/super quote 128516 auto` 撤掉人工那份，
+          退回模型判的。
+
+        **只读的是金句学习那份文件**，一个字都不碰记忆库、不碰人格。
+        """
+
+        agent = getattr(self, "quote_agent", None)
+        store = getattr(agent, "store", None) if agent is not None else getattr(self, "quote_profile", None)
+        store = getattr(store, "store", store)
+        if store is None or not hasattr(store, "effective_sense"):
+            return "当前没有接入金句学习（没配 key，或 `QQBOT_QUOTE_LEARN=0` 关掉了）。"
+        store.reload(force=True)
+        # 方向的中文说法与 `quote_learning` 共用一份（两处漂移就会出现"命令里写不赞成、
+        # 存下来是别的意思"）。**本地 import**：那个模块是可拔的，核心不该在顶部认识它。
+        from .quote_learning import SENSE_LABELS
+
+        group_id = message.target.group_id or (message.session_id.split(":", 1)[-1])
+        taken = _parse_quote_override(message.text or "")
+        changed = ""
+        if taken is not None:
+            emoji_id, sense, note = taken
+            if sense == "auto":
+                store.clear_override(group_id, emoji_id)
+                changed = f"已撤掉 {emoji_id} 的人工方向，改回它自己判的那一版。"
+            else:
+                normalized = store.override_sense(group_id, emoji_id, sense, note)
+                changed = f"已记下：本群的 {emoji_id} 是「{SENSE_LABELS.get(normalized, normalized)}」" \
+                          + (f"（说明：{note}）" if note else "") + "。下一句回复就按这个来。"
+
+        lines: list[str] = []
+        if changed:
+            lines.append(changed)
+        if agent is not None:
+            stats = agent.snapshot()
+            lines.append(
+                f"金句学习：学过 {stats.get('runs', 0)} 轮   样本 {stats.get('samples', 0)} 条   "
+                f"没跑成 {stats.get('failures', 0)} 次"
+            )
+            if stats.get("last_run_at"):
+                lines.append(
+                    f"上一次：{_format_clock(float(stats['last_run_at']))}   "
+                    f"{stats.get('last_result', '')}"
+                )
+        table = store.meanings.get(group_id) or {}
+        if not table:
+            lines.append(f"本群（{group_id}）还没有表情含义（样本不够，或者她的消息还没被贴过表情）。")
+        else:
+            lines.append(f"本群（{group_id}）的表情含义：")
+            for emoji in sorted(table, key=lambda key: (len(key), key)):
+                sense = store.effective_sense(group_id, emoji)
+                detail = store.effective_note(group_id, emoji)
+                manual = store.override(group_id, emoji).get("sense")
+                mark = "（人工改的）" if manual else ""
+                lines.append(
+                    f"· {emoji} → {SENSE_LABELS.get(sense, sense)}{mark}"
+                    + (f"：{detail}" if detail else "")
+                )
+        if store.notes:
+            lines.append("她自己的老习惯（学来的，都是短句）：")
+            for item in store.notes[:6]:
+                lines.append(f"· {item.get('when', '')}——{item.get('note', '')}")
+            hidden = len(store.notes) - 6
+            if hidden > 0:
+                lines.append(f"… 还有 {hidden} 条")
+        lines.append("改：/super quote <表情id> <赞成|不赞成|其它|不确定> [说明]")
+        lines.append("撤：/super quote <表情id> auto")
+        lines.append(f"（文件：{store.path}）")
+        return "\n".join(lines)
+
     def _profile_block(self, store, user_id: str, message: IncomingMessage) -> str:
         """一个人的画像块：名字、关系档位、画像正文、更新时间。"""
 
@@ -2371,6 +2532,26 @@ class DialogueEngine:
         if self.memory_service is not None:
             memory = self.memory_service.snapshot()
             lines.append(f"记忆：已入队 {memory.get('queued_events', 0)} 条待处理")
+        # 金句学习（2026-10-06）：**把学出来的东西露在概览里**——用户要的就是
+        # "要能被操作者看到与纠正"。原文与逐条方向在 `/super quote`，这里只报计数
+        # 与"有没有在跑"，免得概览被一大段笔记撑爆。
+        quote = getattr(self, "quote_agent", None)
+        if quote is not None:
+            stats = quote.snapshot()
+            line = (f"金句学习：学过 {stats.get('runs', 0)} 轮   样本 {stats.get('samples', 0)} 条   "
+                    f"笔记 {stats.get('notes', 0)} 条   "
+                    f"表情含义 {len(stats.get('groups') or [])} 群")
+            if stats.get("failures"):
+                line += f"   没跑成 {stats.get('failures')} 次"
+            if stats.get("overrides"):
+                line += f"   人工改过 {stats['overrides']} 个表情"
+            lines.append(line)
+            if stats.get("last_run_at"):
+                lines.append(
+                    f"  上一次：{_format_clock(float(stats['last_run_at']))}"
+                    + (f"   {stats.get('last_result', '')}" if stats.get("last_result") else "")
+                )
+            lines.append("  看原文 / 改方向：/super quote")
         logs = snapshot.model_trace or {}
         if logs:
             parts = []
@@ -3453,6 +3634,9 @@ class DialogueEngine:
             # 但引擎这一侧现在**恒为空串**——没把握时不再教她怎么说话，
             # 而是"没被叫到就不出声、被叫到就看她自己那一版有没有具体断言"。
             clarify_note="",
+            # 「她自己的老习惯」（2026-10-06 金句学习）：按眼前这句的语境挑几条**材料**
+            # 进 DATA 段。关掉开关 / 还没学出东西时是空串，请求与改动前逐字相同。
+            style_material=self._style_material(message, state),
         )
         self._stats["model_calls"] += 1
         started_at = self.clock()
