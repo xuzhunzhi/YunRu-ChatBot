@@ -423,8 +423,43 @@ function mdToHtml(text, escFn) {
 function kv(label, value, options = {}) {
   // `html: true` 只给**我们自己拼的**内容用（比如号码片），外部数据一律走 esc。
   const body = options.html ? value : esc(value);
-  const cls = options.wide ? "kv span-all" : "kv";
+  // `span`：横跨几列（由 `readoutGrid()` 算出来填最后一行，见那里的说明）。
+  const cls = ["kv", options.wide ? "span-all" : "",
+               options.span ? `span-${options.span}` : ""].filter(Boolean).join(" ");
   return `<div class="${cls}"><div class="k">${esc(label)}</div><div class="v">${body}</div></div>`;
+}
+
+/* 读数格排成一张网格（`.grid` + `.kv`）。
+ *
+ * 参数是 `{label, value, options}` 的数组；`options.wide` 的那几格自己占一整行。
+ *
+ * 为什么要有这个函数（2026-10-06 用户："留白与对齐（卡片内边距、行高、网格对齐）"）：
+ * 三列排下去，**最后一行常常差一格**——总览「运行」卡是 5 格，于是最后一行的右边
+ * 空着一块（截图里看得很清楚，像少放了一个格子）。CSS 没法让"落单的那几格"自动铺开，
+ * 所以这里在**生成的时候**算出来：最后一行差几格，就让最后那一格**横跨**剩下的列。
+ * 这样洞没有了，而每一格的边界仍然落在同一套网格线上（不像 `flex-grow` 那样把
+ * 两格的宽度撑成 1.5 格、与上一行错开）。
+ */
+function readoutGrid(cells, per = 3) {
+  const built = [];
+  let run = [];
+  const closeRun = () => {
+    if (!run.length) return;
+    const rest = run.length % per;
+    if (rest) {
+      const last = run.pop();
+      run.push({ ...last, span: per - rest + 1 });
+    }
+    built.push(...run);
+    run = [];
+  };
+  cells.forEach((cell) => {
+    if (cell.options && cell.options.wide) { closeRun(); built.push(cell); return; }
+    run.push(cell);
+  });
+  closeRun();
+  return `<div class="grid">${built.map((cell) => kv(cell.label, cell.value,
+    { ...cell.options, span: cell.span })).join("")}</div>`;
 }
 
 function chips(values) {
@@ -524,18 +559,20 @@ function currentDark() {
 }
 
 //: 本体状态：左栏底部那两枚徽章（bot 在运行 / 活快照）搬到这里**合成一整行**。
-//: 合成一格是刻意的：`运行`卡里剩下的 5 格正好排成 3 + 2（"启用群"是最后那整行的一格），
-//: 再拆成两格就会多出一行落单的（截图核对过：落单那格旁边空两格，像排版坏了）。
+//: 返回的是**一格的描述**（`{label, value, options}`），由 `readoutGrid()` 排进网格——
+//: 两枚胶囊并排要占**整行**（`wide: true`），所以它自己一行，不跟别的读数挤。
 //: 值仍用 `badge` 小胶囊，颜色语言（绿=在跑 / 灰=活快照）与搬走之前一致。
 function statusRow(health, st) {
   const live = health.bot_live;
   const source = st.source;
   const sourceText = source === "live" ? "活快照"
     : source === "files" ? "文件快照" : "读不到状态";
-  return kv("本体状态",
-    `<span class="badge ${live ? "ok" : "warn"}">${live ? "bot 在运行" : "bot 未运行"}</span>`
-    + ` <span class="badge ${source === "live" ? "dim" : "warn"}">${esc(sourceText)}</span>`,
-    { html: true, wide: true });
+  return {
+    label: "本体状态",
+    value: `<span class="badge ${live ? "ok" : "warn"}">${live ? "bot 在运行" : "bot 未运行"}</span>`
+      + ` <span class="badge ${source === "live" ? "dim" : "warn"}">${esc(sourceText)}</span>`,
+    options: { html: true, wide: true },
+  };
 }
 
 async function viewOverview() {
@@ -554,32 +591,36 @@ async function viewOverview() {
   const healthWarn = state.healthError
     ? card("状态读不出来", `<p class="hint">${esc(state.healthError)}</p>`) : "";
   return warns + healthWarn
-    + card("运行", `<div class="grid">`
+    + card("运行", readoutGrid([
       // 这一格是从左栏底部搬过来的（2026-10-06 用户："左边边栏下面的这个卡片不明所以…
       // 这个不应该在 system 页面吗"）。放这里最顺：这张卡就是"她现在在不在跑"，
       // 与下面那几格同属"本体运行状态"，不用新开一张卡、也不重复。
-      + statusRow(health, st)
-      + kv("对话开关", st.enabled ? "开" : "关")
-      + kv("短期会话", (st.sessions || []).length)
-      + kv("已运行", st.uptime_seconds ? duration(st.uptime_seconds) : "—")
-      + kv("内存", st.memory_bytes ? bytes(st.memory_bytes) : "—")
-      + kv("目标群", st.target_group_id || "—")
+      statusRow(health, st),
+      { label: "对话开关", value: st.enabled ? "开" : "关" },
+      { label: "短期会话", value: (st.sessions || []).length },
+      { label: "已运行", value: st.uptime_seconds ? duration(st.uptime_seconds) : "—" },
+      { label: "内存", value: st.memory_bytes ? bytes(st.memory_bytes) : "—" },
+      { label: "目标群", value: st.target_group_id || "—" },
       // 群号可能五六个：单独一行铺开，用号码片折行（挤在窄格里会被从数字中间折断）。
-      // **放在最后**：整行那一格夹在中间时，它前面的行尾会只剩一格（"内存"旁边空两格）
-      // ——截图核对时看着像排版坏了；挪到最后，前面的 5 格正好排成 3 + 2。
-      + kv("启用群", chips(st.enabled_group_ids), { html: true, wide: true })
-      + `</div>`)
-    + card("计数（本次 / 全时）", `<div class="grid">`
-      + kv("收到消息", `${num(counts.accepted_messages)} / ${num(all.accepted_messages)}`)
-      + kv("已发回复", `${num(counts.replies)} / ${num(all.replies)}`)
-      + kv("判定调用", `${num(counts.judge_calls)} / ${num(all.judge_calls)}`)
-      + kv("模型调用", `${num(counts.model_calls)} / ${num(all.model_calls)}`)
-      + kv("阻断消息", `${num(counts.blocked_messages)} / ${num(all.blocked_messages)}`)
-      + kv("累计自", ts(data.usage && data.usage.since))
-      + `</div>`)
+      // 剩下那 5 格排成 3 + 2，`readoutGrid()` 会把最后一格拉成两列把洞填掉
+      // （2026-10-06 外观返工：原来最后一行的右边空着一块，看着像少了格子）。
+      { label: "启用群", value: chips(st.enabled_group_ids),
+        options: { html: true, wide: true } },
+    ]))
+    + card("计数（本次 / 全时）", readoutGrid([
+      { label: "收到消息", value: `${num(counts.accepted_messages)} / ${num(all.accepted_messages)}` },
+      { label: "已发回复", value: `${num(counts.replies)} / ${num(all.replies)}` },
+      { label: "判定调用", value: `${num(counts.judge_calls)} / ${num(all.judge_calls)}` },
+      { label: "模型调用", value: `${num(counts.model_calls)} / ${num(all.model_calls)}` },
+      { label: "阻断消息", value: `${num(counts.blocked_messages)} / ${num(all.blocked_messages)}` },
+      { label: "累计自", value: ts(data.usage && data.usage.since) },
+    ]))
     + card("模型耗时", latency.count
-      ? `<div class="grid">` + kv("平均", latency.avg + "s") + kv("最大", latency.max + "s")
-        + kv("样本", num(latency.count)) + `</div>`
+      ? readoutGrid([
+        { label: "平均", value: latency.avg + "s" },
+        { label: "最大", value: latency.max + "s" },
+        { label: "样本", value: num(latency.count) },
+      ])
       : `<p class="hint">还没有样本。</p>`)
     + card("会话", table([
       { label: "会话", key: "session_id", mono: true, nowrap: true },
@@ -599,12 +640,12 @@ async function viewUsage() {
     calls: acc.calls + r.calls, prompt: acc.prompt + r.prompt_tokens,
     completion: acc.completion + r.completion_tokens, total: acc.total + r.total_tokens,
   }), { calls: 0, prompt: 0, completion: 0, total: 0 });
-  return card("账本", `<div class="grid">`
-      + kv("统计自", ts(data.since))
-      + kv("最近落盘", ts(data.updated_at))
-      + kv("总调用", num(total.calls))
-      + kv("总 token", num(total.total))
-      + `</div>`)
+  return card("账本", readoutGrid([
+      { label: "统计自", value: ts(data.since) },
+      { label: "最近落盘", value: ts(data.updated_at) },
+      { label: "总调用", value: num(total.calls) },
+      { label: "总 token", value: num(total.total) },
+    ]))
     + card("按 agent", table([
       // 「判定 agent（QQBOT_JUDGE_API_KEY）」这种标签挺长，第一列要给够，
       // 否则窄列里会折成三行，整张表高矮不齐。
@@ -624,6 +665,20 @@ async function viewUsage() {
     + `<p class="hint">命中率 = 命中 /（命中 + 未命中）。与 <code>/super apicheck</code> 同一账本
        （<code>data/api_usage.json</code>），重启不清零。</p>`;
 }
+
+//: 记忆库那几张表的**人话名字**（键就是后端 `counts` 里的表名，见 `webui_data._LIST_SQL`）。
+//: 没登记的键照样显示原名（用的时候 `|| key`）——后端多一张表也不会被吞掉。
+const MEMORY_COUNT_LABELS = {
+  short: "中短期",
+  long: "长期",
+  active: "生效中",
+  archive: "归档",
+  inbox: "收件箱",
+  audit: "变更审计",
+  people: "名册",
+  relationships: "关系两轴",
+  tombstones: "墓碑",
+};
 
 async function viewMemory() {
   const overview = await api("/api/memory/overview");
@@ -652,9 +707,13 @@ async function viewMemory() {
     .map(([value, label]) =>
       `<button class="mem-status ${statusFilter === value ? "on" : ""}" `
       + `data-status="${esc(value)}">${esc(label)}</button>`).join("");
-  return card("概览", `<div class="grid">`
-      + Object.entries(counts).map(([k, v]) => kv(k, num(v))).join("")
-      + `</div>`)
+  return card("概览", readoutGrid(Object.entries(counts).map(([key, value]) => ({
+      // 后端给的是表名（`short` / `long` / `archive`…）。直接把它们印在格子上，
+      // 一屏英文键名看着像没做完（2026-10-06 外观返工核对时看到的）——所以给一份
+      // **人话**标签；以后后端多一张表，没登记的那个**照样显示原名**，不吞掉。
+      label: MEMORY_COUNT_LABELS[key] || key,
+      value: num(value),
+    }))))
     + card("问题记忆（只能删，不能改）", rows.length
       ? `<p class="hint">这里没有任何"新增 / 编辑记忆"的入口：记忆的写入只走记忆维护 agent，
          面板能做的只是把明显有问题的删掉。删除会先把整条原文归档到 archive（保留 30 天），
@@ -716,13 +775,13 @@ async function viewKnowledge() {
   const chunks = await api("/api/knowledge/chunks?limit=50&q=" + encodeURIComponent(q));
   const base = (overview.base || {}) || {};
   const baseStats = base.chunks !== undefined
-    ? `<div class="grid">`
-      + kv("基准块", num(base.chunks))
-      + kv("来源文件", num(base.files))
-      + kv("向量", num(base.vectors))
-      + kv("索引大小", bytes(base.size_bytes))
-      + kv("面板块", num(overview.operator_chunks || 0))
-      + `</div>`
+    ? readoutGrid([
+      { label: "基准块", value: num(base.chunks) },
+      { label: "来源文件", value: num(base.files) },
+      { label: "向量", value: num(base.vectors) },
+      { label: "索引大小", value: bytes(base.size_bytes) },
+      { label: "面板块", value: num(overview.operator_chunks || 0) },
+    ])
     : `<p class="hint">读不到基准索引。</p>`;
   const rows = (operator.chunks || []).map((c) =>
     `<li data-id="${esc(c.id)}">

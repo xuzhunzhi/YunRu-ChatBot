@@ -613,5 +613,31 @@ class SubLevelEntriesTests(unittest.TestCase):
                          "`app.css` 里还留着「子项组」那套（层级线 / 再缩进）")
 
 
+class ReadoutGridTests(unittest.TestCase):
+    """读数格（`.kv`）：**最后一行不满就填满**，而列边界仍落在同一套网格线上。
+
+    由来（2026-10-06 外观返工）：总览「运行」卡是 5 格，三列排下来最后一行的右边空着
+    一块（截图里看着像少放了一个格子）；而"让格子自己 `flex-grow`"又会把两格撑成
+    1.5 格、与上一行错开（上一轮试过、被否掉）。现在是 `readoutGrid()` 在生成时
+    算出来"最后一格跨几列"。这条钉住这个机制的三处：算的地方、跨度样式、窄屏复位。
+    """
+
+    def setUp(self) -> None:
+        self.js = _asset("app.js")
+        self.css = _asset("app.css")
+
+    def test_the_last_row_of_a_readout_grid_is_filled(self) -> None:
+        body = _uncomment(_function_body(self.js, "readoutGrid"))
+        self.assertIn("span: per - rest + 1", body,
+                      "`readoutGrid()` 不再给最后一格算跨度了（最后一行的右边会留洞）")
+        self.assertRegex(
+            self.css, r"\.grid \.kv\.span-2\s*\{[^}]*flex:[^;]*calc\(",
+            "`app.css` 里没有 `span-2` 的宽度（两格宽 + 一个间隙）")
+        self.assertRegex(
+            self.css, r"@media \(max-width: 699px\)[\s\S]*?\.grid \.kv\.span-2",
+            "窄屏那条媒体查询没有把 `span-2` 压回整行"
+            "（`span-2` 比 `.grid .kv` 多一个类，特异性更高，不点名就压不住）")
+
+
 if __name__ == "__main__":
     unittest.main()

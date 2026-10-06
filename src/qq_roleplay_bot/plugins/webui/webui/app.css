@@ -490,7 +490,7 @@ nav button.on:hover { background: var(--surface-container-high); }
    `#back` 只在窄屏的阅读态出现（见文件末尾），桌面/中等屏它 `display:none`，
    标题自然贴左；「刷新」用 `margin-left:auto` 顶到右边，与标题同一行。 */
 .page-head {
-  margin-bottom: 16px;
+  margin-bottom: 18px;              /* 16 → 18：标题区与第一张卡之间多一口气（外观返工） */
   display: flex;
   align-items: flex-start;
   gap: 12px;
@@ -511,9 +511,10 @@ nav button.on:hover { background: var(--surface-container-high); }
   line-height: 1.2;
 }
 .page-nav {
-  margin: 6px 0 0;
-  color: var(--text-3);
-  font-size: 13px;
+  margin: 8px 0 0;                  /* 6 → 8：标题与副标题别再贴着（外观返工） */
+  /* 副标题是这一页的"一句话说明"，原来 0.6 黑 13px 偏淡 → 0.8 黑 13.5px */
+  color: var(--text-2);
+  font-size: 13.5px;
   min-height: 20px;
 }
 
@@ -665,10 +666,12 @@ button:disabled { opacity: 0.38; cursor: not-allowed; transform: none; }
   line-height: 1.35;
 }
 .pref-summary {
-  margin-top: 2px;
-  color: var(--text-3);             /* onSurfaceVariantSummary */
+  margin-top: 3px;
+  /* `--text-3`（0.6 黑）在设置行里是**说明**，不是装饰——外观返工抬到 `--text-2`，
+     行高 1.45 → 1.5（Miuix 的 body2 档仍是 14px）。 */
+  color: var(--text-2);             /* onSurfaceVariantSummary */
   font-size: 14px;                  /* body2 */
-  line-height: 1.45;
+  line-height: 1.5;
 }
 .pref-end {
   /* 控件在右端，**宽了要收窄，不折行**（BasicComponent 给的是 maxWidth 上限，
@@ -775,52 +778,59 @@ section.card {
   /* Miuix 里 `background` 是 #FFFFFF、`surface` 是 #F7F7F7，只差一档。
      这一档放在网页上"卡片"就看不出来了，所以按它的层级语义把两者**换过来**：
      页面用 surface（L7）、卡片用 surfaceVariant（白）。深色下这两个值本来就是
-     一致的，所以只影响浅色，观感跟官方一致（卡片浮在浅灰底上）。 */
+     一致的，所以只影响浅色，观感跟官方一致（卡片浮在浅灰底上）。
+     ⚠️ 2026-10-06 外观返工：**再加一圈 outline 描边**。只靠 #FFFFFF 与 #F7F7F7
+     的差别（约 3%）在真实屏幕上几乎看不出卡片边界（用户原话是"一片灰"）。
+     描边用 Miuix 自己的 `outline`（#D9D9D9）而不是 `dividerLine`（#E0E0E0）：
+     前者深一档，正是"轮廓"该用的那个 token。内边距 18/20 → **20/22**，
+     与下面的行高、间距一起把卡片里的呼吸感补回来。 */
   background: var(--surface-variant);
+  border: 1px solid var(--outline);
   border-radius: var(--radius-card);
-  padding: 18px 20px;
-  margin-bottom: 14px;
+  padding: 20px 22px;
+  margin-bottom: 16px;
 }
 section.card h2 {
-  margin: 0 0 12px;
+  margin: 0 0 14px;
   font-size: 18px;                  /* title5 档（在 title4 与 subtitle 之间） */
   font-weight: 600;
   color: var(--on-surface);
 }
 
 .grid {
-  /* 一格一格的读数块（`.kv`）。**布局用 flex，不用 grid**：
+  /* 一格一格的读数块（`.kv`）。**布局用 flex，不用 grid**：格数不是 3 的倍数时
+   * 每一行的边界都要能对上（`grid` 与 flex 在这件事上没差别），而 flex 还能让
+   * 我们**自己算**最后一格跨几列（见下面的 `.span-2` 与 `app.js::readoutGrid`）。
    *
-   * 原来写的是 `grid-template-columns: repeat(3, minmax(0,1fr))`，9 格时是漂亮的
-   * 3×3，但格数不是 3 的倍数时**行尾会留空洞**——"运行"那张卡是 5 格 + 1 个
-   * 整行格，于是"内存"右边空两格、"目标群"右边空两格，看着像排版坏了（截图核对时
-   * 看到的）。CSS grid 没法让"落单的那一格"自动铺开，flex 可以：每格 `flex-basis: 30%`
-   * （4 个就超过一行 → 每行最多 3 格），同一行里 `flex-grow` 把宽度分匀，
-   * **落单的那一格自己占满一行**，任何格数都不会留洞。
-   *
-   * `min-width: 0` 还是要留着：不然长号码/长文件名会把格子撑破（同 .content 那条）。
+   * 2026-10-06 外观返工（用户："留白与对齐（卡片内边距、行高、网格对齐）"）：
+   * 间距 10 → **12px**；"最后一格差几列就跨几列"从"靠人肉挑格子"改成**算出来**
+   * （`readoutGrid()`），所以右边不再留洞，而列边界仍落在同一套网格线上。
+   * `min-width: 0` 留着：不然长号码/长文件名会把格子撑破（同 `.content` 那条）。
    */
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 12px;
 }
 .grid .kv {
-  /* 每格**固定占三分之一**（减去两个 10px 间隙），`flex-grow: 0`：
-   * 落单的那一格跟别的格子一样宽，不会拉成一条通栏——第一版让它
-   * `flex-grow: 1`，于是"内存""目标群"各占满一整行，比空洞更难看（截图对比过）。 */
-  flex: 0 1 calc((100% - 20px) / 3);
+  /* 每格**固定占三分之一**（减去两个 12px 间隙），`flex-grow: 0`：
+   * 落单的那一格不靠"自己长大"来填（那会让两格的宽度变成 1.5 格、与上一行错开），
+   * 而是由 `readoutGrid()` 给它一个 `span-2`。 */
+  flex: 0 1 calc((100% - 24px) / 3);
   min-width: 0;
 }
 /* 内容需要整行铺开的那一格（比如"启用群"那一串号码） */
 .grid .kv.span-all { flex-basis: 100%; }
+/* 最后一格横跨剩下的列：两列 = 2 格宽 + 1 个间隙；三列就是整行 */
+.grid .kv.span-2 { flex: 0 1 calc((100% - 24px) * 2 / 3 + 12px); }
+.grid .kv.span-3 { flex: 0 1 100%; }
 
 .kv {
   background: var(--surface-container-high);   /* #E8E8E8，比卡片深一档 */
   border-radius: var(--radius-control);
-  padding: 11px 14px;
+  padding: 12px 16px;
 }
-.kv .k { color: var(--text-3); font-size: 12px; margin-bottom: 2px; }
-.kv .v { font-size: 16px; font-weight: 500; overflow-wrap: anywhere; }
+.kv .k { color: var(--text-2); font-size: 12.5px; margin-bottom: 4px; }
+.kv .v { font-size: 16px; font-weight: 500; line-height: 1.35; overflow-wrap: anywhere; }
 
 /* --- 表格（按 Miuix 的 dividerLine） --------------------------------------- */
 
@@ -835,7 +845,7 @@ section.card h2 {
 table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 15px; }
 th, td {
   text-align: left;
-  padding: 11px 12px;
+  padding: 12px 14px;               /* 11/12 → 12/14：单元格挤在一起是"半成品"的观感来源之一 */
   border-bottom: 1px solid var(--divider);
   vertical-align: top;
   /* 长段落要在列内折行；`break-word` 只在**实在放不下**时才断，不会把
@@ -843,9 +853,12 @@ th, td {
   overflow-wrap: break-word;
 }
 th {
-  color: var(--text-3);
+  /* 表头原来用 `--text-3`（0.6 黑）13px：一屏的表头都灰着，读起来像禁用态。
+     2026-10-06 外观返工 → `--text-2`（0.8 黑）+ 字距一点点，仍比正文轻。 */
+  color: var(--text-2);
   font-weight: 500;
   font-size: 13px;                  /* footnote1 */
+  letter-spacing: 0.2px;
   /* 中文表头（"关于谁" / "版本"）在窄列里会被折成两行，看着像排版坏了 */
   white-space: nowrap;
 }
@@ -866,12 +879,15 @@ td.wrap-anywhere { overflow-wrap: anywhere; }
   padding: 4px 10px;
   border-radius: 8px;               /* RichTooltipDefaults.ActionCornerRadius */
   background: var(--secondary-container);
-  color: var(--text-3);
+  color: var(--text-2);             /* 0.6 → 0.8：小胶囊在浅底上原来几乎糊住（见外观返工） */
 }
 .tag.live { background: rgba(76, 195, 138, 0.18); color: var(--good); }
 .tag.restart { background: rgba(242, 163, 60, 0.18); color: var(--warn); }
 
-.hint { color: var(--text-3); font-size: 13px; }
+/* `.hint` 是面板里最常见的"次要说明"（40+ 处）。原来 13px + `--text-3`（0.6 黑），
+   一屏里最常见的那一行字反而最淡——2026-10-06 外观返工改成 **13.5px + `--text-2`**
+   （0.8 黑）+ 行高 1.6：仍然是次要色，但读得清。 */
+.hint { color: var(--text-2); font-size: 13.5px; line-height: 1.6; }
 .error {
   color: var(--error);
   background: var(--error-container);
@@ -1062,9 +1078,11 @@ td button { padding: 8px 16px; min-height: 36px; min-width: 0; font-size: 14px; 
 .bar-chart .fill { height: 8px; background: var(--primary); border-radius: 4px; }
 
 footer {
-  padding: 14px 2px 8px;
-  color: var(--text-4);
-  font-size: 12.5px;
+  padding: 16px 2px 10px;
+  /* 0.4 黑（`--text-4`）12.5px：页脚那行几乎看不见。抬到 `--text-3`（0.6）+ 13px
+     ——它仍是全页最轻的一行，但"读得到"（2026-10-06 外观返工）。 */
+  color: var(--text-3);
+  font-size: 13px;
 }
 code {
   background: var(--secondary-container);
@@ -1193,7 +1211,7 @@ code {
   .rail { flex: 0 0 40%; }          /* 4 : 6 的左半 */
   .content { flex: 1 1 60%; }       /* 右半（min-width:0 在基础样式里已有） */
   .page-head h2 { font-size: 28px; }
-  section.card { padding: 16px; }
+  section.card { padding: 18px; }   /* 基础档是 20/22，中等档收一档但别比原来还挤 */
 }
 
 @media (max-width: 699px) {
@@ -1210,9 +1228,12 @@ code {
   body.is-reading .content { display: flex; }
   body.is-reading #back { display: inline-flex; }
   .page-head h2 { font-size: 24px; }
-  section.card { padding: 14px; }
-  /* 一格一行（`.grid` 在基础样式里是 flex，见那一段的说明） */
-  .grid .kv { flex-basis: 100%; }
+  section.card { padding: 16px; }
+  /* 一格一行（`.grid` 在基础样式里是 flex，见那一段的说明）。
+     ⚠️ 这里要把 `span-2` / `span-3` 也一起压回整行：那两个选择器比 `.grid .kv`
+     多一个类，**特异性更高**——不点名的话，窄屏上"填洞"的那一格会留着 2/3 宽，
+     一行里就会出现半截格子（写完这条规则前是照属性优先级想当然的，实测才发现）。 */
+  .grid .kv, .grid .kv.span-2, .grid .kv.span-3 { flex: 0 1 100%; }
 }
 
 /* 「返回」只在窄屏的"阅读态"出现——桌面与中等屏没有这个概念 */
@@ -1281,20 +1302,23 @@ nav { padding: 0 12px; }
 
 .rail-card {
   background: var(--surface-variant);    /* 浅色下就是白——"一组一张卡" */
+  /* 2026-10-06 外观返工：卡片与左侧灰底之间加一圈 outline 描边（同 `section.card`）
+     ——只靠 #FFFFFF/#F7F7F7 的差别，五张卡片看起来是一片糊在一起的白。 */
+  border: 1px solid var(--outline);
   border-radius: var(--radius-card);
-  margin: 0 0 12px;                      /* 组间留白 */
-  padding: 6px 4px;
+  margin: 0 0 14px;                      /* 组间留白：12 → 14 */
+  padding: 8px 6px 10px;
 }
 .rail-card + .rail-card {
-  border-top: 0;                         /* 去掉老的分隔线 */
+  border-top: 1px solid var(--outline);  /* 每张卡都有自己的轮廓（上面那条不再靠分隔线） */
   margin-top: 0;
 }
 
 .rail-card-title {
-  padding: 10px 12px 4px;
+  padding: 12px 14px 6px;
   font-size: 13px;
-  font-weight: 500;
-  letter-spacing: 0;
+  font-weight: 600;                      /* 500 → 600：分组标题要压得住下面的行 */
+  letter-spacing: 0.2px;
 }
 
 .rail-card-items button {
