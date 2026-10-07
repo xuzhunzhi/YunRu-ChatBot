@@ -105,14 +105,32 @@ class CommandPlugin(Protocol):
         """本命令在帮助里的说明，一行或几行。返回空串表示不列出。"""
 
 
-def level_of(plugin: object) -> str:
-    """插件的档位。没声明或不认识的值一律按 `"public"`——**不认识的档位不放宽**，
-    因为放不放行由核心按档位判，而 "public" 只是"不需要特权"，真正的会话范围仍由
-    `session_allowed` 决定。
+def declared_level(plugin: object) -> str | None:
+    """插件**声明**的档位（去空白 + casefold）；没声明、或声明成空串/非字符串返回 None。
+
+    2026-10-08 安全面审计 A-03 把两件事分开：**没声明**按协议默认 `public`（`level_of`），
+    **声明了却不认识**一律拒绝装载（`CommandRegistry.add`）——不猜、也不降级放行。
     """
 
-    value = str(getattr(plugin, "min_level", "") or "").strip().casefold()
-    return value if value in LEVELS else "public"
+    raw = getattr(plugin, "min_level", None)
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return raw.strip().casefold()
+
+
+def level_of(plugin: object) -> str:
+    """插件的档位。没声明按 `"public"`；**声明了却不认识返回空串**。
+
+    空串不在 `LEVELS` 里，所以调用方（`DialogueEngine._plugin_level_allowed`）一律拒绝。
+    这是第二道网：第一道是 `CommandRegistry.add` 直接**拒绝装载**这种插件。
+    之所以不在这里回落成 `"public"`：那正是审计 A-03 的缺陷——`min_level = "Supre"`
+    这种一个字母的手误会让"踢人 / 禁言 / 改群名"这类特权命令变成**谁都能用**。
+    """
+
+    declared = declared_level(plugin)
+    if declared is None:
+        return "public"
+    return declared if declared in LEVELS else ""
 
 
 class CommandRegistry:
@@ -121,8 +139,8 @@ class CommandRegistry:
     def __init__(self, plugins: tuple[CommandPlugin, ...] = ()) -> None:
         self.plugins: tuple[CommandPlugin, ...] = tuple(plugins)
 
-    def add(self, plugin: object) -> None:
-        """把一条插件挂到链尾。
+    def add(self, plugin: object) -> bool:
+        """把一条插件挂到链尾；返回**有没有装上**。
 
         命令链**只能有一份**（`resolve()` 按注册顺序取第一个命中的），
         所以插件是往这里加，而不是各攒一份列表再拼——拼的时候漏一处就是
@@ -132,10 +150,24 @@ class CommandRegistry:
         **它是装载点的落点**：`plugins.PluginRegistry.command()` / `install()` 都调
         这个方法（装配见 `runtime.build_engine`）。2026-10-04 之前本体没有它，
         于是插件的命令无处可挂；这一条是从插件线 `stage4-plugins` 原样搬来的。
+
+        **档位写错的一律不装**（2026-10-08 安全面审计 A-03）：`min_level` 声明了却不认识
+        时 fail-closed——记一行 WARNING 然后拒绝。从前它会被当成最低档 `public` 放行，
+        一个字母的手误就等于把特权命令放开给所有人，而且**没有任何信号**。
         """
 
-        if plugin is not None:
-            self.plugins = self.plugins + (plugin,)
+        if plugin is None:
+            return False
+        declared = declared_level(plugin)
+        if declared is not None and declared not in LEVELS:
+            logger.warning(
+                "command plugin rejected: name=%s min_level=%r"
+                "（不认识的档位，一律不装载；只认得 %s）",
+                _name_of(plugin), getattr(plugin, "min_level", ""), "/".join(LEVELS),
+            )
+            return False
+        self.plugins = self.plugins + (plugin,)
+        return True
 
     def resolve(self, message: IncomingMessage) -> CommandPlugin | None:
         """**只匹配、不执行**：返回认领这条消息的插件（或其档位不允许而回落时 None）。

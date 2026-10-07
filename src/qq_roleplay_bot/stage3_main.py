@@ -2091,6 +2091,18 @@ class DialogueEngine:
         不暴露层级存在，也不把这条交给模型（调用方看到 False 就直接 return None）。
         """
 
+        # **认不出的档位一律拒绝**（2026-10-08 安全面审计 A-03）：第一道网是装载点
+        # （`CommandRegistry.add` 拒绝装载"声明了却不认识"的插件），这是第二道——
+        # 万一有插件绕过装载点进了链（或档位是运行期被改的），也绝不放行：
+        # 不猜、不降级成 public、不把这条交给模型。
+        from .command_plugins import LEVELS
+
+        if level not in LEVELS:
+            logger.warning(
+                "plugin level not allowed: level=%r user=%s group=%s",
+                level, message.user_id, message.target.group_id or "",
+            )
+            return False
         if level == "super":
             return self._is_super_admin_control(message)
         if level == "admin":
