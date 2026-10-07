@@ -359,6 +359,21 @@ def turn_timeout_seconds() -> float:
     return _float_clamped("QQBOT_TURN_TIMEOUT_SECONDS", 90.0, 5.0, 600.0)
 
 
+# --- 记忆库那张"只增"的关系流水的保留期（2026-10-08 隔离增长审计 [8]）--------
+# `relationship_log`（好感/关系的每一次变动）从前**没有任何保留期**，只增不减。
+# 它同时是**关系数据**，所以清理必须保守：只按时间删**旧行**，近期一行都不动，
+# 写入语义一个字不改。默认 365 天——现有的读取点全是"7 天/1 天窗口"或"最近 N 条"
+# （`affinity_rejected_relax_too_soon` / `affinity_rejected_daily_cap` / 关系曲线），
+# 所以清更早的行不改变任何判定。**调用时现读**、带钳制（下限 30 天兜住手滑）。
+
+
+def relationship_log_retention_days() -> int:
+    """关系流水保留多少天（`QQBOT_RELATIONSHIP_LOG_RETENTION_DAYS`，默认 365，
+    夹在 30..3650）。超期的是**旧的**那些行，近期的一行不动。"""
+
+    return _int_clamped("QQBOT_RELATIONSHIP_LOG_RETENTION_DAYS", 365, 30, 3650)
+
+
 # --- "群里这边"的时间 -------------------------------------------------------
 # 用户口径（2026-10-08）：*"她那边 = 北京 + 3 小时"*。而"这边"从前是**宿主时区**
 # （`datetime.fromtimestamp` / `time.localtime`），代码把"本机=北京"写死在注释里。

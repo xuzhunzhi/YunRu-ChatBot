@@ -3096,6 +3096,12 @@ class DialogueEngine:
             # 记忆库读不到时她不提以前的事、"记忆：已入队 0 条"看着一切正常——查不到。
             if memory.get("failures"):
                 line += f"   读写失败 {memory.get('failures')} 次"
+            # 保留期清理掉的条数（2026-10-08 隔离增长审计 [8]）：关系流水按时间清旧行，
+            # 清了多少要看得见——不然"关系曲线怎么少了一段"查不出来。
+            pruned = memory.get("pruned") or {}
+            if pruned.get("relationship_log") or pruned.get("tombstones"):
+                line += (f"   已清过期关系流水 {pruned.get('relationship_log', 0)} 条"
+                         f" / 墓碑 {pruned.get('tombstones', 0)} 条")
             lines.append(line)
         # 金句学习（2026-10-06）：**把学出来的东西露在概览里**——用户要的就是
         # "要能被操作者看到与纠正"。原文与逐条方向在 `/super quote`，这里只报计数

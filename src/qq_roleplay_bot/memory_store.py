@@ -12,6 +12,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 
 from .memory_filters import system_self_rule
+from . import dev_config
 from .memory_model import (MAX_SUBJECTS, InboxEvent, MemoryBatch, MemoryRecord,
                            MemoryValidationError, parse_operations)
 from .security import sanitize_chat_text
@@ -309,6 +310,9 @@ class MemoryStore:
         self._protect = protect
         self.daily_add_limit = daily_add_limit
         self.near_duplicate_ratio = near_duplicate_ratio
+        # 保留期清理掉的行数（观测用；只记数，不含内容）。见 `_cleanup`：
+        # 关系流水与墓碑这两张"只增"的表按保留期清旧行，清掉的条数要看得见。
+        self.pruned: dict[str, int] = {"relationship_log": 0, "tombstones": 0}
 
     @contextmanager
     def connection(self):
@@ -572,6 +576,17 @@ class MemoryStore:
         db.execute("DELETE FROM audit WHERE created_at<?", (now - 30 * DAY,))
         # 归档保留 30 天：比 inbox 久得多，因为它承担的是"误删之后还能捞回来"。
         db.execute("DELETE FROM archive WHERE deleted_at<?", (now - ARCHIVE_RETENTION_DAYS * DAY,))
+        # **关系流水也要有过期清理**（2026-10-08 隔离增长审计 [8]）：它是好感/关系的
+        # 每一次变动，从前只增不减。清理**保守**：只删超过保留期的**旧行**
+        # （`occurred_at <` 严格早于界限，近期一行不动），也不改写入语义。
+        # 所有读取点都是 7 天/1 天窗口或"最近 N 条"，所以清旧行不改任何判定。
+        pruned_relationships = db.execute(
+            "DELETE FROM relationship_log WHERE occurred_at<?",
+            (now - dev_config.relationship_log_retention_days() * DAY,)).rowcount
+        if pruned_relationships:
+            self.pruned["relationship_log"] += int(pruned_relationships)
+            logger.info("memory retention pruned: relationship_log=%s days=%s",
+                        pruned_relationships, dev_config.relationship_log_retention_days())
 
     def cleanup(self):
         with self.connection() as db:
@@ -1055,6 +1070,10 @@ class MemoryStore:
                 "long_records": long,
                 "inbox": db.execute("SELECT COUNT(*) FROM inbox").fetchone()[0],
                 "audit": db.execute("SELECT COUNT(*) FROM audit").fetchone()[0],
+                # 保留期清理掉的条数（本次进程累计）："关系流水为什么少了"的出口
+                # （2026-10-08 隔离增长审计 [8]）。只记数，不含内容。
+                "pruned_relationship_log": int(self.pruned.get("relationship_log", 0)),
+                "pruned_tombstones": int(self.pruned.get("tombstones", 0)),
             }
             for table in ("tombstones", "receipts", "archive"):
                 try:

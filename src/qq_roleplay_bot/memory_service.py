@@ -160,7 +160,11 @@ class MemoryService:
             logger.warning("memory_status_mark_failed category=%s", type(exc).__name__)
 
     def snapshot(self):
-        return {"enabled": self.settings.enabled, "queued_events": self.inbox.queue.qsize(), **asdict(self.metrics)}
+        return {"enabled": self.settings.enabled, "queued_events": self.inbox.queue.qsize(),
+                # 保留期清理掉的条数（2026-10-08 隔离增长审计 [8][9]）：关系流水与墓碑
+                # 都只增不减，清掉的条数要能在 `/super status` 上看见。只记数，不含内容。
+                "pruned": dict(getattr(self.store, "pruned", {}) or {}),
+                **asdict(self.metrics)}
 
     async def close(self):
         if not self._tasks:
