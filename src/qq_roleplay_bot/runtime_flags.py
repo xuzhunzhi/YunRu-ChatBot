@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,10 @@ FLAG_NOTES: dict[str, str] = {
                       "连那一道判断也不过。",
     "vision_enabled": "识图。关掉＝有图的消息回到 `[图片]` 占位，不描述内容。",
     "memory_enabled": "记忆维护 agent。关掉＝不再批记忆（已有记忆照常检索）。",
-    "compaction_enabled": "对话压缩。关掉＝长对话不再压成摘要，靠活窗口滚动。",
+    "compaction_enabled": "对话压缩。关掉＝长对话不再压成摘要，靠活窗口滚动："
+                          "压缩请求一次都不发（按阈值触发的那条与切走当值群那条都不发），"
+                          "历史原样留着——结果与「压缩失败跳过」一致，只是不烧那次调用。"
+                          "环境变量 `QQBOT_COMPACTION=0` 同样能关。",
     "letter_enabled": "写信 / 每日汇报。关掉＝当天不发信，读信回信不受影响。",
     "group_manage_enabled": "群管理动作（踢/禁言/撤回/全员禁言）的总开关。",
     "group_owner_enabled": "群主专属动作（设管理员/名片/群名/头衔/公告）的总开关。",
@@ -122,7 +126,38 @@ class RuntimeFlags:
 
 
 def _truthy(value: object) -> bool:
-    return str(value).strip().casefold() in {"1", "true", "yes", "on"}
+    return str(value).strip().casefold() in _TRUE_WORDS
+
+
+#: 认得的真值 / 假值写法。口径与 `operator_config.BOOL_TRUE` 相同
+#: （另外收下 `no`；拼错的一律当"没配"，见 `_env_flag`）。
+_TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
+_FALSE_WORDS = frozenset({"0", "false", "no", "off"})
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    """读一个布尔环境变量，**调用时现读**（与 `dev_config.persona_offset_hours()` 同一纪律）。
+
+    - 没设、或者设成空串 → `default`（"没配"与"配了个空"都当没配）；
+    - 认得的值 → 真值解析（`1/true/yes/on` 为真，`0/false/no/off` 为假）；
+    - 认不出的值 → `default`（fail-safe：与 `dev_config` 里
+      `get(name, "1").lower() not in {"0", "false", "off"}` 那套既有写法同向，
+      写错了仍按默认跑，不会因为一个手滑把功能关掉）。
+
+    之所以不用 import 期常量：面板与 `.env` 都要能拉动它（见模块头"每一次调用就读到新值"）。
+    """
+
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    text = str(raw).strip().casefold()
+    if not text:
+        return default
+    if text in _TRUE_WORDS:
+        return True
+    if text in _FALSE_WORDS:
+        return False
+    return default
 
 
 def build_flags(config=None) -> RuntimeFlags:
@@ -142,7 +177,11 @@ def build_flags(config=None) -> RuntimeFlags:
         # 记忆维护的开关不在 dev_config 里（它的启用条件是 key + 允许的群），
         # 所以这里默认 True：面板关掉它才需要一个新的、显式的闸门。
         "memory_enabled": True,
-        "compaction_enabled": True,
+        # 对话压缩：默认开，**这一项从环境变量现读**（`QQBOT_COMPACTION`——
+        # 就是 `operator_config.SETTINGS` 给这条开关声明的那个 env 名）。
+        # 在这之前它是硬编码 True：面板拉不动，`QQBOT_COMPACTION=0` 也拉不动，
+        # 真出事时没有闸门（失败降级审计第 4 条 + 核查的加强版）。
+        "compaction_enabled": _env_flag("QQBOT_COMPACTION", True),
         "letter_enabled": bool(_cfg.MAIL_REPORT_ENABLED),
         "group_manage_enabled": bool(_cfg.GROUP_MANAGE_ENABLED),
         "group_owner_enabled": bool(_cfg.GROUP_OWNER_ENABLED),

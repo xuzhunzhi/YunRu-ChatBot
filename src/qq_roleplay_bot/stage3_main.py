@@ -4593,8 +4593,19 @@ class DialogueEngine:
 
         用 `judge_client` 而不是对话 client：压缩请求的 prompt 形态与对话完全不同，
         共用同一个 user_id 会让两种模式抢同一份 KVCache，两边都命中不了。
+
+        **闸门**：面板那个「对话压缩」开关（`runtime_flags.compaction_enabled`，
+        环境变量 `QQBOT_COMPACTION=0` 同效）关掉时，这里在算待压缩段之前就返回——
+        按阈值触发的那条与切走当值群那条（`force=True`）都不发请求，历史原样留着，
+        靠活窗口滚动。与"压缩失败跳过"是同一个结果，只是连调用都不烧。
         """
 
+        if not self._flags().compaction_enabled:
+            # 每一轮都会走到这里，所以只留 debug：关掉这件事本身在面板上看得见，
+            # `RuntimeFlags.set()` 关的时候也已经写过一行 `agent_disabled`。
+            logger.debug("对话压缩已关（compaction_enabled=false），历史保持原样: session=%s",
+                         session_id)
+            return
         pending = (
             state.compaction_pending_all(keep=COMPACT_KEEP)
             if force
