@@ -1,6 +1,7 @@
 # 隔离与增长审计 · 2026-10-08
 
 > 2026-10-08 已修：落盘切片（[2]，提交 9f92e0a；默认上限 50 → 200 并可调，`QQBOT_PERSISTED_HISTORY`）/ 承诺 FIFO（[4]，提交 db056ca）；另注：本文 [2] 的"最小改法"**原文写法有误**——只切片不前移 `dropped` 会清空 `live_history()`（见 verify 文档）。
+> 2026-10-08 又修一条（下面"已知并跳过"里的 **disable 静默删待处理**）：`/admin disable 群` 收窄成"只不回复"——`memory_store.discard_disallowed` **整个删掉**（一条待处理行都不再删），记忆改成**另一张按群名单**（`/super enable|disable memory`，在哪个群说就动哪个群，提交 038e67c）。
 
 范围：`dev/`（分支 `main`）的 `src/qq_roleplay_bot/` 与 `tests/`。
 分区：**隔离与增长**（跨会话/跨群/跨人串台 + 无界增长）。

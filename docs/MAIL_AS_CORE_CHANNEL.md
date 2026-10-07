@@ -186,12 +186,18 @@
 用户的目标形状里有一条"来信 = 外部输入（与群里来消息同类，走 DATA 区 → **记忆维护/检索**）"。
 **现状不支持**：
 
-- `memory_service.py:36-38`（`capture`）、`memory_service.py:44-47`（`retrieve`）、
-  `memory_service.py:90` / `:109` / `:133`（`profile_for` / `care_note` 那几处）
-  全部先过 `group not in self.allowed_groups()`；
-- `allowed_groups` 就是"**已启用的群**"：`runtime.py:1112`（`lambda: set(engine.enabled_group_ids) …`）；
-- `memory_inbox.py:30`（`if group not in self.allowed_groups() …: return False`）；
-- `memory_store.py:580-641`（`claim` / `discard_disallowed` 也按 `group_id`）。
+- `memory_service.py:43-45`（`capture` → `inbox.offer`）、`memory_service.py:51-54`（`retrieve`）、
+  `memory_service.py:97` / `:116` / `:140`（`identity_for` / `profile_for` / `care_note`）
+  全部先过 `group not in self.allowed_groups()`（构造点 `:27`）；
+- `allowed_groups` 是"**开了记忆的群**"：`runtime.py:1949`（`lambda: set(engine.memory_group_ids) …`）。
+  **2026-10-08 起它与"已启用的群"是两张名单**（提交 038e67c）：`enabled_group_ids`
+  只管回不回，`memory_group_ids` 只管记不记，由 `/super enable|disable memory`
+  在哪个群说就动哪个群；
+- `memory_inbox.py:36`（`if group is None or group not in self.allowed_groups() …: return False`）；
+- `memory_store.py:580`（`claim` 也按 `group_id`）。这里**原来还有一个**
+  `discard_disallowed`（`:631`，维护每 tick 调一次，按那份名单把别的群的待处理行
+  **静默删掉**）——它已在 038e67c 里**整个删掉**：关掉一个群的记忆只表示"不再收新的"，
+  已有的待处理行一条都不删。
 
 **邮件与私聊的 `target.group_id` 是 `None`**（`runtime.py:788` 造的是
 `MessageTarget(user_id=sender)`），所以：

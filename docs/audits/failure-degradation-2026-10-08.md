@@ -1,6 +1,7 @@
 # 失败与降级审计 · 2026-10-08
 
 > 2026-10-08 已修：失败计数与出口（[1][7][8][9]，提交 3ea9a48——判定/回复的模型调用失败接上 `record_model_error` + `_stats` + `/super status` 一行；记忆那行拼上失败数；扩展收集失败补计；`memory_degraded` 取值恒 0，**按审计给的第二条路删掉**）。
+> 2026-10-08 又修一条（本文末尾"已知并按要求跳过"里的 **disable 静默删待处理**）：`/admin disable 群` 收窄成"只不回复"——`memory_store.discard_disallowed` **整个删掉**，记忆改成**另一张按群名单**（`/super enable|disable memory`，在哪个群说就动哪个群，提交 038e67c）。
 
 范围：`dev/src/qq_roleplay_bot/` 与 `dev/tests/`，分支 main。
 方法：只读。未改源码、未跑测试、未碰进程、未碰 `run\`。

@@ -182,13 +182,19 @@ outage_notice **取用**它；mail 那一侧不认识任何使用者的名字。
    后者对一封信**同样是错的措辞**。→ 结论：这档确实缺，但"会被说成群里的普通发言"是**结构上的后果**，
    不是我实测到的输出。
 
-8. **记忆只认群** —— 实测：`memory_service.py:17/20/56`（前两处是构造与 `capture` 的
-   `group not in self.allowed_groups()`）、`memory_inbox.py:20/30`、
-   `memory_store.py:580 claim(...)` / `:631 discard_disallowed`；
-   `allowed_groups` 的来源是 `runtime.py:1112` `lambda: set(engine.enabled_group_ids) if engine.enabled else set()`；
+8. **记忆只认群** —— 实测：`memory_service.py:27`（构造）与五处
+   `group not in self.allowed_groups()`（`:53` `retrieve`、`:63` 检索回读、`:97` `identity_for`、
+   `:116` `profile_for`、`:140` `care_note`）、`memory_inbox.py:36/66`、
+   `memory_store.py:580 claim(...)`；
+   `allowed_groups` 的来源是 `runtime.py:1949` `lambda: set(engine.memory_group_ids) if engine.enabled else set()`；
    而邮件/私聊的 `target.group_id` 是 `None`（`runtime.py:783-791` 造的是 `MessageTarget(user_id=sender)`）。
    → **邮件一个字进不了记忆库、检索不到**。这是"她记不住邮件"的**第二层原因**
-   （第一层是那条被禁的"插件推对话"接缝）。**已写进 `docs/MAIL_AS_CORE_CHANNEL.md:184-206`（§二.8）**，动手时一并解决。
+   （第一层是那条被禁的"插件推对话"接缝）。**已写进 `docs/MAIL_AS_CORE_CHANNEL.md:184-212`（§二.8）**，动手时一并解决。
+   **2026-10-08 补充（提交 038e67c）**：`allowed_groups` 现在**不再是"已启用的群"**——
+   记忆有自己的按群名单（`engine.memory_group_ids`，`/super enable|disable memory`
+   在哪个群说就动哪个群），与 `/admin enable|disable` 那张对话名单互不相干；
+   那处 `discard_disallowed`（`:631`）也已整个删掉，关掉记忆不再删待处理行。
+   "记忆只认群"这条本身没变。
 
 9. **`tests/run_offline.py` 会在仓库根生成未跟踪的 `yunru-source/`** —— 实测：
    `git -C dev status --short` 与 `git -C yunru-stage4 status --short` **两边都是** `?? yunru-source/`；

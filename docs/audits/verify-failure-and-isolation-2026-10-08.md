@@ -1,5 +1,11 @@
 # 核查报告 · 失败降级 + 隔离增长
 
+> 2026-10-08 后续改动（只加这一行指针，正文照旧是那天的实测记录）：
+> `/admin disable 群` 收窄成"只不回复"，`memory_store.discard_disallowed` **已整个删除**，
+> 记忆改成另一张按群名单（`/super enable|disable memory`，提交 038e67c）。
+> 因此本文 [10]（`memory_maintenance_agent` 锁内七处 `to_thread`）里的 `:224 discard_disallowed`
+> **那一处不再存在**，现在是**六处**；其余六处与结论不变。
+
 核查者：独立复核（只读源码 + 只读文件大小 + 一次 `set.pop()` 行为实测）。
 被核查对象：`docs/audits/failure-degradation-2026-10-08.md`（提交 `6ca6b17`）与
 `docs/audits/isolation-growth-2026-10-08.md`（提交 `82e831e`）。
