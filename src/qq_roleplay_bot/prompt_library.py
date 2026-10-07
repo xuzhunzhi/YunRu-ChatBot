@@ -273,7 +273,14 @@ class PromptLibrary:
         return self.directory / "versions"
 
     def load(self) -> None:
-        """把覆盖文件读进内存（启动时一次）。坏文件逐个跳过，不整份失败。"""
+        """把覆盖文件读进内存（启动时一次）。坏文件逐个跳过，不整份失败。
+
+        **读进来时也扫一遍机制词**（2026-10-08 安全与时间口径审计 A-04）：保存路径
+        有护栏（`validate()` 里那句 `scan_text`），但**加载路径**从前一个词都不扫——
+        手改文件、从备份恢复、换 `QQBOT_PROMPT_DIR` 都能把机制词送进可信 system 前缀，
+        而运行时零告警。这里命中就**不进缓存**（`text()` 于是回落到内置默认）+ 一条
+        明确的 WARNING：fail-safe，坏文本不上桌。
+        """
 
         self._cache = {}
         self.last_error = ""
@@ -282,8 +289,18 @@ class PromptLibrary:
             return
         for name in PROMPTS:
             text = self._read_file(self._path(name))
-            if text is not None:
-                self._cache[name] = text
+            if text is None:
+                continue
+            hits = scan_text(name, text)
+            if hits:
+                self.rejected += 1
+                logger.warning(
+                    "prompt_override_rejected file=%s words=%s；已回落到内置默认"
+                    "（改掉这些机制词再启动）",
+                    self._path(name).name, "、".join(hits),
+                )
+                continue
+            self._cache[name] = text
 
     def _read_file(self, path: Path) -> str | None:
         try:

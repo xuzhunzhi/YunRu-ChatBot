@@ -228,12 +228,15 @@ def _load_base_prompt() -> str:
     import re
     from pathlib import Path
 
+    from .prompt_guard import scan_persona_text
+
     candidates: list[Path] = []
     explicit = os.environ.get("QQBOT_BASE_PROMPT_FILE", "").strip()
     if explicit:
         candidates.append(Path(explicit))
     candidates.append(Path(__file__).resolve().parents[2] / "data" / "private_docs"
                       / "base_prompt.REAL.py")
+    rejected: list[str] = []
     for path in candidates:
         try:
             text = path.read_text(encoding="utf-8")
@@ -241,7 +244,31 @@ def _load_base_prompt() -> str:
             continue
         found = re.search(r'BASE_PROMPT\s*=\s*"""(.*?)"""', text, re.S)
         if found and found.group(1).strip():
-            return found.group(1)
+            body = found.group(1)
+            # **加载时也扫一遍机制词**（2026-10-08 安全与时间口径审计 A-04）：人格文件
+            # 是"手改 / 从备份恢复 / 换 `QQBOT_BASE_PROMPT_FILE`"都能进来的入口，而它进的
+            # 是**可信 system 前缀**。保存路径有护栏（`PromptLibrary.save`），加载路径从
+            # 前一个词都不扫——坏文本不该上桌：命中就跳过这个候选（试下一个），
+            # 全都不行就走下面的"回落到模板"并**明确说出是因为机制词**。
+            hits = scan_persona_text(body)
+            if hits:
+                rejected.append(f"{path}（命中：{'、'.join(hits)}）")
+                logging.getLogger(__name__).warning(
+                    "人格文件含机制词，不用它：file=%s words=%s"
+                    "（改掉这些词再启动；否则她会开始讲自己的机制）",
+                    path, "、".join(hits),
+                )
+                continue
+            return body
+    if rejected:
+        logging.getLogger(__name__).warning(
+            "人格正文回落到**模板**：真人格文件含机制词，已全部跳过（%s）。"
+            "模板正文里写着'这一份是人格模板'、并且含机制词，**不要用它上线**——"
+            "把那些词改成交谈视角的说法，再放到 data/private_docs/base_prompt.REAL.py "
+            "或用 QQBOT_BASE_PROMPT_FILE 指过去。",
+            "、".join(rejected),
+        )
+        return _BASE_PROMPT_TEMPLATE
     logging.getLogger(__name__).warning(
         "人格正文回落到**模板**：没找到真人格文件（试过 %s）。"
         "模板正文里写着'这一份是人格模板'、并且含机制词，"
