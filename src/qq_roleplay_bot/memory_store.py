@@ -587,6 +587,16 @@ class MemoryStore:
             self.pruned["relationship_log"] += int(pruned_relationships)
             logger.info("memory retention pruned: relationship_log=%s days=%s",
                         pruned_relationships, dev_config.relationship_log_retention_days())
+        # **墓碑也要有过期清理**（2026-10-08 隔离增长审计 [9]）：它只记键与时间判据、
+        # 不含内容，但同样从来没人删。保守清法同上：只删 `deleted_at` 严格早于界限的
+        # 旧行，近期墓碑一行不动（它们是"删掉的东西不许被写回来"的凭据）。
+        pruned_tombstones = db.execute(
+            "DELETE FROM tombstones WHERE deleted_at<?",
+            (now - dev_config.tombstone_retention_days() * DAY,)).rowcount
+        if pruned_tombstones:
+            self.pruned["tombstones"] += int(pruned_tombstones)
+            logger.info("memory retention pruned: tombstones=%s days=%s",
+                        pruned_tombstones, dev_config.tombstone_retention_days())
 
     def cleanup(self):
         with self.connection() as db:

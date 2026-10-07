@@ -374,6 +374,19 @@ def relationship_log_retention_days() -> int:
     return _int_clamped("QQBOT_RELATIONSHIP_LOG_RETENTION_DAYS", 365, 30, 3650)
 
 
+# --- 墓碑（`tombstones`）的保留期（2026-10-08 隔离增长审计 [9]）--------------
+# 墓碑只记**键与时间判据**、不含内容（AGENTS §2.1），但它是"删掉的东西不许被写回来"
+# 的凭据：`_cleanup` 里从来没人删它，于是它也只会增。清理同样保守——只按时间删旧行，
+# 写入语义一个字不改。默认 365 天：inbox 事件的保留期是 7 天、归档 30 天，
+# 365 天远远盖住"旧证据可能把它写回来"的那段时间。**调用时现读**、带钳制。
+
+
+def tombstone_retention_days() -> int:
+    """墓碑保留多少天（`QQBOT_TOMBSTONE_RETENTION_DAYS`，默认 365，夹在 30..3650）。"""
+
+    return _int_clamped("QQBOT_TOMBSTONE_RETENTION_DAYS", 365, 30, 3650)
+
+
 # --- "群里这边"的时间 -------------------------------------------------------
 # 用户口径（2026-10-08）：*"她那边 = 北京 + 3 小时"*。而"这边"从前是**宿主时区**
 # （`datetime.fromtimestamp` / `time.localtime`），代码把"本机=北京"写死在注释里。
