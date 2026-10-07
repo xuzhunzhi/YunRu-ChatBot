@@ -603,8 +603,11 @@ SLANG_PROFILE_FILE = get("QQBOT_SLANG_PROFILE", "data/slang/entries.json")
 # 所有不可信内容都用它包起来；模型若把这个标记写进回复，判违规。"*
 #
 # 实现只有两份：`data_boundary.py`（取短码 / 包块 / 中和伪造 / 判违规）与
-# `stage3_runtime.build_dialogue_messages`（**逐处**把 DATA 段包上）；重试与
-# fail-closed 在 `stage3_main._model_path`。
+# `stage3_runtime.build_dialogue_messages`（**逐处**把**易变段**的 DATA 块包上）；
+# 重试与 fail-closed 在 `stage3_main._model_path`。
+# **稳定段（群背景 / 名册 / 更早的摘要 / 历史）不包**（2026-10-08 晚，用户拍板
+# "把短码挪走"）：那四块逐轮一字不差，短码进稳定段会让整段前缀复用归零；它们靠
+# 分节标注 + system 里那条规矩的续句（`SECTION_IS_DATA_RULE`）划边界。
 #
 # - **默认开**，`QQBOT_DATA_MARKERS=0` 关掉：关掉之后**DATA 段与改动前逐字相同**
 #   （不取短码、不包裹、也不中和入站文本；有测试直接比字符串）。
