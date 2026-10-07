@@ -49,7 +49,7 @@
 - 8cd6bbc 把中和加到 `ConversationState.roster_lines`（`stage3_runtime.py:188`）与 `_derive_roster`（`:1137`），所以"昵称里带假记号"这条路径**由今天的修复打开**
 - nodoc：`data_boundary.py:133-137` 把这个已知边界写成"概率极低""正常路径上不会发生"——与实测不符（见下）
 
-**复现**（我在副本里跑的探针，脚本 `_audit_roster_path.py`，用的是生产路径：`alias_of` 是 callable，roster 由调用方传）：
+**复现**（我在副本里跑的一次性探针；走的是生产路径：`alias_of` 是 callable、roster 由调用方传。下面这段就是全部代码）：
 
 ```python
 # cwd = 仓库根；PYTHONPATH 指向 src
@@ -110,7 +110,7 @@ python tests/run_single.py tests/test_data_boundary.py
 
 **现象**（实测）。短码是**每轮**新取的（`stage3_main.py:3816`），而 `render()` 把它放进 `stable_content` 的第一块（`stage3_runtime.py:1521-1543`）。于是"稳定段"从第一个字符起每轮就不同——它不再是稳定段。
 
-**实测数字**（同一会话、同样内容，只换短码；探针 `_audit_probe2.py`）
+**实测数字**（同一会话、同样内容，只换短码：`build_dialogue_messages(...)` 两次，`session_marker` 分别给 `"AAAAAAAA"` 与 `"BBBBBBBB"`，按段算共同前缀）
 
 | 段 | 长度 | 相邻两轮共同前缀 | 关掉开关时 |
 | --- | --- | --- | --- |
@@ -138,7 +138,7 @@ python tests/run_single.py tests/test_data_boundary.py
 - `src/qq_roleplay_bot/stage3_runtime.py:888`：`for rule in (STAY_IN_CHARACTER_RULE, DATA_BOUNDARY_RULE, TIME_IS_GIVEN_RULE)`；
 - `tests/test_data_boundary.py:367-377` 比的是"**开 vs 关**"（并断言两者 system 相同），**不是**"关 vs 改动前"——所以它挡不住这句话出错。
 
-**复现**（`_audit_offstate.py`）：`session_marker=""` 时 `DATA_BOUNDARY_RULE in system` → True，`TIME_IS_GIVEN_RULE in system` → True，system 长度 6574；DATA 段里没有 `‹`。
+**复现**（跑一次 `build_dialogue_messages(..., session_marker="")`，再查 `request[0]["content"]`）：`DATA_BOUNDARY_RULE in system` → True，`TIME_IS_GIVEN_RULE in system` → True，system 长度 6574；DATA 段里没有 `‹`。
 
 **最小改法**：把两处措辞改成"**DATA 段**逐字相同；system 恒定多出一条常量安全规则（与开关无关，换来 system 前缀逐字稳定）"。
 
@@ -174,8 +174,8 @@ python tests/run_single.py tests/test_data_boundary.py
 | M4 回复路换回单调时钟 | `now=self.wall_clock()` → `now=now`；跑 `test_wall_clock.py` + `test_two_clocks.py` | `ran=10 failures=3` → **有牙** | 同上，干净 |
 | M5 金句上下文去掉会话过滤 | 改 `quote_samples.context_around`；跑 `test_quote_session_isolation.py` | `ran=11 failures=8` → **有牙**（与提交信息"8 条变红"一致） | 同上，干净 |
 | M6 关掉开关仍写 SECTION_NOTE | 改 `stage3_runtime.py:1531` | `ran=22 failures=1` → **有牙** | 同上，干净 |
-| 边界逐块探针 | `python _audit_roster_path.py` / `_audit_probe2.py` / `_audit_probe4.py` | 见必修 1 的两张表、必修 3 的前缀数字 | 只读，无需还原 |
-| 关掉开关的 system | `python _audit_offstate.py` | 两条规则都在，DATA 段无记号（必修 4） | 只读 |
+| 边界逐块探针 | `build_dialogue_messages(...)` 后查 `‹MARK›\n<people>` / `‹MARK›\n<message who=` 是否在稳定段（必修 1 的代码块就是它） | 见必修 1 的两张表、必修 3 的前缀数字 | 只读，无需还原 |
+| 关掉开关的 system | 同上，`session_marker=""` 时查 `DATA_BOUNDARY_RULE in request[0]["content"]` | 两条规则都在，DATA 段无记号（必修 4） | 只读 |
 | 范围清单 | `git log --since="2026-10-08 00:00" --date=format:"%H:%M" --pretty="%h %ad %s"`；`git log --since="2026-10-05 00:00" --until="2026-10-08 00:00" --oneline \| Measure-Object -Line`；`git -C ..\yunru-stage4 log --oneline main..plugins \| Measure-Object -Line` | 今天 13 笔；10-05~10-07 共 45 笔；插件树独有 33 笔 | 只读 |
 
 **没跑成的一条**：`tests/check_module_removal.py` —— 它在副本里直接报"找不到解释器 <副本>\.venv\Scripts\python.exe（这个脚本要在仓库根目录、用仓库自带的 .venv 跑）"，退出码 2。我没有在 dev 本体里跑它，因为同一时刻还有别的 agent 在改同一棵树、在跑套件（我不想插进它的留痕里）。所以"六项可插能力 / 五项实际 / 核心有没有直连插件目录"这一列，我**没有独立核实**。
