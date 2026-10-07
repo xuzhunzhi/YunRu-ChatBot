@@ -61,6 +61,9 @@ READ_PATHS = (
     # 「知识库 → 金句 / 黑话」（她学来的东西）：接缝没接上时也必须回 200、
     # 并且**如实说读不到**（见 `LearnedSeamTests`），不是 500、也不是编一份空表。
     "/api/knowledge/quotes?group_id=717151356",
+    # 金句**审核**的证据（2026-10-06 用户："你连原文和上下文都不贴出来怎么审核"）：
+    # 接缝少了 `quote_evidence` 时也要回 200 + 如实说读不到。
+    "/api/knowledge/quotes/evidence?group_id=717151356",
     "/api/knowledge/slang",
     "/api/approvals/pending",
     "/api/actions/preview",
@@ -250,6 +253,38 @@ class LearnedSeamTests(unittest.TestCase):
             return {"group_id": group_id, "emoji_id": emoji_id, "sense": sense,
                     "cleared": sense == "auto", "written": True}
 
+        def quote_evidence(self, group_id, limit=10, offset=0):
+            """证据：形状照核心 `learned_quote_evidence` 的那一份（只列页面用到的键）。"""
+
+            self.calls.append(("quote_evidence", group_id, limit, offset))
+            if group_id != "717151356":
+                return {}
+            return {"group_id": group_id, "total": 21, "offset": offset, "limit": limit,
+                    "error": "", "path": "D:/isolated/quote/profile.json",
+                    "evidence": [
+                        {"message_id": "6", "group_id": group_id, "at": 2.0,
+                         "她说的": "我们那次是先按学校凑齐三个人。",
+                         "她开口之前群里在说": ["阿澈：你们那个比赛几个人一组"],
+                         "她说完之后群里接的": ["小满：行吧"],
+                         "被点了": [{"emoji_id": "76", "by": "10001", "count": 2}],
+                         "meanings": [{"emoji_id": "76", "sense": "positive",
+                                       "sense_label": "赞成（好句子）", "note": "这是捧她",
+                                       "quote": "我们那次是先按学校凑齐三个人",
+                                       "manual": False}],
+                         "notes": [{"emoji_id": "76", "id": "abc123", "note": "一句少来带过",
+                                    "manual": False}],
+                         "当时的话题": "比赛分组", "对方想干什么": "想要去年的名单"},
+                        {"message_id": "9", "group_id": group_id, "at": 1.0,
+                         "她说的": "听不懂是因为我说话快。",
+                         "她开口之前群里在说": ["小满：她昨天那个语音我听三遍才听懂"],
+                         "她说完之后群里接的": [],
+                         "被点了": [{"emoji_id": "999", "by": "10002", "count": 1}],
+                         "meanings": [],
+                         "notes": [{"emoji_id": "999", "id": "", "note": "",
+                                    "manual": False}],
+                         "为什么没有结论": "这些表情学习 agent 还没判过"},
+                    ]}
+
         def quote_note_enabled(self, note_id, enabled):
             self.calls.append(("quote_note_enabled", note_id, enabled))
             return {"id": note_id, "enabled": bool(enabled), "written": True}
@@ -357,6 +392,78 @@ class LearnedSeamTests(unittest.TestCase):
                                      "note_id": "abc123", "enabled": False})
         self.assertEqual(response.status, 200)
         self.assertIn(("quote_note_enabled", "abc123", False), learned.calls)
+
+    def test_evidence_read_goes_through_quote_evidence_only(self) -> None:
+        """审核页的证据：`/api/knowledge/quotes/evidence` → `learned.quote_evidence`。
+
+        用户 2026-10-06：*"你连原文和上下文都不贴出来怎么审核"*。这一条钉三件：
+        参数**原样**传下去（群 / limit / offset）、证据**原样**端回来（含"为什么没有结论"
+        这种如实字段），而且只碰了 `quote_evidence` 这一个口。
+        """
+
+        learned = self._FakeLearned()
+        _, response = self._request(
+            learned, "GET", "/api/knowledge/quotes/evidence?group_id=717151356&limit=2&offset=1")
+        self.assertEqual(response.status, 200)
+        data = self._data(response)
+        self.assertTrue(data["available"])
+        self.assertEqual(data["total"], 21)
+        self.assertEqual(data["offset"], 1)
+        self.assertEqual([call for call in learned.calls if call[0] == "quote_evidence"],
+                         [("quote_evidence", "717151356", 2, 1)])
+        # 除了证据本身，只会碰 `slang_list`——那是**候选群**（黑话里出现过的群），
+        # 页面上那个"看哪个群"的下拉要用；别的口一个都不该碰。
+        self.assertEqual(sorted({call[0] for call in learned.calls}),
+                         ["quote_evidence", "slang_list"],
+                         f"证据那一页碰了别的口：{learned.calls}")
+        first, second = data["evidence"]
+        self.assertEqual(first["她说的"], "我们那次是先按学校凑齐三个人。")
+        self.assertEqual(first["被点了"][0]["emoji_id"], "76")
+        self.assertEqual(first["meanings"][0]["sense_label"], "赞成（好句子）")
+        self.assertEqual(first["notes"][0]["id"], "abc123")
+        # 没结论的那一条：**如实**端出来（页面照实写"还没判过"），不是编一个方向。
+        self.assertEqual(second["meanings"], [])
+        self.assertEqual(second["为什么没有结论"], "这些表情学习 agent 还没判过")
+        self.assertEqual(second["notes"][0]["id"], "",
+                         "对不上笔记时必须是空 id（页面据此写「没落到任何笔记」）")
+
+    def test_evidence_stays_honest_when_the_seam_has_no_such_call(self) -> None:
+        """接缝少了 `quote_evidence`（老的装配点）→ 200 + `available: false`，不编空表。"""
+
+        learned = self._FakeLearned()
+        learned.quote_evidence = None       # 半接缝：别的口都在，就缺这一个
+        _, response = self._request(
+            learned, "GET", "/api/knowledge/quotes/evidence?group_id=717151356")
+        self.assertEqual(response.status, 200)
+        data = self._data(response)
+        self.assertFalse(data["available"])
+        self.assertEqual(data["evidence"], [])
+        self.assertEqual(data["total"], 0)
+
+    def test_the_evidence_page_has_no_write_route_of_its_own(self) -> None:
+        """证据那条路径**只读**：写仍然只有 `/api/knowledge/quotes` 那一条。
+
+        用户的要求是"不许新开写通道"——所以这里对**路由表**钉：往证据路径 POST
+        不该被当成写动作接住（面板会回 404/405 那类"没这个动作"），
+        而真正的写动作仍然落在既有那条口上。
+        """
+
+        learned = self._FakeLearned()
+        _, posted = self._request(learned, "POST", "/api/knowledge/quotes/evidence",
+                                  {"confirm": True, "action": "correct",
+                                   "group_id": "717151356", "emoji_id": "76",
+                                   "sense": "positive"})
+        self.assertNotEqual(posted.status, 200,
+                            "证据那条路径被当成写口接住了——那等于新开了一条写通道")
+        self.assertEqual([call for call in learned.calls if call[0] == "quote_correct"], [],
+                         "往证据路径 POST 居然碰到了 `quote_correct`")
+        # 正经的写路径照旧能改（而且只有这一条）。
+        _, ok = self._request(learned, "POST", "/api/knowledge/quotes",
+                              {"confirm": True, "action": "correct",
+                               "group_id": "717151356", "emoji_id": "76",
+                               "sense": "positive"})
+        self.assertEqual(ok.status, 200)
+        self.assertIn(("quote_correct", "717151356", "76", "positive", ""), learned.calls)
 
     def test_slang_writes_hit_one_function_each(self) -> None:
         learned = self._FakeLearned()

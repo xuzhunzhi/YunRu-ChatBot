@@ -35,11 +35,13 @@ const TABS = [
   // ——画像就是记忆里的一类（`kind='profile'`，见 `viewPersonProfiles`）。
   ["memory", "记忆"],
   ["memory_profile", "人物画像"],
-  // 「知识库」卡里的三个口（同样**同级并列**）：知识库本身，加上「金句」「黑话」。
-  // 后两样是她**从群里学来的东西**（表情含义表 + 风格/语境笔记 / 黑话词条），
-  // 由 `registry.ui.learned` 提供（用户 2026-10-06："金句我看应该划到知识库里"、"还有黑话"）。
+  // 「知识库」卡里的四个口（同样**同级并列**）：知识库本身，加上「金句」「金句审核」「黑话」。
+  // 后三样都是她**从群里学来的东西**（表情含义表 + 笔记 / 证据 / 黑话词条），
+  // 由 `registry.ui.learned` 提供（用户 2026-10-06："金句我看应该划到知识库里"、"还有黑话"；
+  // 同一天他又说 *"金句，你连原文和上下文都不贴出来怎么审核"*，于是多了「金句审核」这一页）。
   ["knowledge", "知识库"],
   ["knowledge_quotes", "金句"],
+  ["knowledge_quotes_evidence", "金句审核"],
   ["knowledge_slang", "黑话"],
   ["plugins", "插件"],
 ];
@@ -114,7 +116,10 @@ const CARDS = [
   // 知识库卡下面**三个平级的口**：知识库本身，以及她**从群里学来的东西**
   // （「金句」「黑话」，用户 2026-10-06："金句我看应该划到知识库里"、"还有黑话"，
   // 紧接着："**金句黑话同理**"——同样是同一张卡下面的平级项）。
-  { title: "知识库", items: ["knowledge", "knowledge_quotes", "knowledge_slang"] },
+  { title: "知识库", items: ["knowledge", "knowledge_quotes",
+    // 「金句审核」与「金句」是**同一份数据的两个看法**：前者看含义表 + 笔记，
+    // 后者看**证据**（她的原话 + 上下文 + 表情 + 结论落到哪条笔记）。
+    "knowledge_quotes_evidence", "knowledge_slang"] },
   // 插件卡：每个插件一个 tab（默认只列预装的）。
   { title: "插件", items: ["plugins"] },
   // ⚠️ 这四个是**运维页**，用户给的结构（账号与设备 + 聊天/记忆/知识库/插件）
@@ -172,6 +177,8 @@ const ICON_ALIAS = {
   // `data/tmp_miuix_icons.py`，不该手画）：金句是"她自己说过的话"，借信件那张；
   // 黑话是一份带解释的词条表，借"规则清单"那种列表图标。
   knowledge_quotes: "letter",
+  // 金句审核：借"判定"那张图标（框里一个勾/叉），正好是"这条判得对不对"的意思。
+  knowledge_quotes_evidence: "judge",
   knowledge_slang: "approve_rule",
 };
 
@@ -204,6 +211,7 @@ const TAB_NOTES = {
   knowledge: "知识库可以改：下面那份面板块能增 / 改 / 删；基准语料是只读的",
   // 这两个口的副标题：`render()` 用 `textContent` 写它们，所以**不能**用 markdown 记号。
   knowledge_quotes: "金句：从她自己的话里学来的——按群的表情含义表，以及风格 / 语境笔记（可纠正方向、可停用笔记）",
+  knowledge_quotes_evidence: "金句审核：她那条被点过表情的原话 + 开口前后的上下文 + 表情 + 结论落到哪条笔记（选一条看一条）",
   knowledge_slang: "黑话：她听到别人解释时记下来的词条（词 / 释义 / 谁解释的与原句 / 听到几次 / 改口）",
   plugins: "插件：每个插件一个 tab；预装的不给卸，webui 自己也不给卸（骨架，接口待接）",
 };
@@ -933,6 +941,195 @@ async function viewKnowledgeQuotes() {
       : `<p class="hint">还没有笔记。</p>`);
 }
 
+/* ---------- 金句审核（知识库这一档里的第四个**平级**口）----------
+ *
+ * 用户 2026-10-06：*"金句，你连原文和上下文都不贴出来怎么审核"*。
+ * 在那之前面板上只有**加工后的结论**（表情含义表 + 笔记），没有证据——"这个表情是在损她"
+ * 这句话谁也没法判对错。这一页把证据摆出来，而且**顺着证据能直接改结论**。
+ *
+ * 组织（照用户 2026-10-06 那套"选一个看一个"，他明确讨厌"一条一块往下翻"）：
+ *   顶部 = 群选择 + 分页；中间 = **紧凑列表**（一条一行：时间 · 表情数 · 一句摘要）；
+ *   下面 = **选中的那一条**的完整证据（同一时刻只画一条，见 `evidenceBlock`）。
+ *
+ * 数据只走 `registry.ui.learned`：证据走 `quote_evidence`（`/api/knowledge/quotes/evidence`），
+ * 笔记的启停状态走 `quote_view`（`/api/knowledge/quotes`，同一页要显示"这条笔记现在是开还是关"）。
+ * **写**一律走既有那条 `/api/knowledge/quotes`（`quote_correct` / `quote_note_enabled`），
+ * 这一页**没有**自己的写通道。
+ */
+
+//: 一页看几条证据（核心那条接缝自己也有上限；这里只是"一屏别太长"）。
+const EVIDENCE_PAGE = 10;
+
+//: 列表里那一句摘要取原话多长（原话本身在下面**不截断**地全贴出来）。
+const EVIDENCE_ABSTRACT = 34;
+
+/* **一条证据**：把"凭什么是这个判断"摊开——原话 → 上下文 → 谁贴了什么表情 →
+ * agent 判成什么 → 落到哪条笔记。用户要能拿着这一块去对错。
+ *
+ * 用户 2026-10-06 的改法（与人物画像同一套）：`viewQuoteEvidence()` 用**选中的那一条**
+ * 调这个函数**一次**——谁把它丢进 `map()` 铺成一列，断言当场红。
+ */
+function evidenceBlock(row, data) {
+  const group = String(row.group_id || data.group_id || "");
+  const at = ts(row.at);
+  const reactions = row["被点了"] || [];
+  const meanings = row["meanings"] || [];
+  const notes = row["notes"] || [];
+  const sensesOf = (value) => (data.senses || []).map((item) =>
+    `<option value="${esc(item.value)}"${item.value === value ? " selected" : ""}>${
+      esc(item.label)}</option>`).join("");
+  const lineList = (items, empty) => (items && items.length
+    ? `<ul class="context-list">${items.map((line) =>
+      `<li>${esc(line)}</li>`).join("")}</ul>`
+    : `<p class="hint">${empty}</p>`);
+  // 每个被点过的表情：学到的方向 + agent 当时依据的那句 + **能不能改**（就走那三个写函数）。
+  const meaningBlocks = meanings.length ? meanings.map((item) => {
+    const emoji = String(item.emoji_id || "");
+    return `<div class="card-inline">
+      <div class="pref-title">表情 <span class="mono">${esc(emoji)}</span> · ${
+        esc(item.sense_label || item.sense || "还看不出来")}
+        <span class="tag ${item.manual ? "restart" : "live"}">${
+          item.manual ? "你手工改过" : "她自己学的"}</span></div>
+      ${item.note ? `<p class="hint">这个表情在本群的意思：${esc(item.note)}</p>` : ""}
+      ${item.quote ? `<p class="hint">agent 当时的依据：<q>${esc(item.quote)}</q></p>` : ""}
+      <div class="row">
+        <button class="ev-accept" data-group="${esc(group)}" data-emoji="${esc(emoji)}"
+                data-sense="${esc(item.sense)}">采纳这个判断</button>
+        <button class="ev-reject" data-group="${esc(group)}" data-emoji="${esc(emoji)}">否定</button>
+        <select class="ev-sense" data-group="${esc(group)}" data-emoji="${esc(emoji)}"
+                aria-label="改成哪个方向">${sensesOf(item.sense)}</select>
+        <button class="ev-save" data-group="${esc(group)}" data-emoji="${esc(emoji)}">改成这档</button>
+        ${item.manual ? `<button class="ev-auto" data-group="${esc(group)}"
+           data-emoji="${esc(emoji)}" data-auto="${esc(data.auto_sense || "")}">恢复自动</button>` : ""}
+      </div>
+      <p class="hint">「采纳」= 把她现在这个判断**钉成人工确认的那一档**（模型下次改判也压不过它）；
+        「否定」= 退回「还看不出来」；两者都走同一条人工覆盖（可以再点「恢复自动」撤掉）。</p>
+    </div>`;
+  }).join("") : `<p class="hint">这个表情学习 agent <b>还没判过</b>——所以这里没有方向可改。
+    ${row["为什么没有结论"] ? `（核心的说法：${esc(row["为什么没有结论"])}）` : ""}</p>`;
+  // 结论落到哪条笔记：**对不上就是空 id**，如实说"没落到任何笔记"，也不给一个假的开关。
+  const noteBlocks = notes.length ? notes.map((item) => {
+    const noteId = String(item.id || "");
+    const enabled = noteId ? data.enabled[noteId] : undefined;
+    return `<div class="pref-list">${prefRow(
+      `<div class="pref-title">表情 <span class="mono">${esc(String(item.emoji_id || ""))}</span>
+        → ${noteId ? "落到一条笔记" : "没落到任何笔记"}</div>`
+      + `<div class="pref-summary">${noteId
+        ? `笔记 <span class="mono">${esc(noteId)}</span>：${esc(item.note || "")}`
+        : "这条结论没有和任何一条笔记对上（可能是笔记被整份重写过）。"}</div>`,
+      noteId
+        ? `<input class="switch ev-note" type="checkbox" data-id="${esc(noteId)}"${
+          enabled === false ? "" : " checked"} aria-label="这条笔记还让它用">`
+        : "",
+      { icon: "edit" })}</div>`;
+  }).join("") : "";
+
+  return card(`证据 · ${at}`, `
+    <p class="pref-summary">群 <span class="mono">${esc(group)}</span> ·
+      消息 <span class="mono">${esc(String(row.message_id || ""))}</span>${
+      row["当时的话题"] ? ` · 当时的话题：${esc(row["当时的话题"])}` : ""}${
+      row["对方想干什么"] ? ` · 对方想干什么：${esc(row["对方想干什么"])}` : ""}${
+      row["当时的话题"] || row["对方想干什么"] ? "" : " · 话题 / 对方想干什么：没对上（没配到那一次的回复）"}</p>
+    <div class="pref-group-title">她说的（原话，不截断）</div>
+    <blockquote class="quote-text">${esc(String(row["她说的"] || ""))}</blockquote>
+    <div class="pref-group-title">她开口之前，群里在说（${num((row["她开口之前群里在说"] || []).length)} 条）</div>
+    ${lineList(row["她开口之前群里在说"], "日志里没有留下她开口之前的那些话。")}
+    <div class="pref-group-title">她说完之后，群里接的（${num((row["她说完之后群里接的"] || []).length)} 条）</div>
+    ${lineList(row["她说完之后群里接的"], "她说完之后群里没有接话。")}
+    <div class="pref-group-title">被点了（${num(reactions.length)} 次）</div>
+    ${reactions.length ? table([
+      { label: "表情", get: (r) => String(r.emoji_id || ""), mono: true, nowrap: true },
+      { label: "谁贴的（号）", get: (r) => String(r.by || "—"), wide: true },
+      { label: "贴了几次", get: (r) => num(r.count || 1), nowrap: true },
+    ], reactions, { widths: ["24%", "52%", "24%"] })
+      : '<p class="hint">日志里没记到是谁点的表情。</p>'}
+    <div class="pref-group-title">这些表情，学习 agent 判成了什么</div>
+    ${meaningBlocks}
+    ${noteBlocks ? `<div class="pref-group-title">结论落到了哪条笔记</div>${noteBlocks}` : ""}
+    ${data.path ? `<p class="hint">结论存在 <code>${esc(data.path)}</code>；
+      证据来自 <code>logs/chat.jsonl</code>（面板只通过接缝读，不自己碰这两个文件）。</p>` : ""}`);
+}
+
+async function viewQuoteEvidence() {
+  const chosen = String(state.last.evidenceGroup || "").trim();
+  const offset = Math.max(0, Number(state.last.evidenceOffset || 0));
+  const data = await api("/api/knowledge/quotes/evidence?limit=" + EVIDENCE_PAGE
+    + "&offset=" + offset + (chosen ? "&group_id=" + encodeURIComponent(chosen) : ""));
+  const groups = (data.groups || []).map((id) => String(id));
+  const current = String(data.group_id || "");
+  const known = (current && !groups.includes(current)) ? [current].concat(groups) : groups;
+  const options = known.length
+    ? known.map((id) => `<option value="${esc(id)}"${
+      id === current ? " selected" : ""}>${esc(id)}</option>`).join("")
+    : '<option value="">（还没有群）</option>';
+  const picker = `<div class="row">
+      <select id="ev-group" aria-label="看哪个群">${options}</select>
+      <input id="ev-group-manual" type="text" placeholder="或手填群号">
+      <button id="ev-go">看这个群</button>
+    </div>
+    <p class="hint">证据按群看（同一个表情在不同群可以是两个意思）；候选群 = 她这会儿在听的群，
+      加上黑话里出现过的群，都不在就手填。</p>`;
+
+  const head = card("金句审核（知识库里的一个口）", `
+    <p class="hint">这一页只放<b>证据</b>，用来判断"这个表情在这个群里是什么意思"判得对不对：
+      <b>她的原话</b>（不截断）、她开口<b>之前</b>群里在说什么、她说完<b>之后</b>群里怎么接的、
+      谁给她贴了什么表情，然后是学习 agent 判成的方向与它当时的依据，以及这条结论落到了哪条笔记。</p>
+    <p class="hint">下面是<b>一条一条的列表</b>，点一条看一条的完整证据——同一时刻只展开一条。
+      改判断走的是同一套人工覆盖（采纳 / 否定 / 改成某一档 / 恢复自动），停用笔记也一样。</p>
+    ${data.path ? `<p class="hint">结论存在 <code>${esc(data.path)}</code>。</p>` : ""}
+    ${picker}`);
+
+  if (!data.available) {
+    return head + card("这一份现在读不到", `<p class="hint">可能是证据那一块还没装上
+      （bot 刚起来、日志还没写），也可能这个群号是空的。换一个群，或者等一会儿刷新。
+      读不到的时候面板<b>不编一份空的给你看</b>。</p>`);
+  }
+  const rows = data.evidence || [];
+  if (!rows.length) {
+    return head + card("这个群还没有证据", `<p class="hint">证据是"她说过一句、有人给她贴了表情"
+      那些记录——这个群还没攒到${data.total ? "（这一页之外还有？请翻页看看）" : ""}。
+      ${data.error ? `核心那边说：${esc(data.error)}` : ""}</p>`);
+  }
+  // 笔记**现在**是开还是关：只有 `quote_view` 那份 notes 带 `enabled`（证据里只给"落到哪条笔记"）。
+  // 同一页里多读一次同一个接缝的另一口，不是新通道。
+  const quotes = await api("/api/knowledge/quotes"
+    + (current ? "?group_id=" + encodeURIComponent(current) : ""));
+  const enabled = {};
+  (quotes.notes || []).forEach((note) => {
+    enabled[String(note.id || "")] = Boolean(note.enabled);
+  });
+  // 选中的那一条：键是 `message_id`（列表与详情**用的是同一份数据**——下面就是拿它去 find）。
+  const wanted = String(state.last.evidenceKey || "");
+  const currentRow = rows.find((row) => String(row.message_id) === wanted) || rows[0];
+  const total = Number(data.total || 0);
+  const from = total ? Number(data.offset || 0) + 1 : 0;
+  const to = Number(data.offset || 0) + rows.length;
+  const pager = `<div class="row">
+      <button id="ev-prev"${Number(data.offset || 0) > 0 ? "" : " disabled"}>上一页</button>
+      <span class="hint">第 ${num(from)}–${num(to)} 条 / 共 ${num(total)} 条</span>
+      <button id="ev-next"${to < total ? "" : " disabled"}>下一页</button>
+    </div>`;
+  const items = rows.map((row) => {
+    const key = String(row.message_id || "");
+    const emojis = (row["被点了"] || []).length;
+    // 摘要**该截才截**：短于上限就不加省略号（假省略号会让人以为原话更长）。
+    const full = String(row["她说的"] || "").replace(/\s+/g, " ").trim();
+    const abstract = full.length > EVIDENCE_ABSTRACT
+      ? full.slice(0, EVIDENCE_ABSTRACT) + "…" : full;
+    return `<button class="evidence-item${key === String(currentRow.message_id) ? " on" : ""}"`
+      + ` data-evidence="${esc(key)}">`
+      + `<span class="ev-time">${esc(ts(row.at))}</span>`
+      + `<span class="ev-emoji">${num(emojis)} 个表情</span>`
+      + `<span class="ev-abstract">${esc(abstract)}</span></button>`;
+  }).join("");
+  const list = card(`证据列表（这个群 ${num(total)} 条）`, `
+    <p class="hint">点一条，下面就是那一条的完整证据。</p>
+    <div class="evidence-list">${items}</div>
+    ${pager}`);
+
+  return head + list + evidenceBlock(currentRow, { ...data, enabled });
+}
+
 async function viewKnowledgeSlang() {
   const chosen = String(state.last.slangGroup || "").trim();
   const data = await api("/api/knowledge/slang"
@@ -1546,6 +1743,69 @@ function bind() {
       state.last.profileKey = el.dataset.person;
       render();
     })) return;
+    // --- 金句审核页 ---------------------------------------------------------
+    // 列表里选一条（键是 `message_id`，与详情用的是同一份数据）；换群 / 翻页同理：
+    // 都只是改 `state.last` 再 `render()`，不新开任何读通道。
+    if (act("evidence-item", (el) => {
+      state.last.evidenceKey = el.dataset.evidence;
+      render();
+    })) return;
+    if (target.id === "ev-go") {
+      state.last.evidenceGroup = ($("ev-group-manual").value || "").trim()
+        || ($("ev-group") ? $("ev-group").value : "");
+      state.last.evidenceOffset = 0;
+      state.last.evidenceKey = "";
+      render();
+      return;
+    }
+    if (target.id === "ev-prev" || target.id === "ev-next") {
+      const step = target.id === "ev-next" ? EVIDENCE_PAGE : -EVIDENCE_PAGE;
+      state.last.evidenceOffset = Math.max(0, Number(state.last.evidenceOffset || 0) + step);
+      state.last.evidenceKey = "";
+      render();
+      return;
+    }
+    // 采纳 / 否定 / 改成某一档 / 恢复自动 —— **全部走既有那条写口**（`quote_correct`）。
+    if (act("ev-accept", async (el) => {
+      const done = await write("/api/knowledge/quotes", {
+        action: "correct", group_id: el.dataset.group, emoji_id: el.dataset.emoji,
+        sense: el.dataset.sense,
+      }, "把表情 " + el.dataset.emoji + " 的判断钉成人工确认的那一档？");
+      if (done) render();
+    })) return;
+    if (act("ev-reject", async (el) => {
+      const done = await write("/api/knowledge/quotes", {
+        action: "correct", group_id: el.dataset.group, emoji_id: el.dataset.emoji,
+        sense: "unclear",
+      }, "否定这个判断，把表情 " + el.dataset.emoji + " 退回「还看不出来」？");
+      if (done) render();
+    })) return;
+    if (act("ev-save", async (el) => {
+      const box = el.closest(".card-inline").querySelector(".ev-sense");
+      const label = box.options[box.selectedIndex]
+        ? box.options[box.selectedIndex].text : box.value;
+      const done = await write("/api/knowledge/quotes", {
+        action: "correct", group_id: el.dataset.group, emoji_id: el.dataset.emoji,
+        sense: box.value,
+      }, "把表情 " + el.dataset.emoji + " 改成「" + label + "」？");
+      if (done) render();
+    })) return;
+    if (act("ev-auto", async (el) => {
+      const done = await write("/api/knowledge/quotes", {
+        action: "correct", group_id: el.dataset.group, emoji_id: el.dataset.emoji,
+        sense: el.dataset.auto,
+      }, "撤掉人工判断，回到学习 agent 判的那一档？");
+      if (done) render();
+    })) return;
+    if (target.classList.contains("ev-note")) {
+      const on = target.checked;
+      const done = await write("/api/knowledge/quotes", {
+        action: "note", note_id: target.dataset.id, enabled: on,
+      }, (on ? "恢复" : "停用") + "这条笔记？");
+      if (done) render();
+      else target.checked = !on;   // 取消确认就弹回去（与「金句」页同一条规矩）
+      return;
+    }
     if (act("s-save", async (el) => {
       const box = el.closest(".card-inline").querySelector(".s-def");
       const done = await write("/api/knowledge/slang", {
@@ -1682,7 +1942,11 @@ function showViewport() {
       && window.getComputedStyle(content).display === "none";
     const basis = style.flexBasis || "";
     if (contentHidden) band = "窄屏（只留左栏）";
-    else if (basis === "240px") band = "宽屏（左栏定宽）";
+    // ⚠️ 判据是"左栏定宽还是按比例"，**不许把那个数写死**：这里原来比的是
+    // `basis === "240px"`（宽屏档变 426px 之后这句就永远不成立），于是 1440 / 1267
+    // 这些**宽屏**窗口被这行字说成"中等（左栏 426px）"——而中等档根本不是 426px，
+    // 是 40%（截图核对时读到的）。定宽 → `px`，按比例 → 百分比，一眼分得开。
+    else if (/px$/.test(basis)) band = `宽屏（左栏定宽 ${basis}）`;
     else if (basis && basis !== "auto") band = `中等（左栏 ${basis}）`;
   }
   box.textContent = `视口 ${width}×${height} · DPR ${dpr} · ${band}`;
@@ -2070,6 +2334,8 @@ const VIEWS = {
   // 金句 = 从她自己的话里学来的（表情含义表 + 风格/语境笔记）；
   // 黑话 = 她听到别人解释记下来的词条。取数都只走 `registry.ui.learned`。
   knowledge_quotes: viewKnowledgeQuotes, knowledge_slang: viewKnowledgeSlang,
+  // 金句**审核**：同一份数据的另一个看法——看证据（原话 + 上下文 + 表情 + 结论落到哪条笔记）。
+  knowledge_quotes_evidence: viewQuoteEvidence,
   logs: viewLogs, settings: viewSettings, group: viewGroup, actions: viewActions,
   history: viewHistory,
   // ↓ 2026-10-03 按新架构开的五个口子（骨架；分组依据见 `CARDS` 上面的注释）

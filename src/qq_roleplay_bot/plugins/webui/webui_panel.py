@@ -441,6 +441,14 @@ class Panel:
             if path == "/api/knowledge/quotes":
                 return json_response(_envelope(
                     self._quotes_view(str(query.get("group_id") or ""))))
+            # 「金句审核」的证据：她那条被点过表情的原话 + 前后上下文 + 表情 + 结论落到哪条笔记。
+            # 用户 2026-10-06：*"你连原文和上下文都不贴出来怎么审核"*。**只读**，
+            # 只走 `learned.quote_evidence`（那条窄接缝自己去读日志、自己去配对）。
+            if path == "/api/knowledge/quotes/evidence":
+                return json_response(_envelope(self._evidence_view(
+                    str(query.get("group_id") or ""),
+                    _as_int(query.get("limit"), 10),
+                    _as_int(query.get("offset"), 0))))
             if path == "/api/knowledge/slang":
                 return json_response(_envelope(
                     self._slang_view(str(query.get("group_id") or ""))))
@@ -1000,6 +1008,58 @@ class Panel:
             "senses": [{"value": value, "label": label}
                        for value, label in SENSE_LABELS.items()],
         }
+
+    def _evidence_view(self, group_id: str, limit: int, offset: int) -> dict[str, object]:
+        """「金句审核」的证据（读）：只走 `learned.quote_evidence`。
+
+        用户 2026-10-06 的原话是*"金句，你连原文和上下文都不贴出来怎么审核"*——
+        在这之前面板上只有**加工后的结论**（表情含义表 + 笔记），没有证据，
+        所以"这个表情是在损她"这句话谁也没法判对错。这一页把证据摆出来：
+        她的原话（**不截断**）/ 她开口之前群里在说 / 她说完之后群里接的 /
+        被点了（谁、什么表情、几次）/ 这些表情在本群学到的含义（含是不是人工改过）/
+        结论落到了哪条笔记（**对不上就是空 id**）/ 当时的话题与对方想干什么 /
+        拿不到结论时**如实说为什么**。
+
+        面板**不读 `chat.jsonl`、不碰记忆**：配对与补上下文都在核心那条接缝里做。
+        """
+
+        groups = self._learned_groups()
+        group = str(group_id or "").strip() or (groups[0] if groups else "")
+        try:
+            size = max(1, min(50, int(limit)))
+        except (TypeError, ValueError):
+            size = 10
+        try:
+            start = max(0, int(offset))
+        except (TypeError, ValueError):
+            start = 0
+        from ...quote_learning import SENSE_LABELS
+
+        base: dict[str, object] = {
+            "available": False, "group_id": group, "groups": groups,
+            "evidence": [], "total": 0, "limit": size, "offset": start,
+            "error": "", "path": "", "auto_sense": QUOTE_AUTO,
+            "senses": [{"value": value, "label": label}
+                       for value, label in SENSE_LABELS.items()],
+        }
+        reader = self._learned_fn("quote_evidence")
+        if reader is None or not group:
+            return base
+        try:
+            data = reader(group, size, start) or {}
+        except Exception:  # noqa: BLE001 - 接缝坏了只说"读不到"，不把面板带崩
+            logger.warning("webui_learned_evidence_failed", exc_info=True)
+            return base
+        if not data:
+            return base
+        return {**base, "available": True,
+                "group_id": str(data.get("group_id") or group),
+                "evidence": [dict(row) for row in (data.get("evidence") or [])],
+                "total": int(data.get("total") or 0),
+                "limit": int(data.get("limit") or size),
+                "offset": int(data.get("offset") or start),
+                "error": str(data.get("error") or ""),
+                "path": str(data.get("path") or "")}
 
     def _slang_view(self, group_id: str) -> dict[str, object]:
         """黑话（读）：词条列表。`group_id` 空 = 所有群（`learned.slang_list(None)`）。"""

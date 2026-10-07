@@ -536,8 +536,8 @@ class LearnedUnderKnowledgeTests(unittest.TestCase):
     4. **接线还在**：两个页签在 `VIEWS` 里注册了，写入动作也都打在 `/api/knowledge/` 上。
     """
 
-    #: 两个页签的 id 与它们**只许出现**在的那张卡。
-    IDS = ("knowledge_quotes", "knowledge_slang")
+    #: 这几个页签的 id 与它们**只许出现**在的那张卡。
+    IDS = ("knowledge_quotes", "knowledge_quotes_evidence", "knowledge_slang")
     PARENT = "知识库"
     #: 这两个页面取数/写数只许用的前缀。
     API_PREFIX = "/api/knowledge/"
@@ -564,11 +564,14 @@ class LearnedUnderKnowledgeTests(unittest.TestCase):
                     f"`{page}` 出现在了这些卡里：{holders}——它属于「知识库」这一档")
 
     def test_the_two_learned_pages_are_plain_entries_of_the_knowledge_card(self) -> None:
-        """在「知识库」卡里，两个都是**平级的普通条目**（不是嵌在「知识库」下面）。
+        """在「知识库」卡里，它们都是**平级的普通条目**（不是嵌在「知识库」下面）。
 
         用户原话*"金句黑话同理"*——同理于"人物画像和记忆 tab 是同等级的，都在记忆卡片下"。
-        所以 `CARDS` 里它们是两个普通字符串；写成 `{ id: …, sub: 1 }` 就是被否掉的
+        所以 `CARDS` 里它们是普通字符串；写成 `{ id: …, sub: 1 }` 就是被否掉的
         "挂在上面那个条目下面"的形状（左栏里会被画成低一级），当场失败。
+
+        （2026-10-07 多了第四个口「金句审核」——它是"金句"的**证据视图**，
+        与其余三个同级；这里把四个都点名，少一个/多一个都要人回来看一眼。）
         """
 
         knowledge = self._card(self.PARENT)
@@ -576,11 +579,12 @@ class LearnedUnderKnowledgeTests(unittest.TestCase):
             self.assertIn(page, _card_ids(knowledge),
                           f"「{self.PARENT}」卡里没有 {page} 这个口")
         self.assertEqual(_card_ids(knowledge),
-                         ["knowledge", "knowledge_quotes", "knowledge_slang"],
-                         "「知识库」卡里的项不是「知识库 + 金句 + 黑话」这三个平级项")
+                         ["knowledge", "knowledge_quotes", "knowledge_quotes_evidence",
+                          "knowledge_slang"],
+                         "「知识库」卡里的项不是「知识库 + 金句 + 金句审核 + 黑话」这四个平级项")
         self.assertEqual(
             _top_level_ids(knowledge), _card_ids(knowledge),
-            "「知识库」卡里有条目写成了 `{ id, sub }`——金句与黑话和「知识库」是同一张卡"
+            "「知识库」卡里有条目写成了 `{ id, sub }`——它们和「知识库」是同一张卡"
             "下面的平级项（用户 2026-10-06：\"金句黑话同理\"）")
         for other in ("账号与设备", "记忆", "聊天"):
             self.assertNotIn(self.IDS[0], _card_ids(self._card(other)),
@@ -597,7 +601,9 @@ class LearnedUnderKnowledgeTests(unittest.TestCase):
         tabs_vector = re.search(r"const TABS = \[(.*?)\n\];", self.js, re.S)
         self.assertIsNotNone(tabs_vector, "app.js 里找不到页签名表 `TABS`")
         vector = tabs_vector.group(1)
-        for page, label in (("knowledge_quotes", "金句"), ("knowledge_slang", "黑话")):
+        for page, label in (("knowledge_quotes", "金句"),
+                            ("knowledge_quotes_evidence", "金句审核"),
+                            ("knowledge_slang", "黑话")):
             with self.subTest(page=page):
                 self.assertRegex(
                     vector, r"\[\s*\"" + page + r"\"\s*,\s*\"" + label + r"\"\s*\]",
@@ -624,7 +630,7 @@ class LearnedUnderKnowledgeTests(unittest.TestCase):
         去取数了（比如直接读 `data/quote/profile.json`）。
         """
 
-        for name in ("viewKnowledgeQuotes", "viewKnowledgeSlang"):
+        for name in ("viewKnowledgeQuotes", "viewKnowledgeSlang", "viewQuoteEvidence"):
             with self.subTest(view=name):
                 body = _uncomment(_function_body(self.js, name, kind="async"))
                 calls = re.findall(r"api\((`[^`]*`|\"[^\"]*\")", body)
@@ -638,10 +644,11 @@ class LearnedUnderKnowledgeTests(unittest.TestCase):
                                      f"{name}() 里出现了 {forbidden}——取数只能走接缝")
 
     def test_the_two_pages_are_wired_and_their_writes_go_the_same_way(self) -> None:
-        """两个页签在 `VIEWS` 里注册了，写入动作也只打在 `/api/knowledge/` 上。
+        """这几个页签在 `VIEWS` 里注册了，写入动作也只打在 `/api/knowledge/` 上。
 
-        反向钉住"别为了加页面把功能接线弄丢"：四类控件（改方向 / 恢复自动 / 停用笔记 /
-        黑话的三个动作）都在 `bind()` 的委托里，且 `write("…")` 的路径都是知识库那两个口。
+        反向钉住"别为了加页面把功能接线弄丢"：改方向 / 恢复自动 / 停用笔记 / 黑话的三个动作，
+        以及**金句审核**那五个（选一条 / 采纳 / 否定 / 改成某一档 / 恢复自动 / 停用笔记）
+        都在 `bind()` 的委托里，且 `write("…")` 的路径都是知识库那个既有写口。
         """
 
         views = _uncomment(_function_body(self.js, "render"))
@@ -649,6 +656,7 @@ class LearnedUnderKnowledgeTests(unittest.TestCase):
         vector = re.search(r"const VIEWS = \{(.*?)\n\};", self.js, re.S)
         self.assertIsNotNone(vector, "app.js 里找不到 `VIEWS`")
         for page, name in (("knowledge_quotes", "viewKnowledgeQuotes"),
+                           ("knowledge_quotes_evidence", "viewQuoteEvidence"),
                            ("knowledge_slang", "viewKnowledgeSlang")):
             self.assertRegex(vector.group(1), page + r":\s*" + name,
                              f"`VIEWS` 里没有把 {page} 接到 {name}()")
@@ -657,20 +665,29 @@ class LearnedUnderKnowledgeTests(unittest.TestCase):
         # 认的是**真的接上**的那个形状（`if (act("q-save", async (el) => {`），
         # 不是"文件里出现过这个名字"——按后者时，`if (false && act("q-auto"…` 这种
         # "把控件禁掉"的改法照样能溜过去（变异核对里抓到的）。
-        for handler in ("q-save", "q-auto", "s-save", "s-wrong", "s-del"):
+        for handler in ("q-save", "q-auto", "s-save", "s-wrong", "s-del",
+                        "ev-accept", "ev-reject", "ev-save", "ev-auto"):
             self.assertRegex(
                 bound, r"if \(act\(\"" + handler + r"\", async",
                 f"`bind()` 里 {handler} 那颗控件没有接上"
                 f"（要写成 `if (act(\"{handler}\", async (el) => {{ …`）")
+        # 审核页的两颗**非 async** 控件：选一条、翻页（都只改 state 再重画）。
         self.assertRegex(
-            bound, r"if \(target\.classList\.contains\(\"note-toggle\"\)\)",
-            "`bind()` 里笔记那个开关（`note-toggle`）没有接上")
+            bound, r"if \(act\(\"evidence-item\", \(el\) => \{",
+            "`bind()` 里审核页的列表项没有接上（点了不会换人/换条）")
+        self.assertRegex(
+            bound, r'if \(target\.id === "ev-prev" \|\| target\.id === "ev-next"\)',
+            "`bind()` 里审核页的翻页没有接上")
+        for handler in ("note-toggle", "ev-note"):
+            self.assertRegex(
+                bound, r"if \(target\.classList\.contains\(\"" + handler + r"\"\)\)",
+                f"`bind()` 里 {handler} 那个开关没有接上")
         writes = re.findall(r"write\(\"(/api/[^\"]*)\"", bound)
         self.assertTrue(writes, "`bind()` 里一个 `write(...)` 都没有")
         learned_writes = [path for path in writes if path.startswith("/api/knowledge/")]
         self.assertGreaterEqual(
             len(learned_writes), 5,
-            f"金句/黑话的写入没有全走 `/api/knowledge/`：{writes}")
+            f"金句/黑话/审核的写入没有全走 `/api/knowledge/`：{writes}")
 
 
 class SubLevelEntriesTests(unittest.TestCase):
@@ -938,9 +955,85 @@ class KnowledgeTableLayoutTests(unittest.TestCase):
             "用户的窗口会被当成平板处理")
         self.assertRegex(self.css, r"\.rail\s*\{[^}]*flex:\s*0 0 426px",
                          "宽屏档的左栏不是固定 426px")
+        # 页脚那行"视口 … · 档位"的话**不许把档位判据写死成一个数**：
+        # 它原来比的是 `basis === "240px"`，宽屏改成 426px 之后 1440/1267 被说成"中等"
+        # （截图核对读到的原话："视口 1267×796 · DPR 1 · 中等（左栏 426px）"）。
+        footer = _uncomment(_function_body(self.js, "showViewport"))
+        self.assertNotRegex(footer, r'basis === "\d+px"',
+                            "页脚又拿一个死数字当档位判据了（宽窄一改就说错话）")
+        self.assertRegex(footer, r"/\^?px\$/\.test\(basis\)|endsWith\(\"px\"\)",
+                         "页脚没有按「定宽还是比例」判档位")
         for block in re.findall(r"(?m)^\.content[^{]*\{([^}]*)\}", self.css):
             self.assertNotIn("max-width", block,
                              "内容区被限宽了：1267 这个尺寸下内容会白白少一截")
+
+
+class QuoteEvidencePageTests(unittest.TestCase):
+    """金句审核页（2026-10-06 用户：*"你连原文和上下文都不贴出来怎么审核"*）。
+
+    这一页要干的事只有一件：把**证据**摆出来，让人能对着它判"这个表情在这个群是什么意思"
+    判得对不对。所以钉三条：
+
+    1. **同一时刻只渲染一条证据**（用户明确讨厌"一条一块往下翻"；谁把它丢进 `map()`
+       铺成一列就红）——列表是**紧凑的一行一条**，详情是 `evidenceBlock(currentRow, …)` **一次**；
+    2. **列表与详情用同一份数据**：列表的每一项带着那条证据的键（`data-evidence` =
+       `message_id`），详情是**拿着这个键去同一个数组里 find 出来的**——
+       不是"另取一份"（那样点第 N 条就可能展示第 M 条）；
+    3. **不新开通道**：读只走 `/api/knowledge/quotes/evidence`（+ 同一接缝的
+       `/api/knowledge/quotes` 拿笔记启停态），写只走既有那条 `POST /api/knowledge/quotes`
+       ——面板里**没有**第二个写口（这一条在 `test_webui_panel.py` 里对路由钉）。
+    """
+
+    def setUp(self) -> None:
+        self.js = _asset("app.js")
+
+    def test_only_one_evidence_block_is_rendered_at_a_time(self) -> None:
+        body = _uncomment(_function_body(self.js, "viewQuoteEvidence", kind="async"))
+        self.assertEqual(
+            len(re.findall(r"evidenceBlock\(", body)), 1,
+            "`viewQuoteEvidence()` 里证据块不止一处——同一时刻只许渲染一条")
+        self.assertIn("evidenceBlock(currentRow", body,
+                      "证据块不是拿**选中的那一条**画的")
+        block = _uncomment(_function_body(self.js, "evidenceBlock"))
+        for piece in ("她说的", "她开口之前群里在说", "她说完之后群里接的", "被点了",
+                      "为什么没有结论"):
+            self.assertIn(piece, block, f"证据块里少了「{piece}」")
+        self.assertIn('class="quote-text"', block,
+                      "她的原话没有用不截断的那块（`.quote-text`）贴出来")
+
+    def test_the_list_and_the_detail_use_the_same_data(self) -> None:
+        body = _uncomment(_function_body(self.js, "viewQuoteEvidence", kind="async"))
+        self.assertRegex(body, r"rows\.map\(", "列表不是按那一页的数据铺的")
+        self.assertIn('data-evidence="${esc(key)}"', body,
+                      "列表项没有带那条证据的键（`message_id`）")
+        # 详情 = 拿键在**同一个数组**里找出来；找不到才退回第一条。
+        self.assertRegex(
+            body, r"rows\.find\(\(row\) => String\(row\.message_id\) === wanted\)",
+            "详情不是从**同一份数据**里按 `message_id` 找出来的——"
+            "那样点第 N 条可能展示第 M 条")
+        self.assertIn("|| rows[0]", body, "选中的键不在这一页时没有退回第一条")
+        bound = _uncomment(_function_body(self.js, "bind"))
+        self.assertIn("state.last.evidenceKey = el.dataset.evidence", bound,
+                      "点了列表项没有记下选的是哪一条")
+
+    def test_the_evidence_page_never_opens_a_new_channel(self) -> None:
+        body = _uncomment(_function_body(self.js, "viewQuoteEvidence", kind="async"))
+        calls = re.findall(r"api\((`[^`]*`|\"[^\"]*\")", body)
+        self.assertTrue(calls, "审核页一个 `api(...)` 都没有")
+        for call in calls:
+            self.assertIn("/api/knowledge/", call,
+                          f"审核页去打了 {call}——它只该用既有那条接缝")
+        for forbidden in ("sqlite", "open(", "readFile", "chat.jsonl", "data/"):
+            self.assertNotIn(forbidden, body.casefold(),
+                             f"审核页里出现了 {forbidden}——证据由核心那条接缝给，"
+                             "面板不许自己去读日志文件")
+        # 写侧：只在 `bind()` 里，且路径就是那一条既有写口。
+        bound = _uncomment(_function_body(self.js, "bind"))
+        evidence_writes = re.findall(
+            r'write\("(/api/[^"]*)", \{\s*action: "(?:correct|note)"', bound)
+        self.assertTrue(evidence_writes, "审核页的写入没有走 `action: correct|note`")
+        self.assertEqual(set(evidence_writes), {"/api/knowledge/quotes"},
+                         f"审核页出现了别的写口：{sorted(set(evidence_writes))}")
 
 
 if __name__ == "__main__":

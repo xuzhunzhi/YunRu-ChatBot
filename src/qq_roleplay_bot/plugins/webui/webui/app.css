@@ -1468,6 +1468,68 @@ nav { padding: 0 12px; }
   .profile-name { font-size: 20px; }
 }
 
+/* --- 金句审核页：紧凑列表 + 一条完整证据（2026-10-06 用户："你连原文和上下文都不
+ * 贴出来怎么审核"）----------------------------------------------------------
+ *
+ * 用户明确讨厌"一条一块往下翻"，所以列表是**一行一条**（时间 · 表情数 · 摘要），
+ * 点一条才在下面展开那一条的完整证据——与人物画像页同一套思路（选一个看一个）。
+ */
+.evidence-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 10px;
+}
+.evidence-item {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 0;                       /* 与左栏条目同一条规矩：列表行不是带框的药丸 */
+  border-radius: 10px;
+  background: transparent;
+  color: var(--on-surface);
+  text-align: left;
+  font-size: 14.5px;
+}
+.evidence-item:hover { background: var(--secondary-container); }
+.evidence-item.on {
+  background: var(--secondary-container);
+  font-weight: 600;
+}
+/* 三段的宽度：时间与表情数是**读数**（不折行、不抢位），摘要吃掉剩下的并省略号收尾。 */
+.evidence-item .ev-time { flex: 0 0 auto; color: var(--text-2); font-size: 13px; white-space: nowrap; }
+.evidence-item .ev-emoji { flex: 0 0 auto; color: var(--text-2); font-size: 13px; white-space: nowrap; }
+.evidence-item .ev-abstract {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 她的原话：**不截断**，所以只给缩进与底色，不给任何 max-height（用户要拿它对错）。 */
+.quote-text {
+  margin: 0 0 10px;
+  padding: 10px 14px;
+  border-left: 3px solid var(--primary);
+  background: var(--surface-container-high);
+  border-radius: 0 var(--radius-inner) var(--radius-inner) 0;
+  font-size: 15px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.context-list {
+  margin: 0 0 10px;
+  padding-left: 20px;
+  color: var(--text-2);
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+.context-list li { margin: 2px 0; overflow-wrap: anywhere; }
+
 /* 底部那块白卡（运行状态 / 令牌 / 刷新 / 主题）2026-10-06 撤掉了——左栏只放导航。
    沿 `nav` 那条渐隐线索仍然留着（它是导航的一部分，见 `nav` 那一段）。 */
 .rail-brand { padding: 0 12px 16px; }
