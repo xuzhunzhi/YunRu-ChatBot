@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from datetime import timedelta, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -284,15 +285,63 @@ def _float(name: str, default: float) -> float:
         return default
 
 
-# --- 她那边的时间偏移 -------------------------------------------------------
-# 用户口径（2026-10-08）：*"她那边 = 北京 + 3 小时"*。服务器本地就是北京，所以这只是
-# "她那边"相对这边的固定小时差；渲染成人话的地方是 `stage3_runtime._now_text`（两个
-# 时刻各印一个，"她那边"用 `datetime` + `timedelta` 算，跨天跨周不手算）。
+def _float_clamped(name: str, default: float, minimum: float, maximum: float) -> float:
+    """读一个浮点配置，**夹到 `[minimum, maximum]`**。
+
+    照 `memory_config._float_env` 那一套：写错（不是数）当没配回落默认，
+    写了个离谱的数则夹进来——比"整份配置作废"更可预期。
+    """
+
+    try:
+        value = float(get(name, str(default)))
+    except ValueError:
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+# --- "群里这边"的时间 -------------------------------------------------------
+# 用户口径（2026-10-08）：*"她那边 = 北京 + 3 小时"*。而"这边"从前是**宿主时区**
+# （`datetime.fromtimestamp` / `time.localtime`），代码把"本机=北京"写死在注释里。
+# 换到 UTC 云主机上，"群里这边"整整差 8 小时，而且**没有任何信号**——刚加的钟表测试
+# 在 `TZ=UTC` 下照样全绿（`datetime(2026,10,8,22,12).timestamp()` 与 `fromtimestamp()`
+# 是同一台机器上的一对逆运算，两边一起平移，断言不变）。
 #
-# 写成**函数**而不是 import 期常量：与 `reply_api_base_url` 同一条纪律——**调用时现读
-# 环境**，改配置不必重启，测试也能直接改。读值走 `_float`，写错了当没配（回落默认）。
+# 所以"这边"现在是**显式配置**：`QQBOT_LOCAL_TZ_OFFSET_HOURS`（默认 8），
+# 渲染时刻不再读宿主时区。"她那边"= 这个基准 + `persona_offset_hours()`，
+# 两句话（`stage3_runtime._now_text`）措辞不变。
+#
+# 两个都写成**函数**而不是 import 期常量：与 `reply_api_base_url` 同一条纪律——
+# **调用时现读环境**，改配置不必重启，测试也能直接改。写错了当没配（回落默认）。
+#
+#: "群里这边"的偏移范围（小时）：现实里的时区边界就是 UTC-12 … UTC+14。
+#: 写错的值**夹进来**而不是当没配——`800` 这种手滑不该把时间变成几十年后。
+LOCAL_TZ_OFFSET_MIN = -12.0
+LOCAL_TZ_OFFSET_MAX = 14.0
+
+
+def local_tz_offset_hours() -> float:
+    """「群里这边」相对 UTC 的偏移（`QQBOT_LOCAL_TZ_OFFSET_HOURS`，默认 8）。
+
+    **不读宿主时区**；调用时现读环境，超出 `[LOCAL_TZ_OFFSET_MIN, LOCAL_TZ_OFFSET_MAX]`
+    的值夹进来。
+    """
+
+    return _float_clamped("QQBOT_LOCAL_TZ_OFFSET_HOURS", 8.0,
+                          LOCAL_TZ_OFFSET_MIN, LOCAL_TZ_OFFSET_MAX)
+
+
+def local_timezone():
+    """「群里这边」的时区对象（显式偏移，**与部署机器的时区无关**）。
+
+    `datetime.fromtimestamp(ts, tz=local_timezone())` 与 `time.localtime(ts)` 的区别
+    就是前者换机器不变：UTC 云主机上"群里这边"仍是同一个时刻。
+    """
+
+    return timezone(timedelta(hours=local_tz_offset_hours()))
+
+
 def persona_offset_hours() -> float:
-    """她那边比这台机器快多少小时（`QQBOT_PERSONA_OFFSET_HOURS`，默认 3）。"""
+    """她那边比「群里这边」快多少小时（`QQBOT_PERSONA_OFFSET_HOURS`，默认 3）。"""
 
     return _float("QQBOT_PERSONA_OFFSET_HOURS", 3.0)
 

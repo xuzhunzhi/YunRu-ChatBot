@@ -12,7 +12,7 @@
 `tests/test_wall_clock.py`；这一份只管**两个时刻**与 system 里那条规矩。
 """
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from qq_roleplay_bot import dev_config
@@ -31,9 +31,11 @@ from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 GROUP = "1084401296"
 TARGET = MessageTarget(group_id=GROUP)
 
-#: 2026-10-08 周四 22:12（北京）。`timestamp()` 与 `fromtimestamp()` 是一对逆运算，
-#: 所以这台机器在哪个时区都不影响下面的断言。
-BEIJING = datetime(2026, 10, 8, 22, 12).timestamp()
+#: 2026-10-08 周四 22:12（北京）。**显式按 +8 构造**（不是"本机时区"）：
+#: "群里这边"现在由 `QQBOT_LOCAL_TZ_OFFSET_HOURS`（默认 8）决定，与宿主时区无关，
+#: 所以这一份的期望值在任何机器上都成立（2026-10-08 安全与时间口径审计 B-01；
+#: 这里原先是 `datetime(2026, 10, 8, 22, 12)`，那读的是本机时区）。
+BEIJING = datetime(2026, 10, 8, 22, 12, tzinfo=timezone(timedelta(hours=8))).timestamp()
 #: 她那边那句（+3 小时，跨到次日）。
 HER_SIDE = "你那边现在是 2026-10-09 周五 01:12"
 #: 群里那句（服务器本地）。
@@ -100,7 +102,7 @@ def test_both_clocks_are_printed_with_the_offset_applied() -> None:
 def test_a_cross_day_boundary_is_computed_not_hand_written() -> None:
     """北京 23:30 → 她那边**次日** 02:30（跨天要真的跨过去）。"""
 
-    late = datetime(2026, 10, 8, 23, 30).timestamp()
+    late = datetime(2026, 10, 8, 23, 30, tzinfo=timezone(timedelta(hours=8))).timestamp()
     assert _now_text(late) == (
         "你那边现在是 2026-10-09 周五 02:30；群里这边是 2026-10-08 周四 23:30")
 
@@ -108,7 +110,7 @@ def test_a_cross_day_boundary_is_computed_not_hand_written() -> None:
 def test_a_cross_week_boundary_is_computed_not_hand_written() -> None:
     """北京周日 23:30 → 她那边**周一** 02:30（跨周，星期几要跟着变）。"""
 
-    sunday = datetime(2026, 10, 11, 23, 30).timestamp()
+    sunday = datetime(2026, 10, 11, 23, 30, tzinfo=timezone(timedelta(hours=8))).timestamp()
     assert _now_text(sunday) == (
         "你那边现在是 2026-10-12 周一 02:30；群里这边是 2026-10-11 周日 23:30")
 

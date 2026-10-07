@@ -21,7 +21,7 @@
 "（现在是你那边的 "，**一个字都没提年份或小时**。
 """
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from qq_roleplay_bot.stage3_main import DialogueEngine
 from qq_roleplay_bot.stage3_runtime import (
@@ -35,9 +35,10 @@ from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 GROUP = "1084401296"
 TARGET = MessageTarget(group_id=GROUP)
 
-#: 2026-10-08 周四 22:12（北京）。`timestamp()` 与 `fromtimestamp()` 是一对逆运算，
-#: 所以这台机器在哪个时区都不影响下面的断言。
-BEIJING = datetime(2026, 10, 8, 22, 12).timestamp()
+#: 2026-10-08 周四 22:12（北京）。**显式按 +8 构造**（不是"本机时区"）：
+#: "群里这边"由 `QQBOT_LOCAL_TZ_OFFSET_HOURS`（默认 8）决定，与宿主时区无关，
+#: 所以这一份的期望值在任何机器上都成立（2026-10-08 安全与时间口径审计 B-01）。
+BEIJING = datetime(2026, 10, 8, 22, 12, tzinfo=timezone(timedelta(hours=8))).timestamp()
 #: 北京本地那一句（两个渲染口径下都该出现"群里这边"这个时刻）。
 BEIJING_TEXT = "2026-10-08 周四 22:12"
 

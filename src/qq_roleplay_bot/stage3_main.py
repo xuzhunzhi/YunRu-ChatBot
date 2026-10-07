@@ -7,6 +7,7 @@ import re
 import secrets
 import time
 from dataclasses import dataclass, replace
+from datetime import datetime
 from collections import deque
 from enum import Enum
 from pathlib import Path
@@ -355,7 +356,12 @@ def _format_duration(seconds: float) -> str:
 def _format_clock(timestamp: float) -> str:
     if not timestamp:
         return "—"
-    return time.strftime("%m-%d %H:%M:%S", time.localtime(timestamp))
+    # **显式偏移，不读宿主时区**（2026-10-08 安全与时间口径审计 B-01）：
+    # 从前是 `time.localtime(timestamp)`，于是"群里这边"跟着部署机器的时区走——
+    # 换到 UTC 云主机上整整差 8 小时，而且不报错。
+    return datetime.fromtimestamp(
+        timestamp, tz=dev_config.local_timezone()
+    ).strftime("%m-%d %H:%M:%S")
 
 
 def _sorted_qq(user_ids: object) -> list[str]:
@@ -2639,7 +2645,9 @@ class DialogueEngine:
         if profile:
             lines.append(profile)
             if updated:
-                lines.append(f"（更新于 {time.strftime('%m-%d %H:%M', time.localtime(updated))}）")
+                # 同一个显式偏移（不读宿主时区），与 `_format_clock` 同源。
+                stamp = datetime.fromtimestamp(updated, tz=dev_config.local_timezone())
+                lines.append(f"（更新于 {stamp:%m-%d %H:%M}）")
         else:
             lines.append("还没有画像（记忆维护 agent 还没攒出来）。")
             fallback = self._identity_lines(store, group_id, user_id)

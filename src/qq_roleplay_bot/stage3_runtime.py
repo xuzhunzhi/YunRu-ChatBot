@@ -1485,13 +1485,16 @@ def _now_text(now: float | None = None) -> str:
 
     ## 两个时刻
 
-    "群里这边"是**服务器本地时间**（部署在北京），"你那边"是它加
-    `dev_config.persona_offset_hours()`（用户口径：*"她那边 = 北京 + 3 小时"*）。
+    "群里这边"是**显式配置的那个时区**（`dev_config.local_timezone()`，
+    `QQBOT_LOCAL_TZ_OFFSET_HOURS`，默认 +8）——**不是宿主时区**：
+    从前这里走 `datetime.fromtimestamp(moment)`，代码把"本机=北京"当成前提，
+    换到 UTC 云主机上"群里这边"整整差 8 小时，而且不报错、不报警。
+    "你那边"是它加 `dev_config.persona_offset_hours()`（用户口径：*"她那边 = 北京 + 3 小时"*）。
     跨天与跨周交给 `timedelta` 算，不手算。
     """
 
     moment = time.time() if now is None else float(now)
-    here = datetime.fromtimestamp(moment)
+    here = datetime.fromtimestamp(moment, tz=dev_config.local_timezone())
     there = here + timedelta(hours=dev_config.persona_offset_hours())
     return f"你那边现在是 {_clock_text(there)}；群里这边是 {_clock_text(here)}"
 
