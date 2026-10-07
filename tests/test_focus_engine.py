@@ -275,6 +275,24 @@ def test_promised_message_uses_the_routing_only_judge() -> None:
     assert "不需要判断要不要开口" in judge_request[0]["content"]
 
 
+def test_promised_ids_are_evicted_oldest_first() -> None:
+    """超过上限时丢的是**最旧**那条，不是任意一条。
+
+    `set.pop()` 淘汰的是**任意**元素（set 无序）：积压超过上限时，被丢的可能正是刚
+    说出口的那句"稍等"——她答应过"回头答你"，判定却重新拿到了否决权。这里塞满
+    上限再塞一条，被丢的必须是最先答应的那一条（插入序 = 答应顺序）。
+    """
+
+    engine, _ = build_engine(Clock(), ScriptedJudge())
+    for index in range(256):
+        engine._promise(f"m{index}")
+    engine._promise("overflow")
+
+    assert len(engine._promised_ids) == 256
+    assert "m0" not in engine._promised_ids, "被淘汰的应当是最先答应的那一条"
+    assert list(engine._promised_ids) == [f"m{index}" for index in range(1, 256)] + ["overflow"]
+
+
 def test_mention_without_ack_still_uses_the_normal_judge() -> None:
     """没答应过的消息仍走普通判定（有 route），不许回就不回。"""
 

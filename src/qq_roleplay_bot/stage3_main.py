@@ -1091,7 +1091,8 @@ class DialogueEngine:
         # 这次要跳过去重与"记进历史"（消息在到达时已经记过了），否则历史里会出现两遍。
         self._resumed_ids: set[str] = set()
         # 已经回过"稍等"、因此**必须给结果**的消息 id（判定不许否决）。
-        self._promised_ids: set[str] = set()
+        # 用 `dict` 而不是 `set`：插入序就是"谁先答应的"（见 `_promise`）。
+        self._promised_ids: dict[str, None] = {}
         # `/super restart` 留下的意图标记：由 runtime 在发完回复、关掉传输层之后读走。
         self._restart_requested = False
         # 运行期开关（面板可改）的**替身**：`runtime` 装配时会 `runtime_flags.install()`
@@ -3671,9 +3672,7 @@ class DialogueEngine:
                             self.focus.note_ack(message.session_id, now)
                             ack = self._pick_ack()
                             # 回过"稍等"的，之后必须给结果：判定不许否决它。
-                            self._promised_ids.add(message.message_id)
-                            if len(self._promised_ids) > 256:
-                                self._promised_ids.pop()
+                            self._promise(message.message_id)
                             # "稍等"要进她的历史（她之后看得到自己说过），但**不进长期记忆**、
                             # 也不算进"连回 50 条"——它不是一个真实回应。
                             state.record_bot_reply(message.session_id, message.target, ack, now)
@@ -4211,6 +4210,18 @@ class DialogueEngine:
 
         return secrets.choice(FOCUS_ACK_LINES)
 
+    def _promise(self, message_id: str) -> None:
+        """记下"回过稍等、必须给结果"的消息 id；超上限时淘汰**最旧**的一条。
+
+        为什么不是 `set` + `set.pop()`：`pop()` 拿掉的是**任意**一条，被丢的可能正是
+        刚刚那句"稍等"——判定因此重新获得否决权，她答应过"回头答你"却静默了。用
+        `dict`（插入序）就没这个问题：淘汰点固定是最先答应的那一条。
+        """
+
+        self._promised_ids[message_id] = None
+        if len(self._promised_ids) > 256:
+            self._promised_ids.pop(next(iter(self._promised_ids)))
+
     def focus_stats(self, now: float | None = None) -> dict[str, object]:
         """给观测用的一小撮焦点状态（不含任何聊天正文）。"""
 
@@ -4296,7 +4307,7 @@ class DialogueEngine:
                 reply = None
             outgoing = _as_outgoing_list(reply) + self.take_follow_ups(message.session_id)
             self._resumed_ids.discard(message.message_id)
-            self._promised_ids.discard(message.message_id)
+            self._promised_ids.pop(message.message_id, None)
             if outgoing:
                 self._stats["focus_queued_replies"] += 1
                 deliveries.append((message, outgoing))
