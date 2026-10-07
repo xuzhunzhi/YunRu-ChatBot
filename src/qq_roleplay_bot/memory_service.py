@@ -17,6 +17,13 @@ class MemoryService:
     def __init__(self, client, allowed_groups, *, settings: MemorySettings | None = None,
                  store: MemoryStore | None = None, feature_logs=None):
         self.settings = settings or MemorySettings()
+        # `allowed_groups` 是**记忆开放的群**（`/super enable memory`，在那个群里说的
+        # 那一句；引擎那边是 `DialogueEngine.memory_group_ids`）。它同时管两件事：
+        # 这些群的群消息进收件箱、这些群的旧事在回复时被检索回来。
+        #
+        # 它**不是**"这个群开不开对话"——那是 `/admin enable|disable`（另一张名单）。
+        # 两件事从 2026-10-08 起彻底分开（用户："我要的是**记忆**不是对话"，
+        # 以及"只是不回复，不要影响上下文和记忆入栈"）。
         self.allowed_groups = allowed_groups
         self.store = store or MemoryStore(self.settings.data_dir / "memory.sqlite3", retention_seconds=self.settings.retention_days * 86400, protect=True)
         self.metrics = MemoryMetrics()

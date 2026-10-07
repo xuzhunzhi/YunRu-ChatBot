@@ -1,4 +1,4 @@
-"""本地状态持久化：群启停名单、启停开关与短期会话。
+"""本地状态持久化：群启停名单、**群记忆名单**、启停开关与短期会话。
 
 设计约束：
 - 只用标准库 JSON，原子写入（临时文件 + 替换），不使用数据库连接；
@@ -64,6 +64,11 @@ class PersistedState:
 
     enabled: bool = True
     enabled_group_ids: tuple[str, ...] = ()
+    # **哪些群开记忆**（`/super enable memory` 在哪个群说就开哪个群）。它与
+    # `enabled_group_ids`（哪些群开对话）是两张互不相干的名单：关掉一个群的对话
+    # 不该停掉它的记忆，反之亦然（2026-10-08 用户："我要的是记忆不是对话"）。
+    # 默认空 = 一个群都不记（群号不许写进代码，要哪个群就逐群开）。
+    memory_group_ids: tuple[str, ...] = ()
     target_group_id: str = ""
     sessions: tuple[dict[str, object], ...] = ()
     # 管理员是**按群授权**的：`/super addadmin @某人` 在哪个群发的，就记在哪个群下面。
@@ -111,6 +116,7 @@ class RuntimeStateStore:
         return PersistedState(
             enabled=bool(data.get("enabled", True)),
             enabled_group_ids=self._clean_group_ids(groups),
+            memory_group_ids=self._clean_group_ids(data.get("memory_group_ids")),
             target_group_id=str(data.get("target_group_id", "") or ""),
             sessions=tuple(item for item in sessions if isinstance(item, dict)) if isinstance(sessions, list) else (),
             group_admins=self._clean_group_admins(data.get("group_admins")),

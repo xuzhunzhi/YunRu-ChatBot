@@ -175,6 +175,9 @@ class MemoryMaintenanceAgent:
                  *, timeout=45.0, max_batches=8, feature_logs=None):
         self.client = client
         self.store = store
+        # **记忆开放的群**（`/super enable memory` 在哪个群说就开哪个群），
+        # 不是"开对话的群"。两者 2026-10-08 起是两件事：从前这里拿到的是群对话白名单，
+        # 而它同时被用作"把不在白名单里的待处理行删掉"的判据（体检实测丢过 249 条）。
         self.allowed_groups = allowed_groups
         self.metrics = metrics
         self.timeout = timeout
@@ -220,9 +223,17 @@ class MemoryMaintenanceAgent:
                 batch = None
                 started = time.monotonic()
                 try:
+                    # 认领的判据是"这个群**开了记忆**"（`/super enable memory`，在那个群里
+                    # 说的那一句），**不是**"这个群开没开对话"（`/admin enable|disable`）：
+                    # 两张名单，用户 2026-10-08 的原话是"我要的是**记忆**不是对话"。
+                    #
+                    # 从前这里多一步 `discard_disallowed(allowed_groups())`：先把不在集合里的
+                    # 待处理行**静默删掉**（体检实测因此丢过 249 条普通聊天），再按同一个集合
+                    # 认领。那个删除已经删掉——关掉一个群的记忆只表示"不再收新的"，
+                    # 已有的行留在库里，重新打开就接着处理。
                     groups = set(self.allowed_groups())
-                    await asyncio.to_thread(self.store.discard_disallowed, groups)
-                    batch = await asyncio.to_thread(self.store.claim, groups, lease_seconds=self.timeout + 30)
+                    batch = await asyncio.to_thread(self.store.claim, groups,
+                                                    lease_seconds=self.timeout + 30)
                     if batch is None:
                         break
                     if batch.group_id not in self.allowed_groups():
@@ -245,7 +256,10 @@ class MemoryMaintenanceAgent:
                                  cache_miss=int(usage.get("prompt_cache_miss_tokens", 0)))
                     self.metrics.input_tokens += usage.get("prompt_tokens", 0)
                     self.metrics.output_tokens += usage.get("completion_tokens", 0)
-                    # Group disable during the request revokes the commit as well.
+                    # 这次调用中间这个群的**记忆被关掉**了 → 这次提交不算数。
+                    # 与从前的"群被关掉就撤销提交"同一形状、同一判据（只是那个集合现在
+                    # 表示"哪些群开记忆"，不再表示"哪些群开对话"）。关掉不删行：
+                    # 这条材料会带着租约到期回到待处理，重新打开就接着处理。
                     if batch.group_id not in self.allowed_groups():
                         break
                     ops = await asyncio.to_thread(self.store.commit, batch, raw)

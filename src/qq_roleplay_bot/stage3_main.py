@@ -256,7 +256,22 @@ SUPER_SLANG_PATTERN = re.compile(
     re.IGNORECASE,
 )
 # 群管理与群主命令的解析**已经搬进插件**（`builtin_group_commands.py`，2026-09-30
-# 用户要求"stage4 的内容都用插件实现"）。核心不再认识这些命令的字面形状，只保留：
+# 用户要求"stage4 的内容都用插件实现"）。核心不再认识这些命令的字面形状，
+# 只保留下面这一条自己的记忆开关。
+#
+# `/super enable memory` / `/super disable memory`：**记忆开关**（按群）。
+#
+# 单独一条模式、先于通用的 `SUPER_COMMAND_PATTERN` 判：那个模式的 action 组里没有
+# enable/disable，所以两者本来不会撞；单独列出来是为了让"这条命令的形状"一眼可见
+# （它和 `/admin enable|disable` 是同一套用法，只是管的是另一张名单）。
+# 尾部那个 group 捕获**不是参数**：它是用来"认出并拒绝手滑带了群号"的，
+# 与 `/admin enable 群号` 的处理一致（`_admin_command_reply` 里那段说明）。
+SUPER_MEMORY_SWITCH_PATTERN = re.compile(
+    r"^[/#]super\s+(?P<action>enable|disable|开启|关闭|打开|停止)\s+(?P<target>memory|记忆)"
+    r"(?:\s+(?P<group>\S+))?\s*$",
+    re.IGNORECASE,
+)
+
 # 档位判定（`_plugin_level_allowed`）与动作执行（`_plugin_action_reply`）。
 # `/super admin list` 最多列这么多行：出站正文上限是 1000 字符，
 # 名单长了要主动截断并说明还有多少人，不能撞上限被静默截掉。
@@ -399,6 +414,8 @@ class SuperAction(str, Enum):
     AFFINITY = "affinity"
     AFFINITY_RESET = "affinity_reset"
     MEMORY = "memory"
+    MEMORY_ON = "memory_on"
+    MEMORY_OFF = "memory_off"
     MEMORY_RECORDS = "memory_records"
     MEMORY_INBOX = "memory_inbox"
     MEMORY_AUDIT = "memory_audit"
@@ -420,6 +437,12 @@ def parse_super_command(text: str) -> SuperAction | None:
     stripped = text.strip()
     if SUPER_HELP_PATTERN.fullmatch(stripped):
         return SuperAction.HELP
+    # 记忆开关先于通用模式判（形状与 `/admin enable|disable` 对称）。
+    switch = SUPER_MEMORY_SWITCH_PATTERN.fullmatch(stripped)
+    if switch:
+        action = (switch.group("action") or "").casefold()
+        return (SuperAction.MEMORY_ON if action in {"enable", "开启", "打开"}
+                else SuperAction.MEMORY_OFF)
     if SUPER_ADD_ADMIN_PATTERN.fullmatch(stripped):
         return SuperAction.ADD_ADMIN
     if SUPER_DEL_ADMIN_PATTERN.fullmatch(stripped):
@@ -963,6 +986,7 @@ class DialogueEngine:
         admin_user_ids: frozenset[str] = ADMIN_USER_IDS,
         super_admin_user_ids: frozenset[str] = SUPER_ADMIN_USER_IDS,
         enabled_group_ids: frozenset[str] | None = None,
+        memory_group_ids: frozenset[str] | None = None,
         relay_target_resolver: RelayTargetResolver | None = None,
         runtime_diagnostics: "RuntimeDiagnostics | None" = None,
         memory_service: MemoryService | None = None,
@@ -1040,6 +1064,20 @@ class DialogueEngine:
         self.group_admin_ids: dict[str, set[str]] = {}
         self.super_admin_user_ids: set[str] = set(super_admin_user_ids)
         self.enabled_group_ids = set(enabled_group_ids) if enabled_group_ids is not None else {target_group_id}
+        # **哪些群开记忆**（`/super enable|disable memory` 在哪个群说的，就动哪个群）。
+        #
+        # 它与 `enabled_group_ids`（哪些群开对话）是**两张互不相干的名单**：
+        # `enabled_group_ids` 只决定"回不回"，这张只决定"记不记"。2026-10-08 之前
+        # 记忆用的是**上面那一张**，于是有人在群里发一句 `/admin disable` 就等于
+        # 把那个群还没处理完的记忆材料清空（体检实测丢过 249 条普通聊天）。
+        # 用户当天定的口径：*"我要的是**记忆**不是对话"*、*"只是不回复，不要影响
+        # 上下文和记忆入栈"*。
+        #
+        # 默认**空**：一个群都不记，等操作者在要记的群里逐群 `/super enable memory`。
+        # 这里刻意不回落成 `{target_group_id}`——那会把"单群部署"与"这个群要记忆"
+        # 重新捆在一起，正是这次要拆开的东西。空名单在 `/super memory` 里看得见。
+        self.memory_group_ids = (set(memory_group_ids) if memory_group_ids is not None
+                                 else set())
         self.relay_target_resolver = relay_target_resolver
         # 机器诊断（进程/网卡/风扇）。**可插能力**：没接上时 `_HostMachineProbe()`
         # 是个空壳，`/super processes|lan|fan` 会如实回"采不到"，而不是让核心起不来。
@@ -1765,6 +1803,8 @@ class DialogueEngine:
 
         if action is SuperAction.HELP:
             return await self._help_reply(message, title="云茹 · 超管命令", text=SUPER_HELP)
+        if action in {SuperAction.MEMORY_ON, SuperAction.MEMORY_OFF}:
+            return self._memory_group_switch(message, enabled=action is SuperAction.MEMORY_ON)
         if action is SuperAction.ADD_ADMIN:
             return self._add_admin(message)
         if action is SuperAction.DEL_ADMIN:
@@ -1818,7 +1858,61 @@ class DialogueEngine:
             return self._mail_status()
         if action is SuperAction.MAIL_NOW:
             return await self._mail_send_now()
-        return self._super_memory(action)
+        return self._super_memory(action, message)
+
+    def _memory_group_switch(self, message: IncomingMessage, *, enabled: bool) -> str:
+        """`/super enable|disable memory`：**在哪个群说，就动哪个群的记忆**。
+
+        与 `/admin enable|disable` 完全对称——连"私聊里说"和"手滑带了群号"的处理都
+        照抄那一条（见 `_admin_command_reply`）：记忆名单与对话名单都是**按群**的，
+        两张名单互不相干。用户 2026-10-08 的两次纠正合起来就是这个形状：
+        *"我要的是**记忆**不是对话"*、*"我要的是**在哪个群说 enable/disable 就开启/
+        关闭哪个群的**"*。
+
+        关掉**不删任何东西**：已有的待处理行留在库里，重新打开就接着处理。
+        """
+
+        group_id = message.target.group_id or ""
+        if not group_id:
+            # 照 `/admin` 私聊那一句的原话：这条命令管的就是你发命令的那个群。
+            return "这条命令要在群里发：它管的就是你发命令的那个群。"
+        typed = SUPER_MEMORY_SWITCH_PATTERN.fullmatch((message.text or "").strip())
+        extra = (typed.group("group") or "") if typed else ""
+        if extra.isdigit():
+            # 与 `/admin enable 群号` 逐字同一句（那边也是"参数已去掉"的处理）。
+            return ("群号参数已经去掉了：这条命令只管你发命令的这个群"
+                    f"（现在就是 {group_id}）。")
+        if extra:
+            return f"这条命令不带参数：它只管你发命令的这个群（现在就是 {group_id}）。"
+        if enabled:
+            changed = self.enable_group_memory(group_id)
+            text = (f"本群（{group_id}）已开启记忆：新消息会进记忆收件箱，维护照常处理。"
+                    if changed else f"本群（{group_id}）本来就开着记忆。")
+        else:
+            changed = self.disable_group_memory(group_id)
+            text = (f"本群（{group_id}）已关闭记忆：新消息不再进收件箱；"
+                    "已有的待处理材料一条都不删，重新打开就接着处理。"
+                    if changed else f"本群（{group_id}）当前未开启记忆。")
+        self._log_memory_switch(group_id, enabled)
+        return text
+
+    def _log_memory_switch(self, group_id: str, enabled: bool) -> None:
+        """开关动作进 `control_audit`（与面板改配置同一条只增流水）。
+
+        这条接缝可能没有（测试、裁掉审计能力的部署）——那是 `NoAudit` 或 `None`，
+        两种情况都不该影响命令本身，所以整段兜住。
+        """
+
+        audit = getattr(self, "control_audit", None)
+        if audit is None:
+            return
+        try:
+            audit.record("memory_group_switch",
+                         detail={"group_id": group_id,
+                                 "memory": "1" if enabled else "0"},
+                         result="on" if enabled else "off", source="super")
+        except Exception:  # noqa: BLE001 - 记账失败不该让命令看起来没生效
+            logger.warning("memory_switch_audit_failed group=%s", group_id, exc_info=True)
 
     def _spawn_diagnostics(self, target: MessageTarget, mode: str) -> None:
         """先回一句、稍后把诊断结果单独发出去（`/super processes cpu` 用）。
@@ -3122,15 +3216,24 @@ class DialogueEngine:
             kind = getattr(exc, "kind", "") or type(exc).__name__
             return f"余额：查询失败（{kind}）"
 
-    def _super_memory(self, action: SuperAction) -> str:
-        """记忆查看。未接入记忆服务时给出明确说明而不是报错。"""
+    def _super_memory(self, action: SuperAction, message: IncomingMessage) -> str:
+        """记忆查看。未接入记忆服务时给出明确说明而不是报错。
+
+        `/super memory`（不带动词）多一行**本群记不记**：它是按群的开关，
+        所以答案取决于"这句话是在哪个群说的"（`memory_group_note`）。
+        待处理材料数在这份概览里本来就有，读写失败数在 `/super status` 那一行——
+        这里不重复印第二遍。
+        """
 
         if self.memory_service is None or getattr(self.memory_service, "store", None) is None:
             return "记忆服务未启用，无法查看。"
         store = self.memory_service.store
         try:
             if action is SuperAction.MEMORY:
-                return build_overview(store.counts()).render()
+                return build_overview(
+                    store.counts(),
+                    memory_note=self.memory_group_note(message.target.group_id),
+                ).render()
             if action is SuperAction.MEMORY_RECORDS:
                 records, total = store.list_records(limit=MAX_LIST_ITEMS)
                 return build_records_view(records, total=total).render()
@@ -3171,6 +3274,48 @@ class DialogueEngine:
             self.persist_state()
         return was_enabled
 
+    def enable_group_memory(self, group_id: str) -> bool:
+        """让这个群的群消息进记忆（`/super enable memory` 在哪个群说就动哪个群）。
+
+        返回"这次真的改了没有"——与 `enable_group` 同一形状（幂等、只在真变化时落盘）。
+        **不碰 `enabled_group_ids`**：回不回是另一张名单。
+        """
+
+        if not group_id.isdigit() or not 5 <= len(group_id) <= 12:
+            return False
+        before = group_id in self.memory_group_ids
+        self.memory_group_ids.add(group_id)
+        if not before:
+            self.persist_state()
+        return not before
+
+    def disable_group_memory(self, group_id: str) -> bool:
+        """这个群不再收新记忆。**已有的待处理行一条都不删**（重新打开接着处理）。
+
+        与 `disable_group`（关对话）只有一处一致的地方：都是幂等的。别的一概不同——
+        关对话会顺手清掉这个群的短期会话状态，关记忆**什么都不清**：短期会话与记忆
+        是两份东西，而且"关掉"只该意味着"不再收新的"。
+        """
+
+        if not group_id.isdigit() or not 5 <= len(group_id) <= 12:
+            return False
+        was_enabled = group_id in self.memory_group_ids
+        self.memory_group_ids.discard(group_id)
+        if was_enabled:
+            self.persist_state()
+        return was_enabled
+
+    def memory_group_note(self, group_id: str | None) -> str:
+        """一句话说清"这个群记不记"（`/super memory` 用）。"""
+
+        if not group_id:
+            return ("本群记忆：这里不是群聊。这条开关按群生效，要在要记的那个群里发"
+                    "（/super enable memory）。")
+        if group_id in self.memory_group_ids:
+            return f"本群记忆：开（{group_id} 的新消息会进记忆收件箱）"
+        return (f"本群记忆：关（{group_id} 的新消息不进记忆收件箱；"
+                "在本群发 /super enable memory 打开）")
+
     def _commit_usage_counters(self) -> None:
         """把"全时总量 = 账本 baseline + 本次进程"写回账本。
 
@@ -3186,7 +3331,7 @@ class DialogueEngine:
             logger.debug("api_usage_commit_failed", exc_info=True)
 
     def persist_state(self) -> bool:
-        """把群启停名单、启停开关与短期会话写入本地状态库。
+        """把群启停名单、**群记忆名单**、启停开关与短期会话写入本地状态库。
 
         未配置 state_store 时是空操作；写入失败只记录，不影响对话。
 
@@ -3201,6 +3346,9 @@ class DialogueEngine:
         return self.state_store.save({
             "enabled": self.enabled,
             "enabled_group_ids": sorted(self.enabled_group_ids),
+            # 记忆名单与对话名单一起落盘、一起恢复，但**各存各的键**：
+            # 一张是"回不回"，一张是"记不记"（见 `memory_group_ids` 的说明）。
+            "memory_group_ids": sorted(self.memory_group_ids),
             "target_group_id": self.target_group_id,
             "sessions": self.sessions.export(max_sessions=MAX_PERSISTED_SESSIONS),
             # 授权按群落盘：`/super addadmin` 在哪个群发的，就记在哪个群下面。
@@ -3222,6 +3370,9 @@ class DialogueEngine:
         self.enabled = persisted.enabled
         if persisted.enabled_group_ids:
             self.enabled_group_ids = set(persisted.enabled_group_ids)
+        # 记忆名单照自己的键恢复。**不跟对话名单互相兜底**：老状态文件里没有这个键，
+        # 那就是"还没人开过记忆"（空名单），而不是"沿用对话名单"——那正是要拆掉的耦合。
+        self.memory_group_ids = set(persisted.memory_group_ids)
         restored = self.sessions.restore(persisted.sessions)
         # 授权按群恢复：state 里存的就是"哪个群、哪几个人"。
         for group_id, admins in persisted.group_admins.items():
@@ -3429,6 +3580,31 @@ class DialogueEngine:
             else f"本群（{group_id}）当前没有短期对话状态。"
         )
 
+    async def _absorb_without_reply(self, message: IncomingMessage, *, resumed: bool) -> None:
+        """把一条**不该得到回复**的群消息记进上下文与记忆，什么都不回。
+
+        用在两处：这个群没开对话（`/admin disable`），以及管理员在没开的群里闲聊。
+        用户 2026-10-08 的原话是"**只是不回复，不要影响上下文和记忆入栈**"，
+        所以这里只做"记"；**"不回"由调用方原样 `return None` 保证**，一个字没动。
+
+        与冷群落背景那条路（`handle()` 里的焦点分流）同一个口径：
+        `refresh_activity=False`——她没在跟这个群说话，不该把"最近活跃"往后推，
+        否则这个群会在她没开口的情况下自己变成热群。
+        """
+
+        # 记了就必须去重：老路径"什么都不做"所以不需要它，现在历史与记忆都会多一条。
+        if not resumed and not self.deduplicator.accept(message.message_id):
+            return
+        if self.memory_service is not None:
+            # 记忆收不收是**它自己那张按群名单**的事（`/super enable memory`），
+            # 这里不看群对话开关。
+            self.memory_service.capture(message)
+        state = self.sessions.state(message.session_id)
+        # 先补背景再记这一条：`_seed_history` 只在历史为空时补，而下面这条一进去
+        # 历史就不空了——不先补，这个会话之后永远补不上群背景（比改动前更差）。
+        await self._seed_history(message, state)
+        state.add(message, self.clock(), refresh_activity=False)
+
     async def handle(self, message: IncomingMessage) -> OutgoingMessage | None:
         """处理一条输入；返回要发送的目标和正文，否则表示不发送。
 
@@ -3571,6 +3747,15 @@ class DialogueEngine:
                     message.user_id,
                 )
             logger.debug("Stage 3 ignored non-target session: %s", message.session_id)
+            # **`/admin disable 群` 从 2026-10-08 起只表示"不回复"**：这条消息照进
+            # 短期历史，也照进记忆收件箱（**只要那个群开了记忆**），只有"回不回"
+            # 被关掉。用户原话："只是不回复，不要影响上下文和记忆入栈"。
+            #
+            # 只对**群消息**这么做：私聊白名单外的人仍然整条丢弃（fail-closed，
+            # 见 AGENTS.md §2.1），那里不是"这个群没开"而是"这个人没被允许"。
+            # 记忆那张名单与这张互不相干（`DialogueEngine.memory_group_ids`）。
+            if message.target.group_id is not None:
+                await self._absorb_without_reply(message, resumed=resumed)
             return None
         if not resumed and not self.deduplicator.accept(message.message_id):
             self._stats["ignored_messages"] += 1
@@ -3661,6 +3846,8 @@ class DialogueEngine:
                 message.target.group_id,
                 message.user_id,
             )
+            # 同上：只是不回，上下文与记忆照记（管理员在没开的群里说的也是群里的真事）。
+            await self._absorb_without_reply(message, resumed=resumed)
             return None
 
         if self.memory_service is not None:

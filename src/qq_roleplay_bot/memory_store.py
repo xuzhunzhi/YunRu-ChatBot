@@ -578,6 +578,16 @@ class MemoryStore:
             self._cleanup(db, self.clock())
 
     def claim(self, allowed_groups: set[str], *, lease_seconds=120.0, limit=40) -> MemoryBatch | None:
+        """认领一批待处理材料。`allowed_groups` 是**记忆开放的群**（`/super enable memory`）。
+
+        它**不是**"这个群开不开对话"（`/admin enable|disable` 动的是那一个）。两者是两件事：
+        2026-10-08 之前这里是同一个集合，于是"关掉一个群的对话"顺手就把它的待处理材料
+        当成"白名单变了"**静默删掉**（体检实测丢过 249 条普通聊天）——见下面那段说明。
+
+        空集合仍然表示"一个群都不许"（与从前一致），所以没开记忆的群不会被认领，
+        它的行**留在库里**等着被打开，而不是被删。
+        """
+
         now = self.clock()
         with self.connection() as db:
             self._cleanup(db, now)
@@ -628,19 +638,21 @@ class MemoryStore:
             events = tuple(InboxEvent(**{k: row[k] for k in InboxEvent.__dataclass_fields__}) for row in rows)
             return MemoryBatch(token, group_id, user_id, events, tuple(records), now + lease_seconds)
 
-    def discard_disallowed(self, allowed_groups: set[str]):
-        """Drop pending material only when the host explicitly changes its allowlist."""
-        with self.connection() as db:
-            placeholders = ",".join("?" for _ in allowed_groups)
-            if not placeholders:
-                db.execute("DELETE FROM inbox")
-                db.execute("DELETE FROM leases")
-                db.execute("DELETE FROM replays")
-                return
-            db.execute(f"DELETE FROM inbox WHERE group_id NOT IN ({placeholders})", tuple(allowed_groups))
-            db.execute(f"DELETE FROM leases WHERE group_id NOT IN ({placeholders})", tuple(allowed_groups))
-            # 重放表只按事件 id 关联，需清掉已经没有对应 inbox 行的孤儿记录。
-            db.execute("DELETE FROM replays WHERE id NOT IN (SELECT id FROM inbox)")
+    # 这里原来有一个 `discard_disallowed(allowed_groups)`：维护每 tick 调一次，
+    # 把"不在那个集合里的群"的待处理行、租约与重放**静默删掉**。
+    #
+    # **2026-10-08 删掉它**（用户："只是不回复，不要影响上下文和记忆入栈"）。
+    # 那次删除的判据当时取的是"这个群开不开对话"，于是有人在群里发一句
+    # `/admin disable` 就等于把那个群还没处理完的记忆材料清空——体检实测因此丢过
+    # 249 条普通聊天（见 `docs/audits/isolation-growth-2026-10-08.md` 的"摄取"一节）。
+    # 记忆开不开**是另一套开关**（`/super enable|disable memory`，在哪个群说就动哪个群；
+    # 见 `memory_inbox` / `DialogueEngine.memory_group_ids`），而且那一套也**只决定收不收**：
+    # 关掉之后已有的待处理行一条都不删，重新打开接着处理。
+    #
+    # 为什么是**删方法**而不是"留个不删的同名方法"：它唯一的作用就是删。留一个
+    # `discard_*` 却什么都不删，等于让名字撒谎——下一个人会照名字去理解它。
+    # "保留"这件事因此不需要代码：不删就是不删；可见性由 `/super memory` 的
+    # 待处理材料数与 `/super memory inbox` 承担。
 
     def release(self, batch: MemoryBatch):
         with self.connection() as db:

@@ -1942,7 +1942,11 @@ def _start_memory(engine: DialogueEngine, client) -> MemoryService | None:
         usage_store=_USAGE_STORE,
         usage_role="memory",
     )
-    allowed = lambda: set(engine.enabled_group_ids) if engine.enabled else set()
+    # **记忆开放的群**，不是"开对话的群"：`engine.memory_group_ids` 由
+    # `/super enable|disable memory`（在哪个群说就动哪个群）维护，与 `/admin enable|
+    # disable` 那张对话名单互不相干（2026-10-08 用户："我要的是**记忆**不是对话"）。
+    # 全局停用（`engine.enabled`）时一份都不给：那种状态是"整个 bot 停了"。
+    allowed = lambda: set(engine.memory_group_ids) if engine.enabled else set()
     memory = MemoryService(maintenance_client, allowed, settings=settings,
                            feature_logs=engine.logs)
     engine.memory_service = memory

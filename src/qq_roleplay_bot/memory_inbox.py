@@ -17,6 +17,10 @@ logger = logging.getLogger(__name__)
 class MemoryInbox:
     def __init__(self, store: MemoryStore, allowed_groups, metrics: MemoryMetrics, *, clock=time.time):
         self.store = store
+        # **记忆开放的群**（`/super enable memory`，在那个群里说的那一句）。调用时现读，
+        # 所以命令一改就生效。它与"这个群开不开对话"（`/admin enable|disable`）
+        # 是**两张互不相干的名单**：2026-10-08 之前这里是同一个集合，于是关掉一个群的
+        # 对话顺手就把它的待处理材料当成"白名单变了"**静默删掉**（体检实测丢过 249 条）。
         self.allowed_groups = allowed_groups
         self.metrics = metrics
         self.clock = clock
@@ -27,7 +31,9 @@ class MemoryInbox:
     def offer(self, message: IncomingMessage, *, reply: str | None = None,
               session_key: str | None = None) -> bool:
         group = message.target.group_id
-        if group not in self.allowed_groups() or message.is_bot_message:
+        # 收不收只看**这个群开没开记忆**；回不回是群对话开关的事（另一张名单）。
+        # 私聊/邮件仍然不进来（它们没有群号，记忆至今只认群，见 `docs/PENDING.md` 第 8 条）。
+        if group is None or group not in self.allowed_groups() or message.is_bot_message:
             return False
         raw = reply if reply is not None else message.text
         # Credentials/local diagnostics do not enter either temporary storage or the agent.
@@ -57,7 +63,11 @@ class MemoryInbox:
         while True:
             event, sender_name = await self.queue.get()
             try:
-                if event.group_id in self.allowed_groups():
+                if event.group_id not in self.allowed_groups():
+                    # 排队之后这个群的记忆被关掉：不写库（关掉就是"不再收"）。
+                    # **已入库的行一条都不动**——重新打开后它们照旧被维护处理。
+                    self.metrics.dropped += 1
+                else:
                     saved = False
                     for attempt in range(3):
                         try:

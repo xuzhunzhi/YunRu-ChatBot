@@ -445,12 +445,28 @@ class MemoryStoreTests(unittest.TestCase):
         self.store.commit(batch, output(operation(batch, op="DELETE", targets=batch.records, evidence=[])))
         self.assertEqual(self.store.retrieve(GROUP, "100", ""), ())
 
-    def test_disabled_group_pending_material_is_discarded(self):
+    def test_pending_material_of_a_group_outside_the_memory_list_is_kept(self):
+        """不在记忆名单里的群，它的待处理行**必须留着**，而不是被删掉。
+
+        这条原来叫 `test_disabled_group_pending_material_is_discarded`，断言的是
+        `discard_disallowed({OTHER})` 之后"这个群的行没了"——那正是 2026-10-08 用户要
+        收窄掉的语义（"只是不回复，不要影响上下文和记忆入栈"；体检实测因此丢过 249 条）。
+        那个方法已经删除，现在断言反过来：**一条都不许少**，而且重新打开（把群放回
+        名单）之后必须还能被认领走——不是永远积压。
+        """
+
         batch = self.batch()
         self.store.release(batch)
-        self.store.discard_disallowed({OTHER})
+        with self.store.connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM inbox").fetchone()[0], 1)
+        # 名单里没有这个群：认领不走，但行**还在**（空集合仍然表示"一个群都不许"）。
         self.assertIsNone(self.store.claim({OTHER}))
-        self.assertIsNone(self.store.claim({GROUP}))
+        with self.store.connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM inbox").fetchone()[0], 1)
+        # 重新放进名单：那条材料照旧被认领、被处理。
+        claimed = self.store.claim({GROUP})
+        self.assertIsNotNone(claimed)
+        self.assertEqual([e.text for e in claimed.events], ["我喜欢被叫作小明"])
 
     def test_prompt_data_is_escaped_bounded_and_identity_filtered(self):
         record = self.seed()
@@ -844,9 +860,20 @@ class MemoryAsyncTests(unittest.IsolatedAsyncioTestCase):
             service = MemoryService(client, groups, store=self.store)
             services.append(service)
             return service
+        # 记忆是**按群**开的（`/super enable memory`，2026-10-08）：这条用例验的是
+        # "组装路径把记忆服务接上了"，所以显式把测试群加进记忆名单——名单本身与
+        # `/admin enable|disable` 那张对话名单是两回事（见
+        # `tests/test_disable_means_no_reply.py`）。默认空名单时她一条都不收，
+        # 那也是有意的（"群号不许写进代码"）。
+        built = runtime.build_engine
+        def build_engine(*args, **kwargs):
+            engine = built(*args, **kwargs)
+            engine.memory_group_ids = {GROUP}
+            return engine
         with patch.object(runtime, "OpenAICompatibleClient", Client), \
                 patch.object(runtime.dev_config, "API_KEY", "offline-placeholder"), \
                 patch.object(runtime, "MemoryService", factory), \
+                patch.object(runtime, "build_engine", build_engine), \
                 patch.object(main, "OneBotWebSocketTransport", Transport), \
                 patch.object(runtime.dev_config, "DUAL_AGENT_ENABLED", False):
             # 这个用例验的是"记忆服务接线"，不是双 agent 行为；关掉双 agent，
