@@ -253,21 +253,18 @@ class LeftRailTests(unittest.TestCase):
                 f"左栏的渲染代码里又出现了操作控件的 id `{action}`（它该在页面里）")
 
     def test_the_moved_controls_are_still_there_where_they_moved_to(self) -> None:
-        """搬走 ≠ 删掉：四样功能各自有新落点，且 `render()` 之后仍能被 `bind()` 认领。
+        """搬走 ≠ 删掉：那几样功能各自有新落点，且 `render()` 之后仍能被 `bind()` 认领。
 
         做法与项目里其余前端断言一致（认字符串），但每一处都点名它是"哪一个功能的
         新落点"，所以失败信息直接告诉人该去哪找。
+
+        ⚠️ 「刷新」**不在这一条里了**（2026-10-06 用户："右上角的刷新先删掉反正，
+        这个太丑了"）——它现在是**删掉**的，判据反过来钉在
+        `test_there_is_no_permanent_refresh_button_in_the_content_head` 与
+        `test_the_failure_state_grows_its_own_retry_entry`。
         """
 
-        html = _asset("index.html")
         js = _asset("app.js")
-
-        # 刷新 → 内容区顶栏（`render()` 重画的就是"当前这一页"，所以它属于每一页自己）。
-        self.assertRegex(
-            html, r'<button[^>]*id="refresh"[^>]*>',
-            "内容区顶栏没有「刷新」按钮：它从左栏搬到了 `<header class=\"page-head\">`")
-        self.assertIn('$("refresh").addEventListener("click", render)', js,
-                      "「刷新」按钮没有接上 `render`")
 
         # 深色 → 调参页「面板」分组的开关（浏览器本地偏好，不写 data/、不进覆盖层）。
         self.assertIn('id="panel-theme"', js, "调参页里没有深色开关 `#panel-theme`")
@@ -287,6 +284,60 @@ class LeftRailTests(unittest.TestCase):
                       "总览页没有接住从左栏搬来的本体状态那一行")
         self.assertIn("statusRow(health, st)", js,
                       "`viewOverview` 没有把本体状态那一行放进「运行」卡")
+
+    def test_there_is_no_permanent_refresh_button_in_the_content_head(self) -> None:
+        """内容区顶栏**不许有常驻控件**（用户 2026-10-06："右上角的刷新先删掉反正"）。
+
+        「不许有常驻控件」的准确判据是：顶栏里除了窄屏那个 `#back`（它在桌面/中等屏
+        `display:none`、只在窄屏阅读态出现，**不是常驻**），不许再有别的按钮/输入；
+        而且 `app.js` 里也不许留着 `#refresh` 的绑定（删就要删干净）。
+        """
+
+        html = _asset("index.html")
+        js = _asset("app.js")
+        css = _asset("app.css")
+        self.assertNotIn('id="refresh"', html,
+                         "右上角那颗常驻「刷新」又回来了（用户要求删掉）")
+        head = re.search(r'<header class="page-head">(.*?)</header>', html, re.S)
+        self.assertIsNotNone(head, "index.html 里找不到内容区顶栏 `<header class=\"page-head\">`")
+        buttons = re.findall(r"<button[^>]*>", head.group(1))
+        for tag in buttons:
+            self.assertIn('id="back"', tag,
+                          f"内容区顶栏里出现了常驻控件：{tag}——要做事的话让"
+                          "**失败态自己长入口**（见 `errorCard()`）")
+        for control in ("<input", "<select", "<textarea"):
+            self.assertNotIn(control, head.group(1),
+                             f"内容区顶栏里出现了 {control}（那是常驻控件）")
+        # `#back` 凭什么不算常驻：它在基础样式里是隐藏的，只在窄屏阅读态才出现。
+        self.assertRegex(css, r"#back\s*\{\s*display:\s*none",
+                         "`#back` 不再是「平时不出现」的那个返回按钮了")
+        self.assertRegex(css, r"@media \(max-width: 699px\)[\s\S]*?body\.is-reading #back",
+                         "`#back` 不再只由窄屏阅读态显出来")
+        self.assertNotIn('$("refresh")', js,
+                         "`#refresh` 的绑定还留着（按钮已经删了，别留死代码）")
+
+    def test_the_failure_state_grows_its_own_retry_entry(self) -> None:
+        """读不到时**那一页自己长出「重试」**（功能不裸删），平时页面上没有它。
+
+        用户要求：删掉常驻刷新，但"抓取失败"这个场景要有重试入口——所以判据是
+        `render()` 的 catch 走 `errorCard()`、那张卡里有 `#retry`、`bind()` 接住了它，
+        而且**别处不产出**这个按钮（否则又变成常驻控件）。
+        """
+
+        js = _asset("app.js")
+        render_body = _uncomment(_function_body(js, "render", kind="async"))
+        self.assertIn("errorCard(error)", render_body,
+                      "读不到时不再走失败态那张卡（`errorCard()`）")
+        card_body = _uncomment(_function_body(js, "errorCard"))
+        self.assertIn('id="retry"', card_body, "失败态那张卡里没有「重试」入口")
+        bound = _uncomment(_function_body(js, "bind"))
+        self.assertRegex(bound, r'if \(target\.id === "retry"\)',
+                         "「重试」没有接上（它该走 `bind()` 的委托）")
+        others = "\n".join(
+            _uncomment(_function_body(js, name, kind="async"))
+            for name in ("viewOverview", "viewAccount", "viewDevice", "viewSettings"))
+        self.assertNotIn('id="retry"', others,
+                         "「重试」跑到正常页面里去了——它只该在失败态出现")
 
     def test_the_status_row_reuses_the_single_overview_call(self) -> None:
         """`/api/overview` 一轮只拉一次：状态行复用 `state.overview`，不另开请求。
@@ -637,6 +688,86 @@ class ReadoutGridTests(unittest.TestCase):
             self.css, r"@media \(max-width: 699px\)[\s\S]*?\.grid \.kv\.span-2",
             "窄屏那条媒体查询没有把 `span-2` 压回整行"
             "（`span-2` 比 `.grid .kv` 多一个类，特异性更高，不点名就压不住）")
+
+
+class AccountAndDeviceTests(unittest.TestCase):
+    """账号页 / 设备页的两条规格（2026-10-06 用户，他要拿小米平板对着 MIUI 比）。
+
+    账号页（用户原话）：*"正常情况下**账号是不在下面的卡片里**其实，**显示一个头像一个
+    昵称单开一个比正常 tab 高一点的卡片**"* —— 所以钉：**第一张就是资料头卡**
+    （头像 + 她自己 + 状态，`card("")` 没有标题、排在最前）、头像是**浏览器**去取的
+    （后端代码里不许出现那个 CDN）、她的号只从**既有的** `/api/self` 接缝来。
+
+    设备页（用户只说"太丑"，没给规格）：照 MIUI「关于本机」= **分组卡 + 图标行 + 右侧值**，
+    钉：`VIEWS.device` 指向 `viewDevice`、它用 `prefRow`/`pref-list` 而不是把键值对
+    堆成一张表、只读既有的两个口（`/api/overview` + `/api/storage`）、并且**没接上的
+    那几样如实指路**（`/super`）而不是摆一张空表。
+    """
+
+    #: 账号页允许请求的读口（顺序无关）。
+    ACCOUNT_PATHS = ("/api/self", "/api/overview", "/api/settings")
+    #: 设备页允许请求的读口。
+    DEVICE_PATHS = ("/api/overview", "/api/storage")
+
+    def setUp(self) -> None:
+        self.js = _asset("app.js")
+
+    def _paths(self, body: str) -> list[str]:
+        return re.findall(r"api\(\"(/api/[^\"]*)\"", body)
+
+    def test_the_account_page_starts_with_a_profile_card(self) -> None:
+        body = _uncomment(_function_body(self.js, "viewAccount", kind="async"))
+        # 头卡是第一张：`card("", …)`（**没有标题**）必须是 body 里第一个 `card(`。
+        first = re.search(r"card\(\s*\"\"\s*,", body)
+        self.assertIsNotNone(first, "账号页第一张不是「资料头卡」（该是 `card(\"\", …)`）")
+        earlier = body[:first.start()]
+        self.assertNotIn("card(", earlier, "资料头卡之前还有别的卡片了——它该排在最前")
+        for part in ("profile-avatar", "avatar-img", "profile-name", "profile-tags"):
+            self.assertIn(part, body, f"资料头卡里少了 `{part}`")
+        # 昵称那条读口还没有 → 显示号；但**不许编**（要么她自己的号，要么"还没查到"）。
+        self.assertIn("还没查到她的号", body,
+                      "查不到她自己时没有如实说（会变成空白或编一个名字）")
+        self.assertNotIn("viewStub(", body,
+                         "账号页又变回「还没接」的占位卡了")
+        # 旧占位里那几样"计划放这些"的英文键名不许再出现。
+        for gone in ("provider_registry", "self_id\""):
+            self.assertNotIn(gone, body, f"账号页里还留着占位文案 `{gone}`")
+
+    def test_the_avatar_is_fetched_by_the_browser_not_the_backend(self) -> None:
+        """头像由**浏览器**取（用户明确要求），后端一个字节都不许去抓。"""
+
+        body = _uncomment(_function_body(self.js, "viewAccount", kind="async"))
+        self.assertIn("q1.qlogo.cn", body, "资料头卡里没有 QQ 头像的地址（浏览器取头像那一步）")
+        for name in ("webui_panel.py", "webui_data.py", "wire.py"):
+            source = resources.files("qq_roleplay_bot.plugins.webui").joinpath(
+                name).read_text(encoding="utf-8")
+            self.assertNotIn("qlogo", source,
+                             f"{name} 里去抓头像了——头像只能由浏览器取（用户要求）")
+
+    def test_the_identity_comes_only_from_the_existing_self_seam(self) -> None:
+        body = _uncomment(_function_body(self.js, "viewAccount", kind="async"))
+        paths = self._paths(body)
+        self.assertTrue(paths, "账号页一个 `api(...)` 都没有")
+        for path in paths:
+            self.assertIn(path, self.ACCOUNT_PATHS,
+                          f"账号页去打了 {path}——它只该用 {self.ACCOUNT_PATHS}")
+
+    def test_the_device_page_is_grouped_rows_not_a_key_value_dump(self) -> None:
+        vector = re.search(r"const VIEWS = \{(.*?)\n\};", self.js, re.S)
+        self.assertIsNotNone(vector, "app.js 里找不到 `VIEWS`")
+        self.assertRegex(vector.group(1), r"device:\s*viewDevice",
+                         "`VIEWS` 里 device 没有接到 `viewDevice()`")
+        body = _uncomment(_function_body(self.js, "viewDevice", kind="async"))
+        self.assertIn("prefRow(", body, "设备页不是「图标行」的写法（MIUI 那种）")
+        self.assertIn("pref-list", body, "设备页没有分组卡的壳（`pref-list`）")
+        self.assertNotIn("viewStub(", body, "设备页又变回占位卡了")
+        self.assertNotIn("kv(", body, "设备页把键值对堆成表了——该用分组行")
+        # 没有接缝的那几样要**如实指路**，不是摆一张空表。
+        self.assertIn("/super processes", body,
+                      "设备页没有说清「进程 / 网量」这类面板读不到、该去哪看")
+        for path in self._paths(body):
+            self.assertIn(path, self.DEVICE_PATHS,
+                          f"设备页去打了 {path}——它只该用 {self.DEVICE_PATHS}")
 
 
 if __name__ == "__main__":

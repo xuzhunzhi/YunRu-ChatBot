@@ -314,10 +314,21 @@ class Panel:
         return failure("not_found", status=404)
 
     def _health(self) -> dict[str, object]:
-        """面板健康。`engine_attached` 看的是**核心接缝在不在**，不是"有没有引擎对象"。"""
+        """面板健康。`engine_attached` 看的是**核心接缝在不在**，不是"有没有引擎对象"。
 
+        `panel_address`（装配点注入）给的是**实际**绑上的 host/port；取不到就退回配置值，
+        并由 `read_health` 用 `panel_port_exact` 标出来——设备页据此换一句更保守的话。
+        """
+
+        address = None
+        reader = self._seam("panel_address")
+        if callable(reader):
+            try:
+                address = reader()
+            except Exception:  # noqa: BLE001 - 报不出实际地址就退回配置值
+                logger.warning("webui_panel_address_failed", exc_info=True)
         return webui_data.read_health(attached=self._seam("state_reader") is not None,
-                                      started_at=self.started_at)
+                                      started_at=self.started_at, address=address)
 
     # --- 读接口 -----------------------------------------------------------
 
@@ -339,6 +350,17 @@ class Panel:
                 }))
             if path == "/api/state":
                 return json_response(_envelope(webui_data.read_state(state, root)))
+            # 「她自己是谁」（账号页那张资料头卡用）：**只走既有的 `self_id` 接缝**。
+            # 用户 2026-10-06 的规格要求"头像 + 昵称"，但也明说"昵称从**已有的**自己
+            # 状态接缝取，不要为它新开内部通道"——核心那边只缓存了号
+            # （`group_roles.cached_self_id`，`get_login_info` 的昵称它没留），
+            # 所以这里只回号；取不到就 `available: false`，由页面显示"还没查到"，
+            # **不编一个名字**、也不为昵称新增接缝。
+            if path == "/api/self":
+                return json_response(_envelope(self._self_view()))
+            # 「占用空间」（设备页那张卡）：面板自己的 data/ 落点，不碰核心。
+            if path == "/api/storage":
+                return json_response(_envelope(webui_data.read_storage(root)))
             if path == "/api/plugins":
                 # 插件清单：来自装配点注入的**只读**接缝（`UiSeams.plugins`）。
                 # 没有接缝就如实说"没启用"，**不编一份清单出来**。
@@ -863,6 +885,27 @@ class Panel:
         return {"available": True, "rows": rows, "total": total,
                 "limit": capped, "offset": skip,
                 "overview": index_overview(index)}
+
+    # --- 「她是谁」 / 「这台设备」 ------------------------------------------
+
+    def _self_view(self) -> dict[str, object]:
+        """她自己的号（**只调既有的 `self_id` 接缝**，没有第二条路）。
+
+        这个接缝是**同步**的 `() -> self_id`（`runtime._SeamBinder.ui_self_id` 读的是
+        角色服务缓存下来的那个值，不会为了读一次去驱动网络查询），所以拿不到就是空串
+        —— 面板如实说"还没查到"，不编、也不为此新增接缝。
+        """
+
+        reader = self._seam("self_id")
+        if not callable(reader):
+            return {"available": False, "self_id": ""}
+        try:
+            value = _call(reader) or ""
+        except Exception:  # noqa: BLE001 - 取不到当"还没有"，不把面板带崩
+            logger.warning("webui_self_id_failed", exc_info=True)
+            return {"available": False, "self_id": ""}
+        text = str(value).strip()
+        return {"available": bool(text), "self_id": text}
 
     # --- 「知识库 → 金句 / 黑话」：她**从群里学来的东西**（2026-10-06）----------
     #

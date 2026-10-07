@@ -220,6 +220,12 @@ def build_web_panel(registry):
     panel = Panel(seams, access)
     server = PanelServer(panel, host=dev_config.WEBUI_HOST, port=dev_config.WEBUI_PORT)
     seams["restart_gate"] = _restart_gate
+    # 面板**实际**监听在哪儿（设备页那张「本机」卡要显示它，而不是配置里那个值）。
+    # 为什么要有这一项（2026-10-06 截图核对抓到的）：配置写 `QQBOT_WEBUI_PORT=8790`，
+    # 而夹具跑在 8799 —— 页面照配置显示就成了**假话**；`port=0`（随机口）时更假。
+    # `bound_port` 由 `start()` 填（这台机器上真的绑上了才准），所以这里给的是**取值闭包**
+    # 而不是当场取一次：装配点这一刻服务还没起。
+    seams["panel_address"] = (lambda: {"host": server.host, "port": server.bound_port})
     if access.remote:
         logger.warning(
             "面板以**远程模式**启动：监听 %s:%s，允许来源 %s。"

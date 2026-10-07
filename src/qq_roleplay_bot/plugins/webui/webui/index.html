@@ -52,9 +52,9 @@
       <h2 id="page-title">总览</h2>
       <p id="page-nav" class="page-nav"></p>
     </div>
-    <!-- 「刷新」放**内容区顶栏**而不是左栏底部（2026-10-06 挪）：它拉的就是
-         "当前这一页"的数据（`render()` 重画当前页），所以属于每一页自己。 -->
-    <button id="refresh" class="icon-btn" type="button" title="重新拉这一页的数据">刷新</button>
+    <!-- 右上角那个常驻「刷新」**删掉了**（2026-10-06 用户："右上角的刷新先删掉反正，
+         这个太丑了"）。**没有换成别的常驻控件**——功能不裸删：读不到的时候由那一页
+         自己长出「重试」（见 app.js 的 `errorCard()`），平时页面上不占位置。 -->
   </header>
   <p id="error" class="error" hidden></p>
   <section id="view">加载中…</section>

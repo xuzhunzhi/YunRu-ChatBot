@@ -46,6 +46,10 @@ READ_PATHS = (
     "/health",
     "/api/overview",
     "/api/state",
+    # 账号页的资料头卡（她自己是谁 ← 既有的 `self_id` 接缝）与设备页的占用空间
+    # （面板自己的 data/ 落点）：两个都只读，接缝/目录不在时也必须回 200。
+    "/api/self",
+    "/api/storage",
     "/api/plugins",
     "/api/usage",
     "/api/settings",
@@ -514,6 +518,74 @@ class LearnedSeamTests(unittest.TestCase):
             hits = [text for text in strings if forbidden in text]
             self.assertEqual(hits, [],
                              f"面板里出现了她学来的那份文件名 {forbidden}：{hits}")
+
+
+class SelfAndStorageTests(_PanelCase):
+    """账号页「她自己是谁」与设备页「占用空间」两个读口（2026-10-06 两页返工）。
+
+    两条边界都是用户当轮定的：
+
+    * 她自己的号**只走既有的 `self_id` 接缝**（"昵称从已有的自己状态接缝取，不要为它
+      新开内部通道"）——所以取不到就 `available: false`，**不编一个名字**；
+    * 「占用空间」读的是**面板自己的 data/ 落点**（不是核心数据面），只数文件大小、
+      不打开文件：这一条用一个真目录验字节数对得上。
+    """
+
+    @staticmethod
+    def _ask(panel: Panel, path: str):
+        return panel.handle("GET", path, b"",
+                            {"accept": "application/json",
+                             "authorization": "Bearer " + TOKEN}, "127.0.0.1")
+
+    def test_self_comes_from_the_existing_seam_or_says_it_has_nothing(self) -> None:
+        # 有接缝：原样给号。
+        panel = Panel({"data_root": str(self.root), "self_id": lambda: "10001"},
+                      WebAccess(mode=LOCAL, token=TOKEN))
+        response = self._ask(panel, "/api/self")
+        data = self.payload(response)["data"]
+        self.assertEqual((response.status, data["available"], data["self_id"]),
+                         (200, True, "10001"))
+        # 没有接缝（或它回空）：available=false，**不编名字**。
+        response = self.request("GET", "/api/self")
+        data = self.payload(response)["data"]
+        self.assertEqual((response.status, data), (200, {"available": False, "self_id": ""}))
+
+    def test_storage_counts_what_is_really_there(self) -> None:
+        (self.root / "logs").mkdir()
+        (self.root / "logs" / "a.jsonl").write_bytes(b"x" * 100)
+        (self.root / "logs" / "b.jsonl").write_bytes(b"y" * 50)
+        (self.root / "runtime_state.json").write_text("{}", encoding="utf-8")
+        data = self.payload(self.request("GET", "/api/storage"))["data"]
+        self.assertTrue(data["available"])
+        by_name = {row["name"]: row for row in data["entries"]}
+        self.assertEqual(by_name["logs"]["bytes"], 150)
+        self.assertEqual(by_name["logs"]["files"], 2)
+        self.assertEqual(by_name["runtime_state.json"]["bytes"], 2)
+        self.assertEqual(data["total_bytes"], 152)
+        # 大的排前面（页面就按这个顺序铺）
+        self.assertEqual([row["name"] for row in data["entries"]][0], "logs")
+
+    def test_storage_on_a_missing_directory_is_not_an_error(self) -> None:
+        panel = Panel({"data_root": str(self.root / "nope")},
+                      WebAccess(mode=LOCAL, token=TOKEN))
+        response = self._ask(panel, "/api/storage")
+        self.assertEqual(response.status, 200)
+        self.assertFalse(self.payload(response)["data"]["available"])
+
+    def test_health_prefers_the_address_the_panel_really_bound(self) -> None:
+        """设备页显示的是**实际**监听地址，不是配置里的值（2026-10-06 截图核对抓到：
+        夹具听在 8799、配置写 8790——照配置显示就是一句假话）。"""
+
+        panel = Panel({"data_root": str(self.root),
+                       "panel_address": lambda: {"host": "127.0.0.1", "port": 43210}},
+                      WebAccess(mode=LOCAL, token=TOKEN))
+        data = self.payload(self._ask(panel, "/health"))["data"]
+        self.assertEqual((data["panel_host"], data["panel_port"], data["panel_port_exact"]),
+                         ("127.0.0.1", 43210, True))
+        # 没有那个接缝时退回配置值，并**如实标出**它不是实测的。
+        fallback = self.payload(self._ask(self.panel, "/health"))["data"]
+        self.assertFalse(fallback["panel_port_exact"])
+        self.assertIsInstance(fallback["panel_port"], int)
 
 
 class PortProbeTests(unittest.TestCase):

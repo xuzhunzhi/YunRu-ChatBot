@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import platform
 import sqlite3
 import time
 from pathlib import Path
@@ -579,10 +580,19 @@ def _port_in_use(host: str, port: int) -> bool:
     return False
 
 
-def read_health(*, attached: bool = False, started_at: float = 0.0) -> dict[str, object]:
+def read_health(*, attached: bool = False, started_at: float = 0.0,
+                address: object = None) -> dict[str, object]:
     """面板自己的健康 + bot 进程是否活着（**用 bind 探法**，不产生半截连接）。
 
     `attached` 由调用方给（面板自己知道核心那侧接上没有）——这里不该反过来去问引擎。
+    `address` 也是调用方给的（装配点注入的 `panel_address`：**实际**绑上的 host/port）。
+    两样都不给时退回配置值，并用 `panel_port_exact` 如实标出"这是配置里的、不是实测的"
+    ——设备页据此换一句更保守的话（2026-10-06 截图核对抓到：夹具听在 8799、配置写 8790，
+    照配置显示就是假话）。
+
+    2026-10-06 设备页返工加的几项（`python` / `panel_host` / `panel_port`）都是**面板
+    自己的东西**（本进程的 Python、我们监听的地址），不是核心的数据——所以这里读没有
+    越过任何接缝；核心那侧的（版本 / 提交 / 依赖）面板**读不到就是读不到**，不编。
     """
 
     # 主机/端口本来就是 `dev_config` 的（2026-10-01：原来连 `stage3_main` 里的
@@ -595,6 +605,9 @@ def read_health(*, attached: bool = False, started_at: float = 0.0) -> dict[str,
         live = bool(_port_in_use(dev_config.ONEBOT_WS_HOST, dev_config.ONEBOT_WS_PORT))
     except Exception:  # noqa: BLE001 - 探不到就报"不知道"，不猜
         live = False
+    bound = address if isinstance(address, dict) else {}
+    port = bound.get("port")
+    exact = isinstance(port, int) and not isinstance(port, bool) and port > 0
     return {
         "panel_started_at": started_at,
         "panel_uptime_seconds": round(max(0.0, time.time() - started_at), 1) if started_at else 0.0,
@@ -602,4 +615,93 @@ def read_health(*, attached: bool = False, started_at: float = 0.0) -> dict[str,
         "bot_live": live,
         "engine_attached": bool(attached),
         "data_dir": str(_data_root()),
+        "python": platform.python_version(),
+        "panel_host": str(bound.get("host") or dev_config.WEBUI_HOST),
+        "panel_port": int(port) if exact else dev_config.WEBUI_PORT,
+        "panel_port_exact": exact,
     }
+
+
+#: 「占用空间」那张卡最多往下走几层、最多数多少个文件。
+#: data/ 下的日志能有几万个小文件——数不完就如实说"至少这么多"，别把它当总数。
+STORAGE_MAX_DEPTH = 3
+STORAGE_MAX_ENTRIES = 20000
+
+
+def _dir_size(path: Path, budget: int, *, depth: int) -> tuple[int, int, bool]:
+    """递归求和：`(字节数, 数了几个文件, 有没有被上限截断)`。
+
+    只数 `st_size`，**不打开任何文件**；符号链接一律跳过（data/ 里可能有指向外部的
+    链接，跟着走会把别处的大小算进来）。
+    """
+
+    size = 0
+    used = 0
+    truncated = False
+    try:
+        children = list(os.scandir(path))
+    except OSError:
+        return 0, 0, False
+    for entry in children:
+        if used >= budget:
+            return size, used, True
+        try:
+            if entry.is_symlink():
+                continue
+            if entry.is_file(follow_symlinks=False):
+                size += entry.stat(follow_symlinks=False).st_size
+                used += 1
+                continue
+            if entry.is_dir(follow_symlinks=False) and depth < STORAGE_MAX_DEPTH:
+                child_size, child_used, cut = _dir_size(
+                    Path(entry.path), budget - used, depth=depth + 1)
+                size += child_size
+                used += child_used
+                truncated = truncated or cut
+        except OSError:
+            continue
+    return size, used, truncated
+
+
+def read_storage(root: Path | None = None) -> dict[str, object]:
+    """`data/` 下**每一项各占多少**（设备页那张「占用空间」卡）。
+
+    这是**面板自己的落点**（与它的日志页、状态文件同一棵树），不是核心的数据面，
+    所以这里直接读文件系统没有越过任何接缝。读不到就回 `available: false`。
+    """
+
+    base = Path(root) if root is not None else _data_root()
+    try:
+        children = sorted(base.iterdir(), key=lambda item: item.name)
+    except (FileNotFoundError, OSError):
+        return {"available": False, "entries": [], "total_bytes": 0,
+                "truncated": False, "path": str(base),
+                "limits": {"depth": STORAGE_MAX_DEPTH, "entries": STORAGE_MAX_ENTRIES}}
+    entries: list[dict[str, object]] = []
+    total = 0
+    truncated = False
+    budget = STORAGE_MAX_ENTRIES
+    for child in children:
+        try:
+            if child.is_symlink():
+                continue
+            if child.is_file():
+                size = child.stat().st_size
+                entries.append({"name": child.name, "bytes": size, "kind": "file",
+                                "files": 1})
+                total += size
+                continue
+            if not child.is_dir():
+                continue
+            size, used, cut = _dir_size(child, budget, depth=1)
+            budget -= used
+            truncated = truncated or cut
+            entries.append({"name": child.name, "bytes": size, "kind": "dir",
+                            "files": used})
+            total += size
+        except OSError:
+            continue
+    entries.sort(key=lambda item: (-int(item["bytes"]), str(item["name"])))
+    return {"available": True, "entries": entries, "total_bytes": total,
+            "truncated": truncated, "path": str(base),
+            "limits": {"depth": STORAGE_MAX_DEPTH, "entries": STORAGE_MAX_ENTRIES}}

@@ -1343,6 +1343,59 @@ nav { padding: 0 12px; }
  * 谁要给某一张卡里的某一项单开一档（`[data-sub]` 这类选择器），当场红。
  */
 
+/* --- 账号页的资料头卡（2026-10-06 用户给的规格，他要拿小米平板对着 MIUI 账号页比）--
+ *
+ * 用户原话：*"正常情况下**账号是不在下面的卡片里**其实，**显示一个头像一个昵称单开
+ * 一个比正常 tab 高一点的卡片**"*。
+ *
+ * 所以这是**单独一张卡**里的"头像 + 她自己"：卡片本身没有标题（`card("")`），
+ * 高度由 72px 的头像撑起来（72 + 上下内边距 20×2 ≈ 112px），比卡里那些 56px 的
+ * 偏好行明显高一档——这就是"比正常 tab 高一点"。
+ *
+ * 头像由**浏览器**直接向 QQ 头像 CDN 取；取不到（离线 / 还没查到她自己的号 / CDN 拦了）
+ * 就由 `bind()` 那条捕获阶段的 `error` 监听加上 `is-missing`，换成占位图标——
+ * **不留白框**（用户明确要求）。
+ */
+.profile { display: flex; align-items: center; gap: 18px; }
+.profile-avatar {
+  position: relative;
+  flex: 0 0 auto;
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  background: var(--secondary-container);
+  color: var(--text-3);
+}
+.profile-avatar .avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.profile-avatar .avatar-fallback { display: none; }
+.profile-avatar .avatar-fallback .icon { width: 34px; height: 34px; }
+.profile-avatar.is-missing .avatar-img { display: none; }
+.profile-avatar.is-missing .avatar-fallback { display: grid; place-items: center; }
+.profile-main { min-width: 0; }
+.profile-name {
+  font-size: 24px;                  /* title3 档：这一页最大的字（卡标题才 18px） */
+  font-weight: 700;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+.profile-sub { margin-top: 4px; color: var(--text-2); font-size: 14px; }
+.profile-tags { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+
+/* 窄屏：头卡收一档，但仍然是"比普通行高"的那一张 */
+@media (max-width: 699px) {
+  .profile { gap: 14px; }
+  .profile-avatar { width: 60px; height: 60px; }
+  .profile-name { font-size: 20px; }
+}
+
 /* 底部那块白卡（运行状态 / 令牌 / 刷新 / 主题）2026-10-06 撤掉了——左栏只放导航。
    沿 `nav` 那条渐隐线索仍然留着（它是导航的一部分，见 `nav` 那一段）。 */
 .rail-brand { padding: 0 12px 16px; }

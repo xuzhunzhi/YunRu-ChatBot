@@ -190,8 +190,8 @@ function icon(name, cls = "") {
 //: 每个页签下面那行说明（HyperOS 里大标题下常带一句副标题）。
 //: 注意这些是用 `textContent` 写进去的，**不能用 markdown 记号**（`**` 会原样显示）。
 const TAB_NOTES = {
-  account: "她这个账号：自己的号、供应商与模型、余额、用量、超管名单（脱敏）",
-  device: "设备：关于（版本 / 提交 / Python）、占用空间（data/ 下各项）、运行时诊断",
+  account: "账号：她的资料头卡（头像 + 她自己的号 + 状态）、这台设备怎么连面板、供应商与模型",
+  device: "设备：本机（地址 / Python / 数据目录）、与本体连接（端口 / 心跳 / 活快照）、占用空间（data/ 下各项）",
   logs: "判定 / 回复 / 记忆 / 规则 最近几次的模型输入输出（只读尾部）",
   settings: "六套 prompt、八个 agent 开关、模型与凭据、供应商切换",
   actions: "清短期会话、调关系、重启 bot",
@@ -1528,6 +1528,12 @@ function bind() {
       render();
       return;
     }
+    // 失败态里的「重试」：它就是"重画当前这一页"（原来那颗常驻刷新按钮干的事，
+    // 2026-10-06 按用户要求删掉，改由失败自己长出入口——见 `errorCard()`）。
+    if (target.id === "retry") {
+      render();
+      return;
+    }
     if (act("s-save", async (el) => {
       const box = el.closest(".card-inline").querySelector(".s-def");
       const done = await write("/api/knowledge/slang", {
@@ -1582,6 +1588,16 @@ function bind() {
       return;
     }
   });
+  // 账号页头像：**取不到就换占位，不留白框**（用户 2026-10-06 的规格）。
+  // `error` 事件**不冒泡**，所以这一条只能挂在**捕获**阶段上（`true`）——
+  // 挂在冒泡阶段等于永远收不到（`<img>` 的加载失败就是这样）。
+  $("view").addEventListener("error", (event) => {
+    const target = event.target;
+    if (target instanceof HTMLImageElement && target.classList.contains("avatar-img")) {
+      const box = target.closest(".profile-avatar");
+      if (box) box.classList.add("is-missing");
+    }
+  }, true);
 }
 
 /* ---------- 装配与刷新 ---------- */
@@ -1837,20 +1853,155 @@ function viewStub(title, planned) {
     + `<div class="kv">${rows}</div>`);
 }
 
-//: 账号页：目前只有"退出登录"是真的（它是**账号**的动作，2026-10-06 从左栏底部搬来），
-//: 其余内容仍是骨架——等"每用途凭据"那条接缝定下来再接（不提前建页，见 `CARDS` 注释）。
-function viewAccount() {
-  return card("面板登录", `<div class="pref-list">${prefRow(
+//: 数据根目录下那几个名字的**人话标签**（设备页「占用空间」用）。
+//: 没登记的名字照样显示原名（`|| name`）——后端多一个目录不会被吞掉。
+const STORAGE_LABELS = {
+  memory: "记忆库",
+  logs: "日志",
+  chunks: "知识库索引",
+  prompts: "面板改过的 prompt",
+  quote: "金句",
+  slang: "黑话",
+  traces: "模型原始 I/O",
+  "runtime_state.json": "运行状态快照",
+  "api_usage.json": "用量账本",
+  webui_isolated: "面板隔离目录（夹具）",
+};
+
+/* 账号页。用户 2026-10-06 给的规格（他要拿小米平板对着 MIUI 账号页比）：
+ *   *"正常情况下**账号是不在下面的卡片里**其实，**显示一个头像一个昵称单开一个比正常
+ *   tab 高一点的卡片**"*
+ * 所以这一页的第一张是**资料头卡**（大圆头像 + 她自己 + 状态胶囊，比卡里那些 56px 的
+ * 偏好行明显高一档），下面才是设置型的分组卡。
+ *
+ * 两条边界（用户当轮明确要求）：
+ *   1. 头像是**浏览器自己去取**的（QQ 头像 CDN），后端不抓；取不到就退回占位图标，
+ *      不留白框（`bind()` 里那条捕获阶段的 `error` 监听）；
+ *   2. 昵称只用**已有的**自己状态接缝（`/api/self` ← `UiSeams.self_id`）。核心那边
+ *      只缓存了她自己的号（`get_login_info` 的昵称它没留），所以这里显示号；
+ *      **不为了昵称新增接缝**，也不编一个名字。
+ */
+async function viewAccount() {
+  const self = await api("/api/self");
+  const overview = state.overview || await api("/api/overview");
+  const health = overview.health || {};
+  const access = overview.access || {};
+  const settings = await api("/api/settings");
+  const current = ((settings.fields || []).find((f) => f.key === "provider") || {}).current || "";
+  const qq = String(self.self_id || "").trim();
+  // 只有**纯数字**才拼进 CDN 地址：接缝给的是号，但不拿它当可信输入直接用。
+  const avatar = /^\d{5,12}$/.test(qq)
+    ? `<img class="avatar-img" alt="" src="https://q1.qlogo.cn/g?b=qq&nk=${
+      encodeURIComponent(qq)}&s=100">`
+    : "";
+  const profileCard = card("", `
+    <div class="profile">
+      <div class="profile-avatar${avatar ? "" : " is-missing"}">${avatar
+        }<span class="avatar-fallback" aria-hidden="true">${icon("account")}</span></div>
+      <div class="profile-main">
+        <div class="profile-name">${qq ? esc(qq) : "还没查到她的号"}</div>
+        <div class="profile-sub">云茹 · 她自己的号${
+          qq ? "" : "（查到了就显示在这里，面板不编一个）"}</div>
+        <div class="profile-tags">
+          <span class="badge ${health.bot_live ? "ok" : "warn"}">${
+            health.bot_live ? "bot 在运行" : "bot 未运行"}</span>
+          <span class="badge ${health.engine_attached ? "ok" : "warn"}">${
+            health.engine_attached ? "接缝挂上了" : "接缝没挂上"}</span>
+        </div>
+      </div>
+    </div>`);
+
+  const loginRow = prefRow(
     prefTitle("退出登录") + '<div class="pref-summary">清掉这台浏览器里存的令牌，回到登录页。'
       + '面板进程照旧在跑，重新填一次令牌就回来。</div>',
     '<button type="button" id="signout" class="danger">退出</button>',
-    { icon: "credential" })}</div>`)
-    + viewStub("账号", [
-      ["她自己的号", "self_id"], ["供应商与模型", "provider_registry"],
-      ["余额", "与 /balance 同一账本"],
-      ["用量", "按 agent 对账：调用次数与缓存命中率（与 /super apicheck 同一账本）"],
-      ["超管名单", "脱敏后只显示数量"],
-    ]);
+    { icon: "credential" });
+
+  const accessRows = [
+    ["接入模式", access.remote ? "远程（口令 + 会话 cookie）" : "本机（令牌）", "settings"],
+    ["面板会话", `${num(access.sessions)} 个`, "credential"],
+    ["登录失败", `${num(access.login_failures)} 次`, "logs"],
+    ["反向代理", access.behind_proxy ? "在反代后面" : "直连", "letter"],
+  ].map(([title, value, glyph]) => prefRow(
+    `<div class="pref-title">${esc(title)}</div>`,
+    `<span class="pref-value">${esc(value)}</span>`, { icon: glyph })).join("");
+
+  const providerRows = (settings.providers || []).map((p) => prefRow(
+    `<div class="pref-title">${esc(p.label || p.value)}</div>`
+    + (p.value === current ? '<div class="pref-summary">当前在用</div>' : ""),
+    `<span class="pref-value">${esc(p.base_url || "自定义")}</span>`,
+    { icon: "credential" })).join("");
+
+  return profileCard
+    + card("面板登录", `<div class="pref-list">${loginRow}</div>`)
+    + card("这台设备的接入", `<div class="pref-list">${accessRows}</div>`)
+    + card("供应商与模型", `<div class="pref-list">${
+      providerRows || '<p class="hint">读不到供应商表。</p>'}</div>`
+      + `<p class="hint">她的<b>昵称</b>面板还没有那条读口（核心只留了她自己的号），
+         所以头卡上显示的是号；<b>余额</b>与<b>超管名单</b>同样读不到——它们只在
+         <code>/balance</code> 与 <code>/super</code> 里。这一页不编这三样。</p>`);
+}
+
+/* 设备页。这一页用户没有给具体规格（只说原先那句"还没接"的占位卡太丑），
+ * 照 MIUI「关于本机」的组织方式重做：**分组卡 + 行首图标 + 右侧值**，三组——
+ *
+ *   1. 「本机」    ：面板自己监听的地址、跑它的 Python、已运行多久、数据落在哪；
+ *   2. 「与本体连接」：bot 端口、在不在跑、核心接缝挂没挂上、状态从哪来（活快照/文件）；
+ *   3. 「占用空间」：data/ 下每一项各占多少（大的在前）+ 合计；
+ *
+ * 全都是**已经读得到的东西**：`/api/overview`（health + state）与 `/api/storage`。
+ * 没有接缝的那几样（进程 / GPU / 网量 / 风扇）用一行实话指路 `/super`，不摆一张空表。
+ */
+async function viewDevice() {
+  const data = state.overview || await api("/api/overview");
+  const health = data.health || {};
+  const st = data.state || {};
+  const storage = await api("/api/storage");
+  const row = (glyph, title, value, summary = "") => prefRow(
+    `<div class="pref-title">${esc(title)}</div>`
+    + (summary ? `<div class="pref-summary">${esc(summary)}</div>` : ""),
+    value === "" ? "" : `<span class="pref-value">${esc(value)}</span>`,
+    { icon: glyph });
+  const rows = (...items) => `<div class="pref-list">${items.join("")}</div>`;
+  const port = health.panel_port === undefined ? "—" : String(health.panel_port);
+
+  const local = card("本机", rows(
+    row("settings", "面板监听", `${health.panel_host || "—"}:${port}`,
+      health.panel_port_exact ? "面板自己那个 HTTP 口，与 bot 的不是一个"
+        : "配置里的值（面板还没报出实际端口）"),
+    row("usage", "Python", health.python || "—", "跑面板与 bot 的解释器"),
+    row("time", "面板已运行", health.panel_uptime_seconds
+      ? duration(health.panel_uptime_seconds) : "—"),
+    // 路径太长，放在标题下面那一行（右端放不下会折得很碎）
+    row("logs", "数据目录", "", health.data_dir || "—")));
+
+  const runtime = card("与本体连接", rows(
+    row("group", "bot 端口", String(health.bot_port === undefined ? "—" : health.bot_port),
+      "OneBot 那条 WebSocket"),
+    row("ok", "bot 在不在跑", health.bot_live ? "在跑" : "没在跑",
+      health.bot_live ? "端口探到了" : "端口没探到（也可能它绑在别的地址上）"),
+    row(health.engine_attached ? "ok" : "delete", "核心接缝",
+      health.engine_attached ? "挂上了" : "没挂上",
+      health.engine_attached ? "面板读的是活快照" : "面板只能读落盘的状态文件"),
+    row("overview", "状态来源", st.source === "live" ? "活快照"
+      : st.source === "files" ? "文件快照" : "读不到")));
+
+  const entries = storage.entries || [];
+  const storageRows = entries.map((item) => row(
+    item.kind === "dir" ? "logs" : "credential",
+    STORAGE_LABELS[item.name] || item.name,
+    bytes(item.bytes),
+    item.kind === "dir" ? `${num(item.files)} 个文件` : "")).join("");
+  const storageCard = card("占用空间", storage.available
+    ? rows(row("usage", "合计", bytes(storage.total_bytes), storage.path),
+      storageRows || '<p class="hint">这一层是空的。</p>')
+      + (storage.truncated
+        ? '<p class="hint">数到上限就停了——上面这些是"至少"这么多。</p>' : "")
+    : '<p class="hint">读不到数据目录（它还没建，或者路径不对）。</p>');
+
+  return local + runtime + storageCard
+    + `<p class="hint">进程 / GPU / 网量 / 风扇面板读不到——那几样没有接缝，
+       要看用 <code>/super processes</code>、<code>/super lan</code>、<code>/super fan</code>。</p>`;
 }
 
 const VIEWS = {
@@ -1867,11 +2018,7 @@ const VIEWS = {
   account: viewAccount,
   // 设备页：用户原话"此设备这里塞关于、占用空间之类"——**这两样是这个页面里的内容**，
   // 不是左栏的两个页签（2026-10-04 纠正：我原来把它拆成了 `device` + `storage` 两个页签）。
-  device: () => viewStub("设备", [
-    ["关于", "版本、提交、Python 与依赖"],
-    ["占用空间", "data/ 下记忆库、日志、知识库、提示词、追踪各占多少"],
-    ["运行时诊断", "进程 / GPU / 网量 / 风扇（runtime_diagnostics，已有可复用）"],
-  ]),
+  device: viewDevice,
   private: () => viewStub("私聊", [
     ["聊过谁", "runtime_state 里的 private: 会话（数据已在）"],
     ["轮数与最后一句", "同上；要新接一个「按会话类型分组」的读取口"],
@@ -1885,9 +2032,10 @@ function drawTabs() {
   // 插件卡的条目是动态的（`cards()` 会问 `state.plugins`）。
   //
   // **左栏只放导航**（用户 2026-10-06："在左边切换设置项"）：卡里只有 tab 按钮，
-  // 没有操作类控件——`bot 在运行` / `活快照` / 刷新 / 深色 / 退出 那几样都搬去了
-  // 各自的页面（见 `viewOverview` / `index.html` 的 `#refresh` / `viewSettings` /
-  // `viewAccount`）。所以这里出现的每个 `<button>` 都必须带 `data-tab`。
+  // 没有操作类控件——`bot 在运行` / `活快照` 去了 `viewOverview`，深色去了 `viewSettings`，
+  // 退出去了 `viewAccount`；而**刷新那颗按钮已经整个删掉**了（用户当天："右上角的刷新
+  // 先删掉反正，这个太丑了"），重画当前页只由"换页签"和"失败态里的重试"触发。
+  // 所以这里出现的每个 `<button>` 都必须带 `data-tab`。
   // 卡里的每一项都用**同一个模板**画：同一张卡下面的条目在栏里就是**同级的并列项**
   // （2026-10-06 用户："人物画像和记忆 tab 是同等级的，都在记忆卡片下"，
   // "金句黑话同理"）。所以这里**没有**"某几项缩进/变小"的分支——谁要再给某一张卡里的
@@ -1929,9 +2077,28 @@ async function render() {
     replayEnter();
   } catch (error) {
     // 401 不再往左栏徽章里写了（那枚徽章没了）：登录门与登录卡自己会说清楚
-    // （见 `checkToken` / `loginFailureText`），这一页照旧显示读不出来的原因。
-    $("view").innerHTML = `<p class="hint">这一页读不出来：${esc(error.message)}</p>`;
+    // （见 `checkToken` / `loginFailureText`），这一页走**失败态**——
+    // 一句实话 + 一个重试入口（见 `errorCard`）。
+    $("view").innerHTML = errorCard(error);
+    replayEnter();
   }
+}
+
+/* 这一页**读不到**时给的失败态：一句实话 + 一个「重试」。
+ *
+ * 由来（2026-10-06 用户）：*"右上角的刷新先删掉反正，这个太丑了"*。
+ * **功能不裸删**——原来那个常驻按钮做的就是"重画当前这一页"，现在改成
+ * **失败这一个场景自己长出入口**（MIUI 那种做法）：平时页面上没有刷新，
+ * 只有真读不到的时候才出现「重试」。文案照老规矩：**如实说读不到**，
+ * 不编一份空的糊上来。
+ */
+function errorCard(error) {
+  const detail = (error && error.message) || "读取失败";
+  return card("这一页读不出来", `
+    <p class="hint">${esc(detail)}</p>
+    <p class="hint">数据没读到就是没读到——面板不会拿一份空的糊上来。
+      多半是后台那边刚重启，或者这个口暂时不通。</p>
+    <div class="row"><button id="retry" class="primary">重试</button></div>`);
 }
 
 function replayEnter() {
@@ -2086,7 +2253,9 @@ function init() {
     lock(false);
     render();
   });
-  $("refresh").addEventListener("click", render);
+  // 右上角那颗常驻「刷新」**已经删掉**（2026-10-06 用户："右上角的刷新先删掉反正，
+  // 这个太丑了"）——所以这里没有它的绑定；重画当前页现在只有两个入口：
+  // 换页签（下面的 tabs 点击 / hashchange），以及失败态里的「重试」（`bind()`）。
   // 窄屏（手机）是"左栏 / 内容"二选一：点卡内 tab 进内容态，「返回」退回卡片列表。
   // 桌面与中等屏两栏同时在，`is-reading` 不产生任何视觉差异（CSS 里只在 <600px 生效）。
   const reading = (on) => document.body.classList.toggle("is-reading", on);
