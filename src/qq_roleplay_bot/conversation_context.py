@@ -23,6 +23,9 @@ from .capabilities import CapabilityDenied, CapabilityRegistry
 from .media_segments import media_label
 from .onebot_client import SnowLumaHttpClient
 from .transport import IncomingMessage, MessageTarget, display_name_from_sender
+# 两个缓存的上限与保留期（`context_cache_max_sessions` / `context_cache_ttl_seconds`）
+# 是**调用时现读**的配置，所以整模块 import 它。
+from . import dev_config
 
 logger = logging.getLogger(__name__)
 
@@ -54,10 +57,15 @@ class ConversationContextProvider:
         self.clock = clock
         self._last_refresh: dict[str, float] = {}
         self._members: dict[str, dict[str, str]] = {}
+        # 每个会话的名册是**什么时候写进去的**——按时间淘汰要用它（见 `_prune_caches`）。
+        # 与 `_last_refresh` 的键口径不同：那个按 `group:<id>`（刷新限流是按群的），
+        # 这个是 `session_id`（名册是按会话查的）。
+        self._members_at: dict[str, float] = {}
         self._self_id = ""
         # 只问一次"我是谁"：查到了记下来，查不到（或对面不回这个）也别每轮再问。
         self._self_id_checked = False
-        self.stats = {"refreshes": 0, "failures": 0, "denied": 0, "messages_seeded": 0}
+        self.stats = {"refreshes": 0, "failures": 0, "denied": 0, "messages_seeded": 0,
+                      "cache_evicted": 0}
 
     # --- 只读视图 ---------------------------------------------------------
 
@@ -70,6 +78,63 @@ class ConversationContextProvider:
 
     def cached_member_count(self, session_id: str) -> int:
         return len(self._members.get(session_id) or {})
+
+    def cached_session_count(self) -> int:
+        """缓存里现在有多少个会话的名册（观测用，测试也读它）。"""
+
+        return len(self._members)
+
+    def _prune_caches(self, now: float) -> None:
+        """给两个缓存加上限与保留期（2026-10-08 隔离增长审计 [6]）。
+
+        `_members` 里是**整群成员表**（一个几百人的群就是几百条），`_last_refresh`
+        同样只增不减——两者都是"按外部输入决定大小、却没有任何清理点"的结构。
+
+        淘汰规则（两步）：
+
+        1. **保留期**：距最后一次刷新/写入超过 `QQBOT_CONTEXT_CACHE_TTL_SECONDS`
+           （默认 6 小时）的条目丢掉；
+        2. **条数上限**：仍然超过 `QQBOT_CONTEXT_CACHE_MAX_SESSIONS`（默认 200）时，
+           丢掉**最旧**的那些（按时间，不是随机）。
+
+        两个值都**调用时现读**（见 `dev_config`）：面板/环境变量改完下一次刷新就生效。
+        淘汰只影响"这个名字还能不能立刻解析到"——下次刷新会把名册再取回来，
+        不影响对话正确性。丢掉的条数记在 `stats["cache_evicted"]` 里。
+        """
+
+        self._expire_caches(now)
+        self._enforce_limit()
+
+    def _expire_caches(self, now: float) -> None:
+        """按**保留期**淘汰：这段时间没人回来看的会话/群，名册与限流表一起丢掉。"""
+
+        ttl = dev_config.context_cache_ttl_seconds()
+        for session_id, seen in sorted(self._members_at.items(), key=lambda pair: pair[1]):
+            if now - seen > ttl:
+                self._drop_cached(session_id)
+        for block, seen in sorted(self._last_refresh.items(), key=lambda pair: pair[1]):
+            if now - seen > ttl:
+                self._last_refresh.pop(block, None)
+                self.stats["cache_evicted"] += 1
+
+    def _enforce_limit(self) -> None:
+        """按**条数上限**淘汰：超了就丢最旧的（插入之后也调一次，让上限立刻成立）。"""
+
+        limit = max(1, dev_config.context_cache_max_sessions())
+        while len(self._members) > limit:
+            oldest = min(self._members_at, key=lambda key: self._members_at[key])
+            self._drop_cached(oldest)
+        while len(self._last_refresh) > limit:
+            oldest = min(self._last_refresh, key=lambda key: self._last_refresh[key])
+            self._last_refresh.pop(oldest, None)
+            self.stats["cache_evicted"] += 1
+
+    def _drop_cached(self, session_id: str) -> None:
+        if self._members.pop(session_id, None) is not None:
+            self.stats["cache_evicted"] += 1
+            logger.info("context_cache_evicted session=%s cached=%s",
+                        session_id, len(self._members))
+        self._members_at.pop(session_id, None)
 
     def self_id(self) -> str:
         return self._self_id
@@ -90,6 +155,7 @@ class ConversationContextProvider:
             return ()
         block = f"group:{group_id}"
         now = self.clock()
+        self._prune_caches(now)
         if now - self._last_refresh.get(block, float("-inf")) < self.refresh_interval:
             return ()
         self._last_refresh[block] = now
@@ -98,6 +164,10 @@ class ConversationContextProvider:
         members, history = await self._fetch(group_id)
         if members is not None:
             self._members[session_id] = members
+            # 名册按**会话**存，所以时间戳也按会话记（淘汰时两边一起动）。
+            self._members_at[session_id] = now
+            # 插入之后立刻收紧条数上限：让"缓存里最多 limit 个会话"在任何时刻都成立。
+            self._enforce_limit()
         self.stats["refreshes"] += 1
 
         seeded: list[IncomingMessage] = []

@@ -299,6 +299,38 @@ def _float_clamped(name: str, default: float, minimum: float, maximum: float) ->
     return max(minimum, min(maximum, value))
 
 
+def _int_clamped(name: str, default: int, minimum: int, maximum: int) -> int:
+    """读一个整数配置，**夹到 `[minimum, maximum]`**（与 `_float_clamped` 同一套）。"""
+
+    try:
+        value = int(get(name, str(default)))
+    except ValueError:
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+# --- 对话背景补全那两个缓存的边界（2026-10-08 隔离增长审计 [6]）--------------
+# `ConversationContextProvider` 里 `_members` 存的是**整群成员表**（一个几百人的群
+# 就是几百条），`_last_refresh` 同样只增不减。两个都按"最后一次刷新/写入"的时间
+# 淘汰：先看保留期，再看条数上限（超了丢最旧）。
+#
+# 写成函数、**调用时现读**（与 `persona_offset_hours` 同一条纪律）：改配置不必重启。
+
+
+def context_cache_max_sessions() -> int:
+    """最多缓存多少个会话的名册与刷新时刻（`QQBOT_CONTEXT_CACHE_MAX_SESSIONS`，
+    默认 200，夹在 10..5000）。超过就丢**最旧**的。"""
+
+    return _int_clamped("QQBOT_CONTEXT_CACHE_MAX_SESSIONS", 200, 10, 5000)
+
+
+def context_cache_ttl_seconds() -> float:
+    """多久没刷新就把那份缓存丢掉（`QQBOT_CONTEXT_CACHE_TTL_SECONDS`，
+    默认 21600 = 6 小时，夹在 60..604800）。活跃的群每轮刷新都会续期。"""
+
+    return _float_clamped("QQBOT_CONTEXT_CACHE_TTL_SECONDS", 21600.0, 60.0, 604800.0)
+
+
 # --- "群里这边"的时间 -------------------------------------------------------
 # 用户口径（2026-10-08）：*"她那边 = 北京 + 3 小时"*。而"这边"从前是**宿主时区**
 # （`datetime.fromtimestamp` / `time.localtime`），代码把"本机=北京"写死在注释里。
