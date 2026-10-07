@@ -1,0 +1,40 @@
+---
+title: API 参考
+description: 从运行时动作目录生成的 OpenAPI：参数、应答、示例和试调
+---
+
+SnowLuma 的 HTTP API 与 OneBot v11 兼容。每个动作一页，由 OpenAPI 插件渲染：请求体、鉴权、应答信封、代码示例，以及对着你自己的实例试调。
+
+## 怎么调用
+
+- 方法：`POST /{动作名}`
+- 请求体：`Content-Type: application/json`
+- 默认服务：`http://127.0.0.1:3000/`（同一 Docker 网络里用 `http://snowluma:3000/`）
+- 鉴权（配置了 token 时）：`Authorization: Bearer <token>`，或查询参数 `?access_token=`
+- WebSocket：`ws://127.0.0.1:3001/`，动作名与 HTTP 相同
+
+## 应答信封
+
+HTTP 200 仍可能是业务失败。看信封里的 `retcode`：
+
+```json
+{
+  "status": "ok",
+  "retcode": 0,
+  "data": {},
+  "message": "",
+  "wording": ""
+}
+```
+
+`retcode` 为 `0` 才是成功。`data` 的形状见各动作页。
+
+## 在文档里试调
+
+打开任意动作页，填服务地址和 token，用试调面板直接发请求。请求发自你的浏览器，目标是你填的服务器，不是文档站。
+
+MCP 客户端不必手写 HTTP，见 [MCP](/docs/mcp)。
+
+## 全部动作
+
+<ApiCatalog lang="zh" />
