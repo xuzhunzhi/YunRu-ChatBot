@@ -445,7 +445,9 @@ def test_the_evidence_reader_returns_her_words_context_reactions_and_notes() -> 
             "丙：反正我不敢开上去",
         ]
         assert len(row["她开口之前群里在说"]) >= 2, "上下文必须是复数条"
-        assert row["她说完之后群里接的"] == ["甲（甲的群名片）：有点道理", "乙：下次试试"]
+        # 上下文按 id **回日志补**（不是拿样本里那份截断的），所以 `丙` 那条也在。
+        assert row["她说完之后群里接的"] == ["甲（甲的群名片）：有点道理", "乙：下次试试",
+                                             "丙：我明天也去"]
         assert len(row["她说完之后群里接的"]) >= 2, "她说完之后也得是复数条"
 
         # ③ 表情证据：谁贴的（user_id）、什么表情、第几次。

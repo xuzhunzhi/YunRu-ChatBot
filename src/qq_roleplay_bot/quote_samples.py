@@ -575,7 +575,14 @@ def evidence_pages(entries: tuple[EvidenceEntry, ...], *, offset: int = 0,
 
 def _entries_for(rows: list[dict], selection: SampleSelection, group: str, *,
                  wanted: set[str]) -> list[EvidenceEntry]:
-    """把样本（新→旧）翻成一条条证据；`wanted` 里那几条**没有样本也要给**。"""
+    """把样本（新→旧）翻成一条条证据；`wanted` 里那几条**没有样本也要给**。
+
+    两处刻意与样本不一样（那是"给模型看的材料"，这是"给人审核的证据"）：
+
+    * **正文取自日志那一行**，不是样本里那份截到 240 字的（要审就要看原文）；
+    * 上下文按 id **回日志补**（`context_for`），补不到才退回样本自带的那几条。
+      这样"上下文是不是复数条"有个**真能变红的判据**——只改样本那一侧不会红。
+    """
 
     samples = list(reversed(selection.samples))
     if wanted:
@@ -587,6 +594,8 @@ def _entries_for(rows: list[dict], selection: SampleSelection, group: str, *,
                         context_before=(), context_after=())
             for mid in sorted(wanted - have)
         )
+    full_bodies = {_clean_id(row.get("message_id")): _line_body(row)
+                   for row in rows if _is_her_message(row)}
     out: list[EvidenceEntry] = []
     for sample in samples:
         earlier, later = context_for(rows, sample.message_id, before=EVIDENCE_CONTEXT_MAX,
@@ -594,11 +603,11 @@ def _entries_for(rows: list[dict], selection: SampleSelection, group: str, *,
         out.append(EvidenceEntry(
             message_id=sample.message_id,
             group_id=sample.group_id or group,
-            body=sample.body,
+            body=full_bodies.get(sample.message_id, "") or sample.body,
             at=sample.at,
             reactions=sample.reactions[:MAX_EVIDENCE_REACTIONS],
-            context_before=(sample.context_before or earlier)[:EVIDENCE_CONTEXT_MAX],
-            context_after=(sample.context_after or later)[:EVIDENCE_CONTEXT_MAX],
+            context_before=(earlier or sample.context_before)[:EVIDENCE_CONTEXT_MAX],
+            context_after=(later or sample.context_after)[:EVIDENCE_CONTEXT_MAX],
             sample=sample if sample.body else None,
         ))
     return out
