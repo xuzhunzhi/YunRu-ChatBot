@@ -18,6 +18,7 @@
 突变验证（各自还原）：去掉上限判断 → 第 1、2 条红；淘汰时不删 client → 第 3 条红；
 把淘汰改成"停用群就清它的会话状态" → 第 4 条红。
 """
+import asyncio
 import os
 from unittest.mock import patch
 
@@ -25,6 +26,7 @@ from qq_roleplay_bot.stage3_main import DialogueEngine
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 
 GROUP = "717151356"
+SUPER = "900000001"
 LIMIT = 10          # `QQBOT_SESSION_CACHE_MAX_SESSIONS` 的下界就是 10
 
 
@@ -167,6 +169,24 @@ def test_the_status_line_shows_the_eviction_count() -> None:
         for index in range(LIMIT + 1):
             engine.sessions.state(_sid(index)).last_activity_at = 100.0 + index
         assert engine.snapshot().sessions_evicted == 1
+
+
+def test_the_status_text_prints_the_eviction_count() -> None:
+    """淘汰必须**看得见**：`/super status` 的"短期会话"那行要印出来。"""
+
+    async def run() -> str:
+        engine = DialogueEngine(_NeverCalled(), super_admin_user_ids=frozenset({SUPER}))
+        with patch.dict(os.environ, {"QQBOT_SESSION_CACHE_MAX_SESSIONS": str(LIMIT)}):
+            for index in range(LIMIT + 1):
+                engine.sessions.state(_sid(index)).last_activity_at = 100.0 + index
+        reply = await engine.handle(IncomingMessage(
+            "m:status", f"group:{GROUP}", SUPER, "/super status",
+            MessageTarget(group_id=GROUP)))
+        return reply.text
+
+    text = asyncio.run(run())
+    assert "短期会话：" in text, text
+    assert "已淘汰：1" in text, text
 
 
 # --- 4. 配置 -----------------------------------------------------------------
