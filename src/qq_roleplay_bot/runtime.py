@@ -68,6 +68,7 @@ from .plugins import (
     _maybe_await,
     attach_plugins,
     inventory,
+    mount_data_plugins,
 )
 from .transport import IncomingMessage, MessageTarget, QQTransport
 
@@ -660,6 +661,12 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
     # 它**没有** transport、没有 notify、没有模型 client，也没有 `async def`——
     # "她因此问一句"在这条路上没有可调用的东西（`slang_learning` 的模块说明里写了）。
     engine.slang_library, engine.slang_watcher = _build_slang_learning(engine)
+    # **第二个加载根**（2026-10-08）：`data/plugins/` 里"装进来的"插件与
+    # `src/qq_roleplay_bot/plugins/` 里预装的走**同一条**发现路径（`discover()` 扫
+    # 整个 `__path__`）。目录不在、取不到数据目录 = 没有第二个根，**不是错误**，
+    # 也不许成为必需依赖——"删掉全部插件核心照跑"这条判据继续成立。
+    # 装配点只有这里一处：别的地方不许自己往 `__path__` 上加根。
+    mount_data_plugins()
     # **接插件**（发现只跑这一次，所以放在最后：引擎上该有的东西都已经就位）。
     # 命令插件进 `engine.commands`；后台插件留在 `engine.plugin_registry.backgrounds`
     # 给 `serve` 的节拍用。

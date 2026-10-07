@@ -43,7 +43,6 @@
 from __future__ import annotations
 
 import importlib
-import pkgutil
 
 from qq_roleplay_bot import plugins as plugins_pkg
 
@@ -55,19 +54,15 @@ def _discovered() -> tuple[str, ...]:
 
 
 def _plugin_dirs() -> tuple[str, ...]:
-    """`plugins/` 下**带 `plugin.py`** 的目录名（名字以下划线开头的排除）。
+    """**所有加载根**下带 `plugin.py` 的目录名（名字以下划线开头的排除）。
 
-    判据用 `plugins/__init__.py` 自己在用的那个扫描形状（`pkgutil.iter_modules`），
-    所以这里数出来的东西就是 `discover()` 会去装的东西——不从目录结构另立一套口径。
+    判据直接借发现器自己的那一个函数（`plugins.plugin_dirs()`），不从目录结构另立一套口径。
+    2026-10-08 改：原来这里抄的是 `pkgutil.iter_modules`——而那个函数**看不见没有
+    `__init__.py` 的目录**（`data/plugins/<名字>/plugin.py` 正是这个形状），
+    于是"扫描口径"两边会对不上。现在只有一个口径。
     """
 
-    names = []
-    for info in pkgutil.iter_modules(plugins_pkg.__path__):
-        if not info.ispkg or info.name.startswith("_"):
-            continue
-        if plugins_pkg._plugin_file(info.name).is_file():
-            names.append(info.name)
-    return tuple(sorted(names))
+    return plugins_pkg.plugin_dirs()
 
 
 def _declares_disabled(name: str) -> bool:

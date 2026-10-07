@@ -22,6 +22,15 @@ plugins/
 
 可以导出 `ENABLED = False` 表示"装在这里但先别启用"。
 
+**第二个加载根**（2026-10-08）：插件可以来自两个根——`src/qq_roleplay_bot/plugins/`
+（随代码发布 = 预装）与 `data/plugins/`（装进来的，由装配点 `mount_data_plugins()` 接上）。
+两边走**同一条**发现路径，契约一个字都不变；`plugin_source()` 说出某个插件是从哪个根来的。
+装进来的插件**可以**声明下面三个（都不是必需的，老插件一个字不改照样装）：
+
+    VERSION = "1.2.3"   # 插件版本（面板展示；以后安装时用它比对身份）
+    HOST_API = 1        # 宿主接口版本：不声明就放行；声明了必须等于 `API_VERSION`，否则拒绝加载
+    # SOURCE 不用自己写——它由加载根算出来（`plugin_source()`）
+
 `registry` 携带核心注入的**窄接缝对象**，并提供登记方法：
 
     registry.chat                     # ChatSeams：reserved() / allow() / run() / follow_ups()
@@ -97,11 +106,22 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
 import pathlib
-import pkgutil
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+#: 宿主给插件的接口版本（`plugin.py` 里用 `HOST_API` 卡这一条）。
+#:
+#: 规则（2026-10-08 加，来历见 `docs/research/plugin-ecosystem-2026-10-08.md`）：
+#: **不声明 `HOST_API` 就放行**（现有插件一个字不改照样装）；声明了就必须**等于**这个数，
+#: 不等就**拒绝加载**并记一条 `plugin_host_api_mismatch`（fail-closed，不是"警告后照样装"）。
+#: 动接口时把这里加 1，并同步改插件里的声明。
+API_VERSION = 1
+
+#: 预装插件住的那个根（`src/qq_roleplay_bot/plugins/`）。第二个根见 `mount_data_plugins()`。
+_BUILTIN_ROOT = pathlib.Path(__path__[0]).resolve()
 
 #: 进程里那一份注册表（`build_engine` 装完插件后放上来）。
 #:
@@ -911,13 +931,16 @@ def attach_plugins(registry: PluginRegistry, commands: object | None = None) -> 
 
 
 def discover(registry: PluginRegistry, *, only: tuple[str, ...] = ()) -> tuple[str, ...]:
-    """扫 `plugins/` 下每个目录，按**依赖顺序**把它们的 `register(registry)` 调一遍。
+    """扫**每个加载根**（`__path__`，含 `data/plugins/`）下每个插件，按**依赖顺序**
+    把它们的 `register(registry)` 调一遍。
 
     每个插件的 `plugin.py` 可以导出：
 
     - `register(registry)`（必须）
     - `ENABLED = False`（可选，装在这里但先别启用）
     - **`REQUIRES = ("roles",)`**（可选，**前置插件**）
+    - `VERSION = "1.2.3"` / `HOST_API = 1`（可选，见 `API_VERSION`：不声明就放行，
+      `HOST_API` 声明了却不等于宿主那一份 → **拒绝加载**并记 `plugin_host_api_mismatch`）
 
     ### 关于 `REQUIRES`（2026-10-01 用户纠正）
 
@@ -936,8 +959,7 @@ def discover(registry: PluginRegistry, *, only: tuple[str, ...] = ()) -> tuple[s
     3. **环依赖不会转不出来**：正在装的集合里出现重复就报错跳过。
     """
 
-    available = {m.name for m in pkgutil.iter_modules(__path__)
-                 if m.ispkg and not m.name.startswith("_")}
+    available = set(plugin_dirs())
     loaded: list[str] = []
     loading: set[str] = set()
     failed: set[str] = set()
@@ -987,6 +1009,16 @@ def discover(registry: PluginRegistry, *, only: tuple[str, ...] = ()) -> tuple[s
                 failed.add(name)
                 return False
 
+        # **宿主接口版本**（2026-10-08）：不声明就放行；声明了必须等于 `API_VERSION`。
+        # 这是"装进来的插件"最需要的一条——预装插件与核心同一个提交，它不需要声明。
+        declared_api = getattr(plugin_module, "HOST_API", None)
+        if declared_api is not None and not _host_api_ok(declared_api):
+            logger.error("plugin_host_api_mismatch name=%s declared=%r host=%d",
+                         name, declared_api, API_VERSION)
+            loading.discard(name)
+            failed.add(name)
+            return False
+
         if not getattr(plugin_module, "ENABLED", True):
             logger.info("plugin_disabled name=%s", name)
             loading.discard(name)
@@ -1027,6 +1059,93 @@ def discover(registry: PluginRegistry, *, only: tuple[str, ...] = ()) -> tuple[s
 _LAST_LOADED: tuple[str, ...] = ()
 
 
+def _host_api_ok(declared: object) -> bool:
+    """`HOST_API` 的匹配判定（见 `API_VERSION`）。
+
+    **只认整数**：`bool` 不算（Python 里 `True == 1`，`HOST_API = True` 会被"恰好等于 1"
+    蒙过去，那是写错了声明，不是兼容）；字符串/浮点也不算（`"1"` 曾被 `int()` 收下——
+    声明写的是哪个版本要一眼能看出来，别替插件猜）。
+    """
+    if isinstance(declared, bool) or not isinstance(declared, int):
+        return False
+    return declared == API_VERSION
+
+
+def plugin_dirs() -> tuple[str, ...]:
+    """**所有加载根**下带 `plugin.py` 的目录名（名字以 `_` / `.` 开头的排除）。
+
+    ## 为什么不用 `pkgutil.iter_modules`（2026-10-08 探针实测，必须照这个来）
+
+    它对**没有 `__init__.py` 的目录**直接跳过（`pkgutil._iter_file_finder_modules`
+    里 `for fn in dircontents: … else: continue`）。而 `data/plugins/<名字>/plugin.py`
+    正是这种形状（装进来的插件不该被迫多带一个 `__init__.py`）。实测三个数：
+
+    ```
+    pkgutil.iter_modules(第二个根)   → 0 个（4 个插件全看不见）
+    _plugin_file(<名字>)             → 4/4 命中
+    importlib.import_module(...)     → 成立（命名空间包），__file__ 确实在第二个根
+    ```
+
+    也就是说：**发现器会静默漏掉整个第二个根**，而 `import` 那条路本来是通的。
+    所以扫目录改成自己列目录，只看 `<根>/<名字>/plugin.py` 在不在——两个根同一个口径。
+    """
+    names: set[str] = set()
+    for root in __path__:
+        try:
+            entries = os.listdir(root)
+        except OSError:
+            continue
+        for name in entries:
+            if name.startswith("_") or name.startswith("."):
+                continue
+            if (pathlib.Path(root) / name / "plugin.py").is_file():
+                names.add(name)
+    return tuple(sorted(names))
+
+
+def plugin_source(name: str) -> str:
+    """这个插件来自哪个根：`"builtin"`（随代码发布的预装）或 `"installed"`（装进来的）。
+
+    两个根同名时算 `builtin`——`__path__[0]` 优先，与 `import` 的查找顺序一致。
+    """
+    if (_BUILTIN_ROOT / name / "plugin.py").is_file():
+        return "builtin"
+    return "installed"
+
+
+def data_plugins_root() -> pathlib.Path | None:
+    """`data/plugins/`——**装进来的插件**的根；这个目录不存在就是 `None`。
+
+    路径用 `dev_config.data_dir()`（**唯一的算法**，认 `QQBOT_DATA_DIR`），
+    不在这里自己数目录层数。
+    """
+    try:
+        from ..dev_config import data_dir
+
+        root = data_dir() / "plugins"
+    except Exception:  # noqa: BLE001 - 取不到数据目录 = 没有第二个根，不许因此起不来
+        logger.warning("plugin_data_root_unavailable", exc_info=True)
+        return None
+    return root if root.is_dir() else None
+
+
+def mount_data_plugins() -> pathlib.Path | None:
+    """把 `data/plugins/` 接成**第二个加载根**（幂等；没有这个目录就什么都不做）。
+
+    **它不许变成新的必需依赖**：目录不在、取不到数据目录、`dev_config` 出问题，
+    都只是"没有第二个根"，核心照常起——判据"删掉全部插件核心照跑"继续成立。
+    返回值：接上的那个路径，或 `None`。
+    """
+    root = data_plugins_root()
+    if root is None:
+        return None
+    text = str(root)
+    if text not in [str(item) for item in __path__]:
+        __path__.append(text)
+        logger.info("plugin_data_root_mounted path=%s", text)
+    return root
+
+
 def _plugin_file(name: str) -> pathlib.Path:
     """`<某个插件根>/<name>/plugin.py` 的路径（判断"这目录到底算不算插件"用）。
 
@@ -1048,28 +1167,38 @@ def inventory() -> tuple[dict, ...]:
     文件的顶层代码**。所以"只读、不改任何东西"是**半真话**：在"它自己造成的装配
     状态"这个口径上为真，在"有没有执行代码"这个口径上为假。要写就先写清楚。
 
-    每一行：名字、显示名（`TITLE` 或模块 docstring 首句）、是不是预装、有没有声明
-    `ENABLED=False`、**这次真装上没有**（`loaded`）、依赖谁（`REQUIRES`）、
-    以及**能不能卸**。**成功行与失败行是同一组 9 个键**（面板可以无脑读）。
+    每一行：名字、显示名（`TITLE` 或模块 docstring 首句）、版本（`VERSION`，没写就是空串）、
+    来自哪个根（`source`）、是不是预装、有没有声明 `ENABLED=False`、**这次真装上没有**
+    （`loaded`）、依赖谁（`REQUIRES`）、以及**能不能卸**。
+    **成功行与失败行是同一组 11 个键**（面板可以无脑读）。
 
-    ## "预装"与"能不能卸"的口径（2026-10-03 用户）
+    ## "预装"与"能不能卸"的口径（2026-10-03 用户 + 2026-10-08 第二个根）
 
     > "有几个插件我建议是做成预装的，但是记住一定得按插件包装"
     > "插件是每个插件占卡片里面一个 tab，默认显示预装插件这些，
     >  webui 不给在 webui 里卸载这样"
 
-    * **在 `plugins/` 目录里 = 预装**（随代码发布）。所以这里每一行都是预装。
-    * **预装的不给卸**；**`webui` 自己也不给卸**——它卸掉就等于把面板自己删了。
-      所以目前 `removable` 一律 `False`。真要"装/卸"，那是**加插件**的事
-      （放一个文件夹进来），不是面板点一下的事；面板最多只该管"启用/停用"，
-      而那要写 `data/`（**不许动 `src/`**）。
+    * **在 `src/qq_roleplay_bot/plugins/` 里 = 预装**（随代码发布）→ `source="builtin"`、
+      `removable=False`。
+    * **在 `data/plugins/` 里 = 装进来的** → `source="installed"`、`removable=True`
+      （卸 = 删那个目录，只能删 `data/` 下的东西）。
+    * **`webui` 自己永远不给卸**——它卸掉就等于把面板自己删了（`panel=True` 那一行）。
+    * **面板只该管"启用/停用"与"装/卸 `data/plugins/` 里的"**；启用/停用要写 `data/`
+      （**不许动 `src/`**）。
+
+    ⚠️ 这一版**没有**实现"装"和"卸"本身（没有网络下载、没有删目录的代码）——
+    这里只把"从哪个根来、能不能卸"这两个事实**如实列出来**，给以后那一步用。
     """
 
     rows: list[dict] = []
-    for info in sorted(pkgutil.iter_modules(__path__), key=lambda m: m.name):
-        name = info.name
-        if not info.ispkg or name.startswith("_"):
-            continue
+    for name in plugin_dirs():
+        source = plugin_source(name)
+        #: 失败行的共同部分（成功行也在它上面补字段）：两边的键必须一样多。
+        row = {"name": name, "title": name, "note": "", "version": "",
+               "builtin": source == "builtin", "source": source,
+               "enabled": False, "loaded": False, "requires": [],
+               "removable": source == "installed" and name != "webui",
+               "panel": name == "webui"}
         try:
             module = importlib.import_module(f"{__name__}.{name}.plugin")
         except ModuleNotFoundError as exc:
@@ -1079,29 +1208,23 @@ def inventory() -> tuple[dict, ...]:
             # 这条原来一律 `continue`，于是第 2 种（新插件最常见的坏法）**在面板上
             # 彻底隐身**——而面板存在的意义正是"让插件看得见"。`discover()` 那边
             # 同样静默（口径一致，但一致地漏），所以那边补了一行 warning 日志。
-            if _plugin_file(name).is_file():
-                logger.warning("plugin_inventory_import_missing name=%s missing=%s",
-                               name, getattr(exc, "name", "?"))
-                rows.append({"name": name, "title": name,
-                             "note": f"导入失败：找不到模块 {getattr(exc, 'name', '?')}",
-                             "builtin": True, "enabled": False, "loaded": False,
-                             "requires": [], "removable": False, "panel": False})
+            logger.warning("plugin_inventory_import_missing name=%s missing=%s",
+                           name, getattr(exc, "name", "?"))
+            row["note"] = f"导入失败：找不到模块 {getattr(exc, 'name', '?')}"
+            rows.append(row)
             continue
         except Exception:                 # noqa: BLE001 - 坏插件照样要能列出来
-            rows.append({"name": name, "title": name, "note": "导入失败（看日志）",
-                         "builtin": True, "enabled": False, "loaded": False,
-                         "requires": [], "removable": False, "panel": False})
+            row["note"] = "导入失败（看日志）"
+            rows.append(row)
             continue
         doc = (getattr(module, "__doc__", "") or "").strip().splitlines()
-        rows.append({
-            "name": name,
+        row.update({
             "title": str(getattr(module, "TITLE", "") or name),
             "note": doc[0][:80] if doc else "",
-            "builtin": True,              # 在 plugins/ 里就是预装
+            "version": str(getattr(module, "VERSION", "") or ""),
             "enabled": bool(getattr(module, "ENABLED", True)),
             "loaded": name in _LAST_LOADED,
             "requires": [str(item) for item in (getattr(module, "REQUIRES", ()) or ())],
-            "removable": False,           # 预装的不给卸；webui 自己更不给卸
-            "panel": name == "webui",     # 面板自己（它的 tab 就是面板本体）
         })
+        rows.append(row)
     return tuple(rows)

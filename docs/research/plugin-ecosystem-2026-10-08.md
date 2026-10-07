@@ -139,5 +139,6 @@
 - NoneBot / AstrBot 的"同插件多实例"：文档与源码都没找到，上面写的是**未查到**，不是"不存在"；AstrBot 只查到会话级启停。
 - AstrBot 有没有插件签名/校验和：市场规范只要求 `metadata.yaml` 的 `author/name/version` 三项身份比对，没看到签名。
 - NoneBot 索引里 `valid=false`（实测 328/942）的确切含义：**推断**是 NoneFlow 自动加载测试没过，没有逐条核。
-- 我们这侧：代码只证明了 `pkgutil.iter_modules` 与 `_plugin_file()` 支持多根；追加第二根之后
-  `importlib.import_module("qq_roleplay_bot.plugins.<name>.plugin")` 能不能成功，**第 1 步要先写探针实测**再动装配点。
+- 我们这侧（2026-10-08 **已实测**，结论与预期相反）：`pkgutil.iter_modules` **看不见**没有
+  `__init__.py` 的目录（第二个根数出 0 个插件），而 `_plugin_file()` 6/6 命中、`importlib.import_module` 成立。
+  发现器因此换成 `plugin_dirs()`（自己列目录，只看 `<根>/<名字>/plugin.py`），两个根同一个口径。
