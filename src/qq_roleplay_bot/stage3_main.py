@@ -4152,22 +4152,25 @@ class DialogueEngine:
         self.metrics.record_trigger(trigger_kind)
         # 没人在当值 → 这一次是"巡检"。同一时刻只允许一个群在巡检，别的群继续等
         # （两个群同时攒够 20 条时不会同时叫模型，也就不会同时出现两段当值对话）。
-        swept = False
+        # 守卫是**持有者标记**：拿不到就说明别人（另一个会话或焦点时钟那一跳）正在
+        # 巡检，这一条按"延迟"处理；收尾时也只还自己那份（2026-10-08 失败降级审计 3）。
+        sweep_owner: str | None = None
         if group_chat and not allowed_private and not resumed and self.focus.hot is None:
             if self.focus.sweeping:
                 self._stats["deferred_messages"] += 1
                 logger.debug("Stage 3 focus: sweep busy, defer session=%s", message.session_id)
                 return None
-            self.focus.begin_sweep()
-            swept = True
+            owner = f"recv:{message.session_id}"
+            if self.focus.begin_sweep(owner):
+                sweep_owner = owner
         try:
             return await self._model_path(
                 message, state, now=now, mode=mode, trigger=trigger, trigger_kind=trigger_kind,
                 addressed=addressed, group_chat=group_chat, resumed=resumed,
             )
         finally:
-            if swept:
-                self.focus.end_sweep()
+            if sweep_owner is not None:
+                self.focus.end_sweep(sweep_owner)
 
     async def _model_path(
         self,
@@ -4693,7 +4696,15 @@ class DialogueEngine:
         # 整跳都占着"巡检锁"：释放与切换之间有一段 await（压缩是模型调用），
         # 若此时刚好有新消息进来，它可能被当成一次巡检去调模型，
         # 与正在压缩的那个会话撞上（同一个会话的并发处理是必须避免的）。
-        self.focus.begin_sweep()
+        #
+        # **拿不到就跳过这一跳**（2026-10-08 失败降级审计 3）：从前这里无条件
+        # `begin_sweep()`、`finally` 里又无条件 `end_sweep()`，所以 5 秒一跳的它会把
+        # 接收路径正持有的守卫**提前清掉**——两条任务于是可以同时进 `handle()`。
+        # 现在只有拿到标记才干活，且只还自己那份。
+        if not self.focus.begin_sweep("tick"):
+            logger.debug("Stage 3 focus tick skipped: sweep held by %s",
+                         self.focus.sweep_owner)
+            return []
         try:
             reason = self.focus.release_reason(moment)
             hot = self.focus.hot
@@ -4720,7 +4731,7 @@ class DialogueEngine:
                 logger.info("Stage 3 focus switch: session=%s", switched)
                 deliveries.extend(await self._serve_queue(switched, moment))
         finally:
-            self.focus.end_sweep()
+            self.focus.end_sweep("tick")
         return deliveries
 
     def _farewell(self, session_id: str, now: float) -> list[tuple[IncomingMessage, list[OutgoingMessage]]]:

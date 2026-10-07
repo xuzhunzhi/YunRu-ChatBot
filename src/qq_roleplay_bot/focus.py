@@ -57,7 +57,8 @@ class FocusController:
     # 各群第一次进队列的顺序，决定先轮到谁（先到先得）。
     _order: list[str] = field(default_factory=list)
     _ack_at: dict[str, float] = field(default_factory=dict)
-    _sweeping: bool = False
+    #: 巡检的**持有者**（不是布尔：见 `begin_sweep`）。None = 没人在巡检。
+    _sweep_owner: str | None = None
     #: 因为单个群的队列满而被丢掉的**最旧**消息条数（观测用；只记数，不记正文）。
     dropped: int = 0
 
@@ -204,10 +205,33 @@ class FocusController:
 
     @property
     def sweeping(self) -> bool:
-        return self._sweeping
+        return self._sweep_owner is not None
 
-    def begin_sweep(self) -> None:
-        self._sweeping = True
+    @property
+    def sweep_owner(self) -> str | None:
+        """现在是谁占着巡检（观测用）；没人在巡检时是 None。"""
 
-    def end_sweep(self) -> None:
-        self._sweeping = False
+        return self._sweep_owner
+
+    def begin_sweep(self, owner: str) -> bool:
+        """试着占住巡检。**返回有没有拿到**——已经有人占着就返回 False。
+
+        由来（2026-10-08 失败降级审计 3）：这原先是一个**共享布尔**，`tick()` 不看
+        有没有人占着就 `begin_sweep()`、`finally` 里又无条件 `end_sweep()`——于是
+        接收路径还在模型调用里时，5 秒一跳的 tick 会把它的守卫**提前清掉**，
+        下一条消息就会觉得自己可以巡检，两条任务同时进 `handle()`。
+        换成持有者标记之后：拿不到就跳过这一跳，`end_sweep(owner)` 也只清自己那份。
+        """
+
+        if self._sweep_owner is not None:
+            return False
+        self._sweep_owner = str(owner)
+        return True
+
+    def end_sweep(self, owner: str) -> bool:
+        """归还巡检：**只有持有者本人**能清（返回是否真的清了）。"""
+
+        if self._sweep_owner != str(owner):
+            return False
+        self._sweep_owner = None
+        return True

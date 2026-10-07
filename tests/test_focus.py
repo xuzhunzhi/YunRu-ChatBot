@@ -125,12 +125,21 @@ def test_ack_cooldown_allows_one_per_window() -> None:
 
 
 def test_sweep_is_serialized() -> None:
+    """巡检是**持有者标记**：拿不到的人跳过这一跳，归还也只还自己那份。"""
+
     focus = FocusController()
     assert focus.sweeping is False
-    focus.begin_sweep()
+    assert focus.begin_sweep("recv:group:1") is True
     assert focus.sweeping is True
-    focus.end_sweep()
+    assert focus.sweep_owner == "recv:group:1"
+    # 别人拿不到（这就是"tick 拿不到就跳过这一跳"的依据）
+    assert focus.begin_sweep("tick") is False
+    # 只有持有者本人能清
+    assert focus.end_sweep("tick") is False
+    assert focus.sweeping is True
+    assert focus.end_sweep("recv:group:1") is True
     assert focus.sweeping is False
+    assert focus.sweep_owner is None
 
 
 # --- 观测 -------------------------------------------------------------------

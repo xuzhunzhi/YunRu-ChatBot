@@ -399,13 +399,13 @@ def test_sweep_is_deferred_while_another_sweep_runs() -> None:
     clock = Clock()
     judge = ScriptedJudge()
     engine, reply = build_engine(clock, judge)
-    engine.focus.begin_sweep()          # 假装另一个群正在巡检
+    engine.focus.begin_sweep("recv:group:另一个群")   # 假装另一个群正在巡检
     result = asyncio.run(engine.handle(message(1, A, text="@她 在吗", mentioned=True)))
     assert result is not None and result.paced is False, "巡检占用期间被 @ 也要先回一句稍等"
     assert engine.focus.queue_size(sid(A)) == 1, "巡检占用期间明确找她的要排队"
     assert reply.calls == 0
 
-    engine.focus.end_sweep()
+    engine.focus.end_sweep("recv:group:另一个群")
     clock.advance(46)
     deliveries = asyncio.run(engine.tick(clock.monotonic()))
     assert deliveries, "巡检空出来之后要轮到它"
