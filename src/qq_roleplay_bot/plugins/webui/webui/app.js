@@ -808,13 +808,19 @@ async function viewKnowledge() {
         <button id="kb-search">搜索</button>
         <span class="hint">基准块本来就是 markdown（表格、列表、加粗），这里按渲染后的样子显示。</span>
       </div>` + table([
-        { label: "来源", key: "source", mono: true, nowrap: true },
+        // ⚠️ 「来源」是**路径**（`03-能力与装备/武器与装备清单.md` 这种），比列宽长得多。
+        // 这里原来标着 `nowrap` —— `white-space: nowrap` 让它在单元格里**不折行**，
+        // 于是整串字**压到「标题」那一列上**（2026-10-07 用户截图："知识库文字重叠"；
+        // 本机 1267×796 复现：`02-核心设定/云茹官方设定.md` 与 `基本信息` 叠在一起）。
+        // 现在让它自己折行、并且允许**任意位置断开**（`wide` = `overflow-wrap: anywhere`，
+        // 路径里没有空格，`break-word` 对它不够用）。
+        { label: "来源", key: "source", mono: true, wide: true },
         // `table()` 对非 html 列**自己会转义**；这里再 esc 一次会变成 `&amp;gt;`，
         // 页面上就显示成字面的 `&gt;`（截图核对时抓到的：标题成了 `基本信息 &gt; …`）。
         { label: "标题", key: "title" },
         { label: "内容", html: true,
           get: (r) => `<div class="md clamp">${mdToHtml(String(r.content || ""), esc)}</div>` },
-      ], chunks.rows || [], { widths: ["18%", "32%", "50%"] }));
+      ], chunks.rows || [], { cols: "cols-knowledge" }));
 }
 
 /* ---------- 金句 / 黑话（知识库这一档里的两个**平级**的口）----------
@@ -1534,6 +1540,12 @@ function bind() {
       render();
       return;
     }
+    // 人物画像页的人名条：换一个人看（**重画**，不是只换个高亮——用户 2026-10-06
+    // 要的是"一个卡片里来回切换"，内容必须跟着换）。
+    if (act("person-chip", (el) => {
+      state.last.profileKey = el.dataset.person;
+      render();
+    })) return;
     if (act("s-save", async (el) => {
       const box = el.closest(".card-inline").querySelector(".s-def");
       const done = await write("/api/knowledge/slang", {
@@ -1707,9 +1719,12 @@ function viewPluginList() {
  * （本机 `memory_model.py`："2026-09-29 加的第七类：人物画像——她对某个人整体的印象"），
  * 落在**长期**表里，`/super profile @某人` 看的是同一份。
  *
- * 组织方式：**一个人一张卡**——这个人是谁（名册里的名字 + QQ + 群）、她对这个人的
- * 整体印象（`kind='profile'` 那条），以及挂在这个人身上的零散记录（称呼 / 边界 /
- * 偏好这类）。取数全部走面板**既有**的记忆读取口（`/api/memory/*`：只读打开记忆库，
+ * 组织方式（2026-10-06 用户改的口径）：*"应该是一个**卡片里来回切换多个人**的画像，
+ * 而不是**每个人一个卡片往下翻**，这得翻多久"* —— 所以现在是**一张卡 + 顶部人员切换**：
+ * 卡里**同一时刻只画一个人**（这个人是谁 / 整体印象（带版本）/ 关系两轴 / 名下的零散记录），
+ * 换人是点上面那条横向可滑的人名条（`state.last.profileKey` 记着选的是谁，换页签回来还在）。
+ * 名单 = **有画像的人 ∪ 有记录但还没成形像的人**（后者也能选到，内容区如实写"还没成形像"）。
+ * 取数全部走面板**既有**的记忆读取口（`/api/memory/*`：只读打开记忆库，
  * 与「记忆」页同一套；没有新开任何内部通道），写入路径一条都没变——面板仍然**只能删**，
  * 删除入口仍在「记忆」页。
  */
@@ -1729,6 +1744,73 @@ function personName(row) {
   return String(row.about || "").trim();
 }
 
+//: 切换条上那个人的显示名：优先画像那条的 `about`，其次他名下任意一条记录的 `about`，
+//: 都没有就用他自己的键（QQ 号）；"（无归属人）"照原样留着。
+function personLabel(key, data) {
+  if (key === "（无归属人）") return key;
+  const rows = (data.impression.get(key) || []).concat(data.mentions.get(key) || []);
+  for (const row of rows) {
+    const name = personName(row);
+    if (name) return name;
+  }
+  return key;
+}
+
+/* **一个人一块**：这个人是谁 / 她对这人的整体印象（带版本）/ 关系两轴 / 名下的零散记录。
+ *
+ * 用户 2026-10-06 的改法：*"应该是一个卡片里来回切换多个人的画像，而不是每个人一个
+ * 卡片往下翻"* —— 所以这个函数**每次只画一个人**，由 `viewPersonProfiles()` 用切换条上
+ * **选中的那个键**调**一次**。谁要是把它丢进 `map()` 里铺成一列，
+ * `PersonProfilePlacementTests::test_only_one_profile_block_is_rendered_at_a_time` 当场红。
+ */
+function personBlock(key, data) {
+  const rows = data.impression.get(key);
+  const main = rows ? rows[0] : null;
+  const older = (data.superseded.get(key) || []).length;
+  const identity = [];
+  if (key !== "（无归属人）") identity.push(`<span class="mono">${esc(key)}</span>`);
+  if (data.names[key] && data.names[key].length) identity.push(data.names[key].join("、"));
+  if (main && main.scope_key) {
+    identity.push(`群 <span class="mono">${esc(main.scope_key)}</span>`);
+  }
+  const relation_ = data.relation[key];
+  const relationLine = relation_
+    ? `亲近 ${esc(String(relation_.closeness ?? "—"))} · 戒备 ${
+      esc(String(relation_.guardedness ?? "—"))} · 更新于 ${esc(ts(relation_.updated_at))}`
+    : "还没有关系两轴读数（她还没跟这个人来回够多）";
+  // 有记录、但还没成形像的人：内容区**如实写**，不拿旧事冒充印象。
+  const impressionBlock = main
+    ? `<div class="card-inline">
+        <div class="pref-title">她对这人的整体印象${
+          main.revision ? `（r${num(main.revision)}）` : ""}</div>
+        <div class="impression">${esc(main.content || "（空）")}</div>
+        ${older ? `<p class="hint">另有 ${num(older)} 条旧版（被顶替）；按状态筛选能在「记忆」页看到。</p>` : ""}
+      </div>`
+    : `<div class="card-inline">
+        <div class="pref-title">她对这人的整体印象</div>
+        <p class="hint">还没成形像——这个人名下有记录，但记忆维护 agent 还没写过
+          <code>kind=profile</code> 那一条。她在真的看出"这个人的整体样子"时才会写，
+          不是每人一条。</p>
+      </div>`;
+  const own = data.mentions.get(key) || [];
+  // 「类别」这一列**不许 nowrap**：类别名有长有短（`alias` / `preference` / `boundary`），
+  // 在中等档（内容区只剩 ~575px）里最短的那一列装不下最长的类别名，而 `nowrap`
+  // 会让它**溢到旁边「键」那一列下面**、两列的字叠在一起（2026-10-06 截图核对抓到的）。
+  // 让它自己折行就没有这个问题——`table-layout: fixed` 下折行不会把列撑宽。
+  const ownTable = table([
+    { label: "类别", key: "kind", mono: true },
+    { label: "键", key: "normalized_key", mono: true, wide: true },
+    { label: "内容", get: (r) => r.content },
+    { label: "更新", get: (r) => ts(r.updated_at), nowrap: true },
+  ], own, { cols: "cols-profile", widths: ["20%", "20%", "44%", "16%"] });
+  return card(personLabel(key, data), `
+    <p class="pref-summary">${identity.join(" · ") || "名册里还没有这个人的名字"}</p>
+    ${impressionBlock}
+    <p class="pref-summary">关系两轴：${relationLine}</p>
+    <div class="pref-group-title">这个人的零散记录（${num(own.length)} 条）</div>
+    ${own.length ? ownTable : '<p class="hint">这个人名下还没有别的记录。</p>'}`);
+}
+
 async function viewPersonProfiles() {
   const profiles = await api(`/api/memory/records?limit=${PROFILE_LIMIT}&kind=profile`);
   const records = await api(`/api/memory/records?limit=${PROFILE_LIMIT}`);
@@ -1736,7 +1818,7 @@ async function viewPersonProfiles() {
     return card("人物画像", `<p class="hint">读不到记忆库（bot 正在写，或索引不存在）。
       画像与旧事都在这一个库里，读不到就两样都看不到。</p>`);
   }
-  // 名册与关系两轴：这两样都是**按人**的读数，正好配"一个人一张卡"。
+  // 名册与关系两轴：这两样都是**按人**的读数，正好配"换一个人看一个人"。
   const people = await api(`/api/memory/people?limit=${PROFILE_LIMIT}`);
   const rels = await api(`/api/memory/relationships?limit=${PROFILE_LIMIT}`);
   const names = {};
@@ -1768,80 +1850,56 @@ async function viewPersonProfiles() {
     mentions.get(key).push(row);
   });
   // 生效的那条：同一人有多条时取版本最高的（正常情况下按人只有一条 active）。
-  impression.forEach((rows_, key) => {
-    rows_.sort((a, b) => Number(b.revision || 0) - Number(a.revision || 0));
-    impression.set(key, rows_);
+  impression.forEach((rows, key) => {
+    rows.sort((a, b) => Number(b.revision || 0) - Number(a.revision || 0));
+    impression.set(key, rows);
   });
+  //: 这个人名下最近一条记录的时间（切换条里"没画像的人"按这个排）。
+  const latest = (rows) => (rows || []).reduce(
+    (acc, row) => Math.max(acc, Number(row.updated_at || 0)), 0);
 
   const keys = [...impression.keys()].sort((a, b) => {
     const left = impression.get(a)[0].updated_at || 0;
     const right = impression.get(b)[0].updated_at || 0;
     return Number(right) - Number(left);
   });
+  // **有记录、但还没成形像的人也要能选到**（用户 2026-10-06 这一轮明确要求）——
+  // 排在"有画像的"后面，各自按最近一次记录的时间排。
+  const withoutProfile = [...mentions.keys()].filter((key) => !impression.has(key))
+    .sort((a, b) => latest(mentions.get(b)) - latest(mentions.get(a)));
+  const all = keys.concat(withoutProfile);
+
+  const data = { impression, superseded, mentions, names, relation };
+  const wanted = String(state.last.profileKey || "");
+  const current = all.includes(wanted) ? wanted : (all[0] || "");
+  // 切换条：**横向可滑**的人名条（MIUI 那种筛选条）。人再多也不换行——换行会把卡片撑很高，
+  // 那正是用户嫌的"翻多久"。选中那枚是主色药丸；`data-person` 就是那个人的键。
+  const chips = all.map((key) => {
+    const label = personLabel(key, data);
+    return `<button class="person-chip${key === current ? " on" : ""}"`
+      + ` data-person="${esc(key)}" title="${esc(label)}">${esc(label)}</button>`;
+  }).join("");
+  const switcher = `<div class="person-bar" role="tablist" aria-label="换一个人看">${chips}</div>
+    <p class="hint">共 ${num(all.length)} 个人（有画像的在前）——<b>同一时刻只显示一个人</b>，
+      上面这条<b>横向可以滑</b>；换页签回来还是这个人。</p>`;
 
   const head = card("人物画像（记忆这一档）", `
     <p class="hint">这里是<b>一个人一张</b>：她对这个人的整体印象（记忆里 <code>kind=profile</code>
       那一类），加上挂在这个人名下的零散记录（称呼、边界、偏好这类）。
       画像跟着人走、不跟话题走，所以不按词检索；一批记忆里最多动一条。</p>
-    <p class="hint">面板对记忆**只能删、不能改**：写入只走记忆维护 agent。
+    <p class="hint">面板对记忆只能删、不能改：写入只走记忆维护 agent。
       删除入口在「记忆」页（问题记忆那张卡），这里只读。</p>
     ${profiles.total > PROFILE_LIMIT || records.total > PROFILE_LIMIT
       ? `<p class="hint">这一页每类最多看 ${PROFILE_LIMIT} 条（现在画像 ${num(profiles.total)} 条、
-         旧事 ${num(records.total)} 条），超出的没列出来——不是没有。</p>` : ""}`);
+         旧事 ${num(records.total)} 条），超出的没列出来——不是没有。</p>` : ""}
+    ${switcher}`);
 
-  if (!keys.length) {
+  if (!all.length) {
     return head + card("还没有画像", `<p class="hint">她对这些人的印象还没成形。
       画像由记忆维护 agent 在真的看出"这个人的整体样子"时才写一条，不是每人一条。</p>`);
   }
-
-  const cards = keys.map((key) => {
-    const rows_ = impression.get(key);
-    const main = rows_[0];
-    const older = (superseded.get(key) || []).length;
-    const identity = [];
-    if (key !== "（无归属人）") identity.push(`<span class="mono">${esc(key)}</span>`);
-    if (names[key] && names[key].length) identity.push(names[key].join("、"));
-    if (main.scope_key) {
-      identity.push(`群 <span class="mono">${esc(main.scope_key)}</span>`);
-    }
-    const relation_ = relation[key];
-    const relationLine = relation_
-      ? `亲近 ${esc(String(relation_.closeness ?? "—"))} · 戒备 ${
-        esc(String(relation_.guardedness ?? "—"))} · 更新于 ${esc(ts(relation_.updated_at))}`
-      : "还没有关系两轴读数（她还没跟这个人来回够多）";
-    const own = mentions.get(key) || [];
-    // 「类别」这一列**不许 nowrap**：类别名有长有短（`alias` / `preference` / `boundary`），
-    // 在中等档（内容区只剩 ~575px）里最短的那一列装不下最长的类别名，而 `nowrap`
-    // 会让它**溢到旁边「键」那一列下面**、两列的字叠在一起（2026-10-06 截图核对抓到的）。
-    // 让它自己折行就没有这个问题——`table-layout: fixed` 下折行不会把列撑宽。
-    const ownTable = table([
-      { label: "类别", key: "kind", mono: true },
-      { label: "键", key: "normalized_key", mono: true, wide: true },
-      { label: "内容", get: (r) => r.content },
-      { label: "更新", get: (r) => ts(r.updated_at), nowrap: true },
-    ], own, { cols: "cols-profile", widths: ["20%", "20%", "44%", "16%"] });
-    return card(personName(main) || (key === "（无归属人）" ? "（无归属人）" : key), `
-      <p class="pref-summary">${identity.join(" · ") || "名册里还没有这个人的名字"}</p>
-      <div class="card-inline">
-        <div class="pref-title">她对这人的整体印象${
-          main.revision ? `（r${num(main.revision)}）` : ""}</div>
-        <div class="impression">${esc(main.content || "（空）")}</div>
-        ${older ? `<p class="hint">另有 ${num(older)} 条旧版（被顶替）；按状态筛选能在「记忆」页看到。</p>` : ""}
-      </div>
-      <p class="pref-summary">关系两轴：${relationLine}</p>
-      <div class="pref-group-title">这个人的零散记录（${num(own.length)} 条）</div>
-      ${own.length ? ownTable : '<p class="hint">这个人名下还没有别的记录。</p>'}`);
-  });
-
-  // 有记录、但还没有画像的人：如实列一行，别让人以为"她只记得这几个人"。
-  const withoutProfile = [...mentions.keys()].filter((key) => !impression.has(key));
-  const tail = withoutProfile.length
-    ? card("有记录、但还没成形像", `<p class="hint">这些人名下有零散记录，但还没有"整体印象"那一条：
-        ${withoutProfile.slice(0, 60).map((key) => `<span class="mono">${
-          esc(personName((mentions.get(key) || [])[0]) || key)}</span>`).join("、")}${
-        withoutProfile.length > 60 ? ` …（共 ${num(withoutProfile.length)} 人）` : ""}</p>`)
-    : "";
-  return head + cards.join("") + tail;
+  // **只画选中的那一个**（用户："别每个人一个卡片往下翻"）。
+  return head + personBlock(current, data);
 }
 
 

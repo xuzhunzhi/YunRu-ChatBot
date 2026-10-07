@@ -425,6 +425,66 @@ class PersonProfilePlacementTests(unittest.TestCase):
             "memory_profile", _card_ids(self._card("账号与设备")),
             "人物画像挂到账号页了（它属于「记忆」这一档）")
 
+    def test_only_one_profile_block_is_rendered_at_a_time(self) -> None:
+        """**同一时刻只画一个人**（用户 2026-10-06）：*"应该是一个卡片里来回切换多个人的
+        画像，而不是每个人一个卡片往下翻，这得翻多久"*。
+
+        判据落在"画几个"上：`viewPersonProfiles()` 里 `personBlock(` **只许出现一次**，
+        而且必须拿**选中的那个键**（`current`）去画；谁要是把它丢进 `map()` 铺成一列
+        （原来的写法是 `cards.join("")`），这一条当场红。
+        """
+
+        body = _uncomment(_function_body(self.js, "viewPersonProfiles", kind="async"))
+        self.assertEqual(
+            len(re.findall(r"personBlock\(", body)), 1,
+            "`viewPersonProfiles()` 里画像块不止一处——同一时刻只许渲染一个人")
+        self.assertIn("personBlock(current", body,
+                      "画像块不是拿**选中的那个人**画的")
+        self.assertNotIn('cards.join("")', body,
+                         "又变回「把所有画像拼成一列」的老写法了")
+        # 一个人一块里的四样东西，都在 `personBlock()` 里（不在别处拼）
+        block = _uncomment(_function_body(self.js, "personBlock"))
+        for piece in ("整体印象", "关系两轴", "零散记录"):
+            self.assertIn(piece, block, f"画像块里少了「{piece}」")
+        self.assertIn("main.revision", block, "整体印象没有带版本号")
+        self.assertIn("还没成形像", block,
+                      "没有画像的人那一档没有如实写「还没成形像」")
+
+    def test_the_switcher_lists_exactly_the_people_the_api_gives(self) -> None:
+        """切换条上的人 = **有画像的 ∪ 有记录但还没成形像的**（一个都不许漏）。
+
+        用户这一轮明确要求"名单里要有'有记录但还没成形像'的人"——所以判据是那条并集，
+        以及每枚按钮都带着那个人的键（`data-person`）；选中态只有一处（模板里的三元）。
+        """
+
+        body = _uncomment(_function_body(self.js, "viewPersonProfiles", kind="async"))
+        self.assertRegex(body, r"keys\.concat\(withoutProfile\)",
+                         "切换条的名单不是「有画像 ∪ 有记录没画像」")
+        self.assertIn("mentions.keys()", body,
+                      "没画像但有记录的人没有进名单（用户要求他们也能选到）")
+        self.assertRegex(body, r"all\.map\(", "切换条不是按那份完整名单铺的")
+        self.assertIn('data-person="${esc(key)}"', body,
+                      "切换条的人名按钮没有带那个人的键")
+        self.assertIn('class="person-chip', body, "切换条不是 `person-chip` 那套控件")
+        self.assertEqual(
+            len(re.findall(r'\? " on" : ""', body)), 1,
+            "选中态不止一处（或者没了）——同一时刻只该有一枚被选中")
+
+    def test_switching_a_person_re_renders_the_block(self) -> None:
+        """换人必须**重画**（内容跟着换），不是只换个高亮。"""
+
+        body = _uncomment(_function_body(self.js, "viewPersonProfiles", kind="async"))
+        self.assertIn('String(state.last.profileKey || "")', body,
+                      "当前是谁没有从 `state.last.profileKey` 取")
+        bound = _uncomment(_function_body(self.js, "bind"))
+        handler = re.search(r'act\("person-chip", \(el\) => \{(.*?)\}\)', bound, re.S)
+        self.assertIsNotNone(handler, "切换条的人名按钮没有接上（`bind()` 里找不到）")
+        inner = handler.group(1)
+        self.assertIn("state.last.profileKey = el.dataset.person", inner,
+                      "点了人名没有记下「选的是谁」")
+        self.assertIn("render()", inner,
+                      "换了人只改了高亮、没有重画内容")
+
     def test_the_profile_page_takes_its_data_from_the_existing_memory_seam(self) -> None:
         """取数只走面板**既有**的记忆读接口 `/api/memory/*`，不新开通道、不读库文件。
 
@@ -768,6 +828,119 @@ class AccountAndDeviceTests(unittest.TestCase):
         for path in self._paths(body):
             self.assertIn(path, self.DEVICE_PATHS,
                           f"设备页去打了 {path}——它只该用 {self.DEVICE_PATHS}")
+
+
+def _css_rule(css: str, selector: str) -> str:
+    """取一条 CSS 规则的正文。**行首锚定**（避免命中别人规则里的同名前缀），
+    取**最后**一条（CSS 里后来者胜）。
+
+    ⚠️ 先把注释抹掉：注释里写着的 `{ overflow: hidden }` 那种例子会把
+    `[^}]*` 截断在一半（第一版就是这么红的，而规则其实是对的）。
+    """
+
+    body = re.sub(r"/\*.*?\*/", " ", css, flags=re.S)
+    blocks = re.findall(r"(?m)^" + re.escape(selector) + r"\s*\{([^}]*)\}", body)
+    if not blocks:
+        raise AssertionError(f"app.css 里找不到 `{selector}` 这条规则")
+    return blocks[-1]
+
+
+class KnowledgeTableLayoutTests(unittest.TestCase):
+    """知识库那张「全库浏览」表：**不许叠字、不许裁到卡片外**（2026-10-07 用户："知识库文字重叠"）。
+
+    用户窗口是 **1267×796**（在 1024 与 1440 之间）。我按他截图里的形状自己造了一份
+    知识库索引夹具、在 1267×796 上复现出**三处**，各自的根因都不是"样式没调好"：
+
+    1. **来源压着标题**：那一列标了 `nowrap`，而来源是**路径**（`03-能力与装备/武器与装备
+       清单.md`），比列宽长得多 → `white-space: nowrap` 让它不折行、**画到旁边那一列上**；
+    2. **表格里半行字"压住"下一行**：`.md.clamp { max-height: 180px; overflow: hidden }`
+       正好切在字中间 → 半行字看着像和下一行叠在一起；
+    3. **内容被右边缘裁掉**：`.md-table` 是 `table-layout: auto`，内容偏好宽度可以**超过**
+       `width: 100%`，表格比单元格还宽，再被 `.md.clamp` 的 `overflow: hidden` 裁掉。
+
+    所以这一组钉的是**这三条的根因**（不是"把字切掉当修好"）。
+    ⚠️ 如实标注近似：判据 ①（不许叠字）在离线套件里**测不到真实像素**，
+    这里钉的是"不许用 `nowrap` 挤爆列宽"这个**可测的充分条件**；
+    真正量到的是截图时那次探针（`data/tmp_learned_shot.mjs`：四个档位
+    `table.scrollWidth <= clientWidth`、`rightOverflow` 为空，见提交信息里的读数）。
+    """
+
+    def setUp(self) -> None:
+        self.js = _asset("app.js")
+        self.css = _asset("app.css")
+
+    def test_the_source_column_wraps_instead_of_painting_over_the_next_one(self) -> None:
+        body = _uncomment(_function_body(self.js, "viewKnowledge", kind="async"))
+        row = re.search(r"\{ label: \"来源\".*?\}", body, re.S)
+        self.assertIsNotNone(row, "知识库那张表里找不到「来源」列")
+        column = row.group(0)
+        self.assertNotIn("nowrap", column,
+                         "「来源」列又标了 `nowrap`——路径比列宽长，会画到「标题」列上")
+        self.assertIn("wide: true", column,
+                      "「来源」列没有 `wide`（= `overflow-wrap: anywhere`）："
+                      "路径里没有空格，光靠 `break-word` 断不开")
+
+    def test_markdown_tables_are_contained_instead_of_clipped(self) -> None:
+        table_rule = _css_rule(self.css, ".md-table")
+        self.assertRegex(
+            table_rule, r"table-layout:\s*fixed",
+            "`.md-table` 不是 `table-layout: fixed`：auto 布局下它可能比单元格还宽，"
+            "再被 `.md.clamp` 的 `overflow: hidden` 裁掉（用户截图里的「内容被右边缘裁掉」）")
+        cells = _css_rule(self.css, ".md-table th, .md-table td")
+        self.assertRegex(
+            cells, r"overflow-wrap:\s*anywhere",
+            "`.md-table` 的单元格没有 `overflow-wrap: anywhere`——长 token 会顶出格子")
+
+    def test_the_clamped_preview_fades_instead_of_cutting_through_a_line(self) -> None:
+        clamp = _css_rule(self.css, ".md.clamp")
+        # ⚠️ 必须**行首锚定属性名**：不锚的话 `-webkit-mask-image: linear-gradient…`
+        # 也会被 `mask-image:` 匹配上，于是把 `mask-image` 那一行删掉照样绿
+        # （变异核对抓到的：12 条里只有它没红）。
+        self.assertRegex(
+            clamp, r"(?m)^\s*mask-image:\s*linear-gradient",
+            "`.md.clamp` 还是硬切（`overflow: hidden` + 固定 max-height）："
+            "切在字中间时，半行字看着像和下一行「压在一起」。要留给它一层淡出")
+        self.assertNotRegex(
+            clamp, r"max-height:\s*180px",
+            "`.md.clamp` 又回到了 180px——那个高度正好切在行中间（实测过）")
+
+    def test_the_knowledge_column_widths_live_in_css_so_narrow_screens_can_override(self) -> None:
+        body = _uncomment(_function_body(self.js, "viewKnowledge", kind="async"))
+        self.assertIn('cols: "cols-knowledge"', body,
+                      "知识库那张表没有用 `cols-knowledge`")
+        self.assertNotRegex(
+            body, r"widths:\s*\[\s*\"\d+%\"",
+            "知识库那张表又把列宽写回 `widths` 了——那是 `<col style>`（行内样式），"
+            "比 CSS 优先级高，窄屏那条媒体查询就压不住它了")
+        for index, width in ((1, "22%"), (2, "24%"), (3, "54%")):
+            self.assertRegex(
+                self.css,
+                r"\.cols-knowledge col:nth-child\(" + str(index) + r"\)\s*\{[^}]*"
+                + re.escape(width),
+                f"`.cols-knowledge` 第 {index} 列不是 {width}")
+        self.assertRegex(
+            self.css, r"@media \(max-width: 699px\)[\s\S]*?\.cols-knowledge col:nth-child\(1\)",
+            "窄屏那条媒体查询里没有给「来源」列加宽（500px 时路径会被切成七八行）")
+
+    def test_the_users_own_window_width_falls_in_the_wide_tier(self) -> None:
+        """**1267×796 是用户真实的窗口**——把那个宽度钉进档位。
+
+        判据：中等档的上界必须 **小于 1267**（于是 1267 落在宽屏档：左栏固定 426px、
+        剩下的全给内容），而且内容区**不许有 `max-width`**（有的话 1267 这个尺寸上
+        内容会白白少一截、表格更容易挤）。档位一改，这个尺寸上的排版就得重新看过。
+        """
+
+        medium = re.search(r"@media \(min-width: 700px\) and \(max-width: (\d+)px\)", self.css)
+        self.assertIsNotNone(medium, "找不到中等档那条媒体查询")
+        self.assertLess(
+            int(medium.group(1)), 1267,
+            f"中等档的上界是 {medium.group(1)}px，1267 就落进中等档了——"
+            "用户的窗口会被当成平板处理")
+        self.assertRegex(self.css, r"\.rail\s*\{[^}]*flex:\s*0 0 426px",
+                         "宽屏档的左栏不是固定 426px")
+        for block in re.findall(r"(?m)^\.content[^{]*\{([^}]*)\}", self.css):
+            self.assertNotIn("max-width", block,
+                             "内容区被限宽了：1267 这个尺寸下内容会白白少一截")
 
 
 if __name__ == "__main__":

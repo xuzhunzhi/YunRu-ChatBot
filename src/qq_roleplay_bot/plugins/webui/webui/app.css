@@ -1005,8 +1005,15 @@ textarea.tall { min-height: 260px; }
 .cols-profile col:nth-child(3) { width: 44%; }
 .cols-profile col:nth-child(4) { width: 16%; }
 
-/* 「知识库 → 黑话」里那两张表（谁解释的 / 改口修订）。三列，不挤：
-   时间戳与"她听到的 / 面板改的"都挪进"谁"那一格里分两行——五列平摊时长的那一列
+/* 知识库「全库浏览」：来源是**路径**（长）、标题短、内容是一整段 markdown。
+   ⚠️ 这三条原来写死在 `app.js` 的 `widths` 里（`<col style="...">`）——那比 CSS 优先级高，
+   窄屏就没法调了。2026-10-07 收进这里（与其余表同一条规矩：**列宽只写在这里**），
+   并给窄屏单开一档：500px 时 22% 的「来源」会把路径切成七八行，抬到 30% 好读一些。 */
+.cols-knowledge col:nth-child(1) { width: 22%; }
+.cols-knowledge col:nth-child(2) { width: 24%; }
+.cols-knowledge col:nth-child(3) { width: 54%; }
+
+/* 「知识库 → 黑话」里那两张表（谁解释的 / 改口修订）。三列，不挤：时间戳与"她听到的 / 面板改的"都挪进"谁"那一格里分两行——五列平摊时长的那一列
    在中等档（内容区 ~575px）装不下，`nowrap` 会让它溢到旁边列上（实测抓到过）。
    最后一列是原句（最长 200 字），给它一半宽度并允许任意位置断开。 */
 .cols-learned col:nth-child(1) { width: 26%; }
@@ -1051,6 +1058,49 @@ td .hint { margin: 2px 0 0; }
 /* 键名和"立即生效"标签分两行：并排会把 `compaction_enabled` 这种长键名挤断 */
 .cols-settings .set-key { display: block; overflow-wrap: anywhere; }
 .cols-settings .tag { margin-top: 4px; font-size: 11.5px; padding: 2px 8px; }
+
+/* --- 人物画像页：**一张卡里来回切换**（2026-10-06 用户给的改法）------------------
+ *
+ * 用户原话：*"任务画像（=人物画像），应该是一个**卡片里来回切换多个人**的画像，
+ * 而不是**每个人一个卡片往下翻**，这得翻多久"*。
+ *
+ * 切换控件选的是**横向可滑的人名条**（MIUI 里那种筛选 chip 条，比下拉更像设置页）：
+ *   - `flex-wrap: nowrap` + `overflow-x: auto`：人再多也**不换行**——换行会把卡片撑很高，
+ *     那正是"翻多久"那个毛病；滑一下就到（触摸屏直接划）；
+ *   - 每枚 chip `flex: 0 0 auto`（不许被压扁）+ `white-space: nowrap`（名字不许折）；
+ *   - 选中那枚是**主色药丸**（与页内 `.mem-status.on` 同一套语言）。
+ * ⚠️ 面板全局把滚动条藏了（用户 2026-10-01 要求），横滑条上因此看不到滑块——
+ * 所以卡里那句提示写明了"上面这条横向可以滑"，别只靠滚动条暗示。
+ */
+.person-bar {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 2px 2px 12px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--divider);
+}
+.person-chip {
+  flex: 0 0 auto;                  /* 人多了也不许被压扁 */
+  min-width: 0;                    /* 压掉全局 `button` 的 min-width: 58px */
+  min-height: 34px;
+  padding: 6px 14px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--outline);
+  background: var(--surface-container-high);
+  color: var(--on-surface);
+  font-size: 14px;
+  white-space: nowrap;
+}
+.person-chip:hover { background: var(--secondary-container); }
+.person-chip.on {
+  background: var(--primary);
+  color: var(--on-primary);
+  border-color: transparent;
+  font-weight: 600;
+}
+
 
 /* 一串号码/标签：**在号码之间**折行，不在号码内部断。 */
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -1119,14 +1169,31 @@ code {
 }
 .md-table {
   width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 13px;
+  /* ⚠️ 必须 **fixed**（2026-10-07 用户："知识库文字重叠"，本机 1267×796 复现）：
+     `auto` 布局下"内容偏好宽度"可以**超过** `width: 100%`，表格于是比单元格还宽，
+     再被外面 `.md.clamp { overflow: hidden }` 一裁——就是截图里"内容被右边缘裁掉"
+     （`她的主要武器，能从远距…` 断在卡片外）。
+     `fixed` 之后列按容器宽度分、文字在格内换行：宽表格是**被容纳**，不是被切。 */
+  table-layout: fixed;
 }
 .md-table th, .md-table td {
   border: 1px solid var(--divider);
   padding: 6px 10px; vertical-align: top; text-align: left;
+  /* 长 token（URL、连写的英文/路径）也不许顶出格子——fixed 布局只固定列宽，
+     内容照样能溢出，所以这一条必须留着。 */
+  overflow-wrap: anywhere;
 }
 .md-table th { background: var(--surface-container-high); font-weight: 600; }
-/* 浏览列表里只给个大概，不撑爆表格 */
-.md.clamp { max-height: 180px; overflow: hidden; }
+/* 浏览列表里只给个大概：**淡出**，不是硬切。
+   原来 `max-height: 180px; overflow: hidden` 会正好切在字中间，半行字看着像和下一行
+   "压在一起"（用户截图的第②处；本机复现时的 `便携式EMP发射器：对载具有效` 下面那半行）。
+   淡出之后"还有更多"一眼看得出来，也没有假装内容只有这么点。 */
+.md.clamp {
+  max-height: 200px;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent 100%);
+}
 .md.clamp .md-table { font-size: 12.5px; }
 
 /* --- 确认弹窗（用 windowDimming，圆角与卡片一致） -------------------------- */
@@ -1234,6 +1301,11 @@ code {
      多一个类，**特异性更高**——不点名的话，窄屏上"填洞"的那一格会留着 2/3 宽，
      一行里就会出现半截格子（写完这条规则前是照属性优先级想当然的，实测才发现）。 */
   .grid .kv, .grid .kv.span-2, .grid .kv.span-3 { flex: 0 1 100%; }
+  /* 知识库「全库浏览」：窄屏把「来源」加宽一点——22% 时一条路径会被切成七八行
+     （截图核对过），抬到 30% 好读一些。 */
+  .cols-knowledge col:nth-child(1) { width: 30%; }
+  .cols-knowledge col:nth-child(2) { width: 26%; }
+  .cols-knowledge col:nth-child(3) { width: 44%; }
 }
 
 /* 「返回」只在窄屏的"阅读态"出现——桌面与中等屏没有这个概念 */
