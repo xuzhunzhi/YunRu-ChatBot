@@ -19,7 +19,32 @@ logger = logging.getLogger(__name__)
 
 STATE_VERSION = 1
 MAX_PERSISTED_SESSIONS = 200
-MAX_PERSISTED_HISTORY = 50
+# 落盘时每个会话最多带多少条历史（`QQBOT_PERSISTED_HISTORY`，调用时现读、越界夹取）。
+#
+# **这不是性能开关**：它只决定"**还没进摘要的那一段活窗口**在重启后能不能恢复"。
+# 超出上限的部分只留在内存里，进程一重启就没了；更早的内容已经在持久化的
+# `summary` 里（`summary_through` 一起存），长期记忆是另一个库、跟这里无关。
+# 默认 200 与 `COMPACT_KEEP=50` / `LIVE_TARGET=500` 形成梯度：压缩后留 50 条，
+# 攒到 500 条再压一次，落盘能带住压缩之后的整段活窗口（不至于重启丢几百条最近发言）。
+PERSISTED_HISTORY_DEFAULT = 200
+PERSISTED_HISTORY_MIN = 50
+PERSISTED_HISTORY_MAX = 2000
+
+
+def persisted_history_limit() -> int:
+    """当前生效的落盘历史条数上限：**调用时现读** `QQBOT_PERSISTED_HISTORY`。
+
+    为什么不做成 import 期常量：进程起来之后再改环境（测试、面板覆盖、换配置重启）
+    就再也读不到了——这个坑本仓库踩过（`dev_config` 里有同样的说明）。坏值一律回落
+    默认；越界按 `[PERSISTED_HISTORY_MIN, PERSISTED_HISTORY_MAX]` 夹取（照
+    `memory_config` 的夹取写法）。
+    """
+
+    try:
+        value = int(os.environ.get("QQBOT_PERSISTED_HISTORY", str(PERSISTED_HISTORY_DEFAULT)))
+    except (TypeError, ValueError):
+        value = PERSISTED_HISTORY_DEFAULT
+    return max(PERSISTED_HISTORY_MIN, min(PERSISTED_HISTORY_MAX, value))
 
 
 def state_path_default() -> Path:

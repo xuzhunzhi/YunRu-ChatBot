@@ -5,12 +5,20 @@ import json
 import os
 import shutil
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 from qq_roleplay_bot.metrics import LatencyWindow, RuntimeMetrics
 from qq_roleplay_bot.stage3_main import DialogueEngine
 from qq_roleplay_bot.stage3_runtime import ConversationState
-from qq_roleplay_bot.state_store import MAX_PERSISTED_HISTORY, STATE_VERSION, RuntimeStateStore
+from qq_roleplay_bot.state_store import (
+    PERSISTED_HISTORY_DEFAULT,
+    PERSISTED_HISTORY_MAX,
+    PERSISTED_HISTORY_MIN,
+    STATE_VERSION,
+    RuntimeStateStore,
+    persisted_history_limit,
+)
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 
 GROUP = "717151356"
@@ -21,6 +29,24 @@ _SCRATCH = (
     / f"persist-{os.getpid()}-{uuid.uuid4().hex[:8]}"
 )
 atexit.register(shutil.rmtree, _SCRATCH, ignore_errors=True)
+
+
+@contextmanager
+def _env(name: str, value: str | None):
+    """临时设/删一个环境变量，退出时还原（上限是**调用时现读**的，测试必须还原）。"""
+
+    saved = os.environ.get(name)
+    if value is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = value
+    try:
+        yield
+    finally:
+        if saved is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = saved
 
 
 def _scratch_dir(name: str) -> Path:
@@ -127,7 +153,7 @@ def test_sessions_survive_restart_including_bot_reply_history() -> None:
 
 
 def test_persisted_history_is_capped_and_keeps_absolute_sequence_numbers() -> None:
-    """落盘只带最近 `MAX_PERSISTED_HISTORY` 条，读回来的绝对序号与切掉前逐条对齐。
+    """落盘只带最近 N 条（N = 当前上限），读回来的绝对序号与切掉前逐条对齐。
 
     这条钉的是"`as_state()` 不再全量导出"：把切片去掉 → 条数断言红；
     切片了但忘了把丢掉的条数计进 `dropped` → 序号断言红（读回来的 `seq` 会整体
@@ -140,17 +166,71 @@ def test_persisted_history_is_capped_and_keeps_absolute_sequence_numbers() -> No
     # 压缩过一次的会话：摘要覆盖到第 100 条，活窗口是它之后的那一段。
     state.summary_through = 100
 
+    limit = persisted_history_limit()
     raw = state.as_state()
-    assert len(raw["history"]) <= MAX_PERSISTED_HISTORY
+    assert len(raw["history"]) <= limit
 
     restored = ConversationState.from_state(raw, history_limit=2000)
     assert restored is not None
-    kept = list(state.history)[-MAX_PERSISTED_HISTORY:]
+    kept = list(state.history)[-limit:]
     assert [restored.seq_of(m) for m in restored.recent()] == [state.seq_of(m) for m in kept]
     # 活窗口只剩"落盘的那一截"：它是原来活窗口的尾巴，顺序与内容逐条相同。
     assert ([m.text for m in restored.live_history()]
-            == [m.text for m in state.live_history()][-MAX_PERSISTED_HISTORY:])
+            == [m.text for m in state.live_history()][-limit:])
     assert restored.summary_through == state.summary_through
+
+
+def test_the_persist_cap_follows_the_environment_variable() -> None:
+    """上限是**调用时现读**的环境变量：改它，落盘条数跟着变（默认与实际都钉住）。
+
+    这里同时钉住默认值 200——把它调小/调大都要是有意的。
+    """
+
+    def _exported(limit_text: str | None) -> int:
+        state = ConversationState(history_limit=2000)
+        for index in range(600):
+            state.add(_message(f"m{index}", f"第{index}句"), float(index))
+        with _env("QQBOT_PERSISTED_HISTORY", limit_text):
+            return len(state.as_state()["history"])
+
+    assert _exported(None) == PERSISTED_HISTORY_DEFAULT == 200
+    assert _exported("120") == 120
+    assert _exported("500") == 500
+
+
+def test_the_persist_cap_is_clamped_and_bad_values_fall_back() -> None:
+    """越界夹取到 [50, 2000]，认不出的值回落默认（照 `memory_config` 的夹取写法）。"""
+
+    with _env("QQBOT_PERSISTED_HISTORY", "10"):
+        assert persisted_history_limit() == PERSISTED_HISTORY_MIN == 50
+    with _env("QQBOT_PERSISTED_HISTORY", "99999"):
+        assert persisted_history_limit() == PERSISTED_HISTORY_MAX == 2000
+    for bad in ("abc", "", "12.5", "  "):
+        with _env("QQBOT_PERSISTED_HISTORY", bad):
+            assert persisted_history_limit() == PERSISTED_HISTORY_DEFAULT, bad
+    # 负数与 0 也一样落到下限，不会变成"一条都不存"。
+    with _env("QQBOT_PERSISTED_HISTORY", "-5"):
+        assert persisted_history_limit() == PERSISTED_HISTORY_MIN
+    # 没设置时是默认值，且环境还原干净。
+    with _env("QQBOT_PERSISTED_HISTORY", None):
+        assert persisted_history_limit() == PERSISTED_HISTORY_DEFAULT
+
+
+def test_a_small_cap_still_keeps_sequence_numbers_aligned() -> None:
+    """把上限压到最小值也一样对齐——`dropped` 前移的算法不依赖具体数字。"""
+
+    state = ConversationState(history_limit=2000)
+    for index in range(200):
+        state.add(_message(f"m{index}", f"第{index}句"), float(index))
+    state.summary_through = 30
+    with _env("QQBOT_PERSISTED_HISTORY", "50"):
+        raw = state.as_state()
+    assert len(raw["history"]) == 50
+    restored = ConversationState.from_state(raw, history_limit=2000)
+    assert restored is not None
+    kept = list(state.history)[-50:]
+    assert [restored.seq_of(m) for m in restored.recent()] == [state.seq_of(m) for m in kept]
+    assert raw["dropped"] == 150
 
 
 def test_engine_without_state_store_does_not_touch_disk() -> None:

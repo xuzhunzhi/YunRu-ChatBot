@@ -128,6 +128,7 @@ netstat -ano | findstr :8080     # 看是谁占了
 | `QQBOT_DATA_DIR` | 项目下 `data/` | 所有运行数据、状态、日志、记忆的根目录 |
 | `QQBOT_STATE_PERSIST` | 开启 | `0` 关闭运行状态持久化 |
 | `QQBOT_STATE_FILE` | 由上面推导 | 指定 `runtime_state.json` 的完整路径 |
+| `QQBOT_PERSISTED_HISTORY` | `200` | 每个会话落盘带多少条最近消息。范围夹在 50..2000，坏值回落 200。**不是性能开关**：它只决定"还没进摘要的那段活窗口"在重启后能恢复多少（超出的部分只在内存里，重启就没了；更早的内容已经在摘要里） |
 | `QQBOT_CHAT_LOG` | 开启 | **对话日志**（实际收发，`data/logs/chat.jsonl`）。`0` 关掉整份 |
 | `QQBOT_CHAT_LOG_MAX` | `20000` | 对话日志保留多少条（按条滚动，不是按天）。范围兜在 10..1000000，**不会无限增长** |
 | `QQBOT_CHAT_LOG_DIR` | 空 | 空 = 与模型日志同一个 `data/logs/`；要单独搬走就写路径 |

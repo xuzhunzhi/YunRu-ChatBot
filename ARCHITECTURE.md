@@ -171,7 +171,7 @@ confidence=0到1之间的小数
 
 - **原子写入**：先写同目录临时文件、`fsync`、再 `os.replace`，避免半写文件。
 - **版本校验**：文件缺失、损坏、版本不符、权限不足都整体降级为默认值，只记录异常类别。
-- **只保存运行状态**：不含 API Key、模型请求体或记忆库内容；单文件最多 200 个会话（只导有内容、按最近活动排序），每个会话最多 `MAX_PERSISTED_HISTORY`（50）条最近消息——切掉的那几条计入 `dropped`，所以留下的消息绝对序号与摘要边界都不变。
+- **只保存运行状态**：不含 API Key、模型请求体或记忆库内容；单文件最多 200 个会话（只导有内容、按最近活动排序），每个会话最多 `QQBOT_PERSISTED_HISTORY` 条最近消息（默认 200，夹取 50..2000，**调用时现读**）——切掉的那几条计入 `dropped`，所以留下的消息绝对序号与摘要边界都不变。这个上限**不是性能开关**，它只决定"还没进摘要的那段活窗口"在重启后能恢复多少。
 - **写入节流**：会话活跃时最快每 10 秒写一次，并在关闭时补写一次；群启停等显式操作立即写入。
 - 路径由 `QQBOT_STATE_FILE` 或 `QQBOT_DATA_DIR` 决定；`QQBOT_STATE_PERSIST=0` 关闭持久化。
 - 持久化**默认启用**。离线测试入口 `tests/run_offline.py` 会设置 `QQBOT_STATE_PERSIST=0` 并把 `QQBOT_STATE_FILE` 指向 `.tmp_test_run/`，因此测试不会覆盖真实的 `data/runtime_state.json`（这一点由 `tests/test_persistence_and_metrics.py` 的隔离用例守着）。它同时把 `QQBOT_DEBUG_MODEL_IO` 置 0：`.env` 里为排查注入问题开着模型追踪，测试不该把上千条合成 prompt 写进 `data/traces/`。

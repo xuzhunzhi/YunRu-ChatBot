@@ -16,7 +16,7 @@ from .extensions import PromptMaterial
 from .base_prompt import BASE_PROMPT
 from .memory_model import MemoryMaterial
 from .prompt_library import derive_must_reply
-from .state_store import MAX_PERSISTED_HISTORY
+from .state_store import persisted_history_limit
 from .stay_in_character import STAY_IN_CHARACTER_RULE
 from . import data_boundary
 from . import dev_config
@@ -377,20 +377,26 @@ class ConversationState:
     def as_state(self) -> dict[str, object]:
         """导出可持久化的会话状态；只保留短期语境，不含长期记忆。
 
-        历史**只落最近 `MAX_PERSISTED_HISTORY` 条**（那个常量到这天才有了消费者）：
-        落盘发生在回复路径上、同步、带 fsync，全量导出等于每隔一会儿就把整段窗口
-        dump 一遍。老对话本来就已经在 `summary` 里，切片丢的是"活窗口里最早的那一段"。
+        历史**只落最近 `persisted_history_limit()` 条**（`QQBOT_PERSISTED_HISTORY`，
+        默认 200、夹取 [50, 2000]，**调用时现读**）：落盘发生在回复路径上、同步、带
+        fsync，全量导出等于每隔一会儿就把整段窗口 dump 一遍。
+
+        这个上限**不是性能开关**，它只决定"**还没进摘要的那一段活窗口**在重启后能不能
+        恢复"：超出上限的那几条只留在内存里，进程一重启就没了（更早的内容已经在
+        `summary` 里）。默认 200 与 `COMPACT_KEEP=50` / `LIVE_TARGET=500` 配套，
+        刚好带得住压缩之后的整段活窗口。
 
         切片**不动恢复语义**靠的是 `dropped` 跟着一起前移：`seq = dropped + 位置`，
         留下的那一截消息读回来之后绝对序号逐条不变，`summary_through` 与
         `topic_start_seq` 指的还是原来那一条（见 `from_state`）。
         """
 
+        limit = persisted_history_limit()
         history = list(self.history)
         dropped = self.dropped
-        if len(history) > MAX_PERSISTED_HISTORY:
-            dropped += len(history) - MAX_PERSISTED_HISTORY
-            history = history[-MAX_PERSISTED_HISTORY:]
+        if len(history) > limit:
+            dropped += len(history) - limit
+            history = history[-limit:]
         return {
             "mode": self.mode.value,
             "active_user_id": self.active_user_id,
