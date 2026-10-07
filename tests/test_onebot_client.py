@@ -5,6 +5,7 @@
 import asyncio
 import contextlib
 import json
+import logging
 from unittest.mock import patch
 
 from qq_roleplay_bot.onebot_client import (
@@ -73,6 +74,28 @@ async def _start_with_socket(transport: OneBotClientTransport, socket: _FakeSock
     return transport
 
 
+@contextlib.contextmanager
+def _client_logs():
+    """抓 `qq_roleplay_bot` 这条包的日志行。
+
+    抓**包**那一层：这句说明与反向 WS 那条通道共用一份，落在
+    `qq_roleplay_bot.transport` 上（见 `transport.note_private_send_refusal`）。
+    """
+
+    records: list[logging.LogRecord] = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    logger = logging.getLogger("qq_roleplay_bot")
+    previous_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.WARNING)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+
+
 # --- 出站消息形状 ---------------------------------------------------------
 
 def test_compose_message_plain_and_quoted() -> None:
@@ -108,6 +131,55 @@ def test_send_uses_group_and_private_actions() -> None:
         assert private_call["params"]["message"][0] == {"type": "reply", "data": {"id": "9"}}
 
     asyncio.run(run())
+
+
+def test_a_private_send_refused_by_the_friend_gate_explains_itself() -> None:
+    """客户端这条通道（HTTP / 主动连）与反向 WS **同一份判据、同一句话**。
+
+    依据是 `AGENTS.md` §2.3"共用模块的改动必须同时服务两边"：说明由
+    `transport.note_private_send_refusal` 统一给出，两条通道谁都不许自己写一份。
+    回执形状取自 2026-10-08 的实测（见 `docs/research/snowluma-api-2026-10-08.md`）。
+    """
+
+    from qq_roleplay_bot.transport import DeliveryRejected
+
+    async def run():
+        socket = _FakeSocket(auto_echo=False)
+        transport = OneBotClientTransport("ws://127.0.0.1:3001", request_timeout=1.0)
+        await _start_with_socket(transport, socket)
+
+        async def refusing_send(raw):
+            payload = json.loads(raw)
+            socket.sent.append(payload)
+            await socket._frames.put(json.dumps({
+                "status": "failed", "retcode": 16,
+                "message": "发送失败，请先添加对方为好友",
+                "wording": "发送失败，请先添加对方为好友",
+                "echo": payload.get("echo"),
+            }))
+
+        socket.send = refusing_send  # type: ignore[assignment]
+        try:
+            try:
+                await transport.send(MessageTarget(user_id="2468"), "在吗")
+            except Exception as exc:  # noqa: BLE001 - 用例要看的就是这个异常
+                return exc, socket.sent
+            return None, socket.sent
+        finally:
+            await transport.close()
+
+    with _client_logs() as records:
+        failure, sent = asyncio.run(run())
+        lines = [record.getMessage() for record in records]
+
+    assert any("这条私聊没发出去" in line and "对方还不是好友" in line for line in lines), lines
+    assert any("2468" in line for line in lines), lines
+    # 只是说明：异常分类照旧、还是那一帧、原参数、没有第二次尝试。
+    assert isinstance(failure, DeliveryRejected), failure
+    assert len(sent) == 1, sent
+    assert sent[0]["action"] == "send_private_msg"
+    assert sent[0]["params"]["user_id"] == 2468
+    assert sent[0]["params"]["message"] == "在吗"
 
 
 def test_empty_text_is_not_sent() -> None:

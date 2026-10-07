@@ -22,6 +22,7 @@ from .transport import (
     IncomingMessage,
     MessageNotDelivered,
     MessageTarget,
+    note_private_send_refusal,
 )
 
 logger = logging.getLogger(__name__)
@@ -166,7 +167,15 @@ class OneBotClientTransport:
             await self.call_api("send_group_msg", params)
             return
         params.update(message_type="private", user_id=_id_value(target.user_id or ""))
-        await self.call_api("send_private_msg", params)
+        try:
+            await self.call_api("send_private_msg", params)
+        except DeliveryRejected as exc:
+            # 私聊被**有理由地**拒收（对方还不是好友 / 没有临时会话）时补一句人话给
+            # 操作者。判据与说法跟反向 WS 那条通道**共用一份**
+            # （`transport.note_private_send_refusal`，见 `AGENTS.md` §2.3）。
+            # **只是说明**：异常紧接着照原样抛，失败分类、重发策略、限制一个字不动。
+            note_private_send_refusal(target, exc)
+            raise
 
     async def send_typing(self, target: MessageTarget, notice: str = "typing") -> None:
         """广播一次"正在输入"状态；纯装饰，失败一律吞掉。"""

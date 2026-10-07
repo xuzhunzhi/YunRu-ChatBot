@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Protocol
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +178,30 @@ def private_send_refusal_note(text: str) -> str:
         if any(marker.casefold() in haystack for marker in markers):
             return note
     return ""
+
+
+def note_private_send_refusal(target: MessageTarget, exc: BaseException) -> bool:
+    """私聊被**有理由地**拒收时，给操作者补一句人话（一条 WARNING）；返回有没有打。
+
+    由来（2026-10-08 实测）：给非好友发私聊，对面的回执是一句劝告式的话
+    （"请先添加对方为好友" / `no such temp session`），操作者在日志里只看得到
+    "Stage 3 reply send failed" 加一串回执原文，看不出下一步该做什么。
+
+    **两条出站通道都走这里**（反向 WS 的 `onebot_ws`、客户端的 `onebot_client`）：
+    判据与说法只有一份，免得两边漂移——这也是 `AGENTS.md` §2.3"共用模块的改动必须
+    同时服务两边"的意思。
+
+    **只是说明**：不改失败分类、不重发、不放宽任何限制，异常由调用方照原样抛。
+    只在私聊目标上做：群消息撞不出这两类原因，打了只是噪音。
+    """
+
+    if target.group_id is not None or not isinstance(exc, DeliveryRejected):
+        return False
+    note = private_send_refusal_note(str(exc))
+    if not note:
+        return False
+    logger.warning("%s（私聊对象：%s）", note, target.user_id or "未知")
+    return True
 
 
 class QQTransport(Protocol):

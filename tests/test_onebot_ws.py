@@ -276,12 +276,16 @@ class _RefusingConnection:
 
 @contextmanager
 def _ws_logs():
-    """抓 `qq_roleplay_bot.onebot_ws` 的日志行（与 `test_disconnect_notice` 同法）。"""
+    """抓 `qq_roleplay_bot` 这条包的日志行（与 `test_disconnect_notice` 同法）。
+
+    抓**包**那一层、不是 `...onebot_ws` 那一层：这句说明跟客户端那条通道**共用一份**，
+    落在 `qq_roleplay_bot.transport` 上（见 `transport.note_private_send_refusal`）。
+    """
 
     records: list[logging.LogRecord] = []
     handler = logging.Handler()
     handler.emit = records.append
-    logger = logging.getLogger("qq_roleplay_bot.onebot_ws")
+    logger = logging.getLogger("qq_roleplay_bot")
     previous_level = logger.level
     logger.addHandler(handler)
     logger.setLevel(logging.WARNING)
@@ -324,7 +328,7 @@ def test_a_private_reply_refused_by_the_friend_gate_explains_itself() -> None:
 
     failure, requests, lines = _refused_send(_FRIEND_REFUSAL, MessageTarget(user_id="2468"))
 
-    # 1. 说明在（把 `_note_refusal` 那一行去掉 → 这里立刻红）。
+    # 1. 说明在（把 `note_private_send_refusal(...)` 那一行去掉 → 这里立刻红）。
     assert any("这条私聊没发出去" in line for line in lines), lines
     assert any("对方还不是好友" in line for line in lines), lines
     assert any("云茹" in line and "加好友" in line for line in lines), lines
