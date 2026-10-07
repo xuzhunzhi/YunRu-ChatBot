@@ -138,7 +138,9 @@ class SecondRootTests(SecondRootCase):
 
         stdlib_sees = sorted(m.name for m in pkgutil.iter_modules([str(self.root)]) if m.ispkg)
         assert stdlib_sees == [], f"预期 stdlib 看不见它，实际看见了：{stdlib_sees}"
-        assert plugins_pkg.plugin_dirs() == ("probe_good",)
+        # 只断言"**我写进临时根的那个在结果里**"。**不比整个集合**：这棵树上本来有几个
+        # 插件不是这条用例的事（本体树 0 个、插件树 6 个，两边都要成立）。
+        assert "probe_good" in plugins_pkg.plugin_dirs(), plugins_pkg.plugin_dirs()
 
     def test_old_plugin_without_manifest_fields_still_loads(self) -> None:
         self.write("probe_old", OLD)
@@ -184,10 +186,21 @@ class SecondRootTests(SecondRootCase):
 
         loaded = self.discover()
 
-        assert loaded == ("probe_good",), f"坏插件没被单独跳过：{loaded}"
+        # 断言**我写进临时根的**这几个：好的装上、坏的只跳过自己。**不比整个集合**——
+        # 这棵树上本来有几个插件（本体树 0 个、插件树 6 个）不是这条用例的事。
+        assert "probe_good" in loaded, f"正常插件没被装上：{loaded}"
+        for name in ("probe_noreg", "probe_syntaxerr", "probe_missingmod"):
+            assert name not in loaded, f"坏插件 {name} 没被单独跳过：{loaded}"
+
         rows = self.rows()
-        assert set(rows) == {"probe_good", "probe_noreg", "probe_syntaxerr", "probe_missingmod"}
-        assert all(rows[name]["loaded"] is False for name in rows if name != "probe_good")
+        probes = ("probe_good", "probe_noreg", "probe_syntaxerr", "probe_missingmod")
+        for name in probes:
+            assert name in rows, f"{name} 没出现在清单上：{sorted(rows)}"
+        assert rows["probe_good"]["loaded"] is True
+        for name in probes[1:]:
+            assert rows[name]["loaded"] is False, f"{name} 不该算装上"
+        assert "just_resources" not in rows, "没有 plugin.py 的纯资源目录不该算插件"
+        assert "_private" not in rows, "下划线开头的目录不该算插件"
 
         from qq_roleplay_bot import runtime
 
@@ -249,7 +262,8 @@ class InventoryShapeTests(SecondRootCase):
 
         rows = self.rows()
 
-        assert set(rows) == {"probe_good", "broken"}
+        # 不比整个集合（这棵树上还有别的插件）；钉的是"这两行都在、且同一组键"。
+        assert {"probe_good", "broken"} <= set(rows), sorted(rows)
         expected = {"name", "title", "note", "version", "builtin", "source",
                     "enabled", "loaded", "requires", "removable", "panel"}
         assert set(rows["broken"]) == expected, sorted(rows["broken"])

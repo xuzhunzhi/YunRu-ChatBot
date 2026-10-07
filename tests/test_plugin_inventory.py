@@ -140,9 +140,10 @@ def test_the_loaded_count_matches_what_the_scan_sees() -> None:
 **证明不了这个改动被验证过**。这个文件就是补上那一块。
 """
 
-#: 面板读的 9 个键——**成功行与失败行必须是同一组**，否则前端要写两套读法。
-ROW_KEYS = {"name", "title", "note", "builtin", "enabled", "loaded",
-            "requires", "removable", "panel"}
+#: 面板读的 11 个键——**成功行与失败行必须是同一组**，否则前端要写两套读法。
+#: （2026-10-08 跟着本体对齐：`inventory()` 有意多了 `version` / `source`——源是契约。）
+ROW_KEYS = {"name", "title", "note", "version", "builtin", "source",
+            "enabled", "loaded", "requires", "removable", "panel"}
 
 
 class InventoryShapeTests(unittest.TestCase):
