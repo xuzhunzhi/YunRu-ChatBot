@@ -47,7 +47,7 @@
 - `src/qq_roleplay_bot/data_boundary.py:180`：中和的形状里两侧记号**原样保留**（`f"{MARKER_OPEN}{_ZERO_WIDTH_SPACE}{match.group(1)}{MARKER_CLOSE}"`）
 - `src/qq_roleplay_bot/stage3_runtime.py:1532`（名册）、`:1538`（历史）：两个块就是 `data_boundary.render(...)` 的入参
 - 8cd6bbc 把中和加到 `ConversationState.roster_lines`（`stage3_runtime.py:188`）与 `_derive_roster`（`:1137`），所以"昵称里带假记号"这条路径**由今天的修复打开**
-- nodoc：`data_boundary.py:133-137` 把这个已知边界写成"概率极低""正常路径上不会发生"——与实测不符（见下）
+- `data_boundary.py:133-137` 把这个已知边界写成"概率极低""正常路径上不会发生"——与实测不符（见下）
 
 **复现**（我在副本里跑的一次性探针；走的是生产路径：`alias_of` 是 callable、roster 由调用方传。下面这段就是全部代码）：
 
@@ -162,7 +162,7 @@ python tests/run_single.py tests/test_data_boundary.py
 
 ## 我做了哪些实验（命令 + 结果 + 是否还原）
 
-全部在**工作区内的副本**里跑（`C:\Users\XuZhunzhi\QQRoleplayBot\.audit_scratch\dev` 与 `...\mut`，robocopy 自 dev），没有碰 dev 的源码、`data/`、`.env`、`run/`。副本基线 = e112c02/1544a42 一批（`.git` 也是副本）。
+全部在**仓库外的临时副本**里跑（robocopy 自 dev 的两份拷贝，一份跑基线、一份跑突变），没有碰 dev 的源码、`data/`、`.env`、`run/`。副本基线 = e112c02/1544a42 一批（`.git` 也是副本）。**副本已连同其中的 `.env` 拷贝一起删除**（它们带真实凭据，不该留在工作区）；表里的命令就是在副本里跑的那些，复现时照必修 1 的代码块与这里的命令重建副本即可。
 
 | 实验 | 命令 | 结果 | 还原 |
 | --- | --- | --- | --- |
