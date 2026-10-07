@@ -966,6 +966,11 @@ class DialogueEngine:
         state_store=None,
         context_provider=None,
         clock=time.monotonic,
+        # 印给人看的时间用**墙上时钟**（`time.time`）。刻意与 `clock` 分开：
+        # `clock` 只算时长（焦点值班、冷却、耗时），`wall_clock` 只印日期时刻。
+        # `handle` 里那个 `now`（`self.clock()`）**同时喂着焦点值班的数学**，
+        # 所以不能整体换成墙上时钟——只把"显示/提示"那几处改成 `self.wall_clock()`。
+        wall_clock=time.time,
         group_listen: bool | None = None,
         typing_sim: bool | None = None,
         command_registry=None,
@@ -1117,6 +1122,10 @@ class DialogueEngine:
         self.last_cache_report: dict[str, object] | None = None
         self.state_store = state_store
         self.clock = clock
+        # **墙上时钟**：只给"印给人看的时间"用（她那边/群里这边那两个时刻）。
+        # 与 `self.clock`（单调，只算"过了多少秒"：焦点值班、冷却、耗时）是两回事——
+        # 混用会把开机时长印成 1970（2026-10-08 用户报的问题，见 `_now_text`）。
+        self.wall_clock = wall_clock
         self.enabled = True
         self._stats = {name: 0 for name in (
             "accepted_messages", "ignored_messages", "blocked_messages",
@@ -3011,7 +3020,10 @@ class DialogueEngine:
         """记下一封刚发出去的信（最近在前）。`DailyReporter` 与 runtime 都往这里灌。"""
 
         cleaned = {
-            "at": float(letter.get("at") or self.clock()),
+            # 信的 `at` 是**墙上时间**（`mail_state.json` 里存的就是 `time.time()`），
+            # 缺省值时不能拿单调时钟来凑——那是"开机时长当 epoch"，下面算信龄时
+            # 会减出一个天文数字（这条与 `_now_text` 的 1970 是同一类错）。
+            "at": float(letter.get("at") or self.wall_clock()),
             "to": str(letter.get("to") or ""),
             "subject": str(letter.get("subject") or "").strip(),
             "body": str(letter.get("body") or "").strip(),
@@ -3933,7 +3945,11 @@ class DialogueEngine:
             # 「现在是什么时候」：以前这条路完全没有时间，她答不出"现在几点/今天几号"，
             # 也判断不了"昨天晚上""三天前"（2026-09-30 用户："云茹不能获取时间吗"）。
             # 它进的是**易变段**，不影响前缀缓存。
-            now=now,
+            #
+            # ⚠️ 传**墙上时钟**，不是上面那个 `now`：那个是 `self.clock()`（单调），
+            # 拿它印日期就是把开机时长当 epoch（生产上真的印出过 `1970-01-02`）。
+            # 焦点值班的数学仍然用 `now`——两者不能互换。
+            now=self.wall_clock(),
             # 这一轮**不再有**"没把握就先问一句"的现场提示（2026-10-05 晚拆掉那条路：
             # 用户否掉的就是它）。`clarify_note` 这个口子留着（它只进易变段），
             # 但引擎这一侧现在**恒为空串**——没把握时不再教她怎么说话，
@@ -4490,7 +4506,8 @@ class DialogueEngine:
             identity=identity,
             # 判定也要知道现在什么时候：它判断"还在不在同一条线上"靠的正是
             # "刚才/昨天晚上/三天前"这类说法（2026-09-30 加）。
-            now=self.clock(),
+            # 与回复那条路同源：`self.wall_clock()`（墙上时间），不是 `self.clock()`。
+            now=self.wall_clock(),
         )
         self._stats["judge_calls"] += 1
         started_at = self.clock()
