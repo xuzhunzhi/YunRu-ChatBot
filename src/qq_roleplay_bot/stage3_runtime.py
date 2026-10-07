@@ -162,6 +162,9 @@ class ConversationState:
 
         昵称是外部输入（QQ 昵称），进 prompt 前必须转义 `<` 与 `&`——
         否则一个叫 `<history>` 的人就能把结构搅乱。
+        **2026-10-08 补**：昵称与别称还要过一遍边界记号的中和——昵称是**别人自己
+        能改的**，一个叫 `‹ABCDEFG›` 的人等于把伪造记号直接印在名册那一行上
+        （名册是可信度看起来最高的一段）。中和与 `_format_message` 同一把尺子。
 
         `role_of(user_id) -> str` 是**可选**的"这个人在这个群里是什么角色"读数
         （核心给的 `group_roles` 事实，见 `stage3_main._role_reader`）。
@@ -180,10 +183,12 @@ class ConversationState:
         for user_id, alias in sorted(self.aliases.items(), key=lambda item: item[1]):
             if alias not in present:
                 continue
-            name = escape(sanitize_chat_text(self.alias_names.get(alias, "某人"), max_length=128),
-                          quote=False)
-            also = [escape(sanitize_chat_text(item, max_length=128), quote=False)
-                    for item in self.alias_also.get(alias, ()) if item]
+            name = escape(data_boundary.neutralize_message_text(
+                sanitize_chat_text(self.alias_names.get(alias, "某人"), max_length=128)),
+                quote=False)
+            also = [escape(data_boundary.neutralize_message_text(
+                sanitize_chat_text(item, max_length=128)), quote=False)
+                for item in self.alias_also.get(alias, ()) if item]
             # 别称写在这行里：记忆/摘要里的旧名于是**一跳**就能对上这个编号。
             suffix = f"；别称：{'、'.join(also)}" if also else ""
             lines.append(
@@ -1098,11 +1103,16 @@ def _derive_roster(messages: list[IncomingMessage], alias_of) -> tuple[str, ...]
         if alias is None or alias in people:
             continue
         people[alias] = (message.sender_name or "某人", message.user_id)
-    return tuple(
-        f"{alias}={escape(sanitize_chat_text(name, max_length=128), quote=False)}"
-        f"（QQ{escape(sanitize_chat_text(user_id, max_length=128), quote=False)}）"
-        for alias, (name, user_id) in sorted(people.items())
-    )
+    def _line(item: tuple[int, tuple[str, str]]) -> str:
+        alias, (name, user_id) = item
+        # 昵称是外部输入（别人自己能改的），两道处理都要：转义结构字符 + 中和伪造记号。
+        # 这一条与正式路径（`ConversationState.roster_lines`）同一把尺子。
+        safe_name = escape(data_boundary.neutralize_message_text(
+            sanitize_chat_text(name, max_length=128)), quote=False)
+        return (f"{alias}={safe_name}"
+                f"（QQ{escape(sanitize_chat_text(user_id, max_length=128), quote=False)}）")
+
+    return tuple(_line(item) for item in sorted(people.items()))
 
 
 QUOTE_EXCERPT_CHARS = 24
