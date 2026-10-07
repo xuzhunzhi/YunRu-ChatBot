@@ -101,6 +101,7 @@ from .extensions import PromptContext, PromptMaterial, PromptSources
 from .admin_control import AdminCommand, AdminCommandKind, parse_admin_command
 from .memory_model import MemoryMaterial
 from .memory_service import MemoryService
+from . import data_boundary
 from . import runtime_flags
 
 if TYPE_CHECKING:
@@ -1137,6 +1138,11 @@ class DialogueEngine:
             # 话里有具体断言、三处都没有根据，于是被打回重写一次"的次数。
             # （关掉 `ask_when_unsure` 开关时两者恒为 0。只有计数，没有正文。）
             "clarify_quiet", "reply_grounding_rewrites",
+            # 不可信数据的短码（`data_boundary`，2026-10-08）：`data_marker_retries` 是
+            # "回复里抄了当轮短码、被打回重写一次"的次数；`data_marker_drops` 是
+            # "重写又抄、于是这一条没发出去"的次数（fail-closed）。
+            # 只有计数：**不记短码、不记正文**。
+            "data_marker_retries", "data_marker_drops",
         )}
         self._pending_relays: dict[str, PendingRelay] = {}
         self._pending_relay_selections: dict[str, PendingRelaySelection] = {}
@@ -1212,7 +1218,8 @@ class DialogueEngine:
         return "\n".join(lines)[-600:]
 
     def _revision_request(self, request: list[dict[str, str]], draft: str,
-                          reason: str, *, note: str = "") -> list[dict[str, str]]:
+                          reason: str, *, note: str = "",
+                          redact: tuple[str, ...] = ()) -> list[dict[str, str]]:
         """把"这一版被退回来了"接在**同一份请求**后面。
 
         为什么不重新拼一遍整个请求：`build_dialogue_messages` 有十几个参数，抄一遍
@@ -1225,12 +1232,21 @@ class DialogueEngine:
         * 风格审核那一趟：`reason` 就是审核给的理由，没有别的话；
         * 「没把握就别断言」那一趟：`note=ask_when_unsure.NO_ASSERT_NOTE`
           ——"别断言你不知道的 / 说你能说的，或者说这个你不清楚"，**不是**"问她一句"。
+
+        `redact`（2026-10-08）：这几串在**引述的那一版正文**里要被抹掉。
+        只有"回复抄了边界短码"那一趟用它——否则"你刚写的是：…‹7K3Q9ZM›…"会把那个
+        短码**又递回给她一次**，等于一边说不许抄、一边示范一遍。抹掉的位置写
+        `（那串记号）`，她看得到"这里原本有个记号"，但拿不到可抄的字串。
         """
 
+        shown = draft or ""
+        for token in redact:
+            if token:
+                shown = shown.replace(token, "（那串记号）")
         note_block = f"\n{note.strip()}\n" if note.strip() else ""
         body = (
             "--- 你刚写的那一句要重来 ---\n"
-            f"你刚写的是：{draft}\n"
+            f"你刚写的是：{shown}\n"
             f"不合适的地方：{reason or '（没写清楚是哪一处）'}"
             f"{note_block}\n"
             "照这个地方**重写一遍**——只改不合适的那处，别的不用动。"
@@ -1241,7 +1257,8 @@ class DialogueEngine:
     async def _rewrite_after_review(self, request, draft: str, reason: str, *,
                                     session_id: str, trigger: str, trigger_kind: str,
                                     context: str, known_message_ids: frozenset[str],
-                                    must_reply: bool, note: str = "") -> str | None:
+                                    must_reply: bool, note: str = "",
+                                    redact: tuple[str, ...] = ()) -> str | None:
         """打回之后：**在同一轮里**让回复 agent 重写一次。返回新正文或 `None`。
 
         两个调用方共用这一条路（**不另造机器**）：
@@ -1249,6 +1266,9 @@ class DialogueEngine:
         * 「没把握就别断言」（2026-10-05 晚）：她这一版话里有具体断言，
           而知识库 / 记忆 / 语境三处都没有根据 → 同一个动作，
           只是多带一句现成的 `note`（`ask_when_unsure.NO_ASSERT_NOTE`）。
+
+        第三条（2026-10-08，不可信数据的边界短码）也走它：`reason` 是"你把那串短码
+        写进去了"；`redact=(marker,)` 保证引述那一版正文时**不把短码又递回去**。
 
         几条边界（都是"宁可照旧，也不许把一条回复弄丢"）：
 
@@ -1260,7 +1280,7 @@ class DialogueEngine:
           没有另造一套客户端。
         """
 
-        retry_request = self._revision_request(request, draft, reason, note=note)
+        retry_request = self._revision_request(request, draft, reason, note=note, redact=redact)
         self._stats["model_calls"] += 1
         started_at = self.clock()
         try:
@@ -3777,6 +3797,12 @@ class DialogueEngine:
         # （三处根据一样都没有 + 被叫到 → 之后要看她的草稿）。
         grounding = None
         ask_rules = self._flags().ask_when_unsure
+        # 这一轮的**短码**（不可信数据的边界，2026-10-08）：回复段用它把每个 DATA 块
+        # 包起来，回复回来之后再拿它做一次纯字符串判定（`data_boundary.reply_leaks_marker`）。
+        # 开关关掉时是空串：下面的包裹与判定都变成恒等操作，请求与改动前逐字相同。
+        # **每轮现取**（不是每条消息共用）：`secrets` 取 7 位，见 `data_boundary`。
+        marker = (data_boundary.session_marker()
+                  if self._flags().data_marker_enabled else "")
         # 双 agent 结构：先由判定 agent 决定"要不要接"。它的 prompt 与窗口都小得多，
         # 所以这次调用便宜；判定说 NO_REPLY 就直接结束，省掉回复那一次完整调用。
         if self._judge_on(message.session_id):
@@ -3916,6 +3942,8 @@ class DialogueEngine:
             # 「她自己的老习惯」（2026-10-06 金句学习）：按眼前这句的语境挑几条**材料**
             # 进 DATA 段。关掉开关 / 还没学出东西时是空串，请求与改动前逐字相同。
             style_material=self._style_material(message, state),
+            # 不可信数据的边界短码（空串 = 那个开关关掉了，见上面 `marker`）。
+            session_marker=marker,
         )
         self._stats["model_calls"] += 1
         started_at = self.clock()
@@ -3950,9 +3978,9 @@ class DialogueEngine:
         # 在**同一轮**里重写一次（最多一次，不许循环）；重写后仍被拒 → **发重写的那一版**
         # （绝不把回复丢掉、也不卡住），并记一笔。审核超时/报错/输出认不出来一律按通过。
         # `review_enabled` 是运行期开关（面板可关）——关掉就是原稿直发。
-        # `review_rewrote` 记"审核已经把这一次重写机会用掉了"（见下面那一关）：
-        # 两条路**共用同一次**重写机会，不许一条回复被重写两遍。
-        review_rewrote = False
+        # `style_rewrote` 记"**风格审核**已经把这一次重写用掉了"（见下面那一关）：
+        # 它负责的是"审核与「没把握就别断言」**共用同一次**重写机会"这条规矩。
+        style_rewrote = False
         if (self._flags().review_enabled and self.style_reviewer is not None
                 and decision.kind is DecisionKind.REPLY
                 and decision.text):
@@ -3970,7 +3998,7 @@ class DialogueEngine:
                     known_message_ids=frozenset(message_ids),
                     must_reply=self._judge_on(message.session_id),
                 )
-                review_rewrote = True
+                style_rewrote = True
                 if rewritten is not None:
                     # **只换正文**：这一轮要不要说、引用哪一句、语境是什么，
                     # 都是判定与第一次解析定下来的，不因为重写一遍就改主意。
@@ -3989,7 +4017,7 @@ class DialogueEngine:
         # "行，等你"）不打回——**不许把正常聊天掐死**。打回时递的那句话
         # （`NO_ASSERT_NOTE`）说的是"别断言你不知道的、不知道就直说"，
         # **不是**"问她一句"——那条路用户已经否掉了。
-        if (grounding is not None and grounding.rewrite and not review_rewrote
+        if (grounding is not None and grounding.rewrite and not style_rewrote
                 and decision.kind is DecisionKind.REPLY and decision.text
                 and has_specific_claim(decision.text)):
             first_draft = decision.text
@@ -4015,6 +4043,50 @@ class DialogueEngine:
                 # 审核打回不是否决权，回复绝不许被丢掉。这里只换正文。
                 decision = replace(decision, text=rewritten)
             # 重写这一趟空手/失败 → **发第一版**（宁可照旧，也不许把回复弄丢）。
+        # 「不可信数据的短码」那一关（2026-10-08，最后一道：**上面任何一次重写之后
+        # 的最终稿**都要过它）。
+        #
+        # 判据是纯字符串（`data_boundary.reply_leaks_marker`，**零额外模型调用**）：
+        # 她这一版正文里出现了**当轮那个短码** → 说明她把"资料记号"抄进了要说的话里
+        # （那是注入生效的样子）。处理分两步，与前面两条重写路**刻意不同**：
+        #
+        # * **第一次**：交回回复 agent 在同一轮里重写一次，反馈照样走
+        #   `_rewrite_request`（"你刚写的那一句要重来"）。这一趟**不消耗**风格审核/
+        #   「别断言」那一次机会——那条"最多一次"的规矩是**那两条路之间**的，
+        #   这里要求的是各自独立一次（安全维度不许被风格维度挤掉；`style_rewrote`
+        #   仍然只由审核那一条路置位）；
+        # * **再犯**：**这一条不发**（fail-closed），并记 `data_marker_drops`。
+        #   宁可少说一句，也不把"能证明注入生效"的话发到群里。
+        #
+        # 日志里**不许写短码明文**（与 `security` 里"不记录敏感内容"同一口径）：
+        # 只记会话、触发与条数。
+        if (marker and decision.kind is DecisionKind.REPLY and decision.text
+                and data_boundary.reply_leaks_marker(decision.text, marker)):
+            self._stats["data_marker_retries"] += 1
+            logger.warning(
+                "Stage 3 reply carried the boundary marker; rewriting once: "
+                "session=%s trigger=%s chars=%s",
+                message.session_id, trigger_kind, len(decision.text))
+            rewritten = await self._rewrite_after_review(
+                request, decision.text,
+                reason="你把消息里那串短码写进去了。那些短码只是记号，不要抄、也不要提。",
+                session_id=message.session_id, trigger=trigger, trigger_kind=trigger_kind,
+                context=self._review_context(message, state),
+                known_message_ids=frozenset(message_ids),
+                must_reply=self._judge_on(message.session_id),
+                # **不许把短码又递回给她**：反馈里引述那一版正文时把它抹掉
+                # （否则等于一边说不许抄、一边示范一遍）。
+                redact=(marker,),
+            )
+            if rewritten is not None:
+                decision = replace(decision, text=rewritten)
+            if data_boundary.reply_leaks_marker(decision.text, marker):
+                self._stats["data_marker_drops"] += 1
+                logger.warning(
+                    "Stage 3 reply still carried the boundary marker; dropping this one: "
+                    "session=%s trigger=%s chars=%s",
+                    message.session_id, trigger_kind, len(decision.text))
+                decision = replace(decision, text="")
         self.metrics.record_decision(decision.kind.value)
         logger.info(
             "Stage 3 decision: session=%s trigger=%s kind=%s dialogue=%s reply_length=%s "

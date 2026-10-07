@@ -585,6 +585,23 @@ SLANG_LEARN_ENABLED = _enabled("QQBOT_SLANG_LEARN")
 SLANG_PROFILE_FILE = get("QQBOT_SLANG_PROFILE", "data/slang/entries.json")
 
 
+# --- 不可信数据的机器可验证边界（2026-10-08）----------------------------------
+# 用户原话：*"给不可信数据加一道机器可验证的边界：每轮回复生成一个随机标记，
+# 所有不可信内容都用它包起来；模型若把这个标记写进回复，判违规。"*
+#
+# 实现只有两份：`data_boundary.py`（取短码 / 包块 / 中和伪造 / 判违规）与
+# `stage3_runtime.build_dialogue_messages`（**逐处**把 DATA 段包上）；重试与
+# fail-closed 在 `stage3_main._model_path`。
+#
+# - **默认开**，`QQBOT_DATA_MARKERS=0` 关掉：关掉之后**请求与改动前逐字相同**
+#   （不取短码、不包裹、也不中和入站文本；有测试直接比字符串）。
+# - 短码不是用户举例的 8 位十六进制，理由写在 `data_boundary` 的模块说明里
+#   （hex 会偶然出现在正常回复里 → 误判违规 → 丢一条正常回复）。
+# - system 里那条安全规则是**常量、常驻**，与这个开关无关：关掉时它无害，
+#   换来的是 system 前缀逐字不变、前缀缓存不因开关而断。
+DATA_MARKERS_ENABLED = _enabled("QQBOT_DATA_MARKERS")
+
+
 def session_user_id(base: str, session_id: str) -> str:
     """把会话 id 变成服务商能接受的 user_id 后缀。
 

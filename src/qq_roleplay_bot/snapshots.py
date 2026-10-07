@@ -89,6 +89,11 @@ class EngineSnapshot:
     # 只有计数，没有正文。
     clarify_quiet: int = 0
     reply_grounding_rewrites: int = 0
+    # 不可信数据的短码（`data_boundary`，2026-10-08）：`data_marker_retries` 是
+    # "回复里抄了当轮短码、被打回重写一次"的次数；`data_marker_drops` 是"重写又抄、
+    # 于是这一条没发出去"的次数（fail-closed）。只有计数，**不含短码、不含正文**。
+    data_marker_retries: int = 0
+    data_marker_drops: int = 0
     # 当前当值状态：热群、当值多久、排队深度。只有数字与群号，没有正文。
     focus: dict[str, object] | None = None
     memory: dict[str, object] | None = None

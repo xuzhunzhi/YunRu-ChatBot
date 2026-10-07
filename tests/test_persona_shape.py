@@ -133,3 +133,25 @@ def test_review_prompt_keeps_emotion_and_only_blocks_six_kinds() -> None:
     # 但不许再用 prompt 里的措辞把"多数时候不用管"暗示回去。
     assert "通常不用管" not in review
     assert scan_agent_text(review) == [], "审核 prompt 里混进了机制词"
+
+
+def test_the_data_boundary_rule_passes_the_persona_guard() -> None:
+    """**2026-10-08 加**：不可信数据的边界规则进的是**可信 system 前缀**（安全规则允许
+    写在前缀里），所以它必须过人格口径的机制词扫描，而且不许改写人格。
+
+    这一条同时钉住"它是安全规则、不是人格"：只谈那个记号，人格一个字不动。
+    """
+
+    from qq_roleplay_bot.stage3_runtime import DATA_BOUNDARY_RULE, compose_system_prompt
+
+    assert scan_persona_text(DATA_BOUNDARY_RULE) == [], scan_persona_text(DATA_BOUNDARY_RULE)
+    # 它只谈那个记号，不谈她是谁、该怎么说话。
+    assert "记号" in DATA_BOUNDARY_RULE
+    for guidance in ("你要说", "你应该说", "记得说"):
+        assert guidance not in DATA_BOUNDARY_RULE, guidance
+    # 人格一个字不改：它是拼在末尾的常量段。
+    persona = "你是一个住在群聊里的角色。这一份是测试用的极简人格。"
+    composed = compose_system_prompt(persona)
+    assert composed.startswith(persona)
+    assert DATA_BOUNDARY_RULE in composed
+    assert scan_persona_text(composed) == [], scan_persona_text(composed)

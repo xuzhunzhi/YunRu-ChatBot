@@ -102,11 +102,18 @@ def test_the_whole_system_has_no_mechanism_words_outside_the_personas_guard_sect
 
 
 def test_the_rule_reaches_the_system_through_the_code_seam() -> None:
-    """经 `compose_system_prompt` 进 system（不是写进人格模板）。"""
+    """经 `compose_system_prompt` 进 system（不是写进人格模板）。
+
+    2026-10-08：装配点现在拼**两条常量**——这一条禁令 + 不可信数据的边界规则
+    （`stage3_runtime.DATA_BOUNDARY_RULE`，用户拍板的那条安全规则）。
+    判据没变：**人格本身一个字都不改**，两条规矩都挂在它后面。
+    """
+
+    from qq_roleplay_bot.stage3_runtime import DATA_BOUNDARY_RULE
 
     persona = "你是一个住在群聊里的角色。这一份是测试用的极简人格，里面没有任何规矩。"
     composed = compose_system_prompt(persona)
-    assert composed == persona + STAY_IN_CHARACTER_RULE
+    assert composed == persona + STAY_IN_CHARACTER_RULE + DATA_BOUNDARY_RULE
     assert composed.startswith(persona), "人格本身不能被改动"
 
 
@@ -114,6 +121,8 @@ def test_it_survives_a_replaced_persona() -> None:
     """生产上人格是**整段替换**的——这条规矩走那条真路：换掉人格也照样在。"""
 
     import tempfile
+
+    from qq_roleplay_bot.stage3_runtime import DATA_BOUNDARY_RULE
 
     fake = "你是一个住在群聊里的角色。这一份是测试用的极简人格，里面没有任何规矩。"
     with tempfile.TemporaryDirectory() as tmp:
@@ -131,7 +140,8 @@ def test_it_survives_a_replaced_persona() -> None:
                 trigger="threshold", context=ContextState(topic="闲聊"),
             )
         assert request[0]["role"] == "system"
-        assert request[0]["content"] == persona + STAY_IN_CHARACTER_RULE
+        # 人格一字不改，两条代码层的常量接在后面（禁令 + 边界规则）。
+        assert request[0]["content"] == persona + STAY_IN_CHARACTER_RULE + DATA_BOUNDARY_RULE
         assert scan_persona_text(request[0]["content"]) == []
 
 

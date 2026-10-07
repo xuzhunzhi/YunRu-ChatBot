@@ -826,7 +826,11 @@ def test_the_material_is_wired_into_the_volatile_section_in_the_source() -> None
     from qq_roleplay_bot import stage3_runtime
 
     source = inspect.getsource(stage3_runtime.build_dialogue_messages)
-    material_at = source.index("+ style_material")
+    # 2026-10-08：材料现在经 `data_boundary.render(...)` 包上边界短码，所以拼的写法
+    # 从 `+ style_material` 变成 `render(style_material, mark)`——这里改成量**最后
+    # 一次**出现（函数签名与说明里也各出现一次，那两处不算）。
+    material_at = source.rindex("style_material")
+    assert "render(style_material" in source, "材料没有被短码包住"
     volatile_at = source.index("volatile_content = (")
     system_at = source.index('{"role": "system"')
     assert volatile_at < material_at < source.index("return [", material_at)

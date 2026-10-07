@@ -40,11 +40,15 @@ FLAG_NOTES: dict[str, str] = {
     "quote_enabled": "金句学习 agent（定期学「她怎么说、什么场合说什么」）。"
                      "关掉＝**不再学**，也**不再往回复里加那几条材料**——"
                      "回复 prompt 与改动前逐字相同。",
+    "data_marker_enabled": "不可信数据的边界记号（每轮一个随机短码，包住聊天、资料、"
+                           "旧事、插件材料）。关掉＝**不取短码、不包裹、也不中和入站的"
+                           "伪造记号**，请求与改动前逐字相同；system 里那条安全规则是"
+                           "常量，照旧在。",
 }
 
 
 class RuntimeFlags:
-    """九个开关的可变容器。线程安全够用（面板线程写、asyncio 线程读）。"""
+    """十个开关的可变容器。线程安全够用（面板线程写、asyncio 线程读）。"""
 
     __slots__ = ("_values", "_lock")
 
@@ -111,6 +115,10 @@ class RuntimeFlags:
     def quote_enabled(self) -> bool:
         return self.get("quote_enabled")
 
+    @property
+    def data_marker_enabled(self) -> bool:
+        return self.get("data_marker_enabled")
+
 
 def _truthy(value: object) -> bool:
     return str(value).strip().casefold() in {"1", "true", "yes", "on"}
@@ -141,6 +149,9 @@ def build_flags(config=None) -> RuntimeFlags:
         "ask_when_unsure": bool(_cfg.ASK_WHEN_UNSURE),
         # 金句学习：默认开（`QQBOT_QUOTE_LEARN=0` 关）。关掉时回复 prompt 与改动前逐字相同。
         "quote_enabled": bool(_cfg.QUOTE_LEARN_ENABLED),
+        # 不可信数据的边界记号：默认开（`QQBOT_DATA_MARKERS=0` 关）。
+        # 关掉时不取短码、不包裹、不中和——请求与改动前逐字相同。
+        "data_marker_enabled": bool(_cfg.DATA_MARKERS_ENABLED),
     }
     if config is not None:
         stored = getattr(config, "values", {}) or {}

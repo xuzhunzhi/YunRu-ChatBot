@@ -6,9 +6,19 @@
    这是缓存命中的前提。前缀只在压缩那一刻断裂，且断裂次数等于压缩次数。
 2. **上下文不断**：旧对话不丢，而是压成摘要一直带着。
 3. **窗口有界**：活窗口在 `[COMPACT_KEEP, LIVE_TARGET]` 之间循环，不会无限增长。
+
+**2026-10-08 的口径修正**（不可信数据的边界短码，`data_boundary`）：回复段的每个
+不可信块现在都带一个**每轮重新生成**的短码（用户拍板的安全要求），所以 prompt
+逐字比对时**每轮都会断一次**——断的不是窗口滑动，是那个记号。下面这四条测试
+比的是 `_without_markers()` 之后的内容：**记号之外**的部分仍然必须"逐轮追加、
+只在压缩那一刻断裂"，这才是它们要守的性质。
+
+代价如实记在这里：稳定段的第一行就是短码，所以**回复段这一截的前缀复用没有了**
+（system 那一截照旧逐字稳定）。这是"边界可见 + 可自动检测"换来的，用户已拍板。
 """
 import asyncio
 
+from qq_roleplay_bot.data_boundary import MARKER_SHAPE_PATTERN
 from qq_roleplay_bot.stage3_main import COMPACT_KEEP, LIVE_TARGET, DialogueEngine
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 
@@ -16,6 +26,12 @@ GROUP = "717151356"
 TARGET = MessageTarget(group_id=GROUP)
 
 SUMMARY_MARK = "【摘要】"
+
+
+def _without_markers(text: str) -> str:
+    """去掉每轮那个随机短码，留下它之外的内容（见模块说明）。"""
+
+    return MARKER_SHAPE_PATTERN.sub("\u2039mark\u203a", text or "")
 
 # 跨过一次压缩所需的最小轮数：每条消息都会得到一条回复，所以历史每轮涨 2 条。
 CYCLE_TURNS = LIVE_TARGET // 2 + 20
@@ -96,7 +112,8 @@ def run(dual, n):
             if compactor is not None:
                 compactor.slot["turn"] = position
             await engine.handle(message)
-        return [r[1]["content"] for r in reply.requests], engine, compactor
+        # 返回的是**去掉每轮短码**之后的稳定段：比的是窗口的追加性质，不是那个记号。
+        return [_without_markers(r[1]["content"]) for r in reply.requests], engine, compactor
 
     return asyncio.run(main())
 
