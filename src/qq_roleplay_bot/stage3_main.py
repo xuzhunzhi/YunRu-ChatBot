@@ -149,6 +149,9 @@ RELAY_CONTENT_MAX_LENGTH = 1000
 MAX_PERSISTED_SESSIONS = 200
 # 会话活跃时的持久化节流间隔，避免每条消息都写盘。
 PERSIST_MIN_INTERVAL_SECONDS = 10.0
+# 判定/回复的模型调用**连续**失败到这个数，`/super status` 那一行就升级成"异常"
+# （用户要的是"她又突然不说话了"能一眼看见；单次失败可能只是抖一下，连续才是异常）。
+CONSECUTIVE_MODEL_FAILURE_ALERT = 3
 PING_REPLY = "pong"
 # 拟人化节奏：发送前的"正在输入"状态，以及每条消息之间的打字停顿。
 # 关掉 QQBOT_TYPING_SIM=0 即恢复"模型一返回就立刻发"的旧行为。
@@ -1153,7 +1156,15 @@ class DialogueEngine:
             # "重写又抄、于是这一条没发出去"的次数（fail-closed）。
             # 只有计数：**不记短码、不记正文**。
             "data_marker_retries", "data_marker_drops",
+            # 判定/回复这两条路的模型调用失败（2026-10-08，失败降级审计 1）：失败时
+            # **照样沉默**（那是刻意的，测试钉着），但"她突然不说话"必须看得见——
+            # 只有计数与"连续几次"，没有正文。
+            "judge_failed", "reply_failed",
         )}
+        # 连续失败次数（成功一次就归零）：单次失败可能只是网络抖一下，连续几次才是
+        # "她又突然不说话了"。只用来决定 `/super status` 那一行要不要升级成"异常"。
+        self._judge_failed_streak = 0
+        self._reply_failed_streak = 0
         self._pending_relays: dict[str, PendingRelay] = {}
         self._pending_relay_selections: dict[str, PendingRelaySelection] = {}
         self._relay_deliveries: deque[RelayDelivery] = deque()
@@ -2800,6 +2811,22 @@ class DialogueEngine:
             )
         if snapshot.empty_forced_reply:
             lines.append(f"异常：判定说要回但回复空手 {snapshot.empty_forced_reply} 次")
+        # 判定/回复的模型调用失败（2026-10-08，失败降级审计 1）：失败时她照样不出声，
+        # 所以这一行就是"她突然不说话了"的唯一出口。连续几次才算异常——单次可能只是
+        # 抖一下；连续说明模型那边真的挂了。
+        if snapshot.judge_failed or snapshot.reply_failed:
+            failed_parts = []
+            if snapshot.judge_failed:
+                failed_parts.append(f"判定挂掉 {snapshot.judge_failed} 次")
+            if snapshot.reply_failed:
+                failed_parts.append(f"回复挂掉 {snapshot.reply_failed} 次")
+            streak = max(self._judge_failed_streak, self._reply_failed_streak)
+            head = ("异常：模型调用连续失败" if streak >= CONSECUTIVE_MODEL_FAILURE_ALERT
+                    else "模型调用失败")
+            lines.append(
+                f"{head}：" + "   ".join(failed_parts)
+                + (f"（当前连续 {streak} 次）" if streak else "")
+            )
         if getattr(self, "style_reviewer", None) is not None:
             # 审核的**拦截率**（2026-10-05 追加）：长期 0 拦截 = 它没在工作；
             # 拦截率很高 = 可能过紧。这一行照配置出现，所以"0 次"本身也是信息。
@@ -2826,7 +2853,12 @@ class DialogueEngine:
                 )
         if self.memory_service is not None:
             memory = self.memory_service.snapshot()
-            lines.append(f"记忆：已入队 {memory.get('queued_events', 0)} 条待处理")
+            line = f"记忆：已入队 {memory.get('queued_events', 0)} 条待处理"
+            # 读/写失败数（2026-10-08，失败降级审计 7）：与金句"没跑成 N 次"同一口径。
+            # 记忆库读不到时她不提以前的事、"记忆：已入队 0 条"看着一切正常——查不到。
+            if memory.get("failures"):
+                line += f"   读写失败 {memory.get('failures')} 次"
+            lines.append(line)
         # 金句学习（2026-10-06）：**把学出来的东西露在概览里**——用户要的就是
         # "要能被操作者看到与纠正"。原文与逐条方向在 `/super quote`，这里只报计数
         # 与"有没有在跑"，免得概览被一大段笔记撑爆。
@@ -3860,6 +3892,9 @@ class DialogueEngine:
             )
         except Exception:
             logger.exception("Stage 3 extension collection failed; continuing without extension data")
+            # 与下面"事后通知"那一处同口径（2026-10-08，失败降级审计 8）：知识库/插件
+            # 材料整段时间拿不到时，"她变笨了"也要能在计数上看见，不能只有一行日志。
+            self.metrics.record_extension_failure()
             prompt_material = PromptMaterial()
         if self.memory_service is not None:
             memory_material = await self.memory_service.retrieve(
@@ -3977,7 +4012,13 @@ class DialogueEngine:
                 self.clock() - started_at,
                 summary,
             )
+            # 回复这条路失败照旧往上抛（这一轮没有回复），但**要有人知道**：
+            # 计数 + 连续次数，`/super status` 会印出来。
+            self._stats["reply_failed"] += 1
+            self._reply_failed_streak += 1
+            self.metrics.record_model_error(summary)
             raise
+        self._reply_failed_streak = 0
         elapsed = self.clock() - started_at
         self.metrics.model_latency.observe(elapsed)
         # 完整输入输出落在 data/logs/reply.jsonl（最近 1000 次）。
@@ -4532,7 +4573,13 @@ class DialogueEngine:
                 "Stage 3 judge call failed: session=%s trigger=%s kind=%s elapsed=%.2fs",
                 message.session_id, trigger, summary, self.clock() - started_at,
             )
+            # 沉默是刻意的（fail-closed，`tests/test_dual_agent.py` 钉着"不出声"），
+            # 但"她为什么不出声"要看得见：计数 + 连续次数，`/super status` 会印出来。
+            self._stats["judge_failed"] += 1
+            self._judge_failed_streak += 1
+            self.metrics.record_model_error(summary)
             return JudgeVerdict(should_reply=False)
+        self._judge_failed_streak = 0
         self.metrics.judge_latency.observe(self.clock() - started_at)
         self._log_model_io("judge", request, raw, session_id=message.session_id,
                            trigger=trigger, must_reply=must_reply,

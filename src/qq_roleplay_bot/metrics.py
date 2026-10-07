@@ -110,7 +110,6 @@ class RuntimeMetrics:
         self.model_errors: dict[str, int] = {}
         self.send_failures = 0
         self.extension_failures = 0
-        self.memory_degraded = 0
         self.model_latency = LatencyWindow()
         self.send_latency = LatencyWindow()
         # 判定 agent 单独计时：双 agent 结构下"慢在哪一段"要能分开看。
@@ -142,10 +141,6 @@ class RuntimeMetrics:
         with self._lock:
             self.extension_failures += 1
 
-    def record_memory_degraded(self) -> None:
-        with self._lock:
-            self.memory_degraded += 1
-
     def snapshot(self) -> dict[str, object]:
         with self._lock:
             return {
@@ -154,7 +149,6 @@ class RuntimeMetrics:
                 "model_errors": dict(self.model_errors),
                 "send_failures": self.send_failures,
                 "extension_failures": self.extension_failures,
-                "memory_degraded": self.memory_degraded,
                 "model_latency": self.model_latency.snapshot(),
                 "send_latency": self.send_latency.snapshot(),
                 "judge_latency": self.judge_latency.snapshot(),

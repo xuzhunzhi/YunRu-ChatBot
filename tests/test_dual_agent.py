@@ -125,6 +125,123 @@ def test_judge_failure_degrades_to_silence() -> None:
     assert reply.requests == []
 
 
+def test_judge_failure_is_counted_and_visible_in_status() -> None:
+    """沉默是刻意的，但"她为什么不出声"要看得见：计数 + `/super status` 一行。
+
+    突变：去掉判定失败那两行计数（`_stats["judge_failed"]` / `record_model_error`）
+    → 这条红。
+    """
+
+    class Exploding:
+        async def complete(self, request):
+            raise RuntimeError("judge down")
+
+    engine = DialogueEngine(
+        ScriptedReply(), judge_client=Exploding(), super_admin_user_ids=frozenset({"100"}),
+    )
+    assert asyncio.run(engine.handle(msg(1, "@YunRu 在吗", mentioned=True))) is None
+
+    snapshot = engine.snapshot()
+    assert snapshot.judge_failed == 1
+    # `record_model_error` 以前源码零调用（只有测试调它），现在判定的失败路径会调。
+    assert snapshot.metrics["model_errors"] == {"RuntimeError": 1}
+
+    status = asyncio.run(engine.handle(msg(2, "/super status")))
+    assert status is not None
+    assert "判定挂掉 1 次" in status.text
+
+
+def test_three_consecutive_judge_failures_raise_the_status_line() -> None:
+    """连续 3 次才算"异常"：单次失败可能只是抖一下（这一行升级的判据）。"""
+
+    class Exploding:
+        async def complete(self, request):
+            raise RuntimeError("judge down")
+
+    engine = DialogueEngine(
+        ScriptedReply(), judge_client=Exploding(), super_admin_user_ids=frozenset({"100"}),
+    )
+    for index in range(1, 4):
+        assert asyncio.run(engine.handle(msg(index, "@YunRu 在吗", mentioned=True))) is None
+
+    status = asyncio.run(engine.handle(msg(9, "/super status")))
+    assert status is not None
+    assert "判定挂掉 3 次" in status.text
+    assert "异常：模型调用连续失败" in status.text
+    assert "当前连续 3 次" in status.text
+
+
+def test_a_successful_judge_clears_the_failure_streak() -> None:
+    """成功一次就把"连续"归零：否则几天里攒够三次会一直在状态里吓人。"""
+
+    class Flaky:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, request):
+            self.calls += 1
+            if self.calls <= 2:
+                raise RuntimeError("judge down")
+            return "<route>REPLY</route><from>none</from><topic>话题</topic>"
+
+    engine = DialogueEngine(
+        ScriptedReply(), judge_client=Flaky(), super_admin_user_ids=frozenset({"100"}),
+    )
+    for index in range(1, 3):
+        assert asyncio.run(engine.handle(msg(index, "@YunRu 在吗", mentioned=True))) is None
+    assert asyncio.run(engine.handle(msg(3, "@YunRu 在吗", mentioned=True))) is not None
+
+    status = asyncio.run(engine.handle(msg(9, "/super status")))
+    assert status is not None
+    assert "判定挂掉 2 次" in status.text, "累计次数照着涨"
+    assert "当前连续" not in status.text, "成功一次之后连续次数归零"
+    assert "异常" not in status.text
+
+
+def test_reply_failure_is_counted_and_visible_in_status() -> None:
+    """回复那一路失败照旧往上抛（这一轮没有回复），但同样要看得见。"""
+
+    class Exploding:
+        async def complete(self, request):
+            raise RuntimeError("reply down")
+
+    engine = DialogueEngine(
+        Exploding(), judge_client=ScriptedJudge(), super_admin_user_ids=frozenset({"100"}),
+    )
+    try:
+        asyncio.run(engine.handle(msg(1, "@YunRu 在吗", mentioned=True)))
+    except RuntimeError:
+        pass
+    else:  # pragma: no cover - 失败必须往上抛，不许被吞掉
+        raise AssertionError("回复失败这一路必须继续往上抛")
+
+    snapshot = engine.snapshot()
+    assert snapshot.reply_failed == 1
+    assert snapshot.metrics["model_errors"] == {"RuntimeError": 1}
+
+    status = asyncio.run(engine.handle(msg(2, "/super status")))
+    assert status is not None
+    assert "回复挂掉 1 次" in status.text
+
+
+def test_extension_collection_failure_is_counted() -> None:
+    """知识库/插件材料拿不到时，除了日志还要进 `extension_failures`（她"变笨了"看得见）。"""
+
+    class ExplodingSources:
+        async def collect(self, context, *, knowledge_enabled=True):
+            raise RuntimeError("knowledge down")
+
+        async def notify(self, context, decision):
+            return None
+
+    engine = DialogueEngine(
+        ScriptedReply(), judge_client=ScriptedJudge(), prompt_sources=ExplodingSources(),
+    )
+    result = asyncio.run(engine.handle(msg(1, "@YunRu 在吗", mentioned=True)))
+    assert result is not None, "材料拿不到也得照常回复"
+    assert engine.snapshot().metrics["extension_failures"] == 1
+
+
 def test_unparseable_judge_output_degrades_to_silence() -> None:
     judge = ScriptedJudge("我随便说点什么，没有标签")
     reply = ScriptedReply()

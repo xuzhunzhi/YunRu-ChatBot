@@ -344,6 +344,47 @@ def test_super_status_reports_counts_without_model_call() -> None:
     asyncio.run(run())
 
 
+def test_super_status_prints_memory_failures() -> None:
+    """记忆读/写失败的次数要印在状态行上（与金句那行"没跑成 N 次"同一口径）。
+
+    记忆库读不到时她不提以前的事，而"记忆：已入队 0 条"看着一切正常——查不到。
+    """
+
+    async def run() -> None:
+        engine = DialogueEngine(_NeverCalled(), super_admin_user_ids=frozenset({ADMIN}))
+
+        class _Failing:
+            def snapshot(self):
+                return {"queued_events": 3, "failures": 2}
+
+        engine.memory_service = _Failing()  # type: ignore[assignment]
+        result = await engine.handle(_message("/super status", user_id=ADMIN))
+        assert result is not None
+        assert "记忆：已入队 3 条待处理" in result.text
+        assert "读写失败 2 次" in result.text
+
+    asyncio.run(run())
+
+
+def test_super_status_leaves_the_memory_line_alone_when_nothing_failed() -> None:
+    """一次都没失败时那一行与从前逐字相同（不添一个恒为 0 的尾巴）。"""
+
+    async def run() -> None:
+        engine = DialogueEngine(_NeverCalled(), super_admin_user_ids=frozenset({ADMIN}))
+
+        class _Fine:
+            def snapshot(self):
+                return {"queued_events": 0}
+
+        engine.memory_service = _Fine()  # type: ignore[assignment]
+        result = await engine.handle(_message("/super status", user_id=ADMIN))
+        assert result is not None
+        assert "记忆：已入队 0 条待处理" in result.text
+        assert "读写失败" not in result.text
+
+    asyncio.run(run())
+
+
 # --- 重启 ---------------------------------------------------------------
 
 
