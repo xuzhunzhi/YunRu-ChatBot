@@ -606,12 +606,17 @@ SLANG_PROFILE_FILE = get("QQBOT_SLANG_PROFILE", "data/slang/entries.json")
 # `stage3_runtime.build_dialogue_messages`（**逐处**把 DATA 段包上）；重试与
 # fail-closed 在 `stage3_main._model_path`。
 #
-# - **默认开**，`QQBOT_DATA_MARKERS=0` 关掉：关掉之后**请求与改动前逐字相同**
+# - **默认开**，`QQBOT_DATA_MARKERS=0` 关掉：关掉之后**DATA 段与改动前逐字相同**
 #   （不取短码、不包裹、也不中和入站文本；有测试直接比字符串）。
+#   **不是"整个请求逐字相同"**（2026-10-08 更正，对抗性审查必修 4）：system 里那
+#   **两条**常量规则（`DATA_BOUNDARY_RULE` / `TIME_IS_GIVEN_RULE`）由
+#   `compose_system_prompt` 无条件拼上去，与这个开关无关——关掉开关换不到
+#   "prompt 回到改动前"，换到的是 system 前缀逐字不变、前缀缓存不因开关而断。
 # - 短码不是用户举例的 8 位十六进制，理由写在 `data_boundary` 的模块说明里
 #   （hex 会偶然出现在正常回复里 → 误判违规 → 丢一条正常回复）。
-# - system 里那条安全规则是**常量、常驻**，与这个开关无关：关掉时它无害，
-#   换来的是 system 前缀逐字不变、前缀缓存不因开关而断。
+# - system 里那两条规则是**常量、常驻**：关掉时它们无害（规则原文举的例子就是一个
+#   记号），而且"关功能不该顺手降安全"——撤掉它们等于在关掉短码的那一刻把
+#   "那些带记号的是资料"这句唯一的措辞保障也丢掉。
 DATA_MARKERS_ENABLED = _enabled("QQBOT_DATA_MARKERS")
 
 

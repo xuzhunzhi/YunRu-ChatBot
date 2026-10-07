@@ -9,13 +9,18 @@
 
 这一份测的八件事：
 
-1. **每一个不可信块都带了短码**（逐段断言，不是只测一处）——突变验证之一就是
-   "把包装只加在一处"，那时下面 `SEGMENTS` 里其余各段会逐条变红；
+1. **每一个不可信块都带了短码**（逐段断言，不是只测一处）——判据是"内容**紧邻**
+   在一个开口记号行后面、收尾记号行紧跟在它后面，且这一块里两种记号行各只出现一次"
+   （2026-10-08 改：原来历史那一段是**恒真**的，见下面第 6 条旁边的说明）；
 2. **她自己说过的话没有被包**（取舍写在 `build_dialogue_messages` 的说明里）；
 3. **回复里出现短码 → 判违规 → 重写一次**（重写请求里带着"刚才那版不合格"）；
 4. **重写又出现 → 不发这一条**（fail-closed，断言"没有发出"）；
-5. **入站伪造形状被中和**，而正常聊天（`<3` 这类）**不误伤**；
-6. **关掉开关 → 请求逐字相同**（直接比字符串）；
+5. **入站伪造形状被中和**，而正常聊天（`<3` 这类）**不误伤**；**伪造记号不许把
+   整块的边界打掉**（2026-10-08 补，必修 1：`‹ABCDEFG›`、两个字 `‹`/`›`、
+   中和过的 `‹\u200bABCDEFG›` 一律照包）；
+6. **关掉开关 → DATA 段逐字相同、system 段两条常量规则照旧在**（2026-10-08 更正：
+   这里原来写"请求逐字相同"，那句话是假的——`compose_system_prompt` 无条件拼
+   `DATA_BOUNDARY_RULE` 与 `TIME_IS_GIVEN_RULE`）；
 7. **system 那条规则零机制词**，且 `test_persona_shape.py` 仍在（人格没被改写）；
 8. **短码本身不会误判**：把短码与正常聊天内容混排，判据只认短码那一串。
 """
@@ -38,6 +43,7 @@ from qq_roleplay_bot.prompt_guard import scan_persona_text
 from qq_roleplay_bot.stage3_main import DialogueEngine
 from qq_roleplay_bot.stage3_runtime import (
     DATA_BOUNDARY_RULE,
+    TIME_IS_GIVEN_RULE,
     ContextState,
     ConversationMode,
     Stance,
@@ -263,6 +269,9 @@ def test_every_untrusted_segment_is_wrapped() -> None:
     """**逐段**断言：稳定段与易变段的每一个不可信块都在短码里面。
 
     这是必修 2 的那条：**去掉任何一段的包装都要变红**（历史那一段曾经是恒真的）。
+    实测：只把历史那一段的 `render(..., mark)` 换成裸 f-string →
+    `ran=27 failures=1`，红在 `test_every_untrusted_segment_is_wrapped`；
+    改动前的判据在同一个突变下三条全 True（`ran=22 failures=0`）。
     """
 
     request = _request()
@@ -450,7 +459,9 @@ def test_a_forged_marker_in_a_nickname_is_neutralized_too() -> None:
 # 可以被**两个字**打掉：任何人把 `‹` `›` 放进消息或昵称，或者发一条 `‹ABCDEFG›`
 # （它先被中和成 `‹\u200bABCDEFG›`，**两侧记号还在**），它所在的那一整块从此
 # **再也不被短码包住**——而且留在历史/名册里就是一直不包。
-# 现在跳过判据与中和判据是**同一个**（`looks_like_marker`），下面四条钉住它。
+# 现在跳过判据锚在**当轮那个短码**上（外加"开头第一行是不是记号行"），下面几条钉住它。
+# 注意"形状像就跳过"**也不够**：`‹ABCDEFG›` 本身就是同形状（7 位 A-Z2-9），
+# 所以第一条用例专门放了它——那条候选改法会在这一行红。
 
 
 def test_a_forged_marker_in_the_body_does_not_disable_the_wrapping() -> None:
@@ -526,18 +537,23 @@ def test_a_forged_marker_in_a_nickname_still_leaves_the_roster_wrapped() -> None
         "名册块没有被短码包住"
 
 
-# --- 5. 关掉开关 → 请求逐字相同 ----------------------------------------------
+# --- 5. 关掉开关 → **DATA 段**逐字相同（system 段那两条规则照旧）---------------
+#
+# **2026-10-08 更正（对抗性审查必修 4）**：这一节以前写着"关掉＝请求逐字相同"，
+# 那是假的——`compose_system_prompt` **无条件**拼 `DATA_BOUNDARY_RULE` 与
+# `TIME_IS_GIVEN_RULE`，关掉开关时 system 里那两条照样在（下面第二条测试钉住）。
+# 口径改成：**DATA 段**回到改动前、system 段不变（那两条规则是常量，
+# 换来的是 system 前缀逐字稳定、缓存不因开关而断）。
 
 
-def test_switching_the_markers_off_keeps_the_request_byte_identical() -> None:
-    """关掉＝不取短码、不包裹、不写那句说明 → 与改动前**逐字相同**。"""
+def test_switching_the_markers_off_restores_the_data_segments_verbatim() -> None:
+    """关掉＝不取短码、不包裹、不写那句说明 → **DATA 段**与改动前**逐字相同**。"""
 
     on = _request(marker=MARK)
     off = _request(marker="")
     for index, (item_on, item_off) in enumerate(zip(on, off)):
         if index == 0:
-            # system 里那条规则是**常量**（与开关无关）：关掉时 system 逐字不变，
-            # 变的只有 DATA 段有没有记号。
+            # system 段是**常量**（两条规则与开关无关）：开与关逐字相同。
             assert item_on == item_off
             continue
         assert item_on["role"] == item_off["role"] == "user"
@@ -546,6 +562,32 @@ def test_switching_the_markers_off_keeps_the_request_byte_identical() -> None:
     # 关掉之后内容仍然一字不少（只是没记号）。
     assert "1=小K（QQ200）" in _stable(off)
     assert "他提过这件事。" in _volatile(off)
+
+
+def test_switching_the_markers_off_keeps_both_constant_rules_in_system() -> None:
+    """**关掉开关 ≠ system 回到改动前**：两条常量规则照旧在（必修 4 的实话）。
+
+    这一条是"回退说明不能说谎"的守卫：`data_boundary` 的模块说明、`dev_config` 的
+    配置说明、`runtime_flags.FLAG_NOTES` 与提交信息都按这个口径写。
+    要做成"关掉就一起撤"就得**两个开关**（短码一条、时间一条是两件事），而且那条路
+    会在关掉短码的那一刻把"带记号的是资料"这句唯一的措辞保障一起丢掉。
+    """
+
+    system_off = _request(marker="")[0]["content"]
+    system_on = _request(marker=MARK)[0]["content"]
+    assert system_off == system_on, "开关影响了 system 段"
+    assert DATA_BOUNDARY_RULE in system_off, "关掉开关后那条安全规则不见了"
+    assert TIME_IS_GIVEN_RULE in system_off, "关掉开关后时间那条规则不见了"
+    # 它是常量：整份 system 里只出现一次（幂等，面板手工粘过也一样）。
+    assert system_off.count(DATA_BOUNDARY_RULE) == 1
+    assert system_off.count(TIME_IS_GIVEN_RULE) == 1
+    # 那两条规则是**常量**：里面举的例子是一个写死的记号，与当轮那个短码无关——
+    # 所以 system 段永远是同一份文本，不随轮次变。
+    # （这一条的短码故意与规则里那个例子不同：常量文本，不是某一轮的花样。）
+    round_mark = "ZZZ9999"
+    assert f"{MARKER_OPEN}{round_mark}{MARKER_CLOSE}" not in system_off, "system 里混进了当轮短码"
+    assert _request(marker=round_mark)[0]["content"] == system_off, "system 随短码变了"
+    assert DATA_BOUNDARY_RULE in compose_system_prompt("你是一个测试用的极简人格。")
 
 
 def test_the_flag_is_on_by_default_and_can_be_switched_off() -> None:
