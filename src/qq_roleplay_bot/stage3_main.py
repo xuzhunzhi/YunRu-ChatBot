@@ -3276,7 +3276,20 @@ class DialogueEngine:
     def leave_session(self, session_id: str) -> bool:
         existed = session_id in self.sessions.states or session_id in self.sessions.triggers
         self.sessions.leave(session_id)
+        self._drop_pending_segments(session_id)
         return existed
+
+    def _drop_pending_segments(self, session_id: str) -> None:
+        """丢掉这个会话**还没发出去**的续发段。
+
+        由来（2026-10-08 隔离增长审计，核查者补的漏）：`_follow_ups` 与 `states` 同键、
+        同样只在"有消息被处理"时被取走（`take_follow_ups`），而 `leave()` /
+        `disable_group()` 都不清它——被停用、被清理的会话，它的正文（长回复拆出来的
+        那几段）会一直躺在内存里，直到进程重启。
+        清它是**纯释放**：那几段属于一段已经作废的回复，不会再有人来取。
+        """
+
+        self._follow_ups.pop(session_id, None)
 
     def enable_group(self, group_id: str) -> bool:
         if not group_id.isdigit() or not 5 <= len(group_id) <= 12:
@@ -3293,7 +3306,13 @@ class DialogueEngine:
         was_enabled = group_id in self.enabled_group_ids
         self.enabled_group_ids.discard(group_id)
         if was_enabled:
-            self.sessions.leave(f"group:{group_id}")
+            session_id = f"group:{group_id}"
+            self.sessions.leave(session_id)
+            # **只清"调度/待发"这类东西，不碰会话历史与记忆**：用户 2026-10-08 定死
+            # 了 `/admin disable 群` 只等于"不回复"，上下文与记忆照记（见
+            # `_absorb_without_reply`）。所以这里清的是"还要不要发/还要不要排队"，
+            # 不是"记得什么"。
+            self._drop_pending_segments(session_id)
             self.persist_state()
         return was_enabled
 
