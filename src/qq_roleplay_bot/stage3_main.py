@@ -3291,6 +3291,30 @@ class DialogueEngine:
 
         self._follow_ups.pop(session_id, None)
 
+    def _forget_scheduled(self, session_id: str) -> int:
+        """把这个会话从"排队等当值"里摘掉，并清掉那几条排队消息的记账。
+
+        只碰**调度**：`focus` 的队列/顺序/稍等冷却，加上那几条消息在
+        `_resumed_ids`（"已经记过历史、去过重"）与 `_promised_ids`（"答应过必须给
+        结果"）里的条目。会话历史与记忆一律不动（用户 2026-10-08：`/admin disable`
+        只等于"不回复"）。
+
+        由来（2026-10-08 隔离增长审计 [7]）：被停用的群永远轮不到
+        `take_next_session`，所以它的积压与那两条记账会僵到重启——比"随机淘汰"
+        更彻底。返回摘掉了几条排队消息（给日志用）。
+        """
+
+        queued = self.focus.forget_session(session_id)
+        for item in queued:
+            self._forget_queued_message(item.message_id)
+        return len(queued)
+
+    def _forget_queued_message(self, message_id: str) -> None:
+        """一条"被排队过"的消息作废时，把它在那两张记账表里的条目一起清掉。"""
+
+        self._resumed_ids.discard(message_id)
+        self._promised_ids.pop(message_id, None)
+
     def enable_group(self, group_id: str) -> bool:
         if not group_id.isdigit() or not 5 <= len(group_id) <= 12:
             return False
@@ -3313,6 +3337,12 @@ class DialogueEngine:
             # `_absorb_without_reply`）。所以这里清的是"还要不要发/还要不要排队"，
             # 不是"记得什么"。
             self._drop_pending_segments(session_id)
+            dropped = self._forget_scheduled(session_id)
+            if dropped:
+                logger.info(
+                    "Stage 3 focus: dropped queued messages on disable session=%s count=%s",
+                    session_id, dropped,
+                )
             self.persist_state()
         return was_enabled
 

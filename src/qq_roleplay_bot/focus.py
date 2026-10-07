@@ -143,6 +143,25 @@ class FocusController:
             self._order.remove(session_id)
         return list(queue) if queue else []
 
+    def forget_session(self, session_id: str) -> list[IncomingMessage]:
+        """把一个会话整个从**排队**这件事里摘掉：队列、顺序、"稍等"冷却。
+
+        返回被摘掉的那些排队消息（调用方还要拿它们的 id 去清"排队过"的记账）。
+
+        由来（2026-10-08 隔离增长审计 [7]/[3][4] 的共同缺口）：`disable_group` 从前
+        不清 `focus` 任何一张表，而被停用的群**永远**不会被 `take_next_session` 轮到
+        （它的新消息在 `handle()` 里就被"群未启用"拦下、不再入队），于是队列里的
+        消息全文、`_order` 条目、`_ack_at` 会僵在那里直到重启。
+
+        **当值状态（`hot`）不动**：它有自己的到期路径（`release_reason` 的 quiet /
+        duty），而且可能正有一轮在处理这个会话——在这里硬release 会把焦点记账搅乱，
+        而它自己会好。
+        """
+
+        queued = self.drain(session_id)
+        self._ack_at.pop(session_id, None)
+        return queued
+
     # --- "稍等"的冷却 ---------------------------------------------------------
 
     def ack_allowed(self, session_id: str, now: float) -> bool:
