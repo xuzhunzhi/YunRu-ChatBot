@@ -103,6 +103,8 @@ netstat -ano | findstr :8080     # 看是谁占了
 | `QQBOT_MEMORY_ENABLED` | `1` | 关掉后记忆维护不再跑 |
 | `QQBOT_MEMORY_INTERVAL_SECONDS` | `600` | 每 10 分钟巡检一次 |
 | `QQBOT_MEMORY_RETENTION_DAYS` | `7` | 收件箱里消息的保留天数 |
+| `QQBOT_RELATIONSHIP_LOG_RETENTION_DAYS` | `365` | **关系流水**（每一次好感/防备变动）保留多少天。范围夹在 30..3650，坏值回落 365。只按时间清**旧行**，近期一行不动；清掉的条数在 `/super status` 的记忆那行显示 |
+| `QQBOT_TOMBSTONE_RETENTION_DAYS` | `365` | **墓碑**（删掉的记忆的键与时间判据，**不含内容**）保留多少天。范围夹在 30..3650，坏值回落 365。同样只清旧行、条数可见 |
 | `QQBOT_MEMORY_MODEL` | 空 | 不写就复用 `QQBOT_API_MODEL` |
 
 记忆库在 `data/memory/memory.sqlite3`。**删记忆等于删她的经历**，动手前先备份。
