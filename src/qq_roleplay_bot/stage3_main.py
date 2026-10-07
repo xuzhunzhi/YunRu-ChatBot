@@ -121,6 +121,11 @@ COMPACT_KEEP = 50
 # 一次触发通常 4 批左右能压完；这里只是防止积压过大时一轮里发出太多调用。
 MAX_COMPACT_BATCHES_PER_TURN = 6
 ACTIVE_TIMEOUT_SECONDS = 180.0
+# 「被焦点排队过」的消息 id（`_resumed_ids`）的上限。超了淘汰**最旧**的一条。
+# 条目只在那条消息"还在排队等当值"时有意义，而队列本身有上限
+# （`dev_config.FOCUS_QUEUE_LIMIT` × 群数），所以这个数只是兜底；从前它是 `set`
+# 且只在排空时清，被停用/排不出去的群会把条目永久留下（2026-10-08 隔离审计 [3]）。
+MAX_RESUMED_IDS = 4096
 
 # 冷群里 @ 她时先回的那句"稍等"。随机挑一条，四条属性见 docs/MULTI_GROUP_FOCUS.md：
 # 进她的历史 / 不进长期记忆 / 不算连回 50 条 / 立刻发不摆节奏。
@@ -1136,7 +1141,9 @@ class DialogueEngine:
         self._follow_ups: dict[str, list[OutgoingMessage]] = {}
         # 被焦点排队过的消息 id：轮到它那个群时我们会**再走一次 handle()**，
         # 这次要跳过去重与"记进历史"（消息在到达时已经记过了），否则历史里会出现两遍。
-        self._resumed_ids: set[str] = set()
+        # 用 `dict` 而不是 `set`：插入序就是"谁先排的队"，超上限时淘汰**最旧**的那条
+        # （与 `_promise` 同一写法）。条目正常只活到"那条消息被处理完"。
+        self._resumed_ids: dict[str, None] = {}
         # 已经回过"稍等"、因此**必须给结果**的消息 id（判定不许否决）。
         # 用 `dict` 而不是 `set`：插入序就是"谁先答应的"（见 `_promise`）。
         self._promised_ids: dict[str, None] = {}
@@ -3317,7 +3324,7 @@ class DialogueEngine:
     def _forget_queued_message(self, message_id: str) -> None:
         """一条"被排队过"的消息作废时，把它在那两张记账表里的条目一起清掉。"""
 
-        self._resumed_ids.discard(message_id)
+        self._resumed_ids.pop(message_id, None)
         self._promised_ids.pop(message_id, None)
 
     def enable_group(self, group_id: str) -> bool:
@@ -3957,7 +3964,7 @@ class DialogueEngine:
                     if addressed:
                         queued = self.focus.enqueue(message.session_id, message)
                         # 标记为"已记过历史、且已过去重"：轮到它时 handle() 要跳过那两步。
-                        self._resumed_ids.add(message.message_id)
+                        self._resume_later(message.message_id)
                         self._stats["focus_queued"] += 1
                         logger.info(
                             "Stage 3 focus: queued for later session=%s depth=%s",
@@ -4515,6 +4522,24 @@ class DialogueEngine:
 
         return secrets.choice(FOCUS_ACK_LINES)
 
+    def _resume_later(self, message_id: str) -> None:
+        """标记：这条消息**已经记过历史、去过重**，轮到它时 `handle()` 要跳过那两步。
+
+        **有上限**（`MAX_RESUMED_IDS`），超了淘汰**最旧**的一条——与 `_promise` 同一
+        写法（`dict` 的插入序，淘汰点固定）。
+
+        由来（2026-10-08 隔离增长审计 [3]）：它从前是 `set`，且只在 `_serve_queue`
+        排空时才 `discard`——被停用、或一直排不出去的群，条目会**永久**留着。
+        正常路径下条目只活到"那条消息被处理完"，所以这个上限是兜底；真撞上时也没有
+        第二个后果（最坏是那一条消息被当成新的、再记一次历史）。
+        """
+
+        self._resumed_ids[message_id] = None
+        if len(self._resumed_ids) > MAX_RESUMED_IDS:
+            oldest = next(iter(self._resumed_ids))
+            self._resumed_ids.pop(oldest, None)
+            logger.debug("resumed_ids full, dropping oldest: message_id=%s", oldest)
+
     def _promise(self, message_id: str) -> None:
         """记下"回过稍等、必须给结果"的消息 id；超上限时淘汰**最旧**的一条。
 
@@ -4613,7 +4638,7 @@ class DialogueEngine:
                 logger.exception("Stage 3 focus: queued message failed session=%s", session_id)
                 reply = None
             outgoing = _as_outgoing_list(reply) + self.take_follow_ups(message.session_id)
-            self._resumed_ids.discard(message.message_id)
+            self._resumed_ids.pop(message.message_id, None)
             self._promised_ids.pop(message.message_id, None)
             if outgoing:
                 self._stats["focus_queued_replies"] += 1

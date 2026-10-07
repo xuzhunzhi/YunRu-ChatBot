@@ -48,7 +48,7 @@ def _queue_up(engine: DialogueEngine, item: IncomingMessage) -> None:
 
     engine.focus.enqueue(item.session_id, item)
     engine.focus.note_ack(item.session_id, 10.0)
-    engine._resumed_ids.add(item.message_id)
+    engine._resume_later(item.message_id)
     engine._promised_ids[item.message_id] = None
 
 
