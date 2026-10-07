@@ -619,7 +619,10 @@ def test_turning_the_switch_off_makes_the_request_byte_for_byte_identical() -> N
         try:
             off_request = build(engine._style_material(current, state))
         finally:
-            runtime_flags.install(flags if flags is not None else runtime_flags.RuntimeFlags())
+            # 还回**原来那份**：`flags` 是 None（进程里本来没有共用那份）就装回 None，
+            # 不许拿一份新的默认顶上——那会让后面靠 `_default_flags` 的用例失效
+            # （2026-10-08 实测，`install` 现在接受 None，见 `runtime_flags.install`）。
+            runtime_flags.install(flags)
     assert off_request == baseline, "关掉开关后请求必须与改动前逐字相同"
 
 
@@ -643,8 +646,8 @@ def test_the_engine_injects_the_material_into_the_data_section_only() -> None:
         try:
             result = asyncio.run(engine.handle(msg(1, "这个字幕只能识别不能翻译，是吗")))
         finally:
-            runtime_flags.install(flags) if flags is not None else runtime_flags.install(
-                runtime_flags.RuntimeFlags())
+            # 同上：`flags` 为 None 时也照实还回 None。
+            runtime_flags.install(flags)
         assert result is not None
         request = reply.requests[0]
         system = request[0]

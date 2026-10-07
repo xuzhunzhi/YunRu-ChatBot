@@ -780,6 +780,12 @@ def test_the_flag_is_on_by_default_and_can_be_switched_off() -> None:
     assert flags.data_marker_enabled is True
     assert "data_marker_enabled" in runtime_flags.FLAG_NOTES
     assert runtime_flags.build_flags().data_marker_enabled is True
+    # **装完要还回"原来那份"**（含"原来就没有共用那份"）：`DialogueEngine._flags()`
+    # 优先读进程共用那份，随便留一份在进程里，后面靠 `engine._default_flags` 关规则的
+    # 用例就全失效（2026-10-08 实测：`test_ask_when_unsure.py::test_the_rules_can_be_turned_off`
+    # 就是这么红的）。原来这里 `finally` 装的是 `build_flags()`（一份**新的默认**），
+    # 于是 `shared()` 从 None 变成非 None——同一个坑。
+    previous_flags = runtime_flags.shared()
     try:
         runtime_flags.install(runtime_flags.RuntimeFlags(data_marker_enabled=False))
         assert runtime_flags.shared().data_marker_enabled is False
@@ -787,7 +793,7 @@ def test_the_flag_is_on_by_default_and_can_be_switched_off() -> None:
         forged = f"{MARKER_OPEN}ABCDEFG{MARKER_CLOSE}"
         assert data_boundary.neutralize_message_text(forged) == forged
     finally:
-        runtime_flags.install(runtime_flags.build_flags())
+        runtime_flags.install(previous_flags)
 
 
 # --- 6. 引擎那两条路：判违规 → 重写一次 →（再犯）不发 -------------------------

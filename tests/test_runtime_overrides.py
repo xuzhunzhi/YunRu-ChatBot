@@ -6,6 +6,7 @@
 同时钉住 `llm_client` 的登记簿：换 key / 模型 / 供应商要覆盖**所有**已存在的 client
 （按会话分出来的那些也算），否则会出现"主群换了、别的群还是旧的"。
 """
+import functools
 import json
 import os
 import tempfile
@@ -68,6 +69,29 @@ def _client(role: str, key: str = "sk-old", model: str = "old-model") -> OpenAIC
                                   user_id="u", usage_role=role)
 
 
+def _restores_shared_flags(test):
+    """跑完把**进程共用的运行期开关**还回原来那份（含"原来就没有"）。
+
+    这个文件里每个用例都会 `runtime_flags.install(build_flags())`（`apply_overrides`
+    要拿 `shared()` 那份来改），但不还回去就是个**进程级单例泄漏**：
+    `DialogueEngine._flags()` 优先读共用那份，于是后面靠 `engine._default_flags`
+    关某条规则的用例全失效——2026-10-08 实测过两次
+    （`test_ask_when_unsure.py::test_the_rules_can_be_turned_off` 就这么红）。
+    装饰器只写一次，比 14 个 `try/finally` 省事，语义与它们完全相同。
+    """
+
+    @functools.wraps(test)
+    def wrapper(*args, **kwargs):
+        previous = runtime_flags.shared()
+        try:
+            return test(*args, **kwargs)
+        finally:
+            runtime_flags.install(previous)
+
+    return wrapper
+
+
+@_restores_shared_flags
 def test_unknown_key_is_rejected_per_key() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         flags = runtime_flags.build_flags()
@@ -76,6 +100,7 @@ def test_unknown_key_is_rejected_per_key() -> None:
         assert applied["nope"]["applied"] == "rejected"
 
 
+@_restores_shared_flags
 def test_flags_take_effect_immediately() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         flags = runtime_flags.build_flags()
@@ -88,6 +113,7 @@ def test_flags_take_effect_immediately() -> None:
         assert OperatorConfig(Path(tmp) / "operator_config.json").load()["review_enabled"] == "0"
 
 
+@_restores_shared_flags
 def test_restart_only_settings_are_reported_honestly() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         runtime_flags.install(runtime_flags.build_flags())
@@ -95,6 +121,7 @@ def test_restart_only_settings_are_reported_honestly() -> None:
         assert applied["approve_pattern"]["applied"] == "restart_required"
 
 
+@_restores_shared_flags
 def test_model_change_hits_existing_clients() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         runtime_flags.install(runtime_flags.build_flags())
@@ -114,6 +141,7 @@ def test_model_change_hits_existing_clients() -> None:
         assert os.environ.get("QQBOT_API_MODEL") == "brand-new"
 
 
+@_restores_shared_flags
 def test_api_key_change_keeps_client_identity_and_usage() -> None:
     """就地改属性，不重建 client——重建会丢掉会话缓存与记账。"""
 
@@ -129,6 +157,7 @@ def test_api_key_change_keeps_client_identity_and_usage() -> None:
             client.api_key = ""
 
 
+@_restores_shared_flags
 def test_provider_switches_the_base_url() -> None:
     with tempfile.TemporaryDirectory() as tmp, _clean_addresses():
         runtime_flags.install(runtime_flags.build_flags())
@@ -144,6 +173,7 @@ def test_provider_switches_the_base_url() -> None:
             client.base_url = "https://old.example"
 
 
+@_restores_shared_flags
 def test_unknown_provider_is_rejected() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         runtime_flags.install(runtime_flags.build_flags())
@@ -151,6 +181,7 @@ def test_unknown_provider_is_rejected() -> None:
         assert applied["provider"]["applied"] == "rejected"
 
 
+@_restores_shared_flags
 def test_explicit_url_wins_over_provider() -> None:
     with tempfile.TemporaryDirectory() as tmp, _clean_addresses():
         runtime_flags.install(runtime_flags.build_flags())
@@ -164,6 +195,7 @@ def test_explicit_url_wins_over_provider() -> None:
             client.base_url = "https://old.example"
 
 
+@_restores_shared_flags
 def test_a_global_address_change_only_moves_purposes_without_their_own_key() -> None:
     """**成对取自同一条**：全局改地址不许把"有自己那条 key"的用途搬走。
 
@@ -190,6 +222,7 @@ def test_a_global_address_change_only_moves_purposes_without_their_own_key() -> 
                 os.environ["QQBOT_JUDGE_API_KEY"] = saved
 
 
+@_restores_shared_flags
 def test_switching_the_global_provider_does_not_move_a_bound_purpose() -> None:
     """换供应商同理：它只影响"按兼容档那一对在走"的用途。"""
 
@@ -209,6 +242,7 @@ def test_switching_the_global_provider_does_not_move_a_bound_purpose() -> None:
                 os.environ["QQBOT_JUDGE_API_KEY"] = saved
 
 
+@_restores_shared_flags
 def test_empty_secret_means_fall_back_to_main_key() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         runtime_flags.install(runtime_flags.build_flags())
@@ -225,6 +259,7 @@ def test_empty_secret_means_fall_back_to_main_key() -> None:
             os.environ.pop("QQBOT_API_KEY", None)
 
 
+@_restores_shared_flags
 def test_clearing_a_role_key_leaves_no_empty_env_behind() -> None:
     """清空某一项凭据时，环境里**不能留下空串**。
 
@@ -256,6 +291,7 @@ def test_clearing_a_role_key_leaves_no_empty_env_behind() -> None:
                     os.environ[name] = value
 
 
+@_restores_shared_flags
 def test_clearing_the_main_key_falls_back_or_is_refused() -> None:
     """主 key 留空：回落 `.env` 里那一把；回落不到就明确拒绝（不造出"谁都调不动"）。
 
@@ -317,6 +353,7 @@ def test_deployed_operator_config_has_no_empty_secrets() -> None:
             assert value, f"{key} 是空凭据：文件里留着它只会让人以为 key 没了"
 
 
+@_restores_shared_flags
 def test_audit_receives_every_change() -> None:
     class _Audit:
         def __init__(self) -> None:
