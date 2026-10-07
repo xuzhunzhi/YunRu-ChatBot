@@ -26,6 +26,11 @@
   **不按时间邻近去猜**——猜错会把别人的话当成她的金句，那比漏掉更坏。
 - 上下文取她那条**之前**的入站消息（默认 6 条）；“她话之后”群里的反应也取一点
   （默认 2 条入站 + 她自己的后续），因为"贴完表情群里怎么接"是判正负的主要证据。
+- **上下文严格限定在同一会话**（`session_id`，见 `context_around`）。这一条是
+  2026-10-06 的用户报缺陷补上的：原来按**日志位置**抓前后 N 条，于是别群的消息
+  混进了她的语境（实测 `run/data/logs/chat.jsonl`：128 行上下文里 **38 行**是从
+  **别的会话**抓来的，其中 32 行明确属于主群 `1084401296`）。
+  条数不够就**如实少给**，**绝不**拿别群的话补位。
 - `topic` / `intent` 从 `reply.jsonl` 里**那一条的 SESSION CONTEXT 块**取，且要求
   时间对得上（默认 120 秒内，取最近的一次）。**对不上就不写这两个键**，不硬凑。
 
@@ -36,6 +41,24 @@
 - 也就是说**这份日志窗口里一条"她被点表情"的样本都没有**：51 个表情全点在别人头上。
   于是 `build_samples` 返回空 → 学习 agent **什么都不做**（这正是要的行为，
   见 `quote_learning.py` 的"没有新金句就不跑"）。本模块**不为了凑样本而放宽配对**。
+
+## 真实数据实测（2026-10-06 晚，同一份日志涨到 5201 行；**跨会话那次的实测**）
+
+这一趟才真的跑出了样本（`kind="reaction"` 321 行，其中 **22** 行点在她自己的消息上，
+全在群 `908696203`；`build_samples` 出 8 条样本）。也正因为有样本，才量出上面那个缺陷：
+
+量法是**同一个锚点上同时算两串**（"按日志位置抓" vs "按 `session_id` 过滤"），
+再取差集——这样谁都不用猜锚点（`message_id` 会跨会话撞），也不受上层回退逻辑影响：
+
+| 读口 | 过滤后的上下文行 | **不过滤会串进来的行** | 来自哪个会话 |
+| --- | --- | --- | --- |
+| 学习输入 `build_samples` | 128 | **38**（before 24 + after 14） | `group:1084401296` ×32，另 6 行是跨群复用的图片/卡片正文 |
+| 证据读口 `collect_evidence` | 同上（两个读口共用 `context_around`） | 同上 | 同上 |
+
+改完（按 `session_id` 过滤 + 两处收敛成 `context_around`）再跑同一份日志：
+真实函数返回的那一串与"按会话过滤"那一串**逐字相同 32 次、不同 0 次** → **跨会话 0 行**。
+条数会**如实变少**（不够就是不够，不拿别群补）——例如她那条 `-712103696` 的 6 行污染
+被丢掉后，那一条的 before 只剩 0 行，于是那一条改走"样本自带"的回退分支。
 
 **落盘**：这一份不落盘（它只读日志、返回内存里的样本）。金句含义表与笔记在
 `quote_learning.py` 的 `QuoteStore` 里，落 `data/`（已 gitignored）。
@@ -334,61 +357,123 @@ def _topic_for(index, session_id: str, at: float) -> tuple[str, str]:
     return best[1], best[2]
 
 
-def _context(rows: list[dict], index: int, *, before: int, after: int) -> tuple[
+def _session_of(row: dict) -> str:
+    """一行属于**哪个会话**——取上下文时唯一允许的边界。
+
+    判据用 `session_id`（日志里形如 `group:<群号>`，私聊是 `private:<号>`）；
+    它缺失时才退到 `group_id`。**不拿 `group_id` 当主判据**：私聊那行的 `group_id`
+    是空的，只认群号就会把私聊并进"空群号"那一堆里——那正是这次要修的病。
+    """
+
+    session = str(row.get("session_id") or "").strip()
+    if session:
+        return session
+    group = str(row.get("group_id") or "").strip()
+    return f"group:{group}" if group else ""
+
+
+def context_around(rows: list[dict], anchor: dict, *, before: int, after: int,
+                   window: int, clip: bool) -> tuple[
         tuple[dict[str, str], ...], tuple[dict[str, str], ...]]:
-    """她那条**之前**的入站消息与**之后**的入站消息（各自最多 N 条）。"""
+    """**取上下文的唯一实现**：锚点那条前后各若干条入站消息，**严格限定在同一会话**。
+
+    学习用的 `build_samples` 与审核用的证据读口（`context_for`）都走这一处——
+    原来两处各写一份"按日志位置抓前后 N 条"，于是**两个地方都会串群**：
+    她把 B 群里的话当成了 A 群的语境，学出来的含义表与笔记本身就是脏的
+    （用户 2026-10-06 报的正是这个：*"你没有区分群聊……你把**不同群聊的上下文**
+    都塞到金句的上下文里了"*）。收敛成一份之后，"哪一处还漏了过滤"这种漏洞
+    在结构上就不存在了。
+
+    规则（几条都是硬的）：
+
+    * **一行都不许跨会话**：会话与锚点不同的一行直接跳过，**不算条数**；
+    * 条数不够就**如实少给**——**绝不**拿别群的话补位（宁少勿错）；
+    * 最多往回 / 往前看 `window` 行（`window <= 0` = 不限，看到日志开头 / 结尾）；
+    * `clip=True` 截 240 字（给模型的材料省 token），`False` 给**原文**（给人审核）。
+
+    返回 `(她开口之前, 她说完之后)`，各自是 `{"who": …, "body": …}` 的元组。
+    """
+
+    index = -1
+    for position, row in enumerate(rows):
+        if row is anchor:
+            index = position
+            break
+    session = _session_of(anchor)
+    start = max(0, index - window) if window > 0 else 0
+    stop = (index + 1 + window) if window > 0 else len(rows)
+    # ⚠️ 两个 `_` 函数的入参**不是一个东西**，别把整行递进去：
+    # `_clip(text)` 收**正文字符串**（给模型的那份截 240 字），
+    # `_line_body(row)` 收**整行 dict**（给人审核的那份只归一空白、不截）。
+    # 混用会静默产出 `str(字典)`，而这处曾真的写错过——现在由
+    # `tests/test_quote_session_isolation.py` 的
+    # `test_context_lines_are_bodies_not_stringified_rows` 钉住正文形状。
+    if clip:
+        def take(row: dict) -> str:
+            return _clip(row.get("body"))
+    else:
+        take = _line_body
 
     earlier: list[dict[str, str]] = []
-    for row in reversed(rows[:index]):
+    for item in reversed(rows[start:index]):
         if len(earlier) >= before:
             break
-        if not _is_incoming(row):
+        if not _is_incoming(item) or _session_of(item) != session:
             continue
-        earlier.append({"who": _display_name(row), "body": _clip(row.get("body"))})
+        earlier.append({"who": _display_name(item), "body": take(item)})
     earlier.reverse()
 
     later: list[dict[str, str]] = []
-    for row in rows[index + 1:]:
+    for item in rows[index + 1:stop]:
         if len(later) >= after:
             break
-        if _is_incoming(row):
-            later.append({"who": _display_name(row), "body": _clip(row.get("body"))})
+        if not _is_incoming(item) or _session_of(item) != session:
+            continue
+        later.append({"who": _display_name(item), "body": take(item)})
     return tuple(earlier), tuple(later)
 
 
-def context_for(rows: list[dict], message_id: object, *, before: int, after: int) -> tuple[
+def _context(rows: list[dict], index: int, *, before: int, after: int) -> tuple[
+        tuple[dict[str, str], ...], tuple[dict[str, str], ...]]:
+    """她那条**之前**的入站消息与**之后**的入站消息（各自最多 N 条，同一会话内）。
+
+    只是 `context_around` 的一个薄壳（调用方手里是下标，锚点就在这里取）。
+    正文走 `_clip`——这一份是给模型看的材料。
+    """
+
+    return context_around(rows, rows[index], before=before, after=after,
+                          window=0, clip=True)
+
+
+def context_for(rows: list[dict], message_id: object, *, before: int, after: int,
+                session: str = "") -> tuple[
         tuple[dict[str, str], ...], tuple[dict[str, str], ...]]:
     """按 `message_id` 找她那条消息，再取它前后的入站消息（**复数条**）。
 
     这是"补上下文"用的：样本里本来只存了 `body`（学习那一批要的是短材料），
     所以证据读口要按 id 回日志里把**当时的上下文**补出来。找不到那条就是两串空。
 
-    **数的是"筛出来的入站消息条数"**，与学新词那份 `_context` 逐字同一套判据
-    （`_is_incoming` / `_display_name`；两处都各给 `before` / `after` 条）。
-    唯一的差别是**不截正文**——给模型看的那份截 240 字，给人审核的是**原文**。
-    """
+    **与学习那一份（`_context` → `context_around`）是同一个实现**，
+    只有两处参数不同：这里按 `EVIDENCE_CONTEXT_WINDOW` 行扫窗口、
+    正文取**原文不截**（给人审核）。**过滤会话那一条两边逐字一样**——
+    这正是要收敛成同一处的原因。
+
+    `session` 给了就**连会话一起比**（推荐）：`message_id` 是传输层给的原始 id，
+    本模块**不假设**它跨会话唯一（实测这份日志里 4579 个入站 id 没有一个跨会话撞号，
+    但这不在任何契约里；真撞了，只按 id 找就会把别群那条当成本条）。
+    为空时退到"第一条同 id 的"。"""
 
     target = _clean_id(message_id)
     if not target:
         return (), ()
-    for index, row in enumerate(rows[:MAX_EVIDENCE_SCAN]):
+    wanted_session = str(session or "").strip()
+    for row in rows[:MAX_EVIDENCE_SCAN]:
         if not _is_her_message(row) or _clean_id(row.get("message_id")) != target:
             continue
-        window = EVIDENCE_CONTEXT_WINDOW
-        earlier: list[dict[str, str]] = []
-        for item in reversed(rows[max(0, index - window):index]):
-            if len(earlier) >= before:
-                break
-            if _is_incoming(item):
-                earlier.append({"who": _display_name(item), "body": _line_body(item)})
-        earlier.reverse()
-        later: list[dict[str, str]] = []
-        for item in rows[index + 1:index + 1 + window]:
-            if len(later) >= after:
-                break
-            if _is_incoming(item):
-                later.append({"who": _display_name(item), "body": _line_body(item)})
-        return tuple(earlier), tuple(later)
+        if wanted_session and _session_of(row) != wanted_session:
+            continue
+        return context_around(rows, row, before=before, after=after,
+                              window=EVIDENCE_CONTEXT_WINDOW, clip=False)
     return (), ()
 
 
@@ -596,18 +681,39 @@ def _entries_for(rows: list[dict], selection: SampleSelection, group: str, *,
         )
     full_bodies = {_clean_id(row.get("message_id")): _line_body(row)
                    for row in rows if _is_her_message(row)}
+    sessions: dict[str, set[str]] = {}
+    for row in rows:
+        if _is_her_message(row):
+            sessions.setdefault(_clean_id(row.get("message_id")), set()).add(_session_of(row))
+    fallback_session = f"group:{group}" if group else ""
     out: list[EvidenceEntry] = []
     for sample in samples:
+        known = sessions.get(sample.message_id) or set()
+        # `message_id` 是传输层给的原始 id，**不假设**它跨会话唯一（实测这份日志里
+        # 4579 个入站 id 没撞号，但没契约保证）。撞了就以本群/样本自己的会话为准：
+        # 只按 id 挑会话会把"另一个会话里同号的那条"的上下文贴到这一条上。
+        if known == {fallback_session}:
+            session = fallback_session
+        elif len(known) == 1:
+            session = next(iter(known))
+        else:
+            session = fallback_session or (sample.group_id and f"group:{sample.group_id}") or ""
         earlier, later = context_for(rows, sample.message_id, before=EVIDENCE_CONTEXT_MAX,
-                                     after=EVIDENCE_CONTEXT_MAX)
+                                     after=EVIDENCE_CONTEXT_MAX, session=session)
+        # **只在日志里找不到那条时才退回样本自带的**，不能用 `(later or ...)`：
+        # 回日志补出来的结果是空元组**有两种含义**——"找不到那条"（该退）
+        # 与"同会话里确实一条都没有"（**不该退**，退了就等于拿别群的话补位）。
+        # 样本自带的那一份也已经是按会话过滤过的，但它可能来自另一次扫描窗口。
         out.append(EvidenceEntry(
             message_id=sample.message_id,
             group_id=sample.group_id or group,
             body=full_bodies.get(sample.message_id, "") or sample.body,
             at=sample.at,
             reactions=sample.reactions[:MAX_EVIDENCE_REACTIONS],
-            context_before=(earlier or sample.context_before)[:EVIDENCE_CONTEXT_MAX],
-            context_after=(later or sample.context_after)[:EVIDENCE_CONTEXT_MAX],
+            context_before=(earlier if earlier or later else sample.context_before
+                            )[:EVIDENCE_CONTEXT_MAX],
+            context_after=(later if earlier or later else sample.context_after
+                           )[:EVIDENCE_CONTEXT_MAX],
             sample=sample if sample.body else None,
         ))
     return out
