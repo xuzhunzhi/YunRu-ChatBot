@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 STORE_VERSION = 1
 # 落盘节流：账本是"只增不减"的，最多丢最近几秒的数字，不值得每次调用都写盘。
+# **这段间隔用单调钟量**（见 `ApiUsageStore` 的说明）：墙钟被校时会把它打乱。
 SAVE_INTERVAL_SECONDS = 5.0
 # 计数名单（引擎侧）。写成常量是为了"账本里有什么"一眼可见。
 COUNTER_NAMES = (
@@ -52,17 +53,32 @@ def default_path() -> Path:
 
 
 class ApiUsageStore:
-    """跨重启累计。`enabled=False` 时纯内存（测试与干跑）。"""
+    """跨重启累计。`enabled=False` 时纯内存（测试与干跑）。
+
+    **两个钟，各管一摊**（2026-10-08 安全与时间口径审计 B-02）：
+
+    - `clock`（墙上，默认 `time.time`）只用来写 `since` / `updated_at`——
+      那两个是要印给人看的**时刻**；
+    - `monotonic`（默认 `time.monotonic`）只用来算"距上次落盘过了多少秒"——
+      那是**时长**，跟着墙钟走的话，一次 NTP 校时就能把节流打乱
+      （往前拨 → 立刻多写一次盘；往回拨 → 几分钟不落盘）。
+    """
 
     def __init__(self, path: Path | str | None = None, *, enabled: bool = True,
-                 clock=time.time) -> None:
+                 clock=None, monotonic=None) -> None:
         self.path = Path(path) if path is not None else default_path()
         self.enabled = bool(enabled)
-        self.clock = clock
+        # 默认值在**构造时**解析（不是写进签名里）：签名里的 `=time.time` 在 import 期
+        # 就把函数对象绑死了，测试（与将来任何注入点）替换 `time.time` 都换不掉它。
+        self.clock = time.time if clock is None else clock
+        self.monotonic = time.monotonic if monotonic is None else monotonic
         self.since = 0.0
         self._roles: dict[str, dict[str, int]] = {}
         self._counters: dict[str, int] = {}
-        self._last_save = 0.0
+        # 上一次落盘的**单调**读数。None = 这次进程还没落过盘（那时必须落一次：
+        # `time.monotonic()` 在刚开机的机器上可能只有几秒，用它跟 0 相减会把
+        # 第一次落盘节流掉）。
+        self._last_save: float | None = None
         self.last_error = ""
         if self.enabled:
             self._load()
@@ -110,10 +126,12 @@ class ApiUsageStore:
     def _save(self, *, force: bool = False) -> None:
         if not self.enabled:
             return
-        now = self.clock()
-        if not force and now - self._last_save < SAVE_INTERVAL_SECONDS:
+        now = self.clock()            # 墙上时刻：只写进 since / updated_at（给人看的）
+        moment = self.monotonic()     # 单调读数：只用来算"距上次落盘过了多少秒"
+        if not force and self._last_save is not None \
+                and moment - self._last_save < SAVE_INTERVAL_SECONDS:
             return
-        self._last_save = now
+        self._last_save = moment
         if not self.since:
             self.since = now
         body = {

@@ -1160,10 +1160,15 @@ class DialogueEngine:
         # 记忆维护用的 client。它跟对话会话的 client 是**不同的 key**，
         # 命中率要分开算，所以这里留一个引用（由 runtime 在启动记忆时注入）。
         self.memory_client = None
+        # **两个起始点，各管一摊**（2026-10-08 安全与时间口径审计 B-02）：
+        # `started_at` 是墙上时刻，只用来印"开始于"；`started_monotonic` 是单调读数，
+        # 只用来算"已运行多久"。从前 `uptime` 用 `time.time() - started_at` 算——
+        # 一次 NTP 校时（或开机 RTC 错一次）就能让它跳变，往回拨还会被夹成 0。
         self.started_at = time.time()
         self.last_cache_report: dict[str, object] | None = None
         self.state_store = state_store
         self.clock = clock
+        self.started_monotonic = self.clock()
         # **墙上时钟**：只给"印给人看的时间"用（她那边/群里这边那两个时刻）。
         # 与 `self.clock`（单调，只算"过了多少秒"：焦点值班、冷却、耗时）是两回事——
         # 混用会把开机时长印成 1970（2026-10-08 用户报的问题，见 `_now_text`）。
@@ -1634,7 +1639,9 @@ class DialogueEngine:
         """算一次按 key 的命中率并记日志，同时留给 `/super apicheck` 看。"""
 
         report = self.cache_report()
-        self.last_cache_report = {"reason": reason, "at": time.time(), **report}
+        # `at` 是**给人看的时刻**（`/super apicheck` 用 `_format_clock` 印它），
+        # 所以走注入的墙钟，不另取一次 `time.time()`。
+        self.last_cache_report = {"reason": reason, "at": self.wall_clock(), **report}
         parts = []
         for role in ("dialogue", "judge", "memory"):
             stats = report.get(role) or {}
@@ -1706,6 +1713,7 @@ class DialogueEngine:
             metrics=self.metrics.snapshot(),
             model_trace=self.logs.snapshot(),
             started_at=self.started_at,
+            started_monotonic=self.started_monotonic,
             memory_bytes=memory_now,
             memory_peak_bytes=memory_peak,
             persistence_enabled=self.state_store is not None,
@@ -2845,7 +2853,12 @@ class DialogueEngine:
         snapshot = self.snapshot()
         metrics = snapshot.metrics or {}
         latency = (metrics.get("model_latency") or {}) if isinstance(metrics, dict) else {}
-        uptime = max(0.0, time.time() - snapshot.started_at) if snapshot.started_at else 0.0
+        # **"已运行多久"用单调钟算**（2026-10-08 安全与时间口径审计 B-02）：
+        # 从前是 `time.time() - snapshot.started_at`，一次对时就能让它跳变，
+        # 往回拨还会被 `max(0.0, …)` 夹成"已运行 0 秒"。`started_at` 只用来印
+        # "开始于"那个时刻。
+        uptime = (max(0.0, self.clock() - snapshot.started_monotonic)
+                  if getattr(snapshot, "started_monotonic", 0.0) else 0.0)
         database = self._memory_database_bytes()
         store = getattr(self, "usage_store", None)
         current = {
@@ -3187,7 +3200,9 @@ class DialogueEngine:
         # 信的时间戳是**墙上时间**（`mail_state.json` 里存的是 `time.time()`），
         # 而 `self.clock` 是单调时钟（默认 `time.monotonic`，只用来算"过了多少秒"）。
         # 两者不能相减——混着用会让刚寄出的信算成 0 小时、"很久以前"算成负数。
-        age_hours = max(0.0, (time.time() - float(newest.get("at") or 0.0)) / 3600.0)
+        # 这里**只能**用墙上钟：`at` 是跨重启留下来的时刻，单调钟的零点在重启后没有
+        # 可比性。所以它走注入的墙钟（`self.wall_clock()`），不是另取一次 `time.time()`。
+        age_hours = max(0.0, (self.wall_clock() - float(newest.get("at") or 0.0)) / 3600.0)
         asked = isinstance(message.text, str) and bool(LETTER_ASK_RE.search(message.text))
         if age_hours > LETTER_FRESH_HOURS and not (
             asked and age_hours <= LETTER_RECALL_DAYS * 24

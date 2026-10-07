@@ -13,6 +13,11 @@
 **三道上限**（都不能省）：条数 `max_items`、年龄 `max_age_seconds`、单条尝试次数
 `max_attempts`。没有年龄上限的话，断线一小时后回来会把她一小时的回复连着喷出来，
 那比丢消息更像事故。
+
+**年龄用单调钟算**（`time.monotonic`，2026-10-08 安全与时间口径审计 B-02）：
+"这条排了多久"是**时长**，不该跟着墙上时钟走——NTP 校时或手动改表会让
+`now - queued_at` 一次性失真（往回拨 → 该丢的旧消息永远留着；往前拨 → 新消息被
+判成过期丢掉）。墙上时刻只用来印给人看，不参与这里的判断。
 """
 from __future__ import annotations
 
@@ -53,12 +58,17 @@ class Outbox:
     def __init__(
         self,
         *,
-        clock=time.time,
+        clock=None,
         max_items: int = OUTBOX_MAX_ITEMS,
         max_age_seconds: float = OUTBOX_MAX_AGE_SECONDS,
         max_attempts: int = OUTBOX_MAX_ATTEMPTS,
     ) -> None:
-        self.clock = clock
+        # **"排了多久"是时长，所以默认用单调钟**（`time.monotonic`）。
+        # 从前默认是 `time.time`：NTP 校时或手动改表会让
+        # `now - item.queued_at` 一次性失真——往回拨就把刚排进来的消息判成
+        # **还没排到**（该补发的不补发），往前拨就把好好的消息判成 `too_old` 丢掉。
+        # 只在测试与干跑里注入替身（`tests/test_outbox.py` 那一套照旧）。
+        self.clock = time.monotonic if clock is None else clock
         self.max_items = max(1, int(max_items))
         self.max_age_seconds = float(max_age_seconds)
         self.max_attempts = max(1, int(max_attempts))
@@ -102,8 +112,18 @@ class Outbox:
             return False
         return True
 
+    def age(self, item: OutboundItem, now: float | None = None) -> float:
+        """这条消息**排了多久**（秒）——两个读数都取自同一个（默认单调的）钟。
+
+        夹到 `>= 0`：钟被往回拨时也不该出现负数年龄（那会让 `_expired` 判成
+        "还年轻"，于是一条明明该丢的旧消息永远留在队列里）。
+        """
+
+        moment = self.clock() if now is None else now
+        return max(0.0, moment - item.queued_at)
+
     def _expired(self, item: OutboundItem, now: float) -> str:
-        if now - item.queued_at > self.max_age_seconds:
+        if self.age(item, now) > self.max_age_seconds:
             return "too_old"
         if item.attempts >= self.max_attempts:
             return "too_many_attempts"

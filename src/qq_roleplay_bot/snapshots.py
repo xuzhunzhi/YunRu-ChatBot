@@ -108,7 +108,13 @@ class EngineSnapshot:
     # 最后几条的**预览**，正文只在 data/logs/ 的文件里。
     model_trace: dict[str, object] | None = None
     # 本次进程启动的时间与内存占用（字节）。给 `/super status` 用。
+    #
+    # **两个起始点，各管一摊**（2026-10-08 安全与时间口径审计 B-02）：
+    # `started_at` 是墙上时刻，只用来印"开始于"；`started_monotonic` 是单调读数
+    # （与引擎注入的 `clock` 同一个钟），只用来算"已运行多久"。拿 `started_at` 去减
+    # 当前墙上时刻算时长，会被 NTP 校时/改表拨动——最坏被夹成"已运行 0 秒"。
     started_at: float = 0.0
+    started_monotonic: float = 0.0
     memory_bytes: int = 0
     memory_peak_bytes: int = 0
     persistence_enabled: bool = False
