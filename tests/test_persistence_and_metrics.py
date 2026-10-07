@@ -9,7 +9,8 @@ from pathlib import Path
 
 from qq_roleplay_bot.metrics import LatencyWindow, RuntimeMetrics
 from qq_roleplay_bot.stage3_main import DialogueEngine
-from qq_roleplay_bot.state_store import STATE_VERSION, RuntimeStateStore
+from qq_roleplay_bot.stage3_runtime import ConversationState
+from qq_roleplay_bot.state_store import MAX_PERSISTED_HISTORY, STATE_VERSION, RuntimeStateStore
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 
 GROUP = "717151356"
@@ -123,6 +124,33 @@ def test_sessions_survive_restart_including_bot_reply_history() -> None:
     state = restarted.sessions.state(f"group:{GROUP}")
     assert [m.text for m in state.recent()] == ["@YunRu 你好", "我在"]
     assert state.mode.value == "active"
+
+
+def test_persisted_history_is_capped_and_keeps_absolute_sequence_numbers() -> None:
+    """落盘只带最近 `MAX_PERSISTED_HISTORY` 条，读回来的绝对序号与切掉前逐条对齐。
+
+    这条钉的是"`as_state()` 不再全量导出"：把切片去掉 → 条数断言红；
+    切片了但忘了把丢掉的条数计进 `dropped` → 序号断言红（读回来的 `seq` 会整体
+    前移，`summary_through` 与话题起点就都指到错的消息上了）。
+    """
+
+    state = ConversationState(history_limit=2000)
+    for index in range(300):
+        state.add(_message(f"m{index}", f"第{index}句"), float(index))
+    # 压缩过一次的会话：摘要覆盖到第 100 条，活窗口是它之后的那一段。
+    state.summary_through = 100
+
+    raw = state.as_state()
+    assert len(raw["history"]) <= MAX_PERSISTED_HISTORY
+
+    restored = ConversationState.from_state(raw, history_limit=2000)
+    assert restored is not None
+    kept = list(state.history)[-MAX_PERSISTED_HISTORY:]
+    assert [restored.seq_of(m) for m in restored.recent()] == [state.seq_of(m) for m in kept]
+    # 活窗口只剩"落盘的那一截"：它是原来活窗口的尾巴，顺序与内容逐条相同。
+    assert ([m.text for m in restored.live_history()]
+            == [m.text for m in state.live_history()][-MAX_PERSISTED_HISTORY:])
+    assert restored.summary_through == state.summary_through
 
 
 def test_engine_without_state_store_does_not_touch_disk() -> None:

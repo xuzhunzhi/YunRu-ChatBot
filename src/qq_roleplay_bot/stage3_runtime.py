@@ -16,6 +16,7 @@ from .extensions import PromptMaterial
 from .base_prompt import BASE_PROMPT
 from .memory_model import MemoryMaterial
 from .prompt_library import derive_must_reply
+from .state_store import MAX_PERSISTED_HISTORY
 from .stay_in_character import STAY_IN_CHARACTER_RULE
 from . import data_boundary
 from . import dev_config
@@ -374,8 +375,22 @@ class ConversationState:
         self.last_activity_at = now
 
     def as_state(self) -> dict[str, object]:
-        """导出可持久化的会话状态；只保留短期语境，不含长期记忆。"""
+        """导出可持久化的会话状态；只保留短期语境，不含长期记忆。
 
+        历史**只落最近 `MAX_PERSISTED_HISTORY` 条**（那个常量到这天才有了消费者）：
+        落盘发生在回复路径上、同步、带 fsync，全量导出等于每隔一会儿就把整段窗口
+        dump 一遍。老对话本来就已经在 `summary` 里，切片丢的是"活窗口里最早的那一段"。
+
+        切片**不动恢复语义**靠的是 `dropped` 跟着一起前移：`seq = dropped + 位置`，
+        留下的那一截消息读回来之后绝对序号逐条不变，`summary_through` 与
+        `topic_start_seq` 指的还是原来那一条（见 `from_state`）。
+        """
+
+        history = list(self.history)
+        dropped = self.dropped
+        if len(history) > MAX_PERSISTED_HISTORY:
+            dropped += len(history) - MAX_PERSISTED_HISTORY
+            history = history[-MAX_PERSISTED_HISTORY:]
         return {
             "mode": self.mode.value,
             "active_user_id": self.active_user_id,
@@ -402,11 +417,12 @@ class ConversationState:
                     "sender_name": m.sender_name,
                     "is_bot_message": m.is_bot_message,
                 }
-                for m in self.history
+                for m in history
             ],
             # 绝对序号的基准必须持久化：否则重启后 seq 会从头开始，
             # 判定 agent 上一轮标记的起点就指向了错误的对话。
-            "dropped": self.dropped,
+            # 上面切掉的那几条已计入这里，所以留下的消息 seq 不变。
+            "dropped": dropped,
             # 摘要同样要持久化：它是回复段的稳定前缀，丢了就等于压缩白做，
             # 而且重启后前缀会突然变，缓存全断。
             "summary": self.summary,
