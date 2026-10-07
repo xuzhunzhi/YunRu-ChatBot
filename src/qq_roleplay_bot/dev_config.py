@@ -590,6 +590,9 @@ FOCUS_QUIET_SECONDS = _float("QQBOT_FOCUS_QUIET_SECONDS", 45.0)
 FOCUS_DUTY_SECONDS = _float("QQBOT_FOCUS_DUTY_SECONDS", 300.0)
 FOCUS_REPLY_LIMIT = _int("QQBOT_FOCUS_REPLY_LIMIT", 50)
 FOCUS_ACK_COOLDOWN_SECONDS = _float("QQBOT_FOCUS_ACK_COOLDOWN_SECONDS", 120.0)
+# 单个群的排队上限（条；超了丢最旧）。队列里存的是消息全文，必须有个上界——
+# 2026-10-08 隔离增长审计 [7]。与上面那几个一样是**装配期**读一次的常量。
+FOCUS_QUEUE_LIMIT = _int("QQBOT_FOCUS_QUEUE_LIMIT", 50)
 
 
 # --- 对话日志（**实际收发**，与模型日志分开）---------------------------------

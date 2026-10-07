@@ -1152,6 +1152,9 @@ class DialogueEngine:
             duty_limit_seconds=dev_config.FOCUS_DUTY_SECONDS,
             reply_limit=dev_config.FOCUS_REPLY_LIMIT,
             ack_cooldown_seconds=dev_config.FOCUS_ACK_COOLDOWN_SECONDS,
+            # 单个群的排队上限（条）。队列里是消息全文，所以它必须有上界——
+            # 2026-10-08 隔离增长审计 [7]：从前 `deque()` 没有 maxlen。
+            queue_limit=dev_config.FOCUS_QUEUE_LIMIT,
         )
         self.metrics = RuntimeMetrics()
         # 按功能分开的输入输出日志（判定 / 回复 / 记忆 / 规则拦截放行），
@@ -2914,10 +2917,12 @@ class DialogueEngine:
                 f"当值：{hot['session_id']} 已 {hot['seconds_on_duty']}s"
                 f"（话题静了 {hot['since_related']}s，已回 {hot['replies']} 条）"
             )
-        if focus.get("queued_total"):
+        if focus.get("queued_total") or focus.get("queued_dropped"):
             lines.append(
-                f"排队等她：{focus['queued_total']} 条"
+                f"排队等她：{focus.get('queued_total', 0)} 条"
                 f"（{len(focus.get('queued_sessions') or [])} 个会话）"
+                # 队列满时丢的是**最旧**的（单群上限见 `FOCUS_QUEUE_LIMIT`）。
+                + (f"   已丢最旧 {focus['queued_dropped']} 条" if focus.get("queued_dropped") else "")
             )
         if snapshot.guard_raised:
             lines.append(
@@ -4530,6 +4535,8 @@ class DialogueEngine:
             "hot": self.focus.hot_stats(moment),
             "queued_total": self.focus.total_queued(),
             "queued_sessions": self.focus.queued_sessions(),
+            # 单个群队列满（`FOCUS_QUEUE_LIMIT`）时丢掉的**最旧**消息条数。
+            "queued_dropped": self.focus.dropped,
             "sweeping": self.focus.sweeping,
         }
 

@@ -14,15 +14,21 @@
 """
 from __future__ import annotations
 
+import logging
 from collections import deque
 from dataclasses import dataclass, field
 
 from .transport import IncomingMessage
 
+logger = logging.getLogger(__name__)
+
 QUIET_RELEASE_SECONDS = 45.0
 DUTY_LIMIT_SECONDS = 300.0
 REPLY_LIMIT = 50
 ACK_COOLDOWN_SECONDS = 120.0
+#: 一个群最多排多少条；超了丢**最旧**的（与出站队列同一口径：新的更贴近当下）。
+#: 队列里存的是**消息全文**，所以它必须有个上界——外部刷屏不该把内存顶起来。
+QUEUE_LIMIT_PER_SESSION = 50
 
 
 @dataclass
@@ -42,6 +48,8 @@ class FocusController:
     duty_limit_seconds: float = DUTY_LIMIT_SECONDS
     reply_limit: int = REPLY_LIMIT
     ack_cooldown_seconds: float = ACK_COOLDOWN_SECONDS
+    #: 单个群的排队上限（条）。见 `enqueue` 与 `QUEUE_LIMIT_PER_SESSION`。
+    queue_limit: int = QUEUE_LIMIT_PER_SESSION
 
     hot: FocusState | None = None
     # 冷群积压：只在"明确找她"的消息上排队（@ / 提及 / 引用）。
@@ -50,6 +58,8 @@ class FocusController:
     _order: list[str] = field(default_factory=list)
     _ack_at: dict[str, float] = field(default_factory=dict)
     _sweeping: bool = False
+    #: 因为单个群的队列满而被丢掉的**最旧**消息条数（观测用；只记数，不记正文）。
+    dropped: int = 0
 
     # --- 当值 -----------------------------------------------------------------
 
@@ -107,11 +117,27 @@ class FocusController:
     # --- 积压队列 -------------------------------------------------------------
 
     def enqueue(self, session_id: str, message: IncomingMessage) -> int:
+        """排一条等当值的消息；返回排完之后的队列深度。
+
+        **单个群的队列有上限**（`queue_limit`，默认 50）：满了就丢**最旧**的那条并
+        计数（`dropped`）。由来（2026-10-08 隔离增长审计 [7]）：`deque()` 从前没有
+        maxlen，队列里存的又是**消息全文**——一个群被刷屏（或长期当不上值）就能把内存
+        顶起来，而且没有任何计数能看出来。丢最旧与出站队列同一口径：新的更贴近当下。
+        """
+
         queue = self._queues.get(session_id)
         if queue is None:
             queue = deque()
             self._queues[session_id] = queue
             self._order.append(session_id)
+        limit = max(1, int(self.queue_limit))
+        if len(queue) >= limit:
+            dropped = queue.popleft()
+            self.dropped += 1
+            logger.warning(
+                "focus queue full, dropping oldest: session=%s limit=%s dropped_id=%s",
+                session_id, limit, dropped.message_id,
+            )
         queue.append(message)
         return len(queue)
 
