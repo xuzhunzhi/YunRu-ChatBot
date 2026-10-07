@@ -122,16 +122,32 @@ def test_core_no_longer_knows_those_commands() -> None:
     assert parse_super_command("/super restart") is not None
 
 
-def test_unknown_level_falls_back_to_public() -> None:
-    class Odd:
-        min_level = "root"
+def test_missing_level_still_defaults_to_public() -> None:
+    """协议默认**没变**：**没声明**档位 = 公开命令（`level_of` 返回 `"public"`）。"""
 
     class Bare:
         pass
 
-    assert level_of(Odd()) == "public"
     assert level_of(Bare()) == "public"
     assert level_of(object()) == "public"
+
+
+def test_unknown_declared_level_is_refused_instead_of_falling_back_to_public() -> None:
+    """**声明了却不认识**的档位不再回落成 `public`——本体 `e7a19ad`（安全面审计 A-03）。
+
+    改之前 `level_of` 把"拼错的档位"与"没声明"一视同仁，都回落成最低档 `public`；
+    而核心的放行判据是"不是 super / admin 就放行"，于是 `min_level = "Supre"` 这种
+    一个字母的手误会让踢人 / 禁言 / 改群名这类特权命令变成**谁都能用**，且过程静默。
+    现在 `level_of` 对这种情况返回**空串**（不在 `LEVELS` 里，调用方一律拒绝），
+    装载点 `CommandRegistry.add()` 也会直接拒绝装载。判据在
+    `tests/test_plugin_level_fail_closed.py`——这条断言是**跟着收紧后的边界改的**，
+    不是被改坏的。
+    """
+
+    class Odd:
+        min_level = "root"
+
+    assert level_of(Odd()) == "", "拼错的档位又被回落成可用的档位了"
 
 
 # --- 档位判定在核心 ---------------------------------------------------------
