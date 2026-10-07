@@ -207,7 +207,22 @@ def shared() -> RuntimeFlags | None:
     return _SHARED
 
 
-def install(flags: RuntimeFlags) -> None:
+def install(flags: RuntimeFlags | None) -> None:
+    """装配点装一份进程内共用的；**传 `None` = 卸掉它**。
+
+    "卸掉"是给"跑完一段真正装配之后的复原"用的：`runtime.build_engine()` 每次都会
+    `install(build_flags(...))`，而这是一份**进程级单例**——直接造出来的引擎
+    （`DialogueEngine(...)` 的 `_flags()` **优先读共用那份**）会跟着它走。
+
+    2026-10-08 实测到的坑：`tests/test_memory.py` 里那次真装配把
+    `DUAL_AGENT_ENABLED` patch 成 False，于是共用那份的 `judge_enabled=False`
+    留在进程里，后面**显式指定顺序**同进程跑的 `test_affinity_behavior.py`
+    就整轮不跑判定了（红 3 条 + 1 条 error；整套按文件名字母序跑时 affinity 在
+    memory 之前，所以一直没暴露）。
+
+    所以：**谁改了它，谁负责还回去**（装配过的测试在 `finally` 里 `install(旧的)`）。
+    """
+
     global _SHARED
     _SHARED = flags
 

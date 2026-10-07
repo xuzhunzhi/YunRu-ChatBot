@@ -11,6 +11,7 @@ from unittest.mock import patch
 from dataclasses import replace
 from pathlib import Path
 
+from qq_roleplay_bot import runtime_flags
 from qq_roleplay_bot.memory_config import MemorySettings
 from qq_roleplay_bot.memory_maintenance_agent import MemoryMaintenanceAgent, build_maintenance_messages
 from qq_roleplay_bot.memory_model import InboxEvent, MemoryMaterial, MemoryMetrics, MemoryValidationError, parse_operations
@@ -870,16 +871,27 @@ class MemoryAsyncTests(unittest.IsolatedAsyncioTestCase):
             engine = built(*args, **kwargs)
             engine.memory_group_ids = {GROUP}
             return engine
-        with patch.object(runtime, "OpenAICompatibleClient", Client), \
-                patch.object(runtime.dev_config, "API_KEY", "offline-placeholder"), \
-                patch.object(runtime, "MemoryService", factory), \
-                patch.object(runtime, "build_engine", build_engine), \
-                patch.object(main, "OneBotWebSocketTransport", Transport), \
-                patch.object(runtime.dev_config, "DUAL_AGENT_ENABLED", False):
-            # 这个用例验的是"记忆服务接线"，不是双 agent 行为；关掉双 agent，
-            # 免得假 client 对判定请求也返回同一种内容而被判成不出声。
-            # 双 agent 的接线由 tests/test_dual_agent.py 单独覆盖。
-            await main.run()
+        # **装配会把进程级的运行期开关覆盖掉，跑完必须还回去**（2026-10-08 实测）：
+        # `runtime.build_engine` 里有 `runtime_flags.install(build_flags(...))`，而那是
+        # **进程级单例**——直接造引擎的用例（`DialogueEngine(...)` 的 `_flags()` 优先读
+        # 共用那份）会跟着它走。下面把 `DUAL_AGENT_ENABLED` patch 成 False，于是共用那份
+        # 的 `judge_enabled=False` 会留在进程里：后面显式指定顺序同进程跑的
+        # `test_affinity_behavior.py` 整轮不跑判定（红 3 条 + 1 条 error）。
+        # 整套按文件名字母序跑时 affinity 在 memory 之前，所以一直没暴露。
+        previous_flags = runtime_flags.shared()
+        try:
+            with patch.object(runtime, "OpenAICompatibleClient", Client), \
+                    patch.object(runtime.dev_config, "API_KEY", "offline-placeholder"), \
+                    patch.object(runtime, "MemoryService", factory), \
+                    patch.object(runtime, "build_engine", build_engine), \
+                    patch.object(main, "OneBotWebSocketTransport", Transport), \
+                    patch.object(runtime.dev_config, "DUAL_AGENT_ENABLED", False):
+                # 这个用例验的是"记忆服务接线"，不是双 agent 行为；关掉双 agent，
+                # 免得假 client 对判定请求也返回同一种内容而被判成不出声。
+                # 双 agent 的接线由 tests/test_dual_agent.py 单独覆盖。
+                await main.run()
+        finally:
+            runtime_flags.install(previous_flags)
         self.assertEqual(sent, ["离线启动接线验证"])
         self.assertEqual(services[0].metrics.enqueued, 2)
         self.assertEqual(services[0]._tasks, [])
