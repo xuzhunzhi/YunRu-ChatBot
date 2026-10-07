@@ -58,8 +58,8 @@ Stage 4 是**手脚**：它给大脑接上更多表达方式和动作能力。
 
 | 模块 | 职责 |
 | --- | --- |
-| `capabilities.py` | **194 个 SnowLuma action 的登记与调用闸门**（`read`/`interaction`/`send`/`admin` 四种用途） |
-| `data/snowluma_actions.json` | action 元数据目录 |
+| `capabilities.py` | **194 条 action 的登记与调用闸门**（`read`/`interaction`/`send`/`admin` 四种用途）。这个 194 是**随包那份目录**（`data/snowluma_actions.json`）的条数；**对面可执行动作是 189 个**（2026-10-08 本机实测：`defineAction` 134 + `groupAction` 55，来源 `docs/research/snowluma-api-2026-10-08.md`） |
+| `data/snowluma_actions.json` | action 元数据目录（**194 条**：上面那份登记与闸门读的就是它） |
 | `onebot_client.py` | WS **客户端**模式传输 + SnowLuma 只读 HTTP 封装 |
 | `command_plugins.py` + `builtin_commands.py` | 命令插件接口（含档位与动作意图，见 `docs/ADD_A_COMMAND.md`）|
 | `background_plugins.py` | **后台插件**的装配点与节拍循环（协议在 main 上，具体插件在 `stage4-plugins`）|
