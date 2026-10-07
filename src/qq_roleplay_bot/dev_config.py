@@ -331,6 +331,20 @@ def context_cache_ttl_seconds() -> float:
     return _float_clamped("QQBOT_CONTEXT_CACHE_TTL_SECONDS", 21600.0, 60.0, 604800.0)
 
 
+# --- 短期会话状态的上限（2026-10-08 隔离增长审计 [1]）------------------------
+# `DialogueSessions.states` 从前只增不减（只有 `setdefault` 与"从盘恢复"两条写入口），
+# `/admin disable`、`/super clear` 都只把 mode 置回去，真正的回收只发生在进程重启。
+# 上限**调用时现读**（改配置不必重启）；淘汰只看"上限 + 最久不活跃"，与开不开对话无关。
+# 默认 200 与持久化的 `MAX_PERSISTED_SESSIONS` 对齐：重启能恢复多少，内存里就留多少。
+
+
+def session_cache_max_sessions() -> int:
+    """最多同时留多少个会话的短期状态（`QQBOT_SESSION_CACHE_MAX_SESSIONS`，
+    默认 200，夹在 10..2000）。超了就淘汰**最久不活跃**的那个会话。"""
+
+    return _int_clamped("QQBOT_SESSION_CACHE_MAX_SESSIONS", 200, 10, 2000)
+
+
 # --- "群里这边"的时间 -------------------------------------------------------
 # 用户口径（2026-10-08）：*"她那边 = 北京 + 3 小时"*。而"这边"从前是**宿主时区**
 # （`datetime.fromtimestamp` / `time.localtime`），代码把"本机=北京"写死在注释里。

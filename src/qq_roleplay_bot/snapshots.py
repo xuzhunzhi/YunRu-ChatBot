@@ -115,6 +115,9 @@ class EngineSnapshot:
     # 当前墙上时刻算时长，会被 NTP 校时/改表拨动——最坏被夹成"已运行 0 秒"。
     started_at: float = 0.0
     started_monotonic: float = 0.0
+    # 被"会话数上限"淘汰掉的短期会话数（2026-10-08 隔离增长审计 [1]）。它是
+    # "内存里的会话为什么少了"的唯一出口：只有计数，没有正文、没有群号。
+    sessions_evicted: int = 0
     memory_bytes: int = 0
     memory_peak_bytes: int = 0
     persistence_enabled: bool = False

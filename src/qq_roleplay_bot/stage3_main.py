@@ -921,14 +921,75 @@ async def _deliver_relay(transport: QQTransport, delivery: RelayDelivery, *, out
 
 
 class DialogueSessions:
-    """按会话保存短期聊天记录和语境，默认不会跨群共享。"""
+    """按会话保存短期聊天记录和语境，默认不会跨群共享。
 
-    def __init__(self) -> None:
+    **会话数有上限，超了淘汰最久不活跃的那个**（LRU）。由来（2026-10-08 隔离增长
+    审计 [1]）：`states` 从前只有 `setdefault` 与 `restore` 两处写入、**没有任何删除
+    点**——`/admin disable`、`/super clear` 只把 mode 置回去（`leave()`），历史留在
+    内存里，真正的回收只发生在进程重启。上限**调用时现读**（`dev_config`），
+    淘汰只看"上限 + 最久不活跃"，**与开不开对话无关**：用户 2026-10-08 定死
+    `/admin disable` 只等于"不回复"，历史与记忆照记。
+
+    淘汰时通过 `on_evict` 通知引擎，好让它把那个会话的按会话 client 也一起丢掉
+    （审计 [5]：那两个字典是强引用，不跟会话走就等于会话状态清不掉）。
+    """
+
+    def __init__(self, *, on_evict=None) -> None:
         self.states: dict[str, ConversationState] = {}
         self.triggers: dict[str, IdleTrigger] = {}
+        #: 被上限淘汰掉的会话数（观测用；只记数）。
+        self.evicted = 0
+        #: 淘汰一个会话时要顺带清理的东西（引擎装的是 `_drop_session_clients`）。
+        self.on_evict = on_evict
 
     def state(self, session_id: str) -> ConversationState:
-        return self.states.setdefault(session_id, ConversationState(history_limit=HISTORY_LIMIT))
+        state = self.states.get(session_id)
+        if state is None:
+            state = ConversationState(history_limit=HISTORY_LIMIT)
+            self.states[session_id] = state
+            self._enforce_limit(session_id)
+        return state
+
+    def _enforce_limit(self, keep: str | None) -> None:
+        """会话数上限：超了就淘汰**最久不活跃**的那个（LRU），一次一个。
+
+        `keep` 是这一轮刚碰过的会话，**不许**淘汰它（新建的状态 `last_activity_at`
+        还是 None，否则它会被自己立刻淘汰掉，调用方拿到一个已经不在表里的 state）。
+        """
+
+        limit = max(1, dev_config.session_cache_max_sessions())
+        while len(self.states) > limit:
+            victim = self._least_recent_session(keep=keep)
+            if victim is None:
+                return
+            self._drop(victim)
+
+    def _least_recent_session(self, *, keep: str | None) -> str | None:
+        """最久不活跃的那个会话；从没活跃过的（`None`）排在最前。"""
+
+        candidates = [(sid, st) for sid, st in self.states.items() if sid != keep]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda item: item[1].last_activity_at or 0.0)[0]
+
+    def _drop(self, session_id: str) -> None:
+        """真的淘汰一个会话：把它的状态摘出内存，并通知引擎做联动清理。"""
+
+        state = self.states.pop(session_id, None)
+        if state is None:
+            return
+        # 同一个 key 上的两样东西一起走：留下一个"状态已经不在了"的触发器没有意义。
+        self.triggers.pop(session_id, None)
+        self.evicted += 1
+        logger.info(
+            "short-term session evicted (LRU): session=%s remaining=%s history=%s",
+            session_id, len(self.states), len(state.history),
+        )
+        if self.on_evict is not None:
+            try:
+                self.on_evict(session_id)
+            except Exception:  # noqa: BLE001 - 清理失败不该影响收消息
+                logger.exception("session eviction hook failed: session=%s", session_id)
 
     def trigger(self, session_id: str) -> IdleTrigger:
         return self.triggers.setdefault(
@@ -979,6 +1040,9 @@ class DialogueSessions:
                 continue
             self.states[session_id] = state
             restored += 1
+        # 恢复回来的也受同一个上限管（持久化的那份至多 `MAX_PERSISTED_SESSIONS` 条，
+        # 但上限配小了的话，这里要立刻收紧；`keep=None` = 没有"刚碰过"的那一个）。
+        self._enforce_limit(None)
         return restored
 
 
@@ -1042,6 +1106,10 @@ class DialogueEngine:
         self.target_group_id = target_group_id
         self.private_debug_user_ids = private_debug_user_ids
         self.sessions = sessions or DialogueSessions()
+        # 会话被 LRU 淘汰时，把那个会话的按会话 client 也一起丢掉
+        # （2026-10-08 隔离增长审计 [5]）：`_session_clients` / `_session_judges` 是
+        # 强引用，各自持一份"按会话隔离的缓存空间"，不跟会话走就等于状态永远清不掉。
+        self.sessions.on_evict = self._drop_session_clients
         # 跨重启的累计账本（runtime 会塞进来；测试里是 None，等于只报本次进程）。
         self.usage_store = None
         # 群成员角色事实（**核心的能力**，2026-10-06 从插件搬进来）：回答
@@ -1538,6 +1606,17 @@ class DialogueEngine:
             self._session_clients[session_id] = client
         return client
 
+    def _drop_session_clients(self, session_id: str) -> None:
+        """会话被淘汰时，把它那两个按会话 client 从字典里摘掉。
+
+        它们是**强引用**（`_client_for` / `_judge_for` 只写不删），会话状态都回收了
+        还留着它们，等于"回收"只回收了一半——每个 client 还各持一份连接与缓存。
+        下次这个会话再来消息会重新建一个（缓存空间重来一次，那是可接受的代价）。
+        """
+
+        self._session_clients.pop(session_id, None)
+        self._session_judges.pop(session_id, None)
+
     def _judge_for(self, session_id: str):
         """这个会话该用哪个判定 client；退回单 agent 时返回 None。
 
@@ -1730,6 +1809,7 @@ class DialogueEngine:
             model_trace=self.logs.snapshot(),
             started_at=self.started_at,
             started_monotonic=self.started_monotonic,
+            sessions_evicted=self.sessions.evicted,
             memory_bytes=memory_now,
             memory_peak_bytes=memory_peak,
             persistence_enabled=self.state_store is not None,
@@ -2894,7 +2974,11 @@ class DialogueEngine:
             + (f"（峰值 {_format_bytes(snapshot.memory_peak_bytes)}）" if snapshot.memory_peak_bytes else "")
             + (f"   数据目录：{_format_bytes(database)}" if database else ""),
             f"启用群：{'、'.join(snapshot.enabled_group_ids) or '无'}",
-            f"短期会话：{len(snapshot.sessions)}   已补历史：{snapshot.history_seeded}",
+            f"短期会话：{len(snapshot.sessions)}"
+            # 会话数上限淘汰掉的（2026-10-08 隔离增长审计 [1]）：内存里的会话
+            # 为什么少了，只有这个数能回答——不然读起来像"她忘了之前的对话"。
+            + (f"   已淘汰：{snapshot.sessions_evicted}" if snapshot.sessions_evicted else "")
+            + f"   已补历史：{snapshot.history_seeded}",
             f"收到消息：{snapshot.accepted_messages}   忽略：{snapshot.ignored_messages}   "
             f"阻断：{snapshot.blocked_messages}   延迟：{snapshot.deferred_messages}",
             f"模型调用：{snapshot.model_calls}   已发回复：{snapshot.replies}   "
