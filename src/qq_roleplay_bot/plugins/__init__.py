@@ -444,12 +444,44 @@ class LearnedSeams:
     | 字段 | 形状 | 干什么 |
     | --- | --- | --- |
     | `quote_view` | `(group_id) -> dict` | 读：按群的表情含义表 + 风格/语境笔记 |
+    | `quote_evidence` | `(group_id, limit=10, offset=0) -> dict` | 读：**证据**——她的原文 + 上下文 + 谁贴的表情 + 它落到了哪条笔记 |
     | `quote_correct` | `(group_id, emoji_id, sense, note="") -> dict` | 改：纠正某表情方向（`auto` 撤销） |
     | `quote_note_enabled` | `(note_id, enabled) -> dict` | 改：停用 / 恢复某条笔记 |
     | `slang_list` | `(group_id=None) -> list` | 读：黑话词条（`None` = 所有群） |
     | `slang_update` | `(group_id, word, definition) -> dict` | 改：改释义（记一次修订） |
     | `slang_delete` | `(group_id, word) -> bool` | 改：删词条 |
     | `slang_mark_wrong` | `(group_id, word, wrong=True) -> dict` | 改：标错 / 取消标错 |
+
+    ### `quote_evidence` 是什么（2026-10-06 用户原话）
+
+    *"你有没有发现你做的设置项太表面了，基本没啥能调整的，比如**金句，你连原文和上下文
+    都不贴出来怎么审核**"*。
+
+    在那之前，这一侧只给**加工后的结论**（`quote_view` 的表情含义表 + 笔记），
+    而"她当时到底说了什么、群里在说什么、谁贴的表情、学习 agent 据此推了什么"
+    一个字都没有——没有证据就没法审核一条判断对不对。这一项只**补证据**，不做别的：
+
+    | 返回的键 | 是什么 | 注意 |
+    | --- | --- | --- |
+    | `group_id` | 归一化后的群号 | 与 `quote_view` 同一口径 |
+    | `total` / `offset` / `limit` | 这个群一共几条证据、这一页从第几条起、最多几条 | **默认最近 10 条**，一个群可能很多条，一次不吐完 |
+    | `evidence` | 证据列表（新→旧），每条见下表 | 取不到就是空列表 |
+
+    一条证据（`evidence` 里的一项）：
+
+    | 键 | 是什么 |
+    | --- | --- |
+    | `message_id` / `group_id` / `at` | 她那条消息的 id（**配对只认它**）/ 群号 / 时间戳 |
+    | `她说的` | **她的原文**（不截断；给模型看的那一份才截 240 字） |
+    | `她开口之前群里在说` / `她说完之后群里接的` | **复数条**上下文，每条是 `"名字：说了什么"`（**不是一段说明**） |
+    | `被点了` | 表情证据：`emoji_id` / `by`（谁贴的 `user_id`）/ `count` / `sub_type` |
+    | `meanings` | 每个表情**在这个群**的含义：`sense` / `sense_label` / `note` / `manual`（人工改过没） |
+    | `notes` | 它落到了哪条笔记：`id`（**对不上就是空串**，如实标"没落到任何笔记"）/ `note`，以及 `quote`（学习 agent 据以判断的那一句） |
+    | `sample_id` / `当时的话题` / `对方想干什么` | 这条证据对应的学习样本（`sample_id` 空 = 她这条被点过表情，但没进学习样本） |
+    | `为什么没有结论` | 只有拿不到结论时才出现，写清是"这个群还没学"还是"这个表情还没判过" |
+
+    **边界**：这一项**只读**。改方向 / 停用笔记仍然走 `quote_correct` 与
+    `quote_note_enabled` 那两个既有函数，证据这边一个新写口都不给。
 
     返回的都是**结构化数据**（dict / list / bool），不是给她看的话——面板要显示什么自己排版。
     取不到数据时一律返回空结构（`{}` / `[]` / `False`），**不抛**：
@@ -459,6 +491,9 @@ class LearnedSeams:
     """
 
     quote_view: object = None
+    #: `(group_id, limit=10, offset=0) -> dict`：**只读的证据**（她的原文 + 上下文 +
+    #: 谁贴的表情 + 它落到了哪条笔记）。见上面那张表——这一项**没有**任何写能力。
+    quote_evidence: object = None
     quote_correct: object = None
     quote_note_enabled: object = None
     slang_list: object = None

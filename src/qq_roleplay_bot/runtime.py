@@ -1184,9 +1184,10 @@ class _SeamBinder:
     # --- LearnedSeams（她学来的东西：金句 / 黑话）--------------------------
     #
     # 面板要能看、能改这两份数据，但**不许**碰记忆、也不许驱动对话
-    # （`AGENTS.md` §2.3）。所以这里只给七个函数，全部**转发到核心那两个 store**：
+    # （`AGENTS.md` §2.3）。所以这里只给八个函数，全部**转发到核心那两个 store**：
     # `quote_learning.QuoteStore`（金句那份 JSON）与 `slang_learning.SlangStore`
     # （黑话词条）。**接缝里不存第二份数据**——多一份就迟早分叉。
+    # （2026-10-06 加的是第八个：`learned_quote_evidence`。前面七个一个字没动。）
     #
     # 两个 store 都是**懒取**（`getattr(..., None)` 在**调用时**才求值）：
     # `_ui_seams_for()` 是 `build_engine` 里跑的，那时 `engine.quote_profile` 还没装上
@@ -1245,6 +1246,123 @@ class _SeamBinder:
             })
         return {"group_id": group, "meanings": meanings, "notes": notes,
                 "path": str(store.path)}
+
+    def learned_quote_evidence(self, group_id: str, limit: int = 10, offset: int = 0) -> dict:
+        """读：**证据**——她那条被点过表情的原文 + 当时的上下文 + 表情 + 结论落到哪条笔记。
+
+        由来（2026-10-06 用户原话）：*"金句，你连原文和上下文都不贴出来怎么审核"*。
+        在它之前这一侧只有**加工后的结论**（`quote_view` 的表情含义表 + 笔记），
+        没有证据——那样面板上"这个表情在损她"这句话谁也没法判对错。
+
+        **只读**，三个数各自都有上限（`quote_samples` 里的常量），取不到一律回空结构：
+
+        - 数据来自 `chat.jsonl`（**只读**，配对只认 `message_id`）；
+        - 结论来自 `QuoteStore`（那份 JSON），**这一层不自己存一份**；
+        - 一个群可能很多条：默认最近 `limit` 条（上限 `MAX_EVIDENCE_LIMIT`），
+          `offset` 往后翻——**不一次全吐**。
+        """
+
+        from .quote_samples import (DEFAULT_EVIDENCE_LIMIT, MAX_EVIDENCE_LIMIT,
+                                    collect_evidence)
+
+        group = _exact_text(group_id)
+        if not group:
+            return {}
+        store = self.learned_quote_store()
+        if store is None:
+            return {}
+        try:
+            size = int(limit)
+        except (TypeError, ValueError):
+            size = DEFAULT_EVIDENCE_LIMIT
+        try:
+            start = int(offset)
+        except (TypeError, ValueError):
+            start = 0
+        size = max(0, min(MAX_EVIDENCE_LIMIT, size))
+        start = max(0, start)
+        table = store.meanings.get(group) or {}
+        forced = store.overrides.get(group) or {}
+        chat_log, reply_log = _quote_evidence_paths(self._require())
+        entries, total, error = collect_evidence(
+            chat_log, reply_log_path=reply_log, group_id=group, limit=size,
+            offset=start)
+        evidence = []
+        for entry in entries:
+            row: dict[str, object] = {
+                "message_id": entry.message_id,
+                "group_id": entry.group_id,
+                "at": entry.at,
+                "她说的": entry.body,
+                "她开口之前群里在说": _evidence_lines(entry.context_before),
+                "她说完之后群里接的": _evidence_lines(entry.context_after),
+                "被点了": [dict(item) for item in entry.as_data()["被点了"]],
+                "meanings": self._evidence_meanings(entry.reactions, table, forced),
+                "notes": self._evidence_notes(store, entry.reactions, table, forced),
+                "sample_id": entry.sample.sample_id if entry.sample is not None else "",
+                "当时的话题": entry.sample.topic if entry.sample is not None else "",
+                "对方想干什么": entry.sample.intent if entry.sample is not None else "",
+            }
+            # 拿不到结论时**如实说为什么**（面板上"没有东西可审"与"还没学"是两回事）。
+            if not row["meanings"]:
+                row["为什么没有结论"] = ("这个群还没有学过（表情含义表是空的）" if not table
+                                        and not forced else "这些表情学习 agent 还没判过")
+            evidence.append(row)
+        return {"group_id": group, "total": total, "offset": start, "limit": size,
+                "evidence": evidence, "error": error, "path": str(store.path)}
+
+    @staticmethod
+    def _evidence_meanings(reactions, table: dict, forced: dict) -> list:
+        """这一条证据里**每个被点过的表情**在这个群的含义（学过的才给，没学过的不硬凑）。"""
+
+        from .quote_learning import SENSE_LABELS, SENSES
+
+        out = []
+        seen: set[str] = set()
+        for reaction in reactions:
+            if reaction.emoji_id in seen:
+                continue
+            seen.add(reaction.emoji_id)
+            entry = dict(table.get(reaction.emoji_id) or {})
+            override = dict(forced.get(reaction.emoji_id) or {})
+            if not entry and not override:
+                continue
+            # 生效方向与 `QuoteStore.effective_sense` 同一套判据：人工覆盖压过模型判的。
+            sense = str(override.get("sense") or entry.get("sense") or "")
+            if sense not in SENSES:
+                continue
+            out.append({
+                "emoji_id": reaction.emoji_id,
+                "sense": sense,
+                "sense_label": SENSE_LABELS.get(sense, sense),
+                "note": _exact_text(override.get("note") or entry.get("note")),
+                "quote": _exact_text(entry.get("quote")),
+                "manual": bool(override.get("sense")),
+            })
+        return out
+
+    @staticmethod
+    def _evidence_notes(store, reactions, table: dict, forced: dict) -> list:
+        """这些结论**落到了哪条笔记上**（对不上就是空 id——如实标"没落到任何笔记"）。"""
+
+        out = []
+        seen: set[str] = set()
+        for reaction in reactions:
+            if reaction.emoji_id in seen:
+                continue
+            seen.add(reaction.emoji_id)
+            entry = dict(table.get(reaction.emoji_id) or {})
+            manual_note = _exact_text((forced.get(reaction.emoji_id) or {}).get("note"))
+            key, note = store.note_for_quote(entry.get("quote"))
+            if not key and manual_note:
+                key, note = store.note_for_quote(manual_note)
+            out.append({
+                "emoji_id": reaction.emoji_id,
+                "id": key,
+                "note": note,
+                "manual": bool((forced.get(reaction.emoji_id) or {}).get("sense")),
+            })
+        return out
 
     def learned_quote_correct(self, group_id: str, emoji_id: str, sense: object,
                               note: object = "") -> dict:
@@ -1320,10 +1438,11 @@ class _SeamBinder:
         return store.find(group, term) or {}
 
     def learned_seams(self) -> LearnedSeams:
-        """七个函数的清单。**多一个都不给**——函数集合本身就是那份契约。"""
+        """八个函数的清单。**多一个都不给**——函数集合本身就是那份契约。"""
 
         return LearnedSeams(
             quote_view=self.learned_quote_view,
+            quote_evidence=self.learned_quote_evidence,
             quote_correct=self.learned_quote_correct,
             quote_note_enabled=self.learned_quote_note_enabled,
             slang_list=self.learned_slang_list,
@@ -1331,6 +1450,40 @@ class _SeamBinder:
             slang_delete=self.learned_slang_delete,
             slang_mark_wrong=self.learned_slang_mark_wrong,
         )
+
+
+def _quote_evidence_paths(engine) -> tuple[Path, Path]:
+    """证据读口读哪两份日志：`(chat.jsonl, reply.jsonl)`。
+
+    优先用**这次运行真正在写的那一份**（`quote_agent.chat_log_path`，它在
+    `_start_quote_learning` 里按 `data_dir` 定下来）；学习 agent 没装
+    （开关关掉 / 没有 client）时退到与它同一套口径的默认位置
+    （`quote_samples.default_paths()`，走 `chat_log_directory()`）。
+
+    两份日志都可能不存在：`read_rows` 会返回空 + 原因，这一层不抛。
+    """
+
+    agent = getattr(engine, "quote_agent", None)
+    chat_log = getattr(agent, "chat_log_path", None)
+    if chat_log is not None:
+        return Path(chat_log), Path(chat_log).parent / "reply.jsonl"
+    from .quote_samples import default_paths
+
+    return default_paths()
+
+
+def _evidence_lines(context) -> list:
+    """证据里的上下文：**一条条列出来**，不是压成一段说明。
+
+    `context` 是 `quote_samples` 给的 `({"who":…, "body":…}, …)`；空就是空列表。
+    """
+
+    out = []
+    for item in context or ():
+        who = _exact_text(item.get("who")) or "?"
+        body = _exact_text(item.get("body"))
+        out.append(f"{who}：{body}" if body else f"{who}：（没说话）")
+    return out
 
 
 def _reporter_sink_for(engine: DialogueEngine):

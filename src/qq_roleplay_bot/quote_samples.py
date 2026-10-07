@@ -61,6 +61,28 @@ MAX_REACTIONS_PER_SAMPLE = 6
 #: `reply.jsonl` 里那次回复与这条消息最多差多少秒才算"同一个话题"。
 TOPIC_MATCH_SECONDS = 120.0
 
+# --- "证据读口"（面板审核用）的那几个数 ---------------------------------------
+#
+# 与上面那几个**学习用**的数是两回事，别混着改：
+# 学习那一批是"喂给模型的材料"，截得短、条数少（省 token）；
+# 这一批是"给人审核的证据"，要的是**原文与上下文**（客户 2026-10-06：
+# *"金句，你连原文和上下文都不贴出来怎么审核"*）。所以这里**不截正文**。
+#
+#: 证据里一次最多给几条（默认最近 N 条，见 `DEFAULT_EVIDENCE_LIMIT`）。
+MAX_EVIDENCE_LIMIT = 50
+#: 默认给几条。
+DEFAULT_EVIDENCE_LIMIT = 10
+#: 上下文的**扫描窗口**：她那条前后各看这么多**日志行**，再从中筛入站消息。
+#: 给 0 就是"按行数只取已有的那几条"——注意这里数的是行，不是筛出来的条数
+#: （学新词的那份 `_context` 数的是条数，两处判据不同是故意的）。
+EVIDENCE_CONTEXT_WINDOW = 40
+#: 一条证据的上下文里，最多给几条入站消息。
+EVIDENCE_CONTEXT_MAX = 8
+#: 找一条证据时最多走多少条日志（防"这份日志大得离谱"时整份扫一遍）。
+MAX_EVIDENCE_SCAN = 2000
+#: 一条证据里最多列几个表情回应。
+MAX_EVIDENCE_REACTIONS = 12
+
 _SESSION_CONTEXT = re.compile(r"--- SESSION CONTEXT BEGIN ---(.*?)--- SESSION CONTEXT END ---", re.S)
 _SESSION_FIELD = re.compile(r"^(topic|topic_status|intent|tone|confidence)=(.*)$")
 
@@ -109,6 +131,13 @@ class QuoteSample:
     def emoji_ids(self) -> tuple[str, ...]:
         return tuple(dict.fromkeys(r.emoji_id for r in self.reactions))
 
+    #: `as_data()` 里那两个字段的中文名。**存进去的和读出来的共用一份**，
+    #: 免得"当时的话题"在写侧叫一个名、在证据里又叫另一个（那就等于对不上）。
+    TOPIC_KEY = "当时的话题"
+    INTENT_KEY = "对方想干什么"
+    CONTEXT_BEFORE_KEY = "她开口之前群里在说"
+    CONTEXT_AFTER_KEY = "她说完之后群里接的"
+
     def as_data(self) -> dict[str, object]:
         """给学习 agent 看的那一份（DATA，不是指令）。"""
 
@@ -119,13 +148,13 @@ class QuoteSample:
             "被点了": [r.as_data() for r in self.reactions],
         }
         if self.topic:
-            data["当时的话题"] = self.topic
+            data[self.TOPIC_KEY] = self.topic
         if self.intent:
-            data["对方想干什么"] = self.intent
+            data[self.INTENT_KEY] = self.intent
         if self.context_before:
-            data["她开口之前群里在说"] = _lines(self.context_before)
+            data[self.CONTEXT_BEFORE_KEY] = _lines(self.context_before)
         if self.context_after:
-            data["她说完之后群里接的"] = _lines(self.context_after)
+            data[self.CONTEXT_AFTER_KEY] = _lines(self.context_after)
         return data
 
 
@@ -160,6 +189,16 @@ class SampleSelection:
 def _clip(text: object, limit: int = MAX_BODY_CHARS) -> str:
     body = " ".join(str(text or "").split())
     return body if len(body) <= limit else body[: limit - 1] + "…"
+
+
+def _line_body(row: dict) -> str:
+    """证据读口里的一条正文：**只做空白归一，不截断**。
+
+    为什么不截：这一份是给**人**审核的（原文 + 上下文），截了就没法对照；
+    给模型的那一份（`_clip`）才需要省 token。两者是两回事。
+    """
+
+    return " ".join(str(row.get("body") or "").split())
 
 
 def _lines(messages: tuple[dict[str, str], ...]) -> list[str]:
@@ -317,6 +356,42 @@ def _context(rows: list[dict], index: int, *, before: int, after: int) -> tuple[
     return tuple(earlier), tuple(later)
 
 
+def context_for(rows: list[dict], message_id: object, *, before: int, after: int) -> tuple[
+        tuple[dict[str, str], ...], tuple[dict[str, str], ...]]:
+    """按 `message_id` 找她那条消息，再取它前后的入站消息（**复数条**）。
+
+    这是"补上下文"用的：样本里本来只存了 `body`（学习那一批要的是短材料），
+    所以证据读口要按 id 回日志里把**当时的上下文**补出来。找不到那条就是两串空。
+
+    **数的是"筛出来的入站消息条数"**，与学新词那份 `_context` 逐字同一套判据
+    （`_is_incoming` / `_display_name`；两处都各给 `before` / `after` 条）。
+    唯一的差别是**不截正文**——给模型看的那份截 240 字，给人审核的是**原文**。
+    """
+
+    target = _clean_id(message_id)
+    if not target:
+        return (), ()
+    for index, row in enumerate(rows[:MAX_EVIDENCE_SCAN]):
+        if not _is_her_message(row) or _clean_id(row.get("message_id")) != target:
+            continue
+        window = EVIDENCE_CONTEXT_WINDOW
+        earlier: list[dict[str, str]] = []
+        for item in reversed(rows[max(0, index - window):index]):
+            if len(earlier) >= before:
+                break
+            if _is_incoming(item):
+                earlier.append({"who": _display_name(item), "body": _line_body(item)})
+        earlier.reverse()
+        later: list[dict[str, str]] = []
+        for item in rows[index + 1:index + 1 + window]:
+            if len(later) >= after:
+                break
+            if _is_incoming(item):
+                later.append({"who": _display_name(item), "body": _line_body(item)})
+        return tuple(earlier), tuple(later)
+    return (), ()
+
+
 def build_samples(rows: list[dict], *, topic_index=None, group_ids=(),
                   context_before: int = DEFAULT_CONTEXT_BEFORE,
                   context_after: int = DEFAULT_CONTEXT_AFTER) -> SampleSelection:
@@ -435,3 +510,148 @@ def counts_by_emoji(selection: SampleSelection) -> dict[str, dict[str, int]]:
         for reaction in sample.reactions:
             group[reaction.emoji_id] = group.get(reaction.emoji_id, 0) + 1
     return table
+
+
+# --- 证据读口：把"当时到底发生了什么"整条取出来 --------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceEntry:
+    """**一条证据**：她的原文 + 消息 id / 时间 / 群 + 当时的上下文 + 谁贴了什么。
+
+    与 `QuoteSample` 的差别（别把两者当成一份东西）：
+
+    |  | `QuoteSample`（学习用） | `EvidenceEntry`（审核用） |
+    | --- | --- | --- |
+    | 正文 | `_clip` 截 240 字 | **原文，不截** |
+    | 上下文 | 只在她**被选中**那一次采 | 按 id 回日志补（找不到就空） |
+    | 存不存 | 只活在内存里 | 也只活在内存里（`as_data` 给人看） |
+
+    `sample` 是它对应的那条学习样本——**有值就代表学习 agent 真的读过它**
+    （`结论` 那些字段也才有来源）。为 `None` 时说明她这条被点过表情、
+    但这一轮没进样本（见 `_collect_evidence` 的说明）。
+    """
+
+    message_id: str
+    group_id: str
+    body: str
+    at: float
+    reactions: tuple[QuoteReaction, ...] = ()
+    context_before: tuple[dict[str, str], ...] = ()
+    context_after: tuple[dict[str, str], ...] = ()
+    sample: QuoteSample | None = None
+
+    def as_data(self) -> dict[str, object]:
+        """给人（面板 / 操作者）看的那一份。**全是只读证据，没有一处是判断。**"""
+
+        data: dict[str, object] = {
+            "message_id": self.message_id,
+            "group_id": self.group_id,
+            "at": self.at,
+            "她说的": self.body,
+            "被点了": [r.as_data() for r in self.reactions],
+            "她开口之前群里在说": _lines(self.context_before),
+            "她说完之后群里接的": _lines(self.context_after),
+        }
+        if self.sample is not None:
+            data["当时的话题"] = self.sample.topic
+            data["对方想干什么"] = self.sample.intent
+            data["样本里的她说的"] = self.sample.body
+        return data
+
+
+def evidence_pages(entries: tuple[EvidenceEntry, ...], *, offset: int = 0,
+                   limit: int = DEFAULT_EVIDENCE_LIMIT) -> tuple[tuple[EvidenceEntry, ...], int]:
+    """分页：**默认最近 N 条**（新→旧），`offset` 往后翻。返回 `(这一页, 总数)`。"""
+
+    total = len(entries)
+    start = max(0, int(offset or 0))
+    size = max(0, min(MAX_EVIDENCE_LIMIT, int(limit if limit is not None
+                                            else DEFAULT_EVIDENCE_LIMIT)))
+    if not size or start >= total:
+        return (), total
+    return tuple(entries[start:start + size]), total
+
+
+def _entries_for(rows: list[dict], selection: SampleSelection, group: str, *,
+                 wanted: set[str]) -> list[EvidenceEntry]:
+    """把样本（新→旧）翻成一条条证据；`wanted` 里那几条**没有样本也要给**。"""
+
+    samples = list(reversed(selection.samples))
+    if wanted:
+        have = {sample.message_id for sample in selection.samples}
+        # 被点过、但这一轮没进样本的（例如日志窗口滚动过）：也要能审，
+        # 只是没有"学习 agent 据此得出的结论"那一块（`sample=None`）。
+        samples.extend(
+            QuoteSample(message_id=mid, group_id=group, body="", at=0.0, reactions=(),
+                        context_before=(), context_after=())
+            for mid in sorted(wanted - have)
+        )
+    out: list[EvidenceEntry] = []
+    for sample in samples:
+        earlier, later = context_for(rows, sample.message_id, before=EVIDENCE_CONTEXT_MAX,
+                                     after=EVIDENCE_CONTEXT_MAX)
+        out.append(EvidenceEntry(
+            message_id=sample.message_id,
+            group_id=sample.group_id or group,
+            body=sample.body,
+            at=sample.at,
+            reactions=sample.reactions[:MAX_EVIDENCE_REACTIONS],
+            context_before=(sample.context_before or earlier)[:EVIDENCE_CONTEXT_MAX],
+            context_after=(sample.context_after or later)[:EVIDENCE_CONTEXT_MAX],
+            sample=sample if sample.body else None,
+        ))
+    return out
+
+
+def collect_evidence(chat_log_path: Path | str, /, *, reply_log_path: Path | str | None = None,
+                     group_id: str, limit: int = DEFAULT_EVIDENCE_LIMIT,
+                     offset: int = 0) -> tuple[tuple[EvidenceEntry, ...], int, str]:
+    """证据读口的入口：**只读**一份日志，返回 `(这一页, 总数, 出错原因)`。
+
+    * **配对只认 `message_id`**（与 `build_samples` 同一套判据，不按时间邻近猜）；
+    * 只给**她说过、而且被贴了表情**的那些（`direction="out"` 且表情 `message_id` 对上）；
+    * 上下文按 id 回日志补（她开口之前 / 说完之后各若干条，**复数条**）；
+    * **任何读不开都返回空 + 原因**，不抛。
+
+    上下文以**样本自带的**为准（那是学习 agent 判定时真正读过的那几条），
+    样本没带才回日志补——两处口径不同就等于"审核看的"与"它学的"不是一回事。
+    """
+
+    rows, error = read_rows(chat_log_path)
+    if not rows:
+        return (), 0, error or "empty"
+    targets: dict[str, list[dict]] = {}
+    for row in rows:
+        if _is_reaction(row):
+            target = _clean_id(row.get("message_id"))
+            if target:
+                targets.setdefault(target, []).append(row)
+    group = str(group_id or "")
+    wanted = {
+        _clean_id(row.get("message_id"))
+        for row in rows
+        if _is_her_message(row) and _clean_id(row.get("message_id")) in targets
+        and (not group or str(row.get("group_id") or "") == group)
+    }
+    wanted.discard("")
+    if not wanted:
+        return (), 0, error
+    index, _ = read_topic_index(reply_log_path)
+    selection = build_samples(rows, topic_index=index)
+    entries = _entries_for(rows, selection, group, wanted=wanted)
+    page, total = evidence_pages(tuple(entries), offset=offset, limit=limit)
+    return page, total, error
+
+
+def default_paths() -> tuple[Path, Path]:
+    """证据读口默认读哪两份日志：`(chat.jsonl, reply.jsonl)`。
+
+    与 `quote_learning._default_chat_log_path` 是同一套口径（`chat_log_directory()`），
+    只是这里**两份一起给**（话题要从 `reply.jsonl` 里对）。
+    """
+
+    from .chat_log import CHAT_LOG_FILE, chat_log_directory
+
+    chat_log = Path(chat_log_directory()) / CHAT_LOG_FILE
+    return chat_log, chat_log.parent / "reply.jsonl"
