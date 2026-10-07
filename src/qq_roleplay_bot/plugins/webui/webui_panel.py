@@ -54,7 +54,10 @@ PANEL_TICK_SECONDS = 30.0
 #: 「她学来的东西」那七个口，逐字对齐 `plugins.LearnedSeams` 的字段名
 #: （核心那一侧由 `tests/test_learned_seams.py` 逐个钉住）。面板**要哪一个口就取哪一个**：
 #: 缺一个只坏对应的那一件事，不会把整页读成空白。
-LEARNED_CALLS = ("quote_view", "quote_correct", "quote_note_enabled",
+#: ⚠️ **名字与顺序都照核心那份契约**（`plugins.LearnedSeams` 的字段）。
+#: 2026-10-07 核心加了第八个 `quote_evidence`（金句审核页要的"原文 + 上下文"），
+#: 这里跟着补上——`tests/test_webui_panel.py` 那条对着 dataclass 比，多一个少一个都红。
+LEARNED_CALLS = ("quote_view", "quote_evidence", "quote_correct", "quote_note_enabled",
                  "slang_list", "slang_update", "slang_delete", "slang_mark_wrong")
 
 #: 「恢复自动」送的那个取值。**取值表在核心**（`stage3_main.QUOTE_OVERRIDE_AUTO`：

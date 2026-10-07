@@ -285,8 +285,13 @@ class LearnedSeamTests(unittest.TestCase):
     def _data(response) -> dict:
         return json.loads(response.body.decode("utf-8"))["data"]
 
-    def test_the_seven_names_are_the_core_contract(self) -> None:
-        """面板认的七个名字**就是** `LearnedSeams` 的字段（多一个少一个都红）。"""
+    def test_the_call_names_are_the_core_contract(self) -> None:
+        """面板认的那几个名字**就是** `LearnedSeams` 的字段，**连顺序也一样**
+        （多一个、少一个、换个次序都红）。
+
+        名字里那个数（原来是"seven"）**故意不写进测试名**：核心 2026-10-07 加了第八个
+        `quote_evidence`，测试名里带数就成了第二个真相源——一加字段连名字都得改。
+        """
 
         from dataclasses import fields
 
