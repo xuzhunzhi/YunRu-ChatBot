@@ -397,13 +397,14 @@ def test_the_rule_is_not_in_the_system_prompt_even_with_a_replaced_persona() -> 
         assert persona.strip() == fake, "假人格没被读进来，这条测试就没意义了"
 
         # 1) 装配那一层只拼**代码层的常量**（2026-10-05 起是 `STAY_IN_CHARACTER_RULE`，
-        #    2026-10-08 起再加 `DATA_BOUNDARY_RULE`——不可信数据的边界规则）：
+        #    2026-10-08 起再加 `DATA_BOUNDARY_RULE`——不可信数据的边界规则——以及
+        #    `TIME_IS_GIVEN_RULE`——"眼下是几号几点以告诉你的为准"）：
         #    「不懂就问」那段一个字都不许从这里进来。
-        from qq_roleplay_bot.stage3_runtime import DATA_BOUNDARY_RULE
+        from qq_roleplay_bot.stage3_runtime import DATA_BOUNDARY_RULE, TIME_IS_GIVEN_RULE
 
-        assert compose_system_prompt(persona).endswith(DATA_BOUNDARY_RULE)
+        assert compose_system_prompt(persona).endswith(TIME_IS_GIVEN_RULE)
         assert compose_system_prompt(persona) == (
-            persona + STAY_IN_CHARACTER_RULE + DATA_BOUNDARY_RULE)
+            persona + STAY_IN_CHARACTER_RULE + DATA_BOUNDARY_RULE + TIME_IS_GIVEN_RULE)
         assert UNSURE_ASK_RULE not in compose_system_prompt(persona)
         assert NO_ASSERT_NOTE not in compose_system_prompt(persona)
         # 2) **生产的组装路径**：面板/人格给回来的 system 文本是"裸人格"，
@@ -417,15 +418,16 @@ def test_the_rule_is_not_in_the_system_prompt_even_with_a_replaced_persona() -> 
             )
         assert UNSURE_ASK_RULE not in request[0]["content"]
         assert request[0]["content"] == (
-            persona + STAY_IN_CHARACTER_RULE + DATA_BOUNDARY_RULE), "人格本身不能被改动"
+            persona + STAY_IN_CHARACTER_RULE + DATA_BOUNDARY_RULE
+            + TIME_IS_GIVEN_RULE), "人格本身不能被改动"
         # 3) 旧版那两份现场提示还在文件里（当历史与文字来源），但引擎不再拼它们
         assert "别急着答" in ASK_TURN_NOTE
 
 
 def test_a_panel_prompt_is_not_edited_by_the_assembly_step() -> None:
-    """面板保存的覆盖版同样**只多出那两条常驻规矩**：装配那一步不改操作者写的字。"""
+    """面板保存的覆盖版同样**只多出那三条常驻规矩**：装配那一步不改操作者写的字。"""
 
-    from qq_roleplay_bot.stage3_runtime import DATA_BOUNDARY_RULE
+    from qq_roleplay_bot.stage3_runtime import DATA_BOUNDARY_RULE, TIME_IS_GIVEN_RULE
 
     current = msg(1, "随便聊点什么")
     panel = "面板改过的一份 prompt，里面没有不懂就问这条。"
@@ -435,15 +437,18 @@ def test_a_panel_prompt_is_not_edited_by_the_assembly_step() -> None:
             [current], current=current, mode=ConversationMode.IDLE,
             trigger="threshold", context=ContextState(topic="闲聊"),
         )
-    assert request[0]["content"] == panel + STAY_IN_CHARACTER_RULE + DATA_BOUNDARY_RULE
+    assert request[0]["content"] == (
+        panel + STAY_IN_CHARACTER_RULE + DATA_BOUNDARY_RULE + TIME_IS_GIVEN_RULE)
     assert UNSURE_ASK_RULE not in request[0]["content"]
     # 装配层不替操作者改已存的文本：面板那份里若已经带了旧版留下的那段规矩，
     # 它既不会被删掉、也不会被再拼一遍（幂等）——那种遗留要不要清，由面板上
-    # "恢复默认/重存"决定。常驻规矩那两小段同理，已有的不重复拼。
+    # "恢复默认/重存"决定。常驻规矩那几小段同理，已有的不重复拼。
     assert compose_system_prompt(panel + UNSURE_ASK_RULE) == (
-        panel + UNSURE_ASK_RULE + STAY_IN_CHARACTER_RULE + DATA_BOUNDARY_RULE)
-    assert compose_system_prompt(panel + STAY_IN_CHARACTER_RULE + DATA_BOUNDARY_RULE) == (
-        panel + STAY_IN_CHARACTER_RULE + DATA_BOUNDARY_RULE)
+        panel + UNSURE_ASK_RULE + STAY_IN_CHARACTER_RULE + DATA_BOUNDARY_RULE
+        + TIME_IS_GIVEN_RULE)
+    assert compose_system_prompt(
+        panel + STAY_IN_CHARACTER_RULE + DATA_BOUNDARY_RULE + TIME_IS_GIVEN_RULE) == (
+        panel + STAY_IN_CHARACTER_RULE + DATA_BOUNDARY_RULE + TIME_IS_GIVEN_RULE)
 
 
 # --- 引擎路径（判定 → 路由 → 打回重写）---------------------------------------
@@ -608,16 +613,17 @@ def test_the_pushed_back_version_keeps_the_system_prompt_untouched() -> None:
     first, second = reply.requests
     assert first[0]["role"] == "system" and second[0]["role"] == "system"
     assert first[0]["content"] == second[0]["content"], "system 段必须逐字相同"
-    # 常驻 system 那一份**逐字**是"这一台机器上的人格 + 那两条既有的常驻规矩
-    # （禁令 + 不可信数据的边界规则）"：拿组装函数自己算一份来比——多一个字、
-    # 少一个字都会红。
+    # 常驻 system 那一份**逐字**是"这一台机器上的人格 + 那三条既有的常驻规矩
+    # （禁令 + 不可信数据的边界规则 + 时间以告诉你的为准）"：拿组装函数自己算一份来比
+    # ——多一个字、少一个字都会红。
     # （不用 `BASE_PROMPT` 常量比：生产上人格是整段替换的，这里跟着本机解析走。）
-    from qq_roleplay_bot.stage3_runtime import DATA_BOUNDARY_RULE
+    from qq_roleplay_bot.stage3_runtime import DATA_BOUNDARY_RULE, TIME_IS_GIVEN_RULE
 
     expected_system = compose_system_prompt(resolve_system_prompt(must_reply=True))
     assert first[0]["content"] == expected_system, "常驻 system 不是原来那一份了"
-    assert expected_system.endswith(DATA_BOUNDARY_RULE), "尾部那条边界规则既有的"
+    assert expected_system.endswith(TIME_IS_GIVEN_RULE), "尾部那条时间规矩既有的"
     assert STAY_IN_CHARACTER_RULE in expected_system, "禁令还在（只是后面又接了一条）"
+    assert DATA_BOUNDARY_RULE in expected_system, "不可信数据那条边界规则还在"
     for text in (UNSURE_ASK_RULE, ASK_TURN_NOTE, HOLD_TURN_NOTE, NO_ASSERT_NOTE):
         assert text not in first[0]["content"]
         assert text not in second[0]["content"]

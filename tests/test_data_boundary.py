@@ -240,7 +240,12 @@ def test_the_state_lines_are_marked_line_by_line() -> None:
 
     volatile = _volatile(_request())
     prefix = f"{MARKER_OPEN}{MARK}{MARKER_CLOSE} "
-    assert f"{prefix}（现在是你那边的" in volatile
+    # 时间那行 2026-10-08 改口径：**两个时刻各印一个**（她那边 / 群里这边），
+    # 原来的前缀"（现在是你那边的 "已经不存在了；这里跟着改成新的开头，
+    # 并且顺手钉住"两句都在"——只印一句时这一行就会红。
+    # （偏移是多少、跨天跨周对不对，由 `tests/test_two_clocks.py` 那几条钉。）
+    assert f"{prefix}（你那边现在是 " in volatile
+    assert "；群里这边是 " in volatile
     assert f"{prefix}这句话是怎么来的：" in volatile
 
 

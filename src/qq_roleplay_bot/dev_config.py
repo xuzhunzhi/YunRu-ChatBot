@@ -284,6 +284,19 @@ def _float(name: str, default: float) -> float:
         return default
 
 
+# --- 她那边的时间偏移 -------------------------------------------------------
+# 用户口径（2026-10-08）：*"她那边 = 北京 + 3 小时"*。服务器本地就是北京，所以这只是
+# "她那边"相对这边的固定小时差；渲染成人话的地方是 `stage3_runtime._now_text`（两个
+# 时刻各印一个，"她那边"用 `datetime` + `timedelta` 算，跨天跨周不手算）。
+#
+# 写成**函数**而不是 import 期常量：与 `reply_api_base_url` 同一条纪律——**调用时现读
+# 环境**，改配置不必重启，测试也能直接改。读值走 `_float`，写错了当没配（回落默认）。
+def persona_offset_hours() -> float:
+    """她那边比这台机器快多少小时（`QQBOT_PERSONA_OFFSET_HOURS`，默认 3）。"""
+
+    return _float("QQBOT_PERSONA_OFFSET_HOURS", 3.0)
+
+
 # --- OneBot 连接方式 -------------------------------------------------------
 # Stage 3（run_stage3.bat）使用反向 WS 服务端模式：Bot 监听，SnowLuma 作为
 # wsClient 连进来。Stage 4 使用 WS 客户端模式：Bot 主动连 SnowLuma 的 wsServer，

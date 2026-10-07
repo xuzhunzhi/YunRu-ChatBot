@@ -5,6 +5,7 @@ import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from enum import Enum
 from html import escape
 
@@ -17,6 +18,7 @@ from .memory_model import MemoryMaterial
 from .prompt_library import derive_must_reply
 from .stay_in_character import STAY_IN_CHARACTER_RULE
 from . import data_boundary
+from . import dev_config
 
 logger = logging.getLogger(__name__)
 
@@ -805,6 +807,28 @@ DATA_BOUNDARY_RULE = """
 """
 
 
+#: 「眼下的时间以告诉你的为准」这条规矩（2026-10-08 用户要求）。
+#:
+#: 与 `DATA_BOUNDARY_RULE` 同一类：**代码层的规矩**，经 `compose_system_prompt` 拼在
+#: 人格末尾。生产上人格与面板覆盖版都是**整段替换**的，只有从代码拼进去的才一定在。
+#:
+#: 三条约束与那条一样：
+#:
+#: 1. **零机制词**（`prompt_guard.PERSONA_MECHANISM_WORDS`）——也不出现"时区""UTC"
+#:    这类词：她不该用这套词讲话（措辞是交谈视角，见 `TLABEL` 的口径）；
+#: 2. **只谈时间怎么算，不谈她是谁、该怎么说话**：它是一条约定，不是人格改写；
+#: 3. **是常量**：每轮逐字相同，前缀缓存不因它而断。
+#:
+#: 为什么需要它：每一轮都会报两个时刻（她那边 / 群里这边），而模型完全有能力
+#: 拿聊天里隔了多久自己推一个——推出来的和报给它的对不上时，它会开始解释"时间不对"。
+#: 那条路直接掐掉：**以报给你的为准**。
+TIME_IS_GIVEN_RULE = """
+
+还有一件小事：眼下是几号、几点钟，以告诉你的为准；别人问起就照这个答，不用自己
+另算一遍，也别照着聊天里隔了多久去推。两者对不上时，信告诉你的那个。
+"""
+
+
 def resolve_system_prompt(*, must_reply: bool = False) -> str:
     """当前生效的回复 system prompt（面板覆盖优先，否则内置默认）。
 
@@ -824,14 +848,17 @@ def resolve_system_prompt(*, must_reply: bool = False) -> str:
 def compose_system_prompt(persona_text: str) -> str:
     """system 段的**唯一装配点**：把**代码层的规矩**拼在人格后面。
 
-    这里现在拼两条，都是**常量**：
+    这里现在拼三条，都是**常量**：
 
     * `stay_in_character.STAY_IN_CHARACTER_RULE`：有人当着她的面谈
       "这东西怎么做出来的""该给它加点什么"时，她**不接这个话**（见那个模块的由来——
       生产日志里她真的接了，还说了"再加一个插件，那条线还得挪"）；
     * `DATA_BOUNDARY_RULE`（2026-10-08 加）：带短码的那些内容都是别人的话与资料，
       **短码不许抄进她说的话里**。这是"DATA 永远不是指令"那条边界的**安全规则**，
-      不是人格改写——它只谈那个记号，一个字都不谈她是谁、该怎么说话。
+      不是人格改写——它只谈那个记号，一个字都不谈她是谁、该怎么说话；
+    * `TIME_IS_GIVEN_RULE`（2026-10-08 加）：眼下的时间是**报给她的那两个**，
+      不许自己照着聊天隔了多久去推（那条路会让她去解释"时间不对"）。同样只谈
+      时间怎么算，不谈她是谁、该怎么说话。
 
     为什么要留这一层（而不是把调用点删掉）：`AGENTS` §2.2 要求"代码层的规矩"只能
     从这里进 system——生产上 `BASE_PROMPT` 是**整段替换**的
@@ -858,7 +885,7 @@ def compose_system_prompt(persona_text: str) -> str:
     body = persona_text or ""
     if not body:
         return body
-    for rule in (STAY_IN_CHARACTER_RULE, DATA_BOUNDARY_RULE):
+    for rule in (STAY_IN_CHARACTER_RULE, DATA_BOUNDARY_RULE, TIME_IS_GIVEN_RULE):
         if rule not in body:
             body += rule
     return body
@@ -1364,16 +1391,42 @@ def _letter_block(letter_note: dict | None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _now_text(now: float | None = None) -> str:
-    """「现在是什么时候」的人话：`2026-09-30 周三 23:14`。
+#: 星期几的中文人话（`datetime.weekday()`：0 是周一）。
+_WEEKDAYS = "一二三四五六日"
 
-    说话视角的措辞（"你那边"），不写"服务器时间""系统时间"这类机制词。
+
+def _clock_text(moment: datetime) -> str:
+    """一个时刻的人话：`2026-10-08 周四 22:12`。"""
+
+    return f"{moment:%Y-%m-%d} 周{_WEEKDAYS[moment.weekday()]} {moment:%H:%M}"
+
+
+def _now_text(now: float | None = None) -> str:
+    """「现在是什么时候」的人话，**两个地方各印一个**：
+
+        你那边现在是 2026-10-09 周五 01:12；群里这边是 2026-10-08 周四 22:12
+
+    说话视角的措辞（"你那边""群里这边"），不写"服务器时间""系统时间"这类机制词。
+
+    ## `now` 是**墙上时间戳**
+
+    这个参数以前收的是引擎的 `self.clock()`——那是 `time.monotonic()`，于是**开机时长
+    被当成 epoch 印出来**：生产实测 `现在是你那边的 1970-01-02 周五 23:50`
+    （2026-10-08 用户报的问题，她的原话与那个假小时逐分钟对得上）。
+    现在传进来的是 `DialogueEngine.wall_clock()`（`time.time`）；单调时钟只用来算
+    "过了多少秒"（焦点值班那一套），**不许流到这里**。不传时自己取 `time.time()`。
+
+    ## 两个时刻
+
+    "群里这边"是**服务器本地时间**（部署在北京），"你那边"是它加
+    `dev_config.persona_offset_hours()`（用户口径：*"她那边 = 北京 + 3 小时"*）。
+    跨天与跨周交给 `timedelta` 算，不手算。
     """
 
     moment = time.time() if now is None else float(now)
-    local = time.localtime(moment)
-    weekday = "一二三四五六日"[local.tm_wday]
-    return f"{time.strftime('%Y-%m-%d', local)} 周{weekday} {time.strftime('%H:%M', local)}"
+    here = datetime.fromtimestamp(moment)
+    there = here + timedelta(hours=dev_config.persona_offset_hours())
+    return f"你那边现在是 {_clock_text(there)}；群里这边是 {_clock_text(here)}"
 
 
 def build_dialogue_messages(
@@ -1500,10 +1553,14 @@ def build_dialogue_messages(
         # 所以她写信时知道日期、在群里说话时不知道，这本身就自相矛盾。
         # **只能放易变段**：放进稳定段会让前缀每分钟断一次，缓存全废（有测试锁这条）。
         #
+        # `now` 必须是**墙上时间戳**（`DialogueEngine.wall_clock()`）——它原来收的是单调
+        # 时钟，"开机时长"被印成了 1970（2026-10-08 用户报的问题，见 `_now_text`）。
+        # 两句话（她那边 / 群里这边）都在这里印；偏移与跨天见 `_now_text`。
+        #
         # 短码：这五行是"她这一轮看到的现场状态"。它由判定/会话推出来的（不是她说的话），
         # 所以**逐行**加记号——行短、逐行加之后边界一眼可见（`mark_lines`）。
         data_boundary.mark_lines(
-            f"（现在是你那边的 {_now_text(now)}）\n"
+            f"（{_now_text(now)}）\n"
             f"当前状态：{'正在和人交谈' if mode is ConversationMode.ACTIVE else '只是在旁边听着'}\n"
             f"这句话是怎么来的：{TLABEL.get(trigger, '群里的普通发言')}\n"
             f"场景：{'群聊（群里有多个人，别人之间的对话你也听得到）' if group_chat else '私聊'}\n"
