@@ -9,7 +9,7 @@
 ## 它的动作清单（来源：本机打包产物 / WebUI 文档 / 官方文档 —— 标清来源）
 
 本机产物（实测）：
-- `C:\ProgramData\NapCatQQ Desktop\components\SnowLuma\config-ClrCrmAk.js` 是权威来源：`index.mjs` 首行 `import { ... m as ACTION_REGISTRY ... }` 即指向它。内含 `ACTION_GROUPS`（12 分类）+ `defineAction` 134 条 + `groupAction` 55 条 = **189 个可执行动作**。
+- `C:\ProgramData\NapCatQQ Desktop\components\SnowLuma\config-ClrCrmAk.js` 是权威来源：`index.mjs` 首行 `import { ... m as ACTION_REGISTRY ... }` 即指向它。内含 `ACTION_GROUPS`（12 分类）+ `defineAction` 134 条 + `groupAction` 55 条 = **189 个可执行动作**。（2026-10-08 晚更正：把分包**逐条抽出来**是 **198** 个——189 只数了 `defineAction` + `groupAction` 两种声明写法，漏掉 5 个用 `defineStreamAction` 写的，另外那 134 里含 3 条包装函数定义。复跑脚本与总表在 `docs/reference/snowluma/`，四个数的口径表在它的 `README.md` 里。）
 - 该目录**没有** `docs\`、没有 openapi.json、没有 README；只有 `EULA.md` / `PRIVACY.md` / `package.json`。`index.mjs` 里 `send_private_msg` 只出现 1 次（动作调用处）。
 - 12 个分类：信息 / 消息 / 好友 / 群信息 / 群管理 / 群文件 / 请求 / 扩展 / 群相册 / 空间 / 系统表情 / 流式接口。另有 2 个隐藏别名 `.handle_quick_operation`、`.handle_quick_operation_async`。
 

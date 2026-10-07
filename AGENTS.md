@@ -15,7 +15,7 @@
 | 对话（说不说、说什么） | 功能扩展（怎么说出去、能做什么） |
 | 记忆（长期记忆的准确性与边界） | 发表情、发图、发语音、Ark 卡片 |
 | 防护（提示词注入、越权、敏感请求） | 戳一戳、表情回应、群管理、QZone |
-| 判断回复时机、群聊注意力、人格分寸 | 调用 SnowLuma 的 189 个 action（2026-10-08 本机实测：`defineAction` 134 + `groupAction` 55 = 189，来源 `docs/research/snowluma-api-2026-10-08.md`；本行原写 194——那是随包那份 action 目录（`src/qq_roleplay_bot/data/snowluma_actions.json`）的条数，不是对面可执行动作的个数） |
+| 判断回复时机、群聊注意力、人格分寸 | 调用 SnowLuma 的 198 个 action（2026-10-08 本机实测：分包里**逐条抽出来的可执行动作**，脚本 `docs/reference/snowluma/extract-actions.py` 可复跑、总表 `docs/reference/snowluma/local-actions.md`）。同一天还有三个数，**口径不同、都对**：189 = 只数 `defineAction` + `groupAction` 两种声明写法的旧口径（漏了 5 个用 `defineStreamAction` 写的），193 = 上游文档站当前目录，194 = 仓库内那份更早的快照（`src/qq_roleplay_bot/data/snowluma_actions.json`，`capabilities.py` 登记与闸门读的就是它） |
 
 **判断标准**：如果一个改动需要动 prompt、记忆或注意力判定，它属于 Stage 3，
 **不管它表面上是为了哪个功能**。
