@@ -345,6 +345,20 @@ def session_cache_max_sessions() -> int:
     return _int_clamped("QQBOT_SESSION_CACHE_MAX_SESSIONS", 200, 10, 2000)
 
 
+# --- 一轮对话的总预算（2026-10-08 失败降级审计 2）----------------------------
+# 主循环是**串行**的，而单次 `complete()` 最坏 ≈ 181 秒（60 秒 × 3 次 + 退避），
+# 一轮里最多三次（压缩 + 判定 + 回复）——模型"拖着不回"时整个 bot（含 ping、
+# `/admin`、私聊）最坏停摆约 9 分钟，而 focus / outbox 还在跑，日志看起来像活着。
+# 默认 90 秒是实测（判定约 2 秒、回复约 10 秒）的 9 倍余量；**调用时现读**。
+
+
+def turn_timeout_seconds() -> float:
+    """一条消息从进来到出结果的**总预算**（`QQBOT_TURN_TIMEOUT_SECONDS`，
+    默认 90，夹在 5..600）。超时就当这一条没有回复（历史照留）。"""
+
+    return _float_clamped("QQBOT_TURN_TIMEOUT_SECONDS", 90.0, 5.0, 600.0)
+
+
 # --- "群里这边"的时间 -------------------------------------------------------
 # 用户口径（2026-10-08）：*"她那边 = 北京 + 3 小时"*。而"这边"从前是**宿主时区**
 # （`datetime.fromtimestamp` / `time.localtime`），代码把"本机=北京"写死在注释里。

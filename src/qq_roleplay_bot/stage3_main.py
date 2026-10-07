@@ -1287,6 +1287,11 @@ class DialogueEngine:
             # **照样沉默**（那是刻意的，测试钉着），但"她突然不说话"必须看得见——
             # 只有计数与"连续几次"，没有正文。
             "judge_failed", "reply_failed",
+            # 一轮对话超过**总预算**（`QQBOT_TURN_TIMEOUT_SECONDS`，2026-10-08 失败降级
+            # 审计 2）：主循环串行，没有上界时模型"拖着不回"会把整个接收循环卡住
+            # （连 ping / 管理命令 / 私聊都进不来）。超时 = 这一条没有回复，
+            # **历史照留**（她该知道群里发生过那句话）。
+            "turn_timeouts",
         )}
         # 连续失败次数（成功一次就归零）：单次失败可能只是网络抖一下，连续几次才是
         # "她又突然不说话了"。只用来决定 `/super status` 那一行要不要升级成"异常"。
@@ -1779,6 +1784,20 @@ class DialogueEngine:
                 len(seeded),
             )
         return len(seeded)
+
+    def note_turn_timeout(self) -> int:
+        """一轮对话超过了总预算（`runtime.handle_turn_within_budget` 报进来）。
+
+        由来（2026-10-08 失败降级审计 2）：主循环串行，而单次模型调用最坏 ≈ 181 秒、
+        一轮最多三次——没有上界时"模型拖着不回"会让整个 bot 停摆约 9 分钟。
+        超时的处理与"模型抛异常"**同一个结果**：这一条没有回复（`handle` 返回 None）。
+
+        **不删那条消息的历史**：它早就记进去了（`handle` 里 `state.add` 在模型调用
+        之前），她该知道群里发生过那句话。只有计数与（runtime 那边的）一行 ERROR。
+        """
+
+        self._stats["turn_timeouts"] += 1
+        return self._stats["turn_timeouts"]
 
     def snapshot(self) -> EngineSnapshot:
         """只读运行快照。内存数字每次读取时现取（取不到就是 0）。"""
@@ -3022,6 +3041,14 @@ class DialogueEngine:
             )
         if snapshot.empty_forced_reply:
             lines.append(f"异常：判定说要回但回复空手 {snapshot.empty_forced_reply} 次")
+        # 一轮超过总预算（2026-10-08 失败降级审计 2）：主循环串行，这条就是
+        # "为什么刚才整个 bot 都不理人"的出口——一条消息卡住最长多久有上界了。
+        # 历史照留，所以"她不知道发生过"不成立；这里说明的是"这一条没回复"。
+        if snapshot.turn_timeouts:
+            lines.append(
+                f"异常：一轮对话超过总预算 {snapshot.turn_timeouts} 次"
+                f"（这一条没回复，消息仍在她的历史里）"
+            )
         # 判定/回复的模型调用失败（2026-10-08，失败降级审计 1）：失败时她照样不出声，
         # 所以这一行就是"她突然不说话了"的唯一出口。连续几次才算异常——单次可能只是
         # 抖一下；连续说明模型那边真的挂了。

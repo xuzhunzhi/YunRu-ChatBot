@@ -2400,6 +2400,39 @@ FOCUS_TICK_SECONDS = 5.0
 OUTBOX_TICK_SECONDS = 5.0
 
 
+async def handle_turn_within_budget(engine: DialogueEngine, item: IncomingMessage):
+    """给**一轮对话**包一层总预算，超时返回 None（2026-10-08 失败降级审计 2）。
+
+    为什么需要它：接收循环是**串行**的（`_handle_one` 逐条 await），而单次
+    `complete()` 最坏 ≈ 181 秒（60 秒 × 3 次尝试 + 退避），一轮里最多三次
+    （压缩 + 判定 + 回复）——模型服务端"挂着不回"时整个 bot 最坏停摆约 9 分钟，
+    期间 ping、`/admin`、私聊**一条都进不来**，而 focus / outbox 还在跑，
+    日志看起来像"进程活着"。
+
+    超时的结果与"模型抛异常"**完全相同**：这一条没有回复（返回 None），
+    后续消息照常处理。上游 `_handle_one` 的异常分支本来就是这样收尾的，
+    这里只是把"要等多久"从"模型自己愿意回"变成"有上界"。
+
+    **不动历史**：那条消息在 `engine.handle()` 里早就 `state.add` 过了（记历史发生在
+    任何模型调用之前），超时也不把它删掉——她该知道群里发生过那句话。
+
+    预算**调用时现读**（`QQBOT_TURN_TIMEOUT_SECONDS`，默认 90 秒，夹在 5..600）。
+    """
+
+    budget = dev_config.turn_timeout_seconds()
+    try:
+        return await asyncio.wait_for(engine.handle(item), timeout=budget)
+    except asyncio.TimeoutError:
+        # 超时会取消里面那个任务（`asyncio.wait_for` 的语义）；引擎那边的
+        # `finally` 负责把巡检守卫还回去（见 `FocusController.end_sweep`）。
+        engine.note_turn_timeout()
+        logger.error(
+            "Stage 3 turn timeout: session=%s budget=%ss（这一条没有回复，历史照留）",
+            item.session_id, budget,
+        )
+        return None
+
+
 async def _message_loop(
     transport: QQTransport, engine: DialogueEngine, *, tick_seconds: float = FOCUS_TICK_SECONDS,
     outbox=None,
@@ -2464,7 +2497,7 @@ async def _message_loop(
             except Exception:  # noqa: BLE001 - 观察者绝不影响对话
                 logger.warning("slang_observe_failed", exc_info=True)
         try:
-            reply = await engine.handle(item)
+            reply = await handle_turn_within_budget(engine, item)
             # 一条输入可能对应多条出站消息：首条是 handle() 的返回值，
             # 其余几段在 follow-up 队列里，按同样节奏接着发。
             # 2026-09-30 起续发**按会话**取：读信回信是第二个调用方，

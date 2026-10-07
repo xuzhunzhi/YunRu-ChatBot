@@ -1,0 +1,135 @@
+"""一轮对话有**总预算**：模型"拖着不回"不许把整个 bot 卡住（失败降级审计 2）。
+
+修之前：接收循环是**串行**的（`_handle_one` 逐条 await），而单次 `complete()` 最坏
+≈ 181 秒（60 秒 × 3 次 + 退避），一轮里最多三次（压缩 + 判定 + 回复）——模型服务端
+"挂着不回"时整个 bot 最坏停摆约 9 分钟，期间 ping、`/admin`、私聊**一条都进不来**，
+而 focus / outbox 还在跑，日志看起来像"进程活着"。
+
+现在 `runtime.handle_turn_within_budget` 用 `asyncio.wait_for` 包住
+`engine.handle(item)`：预算 `QQBOT_TURN_TIMEOUT_SECONDS`（默认 90，夹 5..600，
+**调用时现读**）。超时的结果与"模型抛异常"完全相同——这一条没有回复（返回 None）、
+计数 + 一行 ERROR；**那条消息留在历史里**（记历史发生在任何模型调用之前，
+她该知道群里发生过那句话）。
+
+这一份钉住：
+
+1. 故意不返回的客户端 → 到点就收尾（返回 None）、计数 +1、**消息仍在历史里**；
+2. 正常一轮不受影响（照旧拿到回复、计数为 0）；
+3. 预算的默认值 / 现读 / 夹取；
+4. 计数进 snapshot 与 `/super status`。
+
+突变（各自还原）：去掉总预算（直接 `await engine.handle`）→ 第 1 条会挂死/红；
+超时后把消息从历史里删掉 → 第 1 条红。
+"""
+import asyncio
+import os
+import time
+from unittest.mock import patch
+
+from qq_roleplay_bot import dev_config
+from qq_roleplay_bot.runtime import handle_turn_within_budget
+from qq_roleplay_bot.stage3_main import DialogueEngine
+from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
+
+GROUP = "717151356"
+SUPER = "900000001"
+SESSION = f"group:{GROUP}"
+TARGET = MessageTarget(group_id=GROUP)
+BUDGET = 5.0          # `QQBOT_TURN_TIMEOUT_SECONDS` 的下界就是 5
+
+
+class _HangingClient:
+    """故意不返回：模拟"服务端拖着不回"（不是拒绝，是拖）。"""
+
+    async def complete(self, request):
+        await asyncio.sleep(3600)
+
+
+class _ScriptedClient:
+    def __init__(self, output: str) -> None:
+        self.output = output
+
+    async def complete(self, request):
+        return self.output
+
+
+def _message(index: int = 1) -> IncomingMessage:
+    return IncomingMessage(
+        message_id=f"t{index}", session_id=SESSION, user_id="100",
+        text="@YunRu 在吗", target=TARGET, sender_name="某人", is_bot_mentioned=True,
+    )
+
+
+# --- 1. 拖着不回就有上界 -----------------------------------------------------
+
+
+def test_a_hanging_turn_is_cut_by_the_budget_and_keeps_the_history() -> None:
+    engine = DialogueEngine(
+        _HangingClient(), judge_client=_HangingClient(),
+        enabled_group_ids=frozenset({GROUP}))
+    message = _message()
+    with patch.dict(os.environ, {"QQBOT_TURN_TIMEOUT_SECONDS": str(BUDGET)}):
+        started = time.monotonic()
+        reply = asyncio.run(handle_turn_within_budget(engine, message))
+        elapsed = time.monotonic() - started
+
+    assert reply is None, "超时该按「这一条没有回复」收尾"
+    assert elapsed < BUDGET + 3.0, elapsed
+    assert engine.snapshot().turn_timeouts == 1
+    # **不许**把那条消息从历史里删掉：她该知道群里发生过那句话。
+    history = engine.sessions.state(SESSION).history
+    assert [item.message_id for item in history] == [message.message_id], \
+        "超时把消息从历史里删掉了"
+    # 守卫（巡检锁）也要还回去，否则后面所有群都被"延迟"。
+    assert engine.focus.sweeping is False
+
+
+def test_a_normal_turn_is_not_touched() -> None:
+    judge = _ScriptedClient("<route>REPLY</route><topic>话题</topic>")
+    reply_client = _ScriptedClient(
+        "<decision>REPLY</decision><dialogue>KEEP</dialogue><reply>我接一句。</reply>")
+    engine = DialogueEngine(
+        reply_client, judge_client=judge, enabled_group_ids=frozenset({GROUP}))
+    with patch.dict(os.environ, {"QQBOT_TURN_TIMEOUT_SECONDS": str(BUDGET)}):
+        reply = asyncio.run(handle_turn_within_budget(engine, _message()))
+
+    assert reply is not None and reply.text == "我接一句。"
+    assert engine.snapshot().turn_timeouts == 0
+
+
+# --- 2. 预算本身 -------------------------------------------------------------
+
+
+def test_the_budget_is_read_when_called_and_clamped() -> None:
+    with patch.dict(os.environ):
+        os.environ.pop("QQBOT_TURN_TIMEOUT_SECONDS", None)
+        assert dev_config.turn_timeout_seconds() == 90.0
+    with patch.dict(os.environ, {"QQBOT_TURN_TIMEOUT_SECONDS": "30"}):
+        assert dev_config.turn_timeout_seconds() == 30.0
+    for text, expected in (("", 90.0), ("不是数", 90.0), ("1", 5.0), ("99999", 600.0)):
+        with patch.dict(os.environ, {"QQBOT_TURN_TIMEOUT_SECONDS": text}):
+            assert dev_config.turn_timeout_seconds() == expected, text
+
+
+# --- 3. 计数看得见 -----------------------------------------------------------
+
+
+def test_the_timeout_count_shows_up_in_the_status() -> None:
+    async def run() -> str:
+        engine = DialogueEngine(_HangingClient(), super_admin_user_ids=frozenset({SUPER}))
+        engine.note_turn_timeout()
+        engine.note_turn_timeout()
+        assert engine.snapshot().turn_timeouts == 2
+        reply = await engine.handle(IncomingMessage(
+            "m:status", SESSION, SUPER, "/super status", TARGET))
+        return reply.text
+
+    text = asyncio.run(run())
+    assert "超过总预算 2 次" in text, text
+    assert "历史" in text, text
+
+
+if __name__ == "__main__":
+    import unittest
+
+    unittest.main()
