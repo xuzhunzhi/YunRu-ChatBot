@@ -166,8 +166,9 @@
 改完必须全部满足：
 
 ```powershell
-# 1. 离线测试全绿（这条分支 1068 个；`stage4-plugins` 上 1162+ 个）
-#    （1068 是 2026-10-06 的实测数，用 `verify_runs.log` 的 `ran=` 核对，见 §3.2）
+# 1. 离线测试全绿（这条分支 1163 个；`stage4-plugins` 上 1162+ 个）
+#    （1163 是 2026-10-08 的实测数，用 `verify_runs.log` 的 `ran=` 核对，见 §3.2）
+#    （`stage4-plugins` 那个 1162+ 是那条分支上的数，这条分支上核不到，没跟着改）
 #    本机（配好了）：0 跳过。干净 clone（只有 .env.example、模板人格）：4 跳过，其余全过
 #    （那 4 条 = 主 key / 风格审核 / 记忆 key 三条前提不在，加我新加的守卫自检
 #      `test_the_memory_guard_lets_a_configured_machine_run` 在没有记忆 key 时跳过自己）
