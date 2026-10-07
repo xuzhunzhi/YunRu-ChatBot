@@ -410,6 +410,43 @@ def test_an_old_state_file_without_the_memory_key_means_memory_off() -> None:
     run(scenario())
 
 
+def test_the_real_assembly_wires_memory_to_the_memory_list_not_the_chat_list() -> None:
+    """装配点（`runtime._start_memory`）给记忆服务的那条 lambda 读的是**记忆名单**。
+
+    上面那些用例用的是自己拼的 lambda，接不上就等于"新名单只活在测试里"。
+    这里直接把装配点那条 lambda 取出来求值：两个名单给成不同的群，看它认哪一个。
+    """
+
+    from unittest.mock import patch
+
+    import qq_roleplay_bot.runtime as runtime
+
+    engine = DialogueEngine(
+        _NeverCalled(),
+        enabled_group_ids=frozenset({GROUP}),      # 开对话的是 A
+        memory_group_ids=frozenset({OTHER}),       # 开记忆的是 B
+    )
+
+    class _Endpoint:
+        def triple(self):
+            return ("http://offline.invalid", "offline-key", "offline-model")
+
+    captured = {}
+
+    class _StubService:
+        def __init__(inner, client, allowed, **kwargs):
+            captured["allowed"] = allowed
+
+    with patch.object(runtime, "_memory_endpoint", lambda: _Endpoint()), \
+            patch.object(runtime, "OpenAICompatibleClient", lambda *a, **k: object()), \
+            patch.object(runtime, "MemoryService", _StubService):
+        runtime._start_memory(engine, object())
+    assert captured["allowed"]() == {OTHER}, "装配点接错了名单"
+    # 全局停用（engine.enabled=False）时一份都不给：那是"整个 bot 停了"。
+    engine.enabled = False
+    assert captured["allowed"]() == set()
+
+
 def test_super_memory_says_whether_this_group_is_recorded() -> None:
     """`/super memory`：列出**当前这个群**记不记（待处理数就在那份概览里）。"""
 
