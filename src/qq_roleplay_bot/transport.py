@@ -139,6 +139,44 @@ class DeliveryRejected(RuntimeError):
     """
 
 
+# 私聊被对面拒收时，有**两类原因**是能解释给操作者听的（2026-10-08 实测，
+# 来源见 `docs/research/snowluma-api-2026-10-08.md`）：
+#
+# - 好友私聊那条路：对方不是好友（服务端原话"发送失败，请先添加对方为好友"）；
+# - 群临时会话那条路：对方此前从没在这个群里跟她说过话（对面原话 `no such temp session`，
+#   这道门在对方本地：收到过才给回）。
+#
+# 两句话都按**操作者视角**写（"该怎么办"），不出现任何实现词——口径见 `AGENTS.md` §2.2，
+# 测试 `tests/test_onebot_ws.py` 用 `prompt_guard` 逐词钉住。
+# **这里只做说明**：认出来也不改发送结果、不重发、不放宽任何限制。
+_PRIVATE_REFUSAL_NOTES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("请先添加对方为好友", "不是好友"),
+        "这条私聊没发出去：对方还不是好友。让他先给云茹发一句话，或者加好友。",
+    ),
+    (
+        ("no such temp session",),
+        "这条私聊没发出去：对方还没在这个群里跟云茹说过话。"
+        "让他在群里先对她说一句，之后她才能回他。",
+    ),
+)
+
+
+def private_send_refusal_note(text: str) -> str:
+    """把"私聊被拒收"的原始回执翻成一句人话；认不出来就返回空串。
+
+    认出哪种原因**不改任何东西**：发送照样已经失败、该抛的照样抛、重不重发由
+    `Outbox` 按原来那三分类决定。调用方拿到这句话只做一件事——写给操作者看
+    （见 `onebot_ws._note_refusal`）。
+    """
+
+    haystack = (text or "").casefold()
+    for markers, note in _PRIVATE_REFUSAL_NOTES:
+        if any(marker.casefold() in haystack for marker in markers):
+            return note
+    return ""
+
+
 class QQTransport(Protocol):
     """QQ 通信层只有输入和输出两个接口。"""
 

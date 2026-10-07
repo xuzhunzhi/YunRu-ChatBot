@@ -22,6 +22,7 @@ from .transport import (
     MessageTarget,
     display_name_from_sender,
     card_from_sender,
+    private_send_refusal_note,
 )
 
 logger = logging.getLogger(__name__)
@@ -408,6 +409,7 @@ class OneBotWebSocketTransport:
             self._note_chat(target, body=body, kind=kind, reply_to=reply_to, part=part,
                             total=total, origin=origin, outcome="failed",
                             error=type(exc).__name__, error_detail=str(exc))
+            self._note_refusal(target, exc)
             raise
         self._note_chat(target, body=body, kind=kind, reply_to=reply_to, part=part,
                         total=total, origin=origin, outcome="ok",
@@ -423,6 +425,25 @@ class OneBotWebSocketTransport:
             log.record_outgoing(target, **fields)  # type: ignore[arg-type]
         except Exception:  # noqa: BLE001 - 日志坏了不能让消息发不出去
             logger.warning("chat_log_out_failed", exc_info=True)
+
+    def _note_refusal(self, target: MessageTarget, exc: Exception) -> None:
+        """私聊被**有理由地**拒收时，给操作者补一句人话（一条 WARNING）。
+
+        由来（2026-10-08 实测）：给非好友发私聊，对面的回执是一句劝告式的话
+        （"请先添加对方为好友" / `no such temp session`），操作者在日志里只看得到
+        "Stage 3 reply send failed" 加一串回执原文，看不出下一步该做什么。
+        认得出的两类原因翻成一句"该怎么办"，落在**出站这条路自己**的日志上——
+        她发的正文、插件发的图/文都从这里出门，所以三条路一起看得见。
+
+        **只是说明**：不改失败分类（异常照原样抛）、不重发、不放宽任何限制，
+        也不影响对话日志里那一笔。群消息撞不出这两类原因，不打（打了只是噪音）。
+        """
+
+        if target.group_id is not None or not isinstance(exc, DeliveryRejected):
+            return
+        note = private_send_refusal_note(str(exc))
+        if note:
+            logger.warning("%s（私聊对象：%s）", note, target.user_id or "未知")
 
     def _note_chat_in(self, message: IncomingMessage) -> None:
         """把一条收到的消息记进对话日志（同样是"只记日志"）。"""
