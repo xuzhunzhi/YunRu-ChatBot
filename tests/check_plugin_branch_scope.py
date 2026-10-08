@@ -105,6 +105,10 @@ WHITELIST = {
     "tests/test_mail_channel.py":
         "读信回信插件（`plugins/mail/`）的只认主人 / 幂等 / 旧信 / 上限 / 不回自己。"
         "整份都在测这个插件。",
+    "tests/test_mail_send_to.py":
+        "邮件接缝上**第二条窄口**（`MailSeams.send_to`：「寄给指定的一个地址」）的覆盖，"
+        "连「旧那条（发给操作者）不许变」一起钉住。整份都在测插件包里的那条口子——"
+        "本体侧没有它，在那边根本收集不起来。",
     "tests/test_media_segments_plugins.py":
         "从本体 `tests/test_media_segments.py` 拆出来的三条：它们要真造一个识图器"
         "（`ImageDescriber` 在 `plugins/vision/`）。本体侧的正常形态是插件不在，"

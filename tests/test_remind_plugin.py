@@ -1,25 +1,31 @@
 """到点提醒插件（`plugins/remind/`）的离线覆盖。
 
-这一份钉住的是**插件侧那一半**（核心那一半在 `tests/test_remind_intent.py`，
-在本体那条线上）：
+核心那一半在 `tests/test_remind_intent.py` / `test_remind_email.py` / `test_remind_seam.py` /
+`test_remind_send.py`（都在本体那条线上）。这一份钉住的是**插件侧那一半**：
 
-1. **三个选择只在第一次问**：第一次回那句三选一，选过之后"@ 一句就够"（不再问）；
-2. **没有会话时那句人话**：他选"私聊"却还没私聊过她 → 回人话，不装作发得出去；
-3. **插件拿不到记忆 API**（钉住）：请求对象**只**暴露允许的那几个字段、并记下每个
-   被读过的名字；再加上一条扫源码的静态断言——插件包里不许出现任何记忆/引擎/传输层的名字；
-4. **到点只对到期的发**：没到点的一条都不碰，发过的不再发；
-5. **邮件那一路走邮件插件的能力**：不自己写 SMTP，也不把邮件错寄给操作者。
+1. **装配**：走真的 `discover()`，能力经 `registry.remind` 交上去——形状是
+   **同步可调用对象** `(RemindRequest) -> None`（核心的真实形状）；
+2. **只第一次问**：第一次收到提醒 → 记下"到哪儿去问"；下一拍才把问话发出去；
+   他答过之后**不再问**（用户要的"以后 @ 一句就够"）；
+3. **没有会话时那句人话**：他在群里选了"私聊" → 回那句人话；而且核心回
+   `rejected`（真的对面拒收）时**只对他说一次**，那条提醒**留待发**；
+4. **到点只对到期的发**；核心回的五种结果**各有各的处理**：
+   `ok` → 已发；`no_target` / 发送口没接上 → **留待发、不烧重试次数**；
+   `not_delivered` / `error` → 记一次失败、可重试（最多 3 次）；
+   `uncertain` → **不再试**（重发就可能发两条）；
+5. **邮件那一路走邮件插件的能力**（`MailSeams.send_to`），不经核心；
+6. **插件拿不到记忆 API**（钉住）：源码静态扫 + 只暴露 `RemindRequest` 那几个字段的
+   请求对象（并记下每个被读过的名字）。
 
-另外几条是这只剩半边时最容易烂掉的地方：**核心还没那个口子时插件照样装得上**
-（看/改那一半今天就能用）、发不出去要**记下来可重试**而不是静默算成功、
-她要说出口的话里**一个机制词都不许有**。
+另外几条：她要说出口的每一句都零机制词（`USER_TEXTS` 逐个扫）、
+追加日志撞上"写了一半的行"照读不误、同一条请求重复递进来只算一条。
 
 ## 关于替身
 
-* `_FakeCore`：真的 `PluginRegistry` 有 `__slots__`（`remind` 这个口子要核心加），
-  所以这里用子类挂一个——核心那一半落到本体之后，换成真注册表就是同一件事。
-* `_FakeMail`：邮件接缝的替身，**多一个"寄给某个人"的口子**（真接缝现在只有
-  "给操作者发一封"）。那一条是这次要跟核心/mail 对齐的假定接口之一。
+请求与结果都用**真的**（`qq_roleplay_bot.remind.RemindRequest` / `RemindDelivery` /
+`RemindSendResult`——核心那份已经落地），所以这份测试连"形状对不上"都验得到。
+`registry.remind_send` 是真的槽位，直接赋值即可；`_FakeMail` 是邮件接缝的替身
+（形状与 `MailSeams` 一致，两条口子都在）。
 """
 from __future__ import annotations
 
@@ -36,11 +42,13 @@ from qq_roleplay_bot.plugins.remind import remind as R
 from qq_roleplay_bot.plugins.remind import store as S
 from qq_roleplay_bot.plugins.remind.remind import RemindCapability
 from qq_roleplay_bot.plugins.remind.store import RemindStore
+from qq_roleplay_bot.remind import RemindDelivery, RemindRequest, RemindSendResult
 
 GROUP = "717151356"
 GROUP_SESSION = f"group:{GROUP}"
+PRIVATE_SESSION = "private:100"
 PERSON = "100"
-#: 固定的"现在"（测试里所有时间都相对它，别让用例依赖跑的时刻）。
+#: 固定的"现在"（所有用例的时间都相对它，别让断言依赖跑的时刻）。
 NOW = 1_800_000_000.0
 #: 插件包在磁盘上的位置（那条扫源码的断言要用）。
 PACKAGE = pathlib.Path(R.__file__).resolve().parent
@@ -54,15 +62,14 @@ async def _no_action(action, params=None):
 
 
 class _WatchedRequest:
-    """核心递进来的那一条：**只**暴露允许的字段，并记下每一个被读过的名字。
+    """**只**暴露 `RemindRequest` 的那几个字段，并记下每一个被读过的名字。
 
     插件多读一个属性（比如 `memory`、`engine`）在这里读不到，而且会被记进 `read`——
-    测试最后断言"它只要了这几个"。这就是"插件拿不到记忆 API"那条钉子的一半。
+    用例最后断言"它只要了这几个"。这就是"插件拿不到记忆 API"那条钉子的一半。
     """
 
-    #: 允许插件读的全部字段（核心那份 `RemindRequest` 的字段 + "能不能私聊"那个事实）。
-    ALLOWED = ("person_id", "session_id", "group_id", "at", "what", "email",
-               "private_reachable", "has_private_session", "private_ok")
+    #: 与真的 `RemindRequest` 一致（`tests/test_remind_seam.py` 把那张白名单钉在核心侧）。
+    ALLOWED = ("person_id", "session_id", "group_id", "at", "what", "email")
 
     def __init__(self, **fields: object) -> None:
         unknown = sorted(set(fields) - set(self.ALLOWED))
@@ -80,12 +87,8 @@ class _WatchedRequest:
             raise AttributeError(name) from None
 
 
-class _FakeCore(PluginRegistry):
-    """核心侧那一半的替身：**多一个 `remind` 槽位**（真注册表还没加）。"""
-
-
 class _FakeMail:
-    """邮件接缝的替身：把"寄给某个人"那条口子记下来，别的与真接缝一致。"""
+    """邮件接缝的替身：两条口子都在（"寄给操作者"那条只为不把旧路弄坏）。"""
 
     def __init__(self) -> None:
         self.sent: list[tuple[str, str, str]] = []
@@ -94,27 +97,40 @@ class _FakeMail:
     def provide(self, sender: object) -> None:
         self.operator_sender = sender
 
+    def provide_address_sender(self, sender: object) -> None:
+        self.address_sender = sender
+
+    def knows(self) -> bool:
+        return callable(self.operator_sender)
+
+    def knows_address_sender(self) -> bool:
+        return callable(getattr(self, "address_sender", None))
+
     async def send_to(self, address: str, subject: str, body: str) -> dict:
         self.sent.append((address, subject, body))
         return {"status": "ok"}
 
 
-#: "核心没告诉我们这个事实"用这个哨兵——那样那个字段**根本不存在**（不是设成 False）。
-_MISSING = object()
+def _core(into: list, *, sent: bool = True, reason: str = "ok", detail: str = ""):
+    """造一个核心发送口的替身：记下来，按给定的结果如实回（**不抛异常**）。"""
+
+    async def sender(delivery: RemindDelivery) -> RemindSendResult:
+        into.append(delivery)
+        return RemindSendResult(sent=sent, reason=reason, detail=detail)
+
+    return sender
 
 
-def _request(**fields: object) -> _WatchedRequest:
+def _request(**fields: object) -> RemindRequest:
     body = {"person_id": PERSON, "session_id": GROUP_SESSION, "group_id": GROUP,
-            "at": NOW + 60.0, "what": "交作业", "email": "lele@example.com",
-            "private_reachable": True}
+            "at": NOW + 60.0, "what": "交作业", "email": "lele@example.com"}
     body.update(fields)
-    return _WatchedRequest(**{key: value for key, value in body.items()
-                              if value is not _MISSING})
+    return RemindRequest(**body)  # type: ignore[arg-type]
 
 
-def _capability(root, *, hand_off=None, mail_send=None) -> RemindCapability:
-    return RemindCapability(RemindStore(root), mail_send=mail_send, hand_off=hand_off,
-                            clock=lambda: NOW)
+def _capability(root, *, core=None, mail_send=None) -> RemindCapability:
+    return RemindCapability(RemindStore(root), mail_send=mail_send,
+                            core_sender=(lambda: core), clock=lambda: NOW)
 
 
 def _poller(registry):
@@ -127,238 +143,297 @@ def _command(registry):
                 if getattr(item, "name", "") == "remind")
 
 
-# --- 1. 装配（走真的 discover），以及"核心还没那个口子"那一态 -----------------
+# --- 1. 装配（走真的 discover），形状是同步可调用对象 ------------------------
 
 
 def test_the_plugin_hands_its_capability_to_the_core_through_discovery() -> None:
     with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"QQBOT_DATA_DIR": tmp}):
-        registry = _FakeCore(call_action=_no_action)
+        registry = PluginRegistry(call_action=_no_action)
         registry.mail = _FakeMail()
+        registry.remind_send = _core([])
         loaded = discover(registry, only=("remind",))
 
         assert loaded[:2] == ("mail", "remind"), f"前置要先装：{loaded}"
-        assert callable(getattr(registry, "remind", None)), "核心那一侧的口子没接上"
-
-        handed: list = []
-        capability = registry.remind(lambda delivery: handed.append(delivery))
-        assert isinstance(capability, RemindCapability)
+        seam = getattr(registry, "remind", None)
+        assert isinstance(seam, RemindCapability), "交上去的不是那个能力对象"
+        # **同步**：核心那一侧就是 `seam(request)`（不 await、不读返回值）。
+        assert not asyncio.iscoroutinefunction(seam), "接缝是同步的，不许是协程函数"
+        seam(_request())
+        assert len(RemindStore(pathlib.Path(tmp) / S.DIR_NAME).list_for(PERSON, now=NOW)) == 1
 
         poller = _poller(registry)
         assert poller.interval_seconds > 0 and poller.enabled is True
-        assert asyncio.run(poller.poll_once()) == ()      # 什么都没有时要能空跑
-
+        assert remind_plugin.REQUIRES == ("mail",) and remind_plugin.TITLE
         command = _command(registry)
         assert command.name == "remind" and command.min_level == "public"
-        assert remind_plugin.REQUIRES == ("mail",) and remind_plugin.TITLE
 
 
-def test_it_still_loads_when_the_core_has_no_seam_yet() -> None:
-    """核心还没有那个口子时：**不抛、照样装进来**，看/改那一半今天就能用。
-
-    这条钉的是**过渡期**的行为：插件坏也要只坏自己那一半，不许把装配带走
-    （`discover()` 会把 `register()` 抛异常的插件整个跳过——那才是静默丢功能）。
-    """
+def test_it_still_loads_when_the_cores_send_seam_is_missing() -> None:
+    """核心那条发送口还没接上（`remind_send is None`）：插件照装、节拍照跑，只是发不出去。"""
 
     with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"QQBOT_DATA_DIR": tmp}):
-        registry = PluginRegistry(call_action=_no_action)   # 现状：注册表上没有 remind 这个口子
+        registry = PluginRegistry(call_action=_no_action)
+        registry.mail = _FakeMail()
+        assert registry.remind_send is None
+        discover(registry, only=("remind",))
 
-        loaded = discover(registry, only=("remind",))
-
-        assert "remind" in loaded, "核心还没有那个口子时，插件照样要装进来"
-        assert getattr(registry, "remind", None) is None
-        assert _command(registry).name == "remind"
+        registry.remind(_request())
         assert asyncio.run(_poller(registry).poll_once()) == ()
+        store = RemindStore(pathlib.Path(tmp) / S.DIR_NAME)
+        item = store.list_for(PERSON, now=NOW)[0]
+        assert item.state == S.WAITING and item.tries == 0, "没有出口不该烧重试次数"
 
 
-# --- 2. 三个选择只在第一次问 -------------------------------------------------
+# --- 2. 只第一次问 -----------------------------------------------------------
 
 
-def test_the_three_choices_are_asked_once_and_only_once() -> None:
+def test_the_question_is_asked_once_and_only_once() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        seen: list = []
-        capability = _capability(tmp, hand_off=lambda delivery: seen.append(delivery),
-                                 mail_send=_FakeMail().send_to)
-        first = _request()
+        handed: list = []
+        capability = _capability(tmp, core=_core(handed), mail_send=_FakeMail().send_to)
 
-        question = asyncio.run(capability.plan(first))
-        assert question is not None
+        capability(_request())                              # 核心递进来（同步）
+        assert handed == [], "收下请求那一瞬间不该发东西（它跑在核心那一轮对话里）"
+        # 下一拍才把问话发出去。
+        asyncio.run(capability.flush(now=NOW))
+        assert len(handed) == 1
+        question = handed[0]
+        assert question.person_id == PERSON and question.group_id == GROUP
         for line in (R.ASK_GROUP, R.ASK_PRIVATE, R.ASK_MAIL, R.ASK_TAIL):
-            assert line in question, question
-        assert "交作业" in question
+            assert line in question.text, question.text
+        assert "交作业" in question.text
 
-        assert asyncio.run(capability.choose(first, "2")) == R.CHOOSE_OK[S.CHANNEL_PRIVATE]
-        assert capability._store.preference(PERSON).channel == S.CHANNEL_PRIVATE
-
-        # 第二次：**不再问**，而且这条提醒直接收下了（用户要的"@ 一句就够"）。
-        second = _request(at=NOW + 7200.0, what="交物理作业")
-        assert asyncio.run(capability.plan(second)) is None
+        # 他答了 → 记下来 + 回一句确认。
+        assert capability.note_reply(PERSON, "2", session_id=PRIVATE_SESSION) == \
+            R.CHOOSE_OK[S.CHANNEL_PRIVATE]
+        # 再来的提醒：**不再问**，直接排上（"以后 @ 一句就够"）。
+        capability(_request(at=NOW + 7200.0, what="交物理作业"))
+        assert asyncio.run(capability.flush(now=NOW)) == ()
         waiting = capability._store.list_for(PERSON)
         assert [item.what for item in waiting] == ["交作业", "交物理作业"]
         assert {item.channel for item in waiting} == {S.CHANNEL_PRIVATE}
-        assert first.read and set(first.read) <= set(_WatchedRequest.ALLOWED)
+
+
+def test_the_person_who_never_private_chatted_is_told_the_plain_truth() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        capability = _capability(tmp, core=_core([]), mail_send=_FakeMail().send_to)
+        capability(_request())
+        asyncio.run(capability.flush(now=NOW))
+
+        # 他这句话在**群里**说的 → 看不到"他私聊过她"的证据 → 人话（fail-closed）。
+        assert capability.note_reply(PERSON, "2", session_id=GROUP_SESSION) == R.NO_PRIVATE
+        assert capability._store.preference(PERSON).channel == S.CHANNEL_PRIVATE
+
+        # 他这句话是**私聊里**说的 → 正常确认。
+        assert capability.note_reply(PERSON, "2", session_id=PRIVATE_SESSION) == \
+            R.CHOOSE_OK[S.CHANNEL_PRIVATE]
+
+
+def test_a_choice_that_cannot_be_read_is_asked_again() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        capability = _capability(tmp, core=_core([]), mail_send=_FakeMail().send_to)
+        capability(_request())
+        for reply in ("随便吧", "1 或者 2", "", "看情况"):
+            assert capability.note_reply(PERSON, reply, session_id=GROUP_SESSION) == \
+                R.ASK_AGAIN, reply
+        # 没认出来就是没认出来：渠道还是空的，下一次照样问（不静默记一个默认值）。
+        assert not capability._store.preference(PERSON).channel
+        # 他手上有邮箱、邮件那一路也接上了 → 选 3 就是真能办到的，正常答应。
+        assert capability.note_reply(PERSON, "3", session_id=GROUP_SESSION) == \
+            R.CHOOSE_OK[S.CHANNEL_MAIL]
+        # 换一个**没有邮箱**的人：这时选 3 只能先跟他要地址（不许答应做不到的事）。
+        empty = _capability(pathlib.Path(tmp) / "no-email", core=_core([]),
+                            mail_send=_FakeMail().send_to)
+        assert empty.note_reply("200", "3", session_id=GROUP_SESSION) == R.NEED_EMAIL
 
 
 def test_only_the_choices_that_really_work_are_offered() -> None:
     """没有邮箱（或邮件那一路没接上）时**不列第 3 条**——列一条做不到的是骗人。"""
 
     with tempfile.TemporaryDirectory() as tmp:
-        without_mail = _capability(tmp, mail_send=None)
-        with_address = asyncio.run(without_mail.plan(_request()))
+        without_mail = _capability(tmp, core=_core([]), mail_send=None)
+        with_address = without_mail.ask_text("交作业", has_email=True)
         assert R.ASK_GROUP in with_address and R.ASK_PRIVATE in with_address
         assert R.ASK_MAIL not in with_address, with_address
 
-        with_mail = _capability(tmp, mail_send=_FakeMail().send_to)
-        without_address = asyncio.run(with_mail.plan(_request(email="")))
+        with_mail = _capability(tmp, core=_core([]), mail_send=_FakeMail().send_to)
+        without_address = with_mail.ask_text("交作业", has_email=False)
         assert R.ASK_MAIL not in without_address, without_address
 
-
-def test_choosing_mail_needs_an_address() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        capability = _capability(tmp, mail_send=_FakeMail().send_to)
-        request = _request(email="")
-
-        assert asyncio.run(capability.choose(request, "3")) == R.NEED_EMAIL
-        # 没地址就不许装成"已经收下了"。
-        assert capability._store.list_for(PERSON) == ()
-        assert capability._store.preference(PERSON) is None
+        # 没接上邮件那一路时选 3 → 一句人话，而不是"答应得好好的"。
+        assert without_mail.note_reply(PERSON, "3", session_id=GROUP_SESSION) == R.NO_MAIL
 
 
-def test_choosing_mail_when_the_mail_seam_is_missing_says_so() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        capability = _capability(tmp, mail_send=None)
-        assert asyncio.run(capability.choose(_request(), "3")) == R.NO_MAIL
-        assert capability._store.list_for(PERSON) == ()
-
-
-def test_a_choice_that_cannot_be_read_is_asked_again() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        capability = _capability(tmp, mail_send=_FakeMail().send_to)
-        for reply in ("随便吧", "1 或者 2", "", "看情况"):
-            assert asyncio.run(capability.choose(_request(), reply)) == R.ASK_AGAIN, reply
-        # 没认出来就是没认出来：什么都没记下，下一次照样问（不静默记一个默认值）。
-        assert capability._store.preference(PERSON) is None
-        assert capability._store.list_for(PERSON) == ()
-        assert asyncio.run(capability.plan(_request())) is not None
-
-
-# --- 3. 没有会话时那句人话 ---------------------------------------------------
-
-
-def test_the_person_who_never_private_chatted_is_told_the_plain_truth() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        capability = _capability(tmp, hand_off=lambda delivery: True,
-                                 mail_send=_FakeMail().send_to)
-        # 核心**没告诉**我们他能不能被私聊（字段不在）——按 fail-closed 当不能。
-        silent_core = _request(private_reachable=_MISSING)
-        assert asyncio.run(capability.choose(silent_core, "2")) == R.NO_PRIVATE
-
-        # 记住了（他选的就是它），但话要说清。
-        assert capability._store.preference(PERSON).channel == S.CHANNEL_PRIVATE
-        assert [item.channel for item in capability._store.list_for(PERSON)] == \
-            [S.CHANNEL_PRIVATE]
-
-        # 核心说"他能被私聊"时：正常确认，没有那句人话。
-        told = _request(person_id="200", private_reachable=True, at=NOW + 60.0)
-        assert asyncio.run(capability.choose(told, "2")) == R.CHOOSE_OK[S.CHANNEL_PRIVATE]
-
-
-# --- 4. 到点只对到期的发 -----------------------------------------------------
+# --- 3. 到点只对到期的发；核心回的每一种结果各有各的处理 ---------------------
 
 
 def test_only_the_due_ones_are_handed_over() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         handed: list = []
-        capability = _capability(tmp, hand_off=lambda delivery: handed.append(delivery))
+        capability = _capability(tmp, core=_core(handed))
         store = capability._store
         store.add(person_id=PERSON, session_id=GROUP_SESSION, group_id=GROUP,
                   at=NOW - 1, what="该发的那条", channel=S.CHANNEL_GROUP)
         store.add(person_id=PERSON, session_id=GROUP_SESSION, group_id=GROUP,
                   at=NOW + 3600, what="还没到的那条", channel=S.CHANNEL_GROUP)
 
-        sent = asyncio.run(capability.flush_due(now=NOW))
+        sent = asyncio.run(capability.flush(now=NOW))
 
-        assert [delivery.text for delivery in sent] == [R.DUE_TEXT.format(what="该发的那条")]
-        assert [delivery.text for delivery in handed] == [d.text for d in sent]
-        assert sent[0].channel == S.CHANNEL_GROUP and sent[0].mention is True
-        # 发过的不再发；没到点的还在。
-        assert asyncio.run(capability.flush_due(now=NOW)) == ()
-        waiting = store.list_for(PERSON, now=NOW)
-        assert [item.what for item in waiting] == ["还没到的那条"]
-        assert waiting[0].state == S.WAITING and waiting[0].tries == 0
+        assert [item.text for item in sent] == [R.DUE_TEXT.format(what="该发的那条")]
+        assert sent[0].person_id == PERSON and sent[0].group_id == GROUP
+        assert [item.what for item in store.list_for(PERSON, now=NOW)] == ["还没到的那条"]
+        # 再跑一拍：发过的不再发。
+        assert asyncio.run(capability.flush(now=NOW)) == ()
+        assert len(handed) == 1
+
+
+def test_without_a_way_out_it_stays_pending_and_burns_no_retry() -> None:
+    """**没有出口**（发送口没接上 / 核心说 no_target）：留待发、不烧次数。"""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        capability = _capability(tmp, core=None)
+        capability._store.add(person_id=PERSON, session_id=GROUP_SESSION, group_id=GROUP,
+                              at=NOW - 1, what="交作业", channel=S.CHANNEL_PRIVATE)
+
+        for _ in range(5):
+            assert asyncio.run(capability.flush(now=NOW)) == ()
+
+        item = capability._store.list_for(PERSON, now=NOW)[0]
+        assert item.state == S.WAITING and item.tries == 0, item
+        assert "还没接上" in item.last_error, item      # 把"为什么还没发出去"记在那条上
+        # 接缝一接上，同一条立刻发得出去（前面那 5 拍什么都没烧掉）。
+        handed: list = []
+        capability._core_sender = lambda: _core(handed)
+        assert len(asyncio.run(capability.flush(now=NOW))) == 1
+        assert capability._store.get(item.key).state == S.SENT
+
+        # 核心说"找不到那个人"（no_target）也是同一种：留待发。
+        other = _capability(pathlib.Path(tmp) / "b",
+                            core=_core([], sent=False, reason="no_target"))
+        other._store.add(person_id=PERSON, session_id=GROUP_SESSION, group_id=GROUP,
+                         at=NOW - 1, what="交作业", channel=S.CHANNEL_PRIVATE)
+        for _ in range(3):
+            assert asyncio.run(other.flush(now=NOW)) == ()
+        kept = other._store.list_for(PERSON, now=NOW)[0]
+        assert kept.state == S.WAITING and kept.tries == 0 and "no_target" in kept.last_error
 
 
 def test_a_failed_delivery_is_recorded_and_can_be_retried() -> None:
+    """核心说"确定没送出去"（`not_delivered` / `error`）：记一次失败，可重试。"""
+
     with tempfile.TemporaryDirectory() as tmp:
         calls: list = []
-
-        async def broken(delivery):
-            calls.append(delivery)
-            raise RuntimeError("对面没接上")
-
-        capability = _capability(tmp, hand_off=broken)
+        capability = _capability(tmp, core=_core(calls, sent=False, reason="not_delivered"))
         store = capability._store
         store.add(person_id=PERSON, session_id=GROUP_SESSION, group_id=GROUP,
                   at=NOW - 1, what="交作业", channel=S.CHANNEL_GROUP)
 
-        assert asyncio.run(capability.flush_due(now=NOW)) == ()
-        item = store.list_for(PERSON, now=NOW, include_finished=True)[0]
-        assert item.state == S.FAILED and item.tries == 1 and "RuntimeError" in item.last_error
+        assert asyncio.run(capability.flush(now=NOW)) == ()
+        item = store.list_for(PERSON, now=NOW)[0]
+        assert item.state == S.FAILED and item.tries == 1 and "not_delivered" in item.last_error
 
-        # 下一次节拍接着试（"失败的记下来可重试"），试够次数就停。
         for _ in range(S.MAX_TRIES - 1):
-            asyncio.run(capability.flush_due(now=NOW))
+            asyncio.run(capability.flush(now=NOW))
         assert store.due(NOW) == (), "试够次数了还在发？"
         assert len(calls) == S.MAX_TRIES, f"试的次数不对：{len(calls)}"
-        stuck = store.list_for(PERSON, now=NOW)[0]
-        assert stuck.state == S.FAILED and stuck.tries == S.MAX_TRIES
 
 
-def test_without_the_cores_send_seam_it_is_recorded_not_swallowed() -> None:
-    """核心还没把发送口递过来时：**记成没发出去**，不许静默算成功。"""
+def test_a_rejected_private_reminder_tells_him_once_and_stays_pending() -> None:
+    """核心回 `rejected`（他还没私聊过她）：说一次人话，而且**留待发**。"""
 
     with tempfile.TemporaryDirectory() as tmp:
-        capability = _capability(tmp, hand_off=None)
-        capability._store.add(person_id=PERSON, session_id=GROUP_SESSION, group_id=GROUP,
-                              at=NOW - 1, what="交作业", channel=S.CHANNEL_PRIVATE)
+        handed: list = []
 
-        assert asyncio.run(capability.flush_due(now=NOW)) == ()
-        item = capability._store.list_for(PERSON, now=NOW, include_finished=True)[0]
-        assert item.state == S.FAILED and "核心" in item.last_error, item
+        async def rejected(delivery: RemindDelivery) -> RemindSendResult:
+            handed.append(delivery)
+            if delivery.text == R.NO_PRIVATE:
+                return RemindSendResult(True, "ok")          # 人话发到群里成了
+            return RemindSendResult(False, "rejected", "还不是好友")
+
+        capability = _capability(tmp, core=rejected)
+        store = capability._store
+        store.remember_person(PERSON, channel=S.CHANNEL_PRIVATE)
+        store.add(person_id=PERSON, session_id=GROUP_SESSION, group_id=GROUP,
+                  at=NOW - 1, what="交作业", channel=S.CHANNEL_PRIVATE)
+
+        asyncio.run(capability.flush(now=NOW))
+        assert [item.text for item in handed][0] == R.DUE_TEXT.format(what="交作业")
+        assert R.NO_PRIVATE in [item.text for item in handed], "那句人话没跟他说"
+        item = store.list_for(PERSON, now=NOW)[0]
+        assert item.state == S.WAITING and item.tries == 0, item
+        assert item.told_no_session is True
+
+        # 下一拍：**不再重复说**那句人话（否则就是每半分钟骚扰他一次）。
+        asyncio.run(capability.flush(now=NOW))
+        assert [item.text for item in handed].count(R.NO_PRIVATE) == 1
 
 
-# --- 5. 邮件那一路走邮件插件的能力 -------------------------------------------
+def test_uncertain_is_never_retried() -> None:
+    """核心回 `uncertain`（不知道那条出去没有）：**不再试**——重发就可能发两条。"""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        calls: list = []
+        capability = _capability(tmp, core=_core(calls, sent=False, reason="uncertain"))
+        store = capability._store
+        store.add(person_id=PERSON, session_id=GROUP_SESSION, group_id=GROUP,
+                  at=NOW - 1, what="交作业", channel=S.CHANNEL_GROUP)
+
+        asyncio.run(capability.flush(now=NOW))
+        assert len(calls) == 1
+        for _ in range(3):
+            asyncio.run(capability.flush(now=NOW))
+        assert len(calls) == 1, "uncertain 又发了一遍（可能重复提醒）"
+        item = next(iter(store._all().values()))     # noqa: SLF001 - 直接看那条的状态
+        assert item.state == S.GIVEN_UP and "uncertain" in item.last_error
+        assert store.list_for(PERSON, now=NOW) == (), "已经放弃的还挂在待发列表里"
+
+
+def test_an_unanswered_channel_falls_back_to_where_he_spoke() -> None:
+    """他没答就用**他当时说话的地方**叫他，并把这次的选择记下来（以后不再问）。"""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        handed: list = []
+        capability = _capability(tmp, core=_core(handed))
+        capability(_request(session_id=GROUP_SESSION))
+        asyncio.run(capability.flush(now=NOW))          # 问话发出去了
+        # 他没答，时间到了。
+        asyncio.run(capability.flush(now=NOW + 3600))
+
+        assert handed[-1].group_id == GROUP, handed[-1]
+        assert capability._store.preference(PERSON).channel == S.CHANNEL_GROUP
+        assert capability._store.preference(PERSON).ask_session == ""
+
+
+# --- 4. 邮件那一路走邮件插件的能力 -------------------------------------------
 
 
 def test_the_mail_channel_goes_through_the_mail_plugins_ability() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         mail = _FakeMail()
         handed: list = []
-        capability = _capability(tmp, mail_send=mail.send_to,
-                                 hand_off=lambda delivery: handed.append(delivery))
+        capability = _capability(tmp, core=_core(handed), mail_send=mail.send_to)
         store = capability._store
         store.remember_person(PERSON, channel=S.CHANNEL_MAIL, email="lele@example.com")
         store.add(person_id=PERSON, session_id=GROUP_SESSION, group_id=GROUP,
                   at=NOW - 1, what="交作业", channel=S.CHANNEL_MAIL)
 
-        sent = asyncio.run(capability.flush_due(now=NOW))
+        sent = asyncio.run(capability.flush(now=NOW))
 
         assert len(mail.sent) == 1, "邮件那一路没走邮件插件"
         address, subject, body = mail.sent[0]
         assert address == "lele@example.com"
         assert subject == R.MAIL_SUBJECT.format(what="交作业") and "交作业" in body
-        assert handed == [], "邮件那一路不该再经核心的发送口发一遍"
-        assert sent[0].email == "lele@example.com" and sent[0].mention is False
+        assert handed == [], "邮件那一路不该再经核心发一遍"
+        assert sent == ()
 
 
-# --- 6. 看 / 改（命令那条入口，用的是能力上同一份函数） -----------------------
+# --- 5. 看 / 改（命令那条入口用的是能力上同一份函数） -----------------------
 
 
 def test_the_command_lists_cancels_and_switches() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        capability = _capability(tmp, hand_off=lambda delivery: True,
-                                 mail_send=_FakeMail().send_to)
+        capability = _capability(tmp, core=_core([]), mail_send=_FakeMail().send_to)
         store = capability._store
-        # 有地址才换得到邮件那一路（没地址时它只回一行用法，见下面那条断言）。
         store.remember_person(PERSON, channel=S.CHANNEL_PRIVATE, email="lele@example.com")
         store.add(person_id=PERSON, session_id=GROUP_SESSION, group_id=GROUP,
                   at=NOW + 600, what="交作业", channel=S.CHANNEL_PRIVATE)
@@ -380,25 +455,27 @@ def test_the_command_lists_cancels_and_switches() -> None:
         assert switched == R.CHOOSE_OK[S.CHANNEL_MAIL]
         assert store.preference(PERSON).channel == S.CHANNEL_MAIL
 
-        assert asyncio.run(command.handle(_message("/提醒 删 9"))) == R.BAD_INDEX.format(index=9)
+        assert asyncio.run(command.handle(_message("/提醒 删 9"))) == \
+            R.BAD_INDEX.format(index=9)
         assert asyncio.run(command.handle(_message("/提醒 瞎写"))) == R.USAGE
         assert command.match(_message("/提醒")) and not command.match(_message("提醒我"))
 
 
-def _message(text: str):
+def _message(text: str, *, session_id: str = GROUP_SESSION):
     class _Message:
         user_id = PERSON
     _Message.text = text
+    _Message.session_id = session_id
     return _Message()
 
 
-# --- 7. 钉子：插件拿不到记忆 API（源码扫 + 请求只暴露允许的字段） -------------
+# --- 6. 钉子：插件拿不到记忆 API（源码扫 + 请求只暴露允许的字段） -------------
 
 
 #: 插件包里**一个字都不许出现**的名字（记忆 / 知识库 / 对话 / 引擎 / 传输层 / 权限名单）。
 FORBIDDEN = ("memory", "Memory", "knowledge", "Knowledge", "persona", "base_prompt",
-              "prompt_library", "slang", "quote_learning", "engine", "transport",
-              "admin_user_ids", "super_admin", "chat_log", "data_boundary")
+             "prompt_library", "slang", "quote_learning", "engine", "transport",
+             "admin_user_ids", "super_admin", "chat_log", "data_boundary")
 
 
 def test_the_plugin_source_never_names_a_memory_or_engine_api() -> None:
@@ -425,25 +502,29 @@ def test_the_plugin_source_never_names_a_memory_or_engine_api() -> None:
 
 
 def test_the_request_object_is_the_whole_world_it_gets() -> None:
-    """一条请求里只该有那几个字段——插件读别的就读不到（`_WatchedRequest` 会记下来）。"""
+    """交进来的那条请求里只该有那几个字段——插件读别的就读不到（会被记下来）。"""
 
     with tempfile.TemporaryDirectory() as tmp:
-        capability = _capability(tmp, hand_off=lambda delivery: True,
-                                 mail_send=_FakeMail().send_to)
-        request = _request(private_reachable=True)
-        asyncio.run(capability.plan(request))
-        asyncio.run(capability.choose(request, "1"))
+        capability = _capability(tmp, core=_core([]), mail_send=_FakeMail().send_to)
+        watched = _WatchedRequest(person_id=PERSON, session_id=GROUP_SESSION,
+                                  group_id=GROUP, at=NOW + 60.0, what="交作业",
+                                  email="lele@example.com")
 
-        assert request.read, "一条都没读过？那这条断言没在验东西"
-        assert set(request.read) <= set(_WatchedRequest.ALLOWED), request.read
+        capability(watched)
+        asyncio.run(capability.flush(now=NOW))
+        capability.note_reply(PERSON, "1", session_id=GROUP_SESSION)
+
+        assert watched.read, "一条都没读过？那这条断言没在验东西"
+        assert set(watched.read) <= set(_WatchedRequest.ALLOWED), watched.read
         for forbidden in ("memory", "engine", "transport", "registry"):
-            assert forbidden not in request.read
-        # 能力对象上也没有引擎 / 传输层 / 记忆这三样。
-        for forbidden in ("engine", "transport", "memory", "registry"):
+            assert forbidden not in watched.read
+        # 能力对象上也没有引擎 / 传输层 / 记忆 / 权限名单这几样。
+        for forbidden in ("engine", "transport", "memory", "registry",
+                          "admin_user_ids", "super_admin_user_ids"):
             assert not hasattr(capability, forbidden), forbidden
 
 
-# --- 8. 她要说出口的话：零机制词 ---------------------------------------------
+# --- 7. 她要说出口的话：零机制词 ---------------------------------------------
 
 
 def test_her_words_have_no_mechanism_words() -> None:
@@ -462,12 +543,12 @@ def test_every_sentence_it_says_is_declared_scan_able() -> None:
     assert all(isinstance(text, str) and text for text in R.USER_TEXTS)
 
 
-# --- 9. 它自己的数据 ---------------------------------------------------------
+# --- 8. 它自己的数据 ---------------------------------------------------------
 
 
 def test_the_log_survives_a_reload_and_a_torn_line() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        capability = _capability(tmp, hand_off=lambda delivery: True)
+        capability = _capability(tmp, core=_core([]))
         capability._store.add(person_id=PERSON, session_id=GROUP_SESSION, group_id=GROUP,
                               at=NOW + 600, what="交作业", channel=S.CHANNEL_GROUP)
         # 模拟"写在半路崩了"：文件末尾留半行。
@@ -476,14 +557,13 @@ def test_the_log_survives_a_reload_and_a_torn_line() -> None:
             handle.write('{"key": "half')
 
         again = RemindStore(tmp)
-        items = again.list_for(PERSON, now=NOW)
-        assert [item.what for item in items] == ["交作业"]
+        assert [item.what for item in again.list_for(PERSON, now=NOW)] == ["交作业"]
         assert again.preference(PERSON) is None       # 没被问过
 
 
 def test_the_same_request_twice_is_the_same_reminder() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        capability = _capability(tmp, hand_off=lambda delivery: True)
+        capability = _capability(tmp, core=_core([]))
         for _ in range(2):
             capability._store.add(person_id=PERSON, session_id=GROUP_SESSION,
                                   group_id=GROUP, at=NOW + 600, what="交作业",
