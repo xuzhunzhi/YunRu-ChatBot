@@ -28,14 +28,14 @@ class RemindPoller:
         self.interval_seconds = float(interval_seconds)
 
     async def poll_once(self) -> object:
-        """跑一轮：`flush_due()` 自己会判"到点了没有 / 试够次数没有"。
+        """跑一轮：`flush()` 自己会判"该问的问了没有 / 到点了没有 / 试够次数没有"。
 
         返回值是这一轮真交出去的内容/意图（核心那份节拍现在不读它，
         所以**不能**靠返回值投递——投递走的是接缝里那条发送口）。
         """
 
         try:
-            return await self._capability.flush_due()
+            return await self._capability.flush()
         except Exception:  # noqa: BLE001 - 一轮失败不停下这条通道
             logger.exception("remind_poll_failed（这一轮跳过，下一次照跑）")
             return ()

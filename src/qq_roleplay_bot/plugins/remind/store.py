@@ -4,7 +4,7 @@
 
 用户 2026-10-08 的口径：**核心听懂 + 插件做事 + 核心发送**。"该怎么叫他"与
 "还有哪几条没发"是这件事自己的状态，核心一个字不认识——核心只在认到提醒请求时把
-（谁 · 什么事 · 什么时刻 · 他的邮箱）递进来，插件收下；到点了插件再把"要发什么"交回去。
+（谁 · 什么事 · 什么时刻 · 他的邮箱）递进来，插件收下；到点了自己算该发什么。
 
 ## 为什么是 jsonl、为什么落在 `data/` 下
 
@@ -48,15 +48,25 @@ CHANNEL_GROUP = "group"
 CHANNEL_PRIVATE = "private"
 CHANNEL_MAIL = "mail"
 CHANNELS = (CHANNEL_GROUP, CHANNEL_PRIVATE, CHANNEL_MAIL)
+#: **还没答**（第一次收到他的提醒、那句"你想我怎么叫你"还没发出去 / 还没答）。
+CHANNEL_UNSET = ""
 
-#: 一条提醒的四种状态。
+#: 一条提醒的状态。
 WAITING = "waiting"
 SENT = "sent"
 FAILED = "failed"
 CANCELLED = "cancelled"
+#: **不再试了**（核心回 `rejected` / `uncertain`——对面拒收、或不知道发出去没有）。
+#: 与 `FAILED` 分开：`FAILED` 是"还会再试"，这个是"到此为止，下一拍不许再发"。
+#: 尤其是 `uncertain`（不知道那条到底出去没有）**绝不能**重发——重发就可能发两条。
+GIVEN_UP = "given_up"
 
 #: 一条提醒最多试几次。"发不出去记下来可重试"不等于无限重试——一直失败是配置或
 #: 渠道的问题，无限重试只会每半分钟往日志里灌一行。
+#:
+#: **"没有出口"不算一次重试**（见 `remind.RemindCapability._deliver`）：核心的发送口
+#: 还没接上、或邮件插件没给那条口子——那是部署缺口，不是这条提醒发失败了；那种情况
+#: 留在待发里，接缝一落地就发得出去，**不烧次数**（用户 2026-10-08 的裁决）。
 MAX_TRIES = 3
 
 #: 折叠阈值：行数超过"有效条数 × 这个倍数"时，把日志压一次。
@@ -76,35 +86,57 @@ def reminder_key(person_id: str, session_id: str, at: float, what: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class Preference:
-    """一个人**已经被问过**之后的答案：以后用哪种方式叫他、他有没有邮箱。"""
+    """一个人的那份状态：他选了哪种方式、他有没有邮箱、那句问话发没发出去。
+
+    `channel == ""` = **还没答**（第一次收到他的提醒时就是这样）；这时
+    `ask_session` 记着"到哪个会话里去问他"（他当时说话的地方），问出去之后清掉——
+    **只问一次**（用户 2026-10-08：以后 @ 一句就够）。
+    """
 
     person_id: str
-    channel: str
+    channel: str = CHANNEL_UNSET
     email: str = ""
+    #: 还没问出去时：问在哪个会话 / 哪个群 / 提醒的是什么事（问话里要带上它）。
+    ask_session: str = ""
+    ask_group: str = ""
+    ask_what: str = ""
 
     @property
     def has_email(self) -> bool:
         return bool(self.email)
 
+    @property
+    def needs_ask(self) -> bool:
+        """**该问他"怎么叫你"吗**：他还没答，而且那句问话还没发出去过。"""
+
+        return not self.channel and bool(self.ask_session)
+
 
 @dataclass(frozen=True, slots=True)
 class Reminder:
-    """一条到点提醒。`at` 是**核心算好的绝对时刻**（epoch 秒）——插件不做时间推算。"""
+    """一条到点提醒。`at` 是**核心算好的绝对时刻**（epoch 秒）——插件不做时间推算。
+
+    `channel == ""` = 收下时他还没答"怎么叫你"；到点仍没答，就按**他当时说话的地方**
+    叫他（群里说的就群里 @、私聊说的就私聊），并把这次的选择记下来。
+    """
 
     key: str
     person_id: str
     session_id: str
     group_id: str
-    channel: str
     at: float
     what: str
+    channel: str = CHANNEL_UNSET
     state: str = WAITING
     tries: int = 0
     last_error: str = ""
+    #: **已经告诉过他"先私聊我一次"了**（核心回 `rejected` 时那条人话只发一次，
+    #: 不然他每拍都会收到一遍，那是骚扰）。
+    told_no_session: bool = False
 
     @property
     def live(self) -> bool:
-        """还算"待发"（没发出去、也没被取消）。"""
+        """还算"待发"（没发出去、也没被取消 / 放弃）。"""
 
         return self.state in (WAITING, FAILED)
 
@@ -118,7 +150,8 @@ class Reminder:
                 "session_id": self.session_id, "group_id": self.group_id,
                 "channel": self.channel, "at": self.at, "what": self.what,
                 "state": self.state, "tries": self.tries,
-                "last_error": self.last_error}
+                "last_error": self.last_error,
+                "told_no_session": self.told_no_session}
 
 
 class JsonlLog:
@@ -190,36 +223,72 @@ class RemindStore:
     # --- 人 -----------------------------------------------------------------
 
     def preference(self, person_id: str) -> Preference | None:
-        """他上次选的那种方式；从没被问过就是 `None`（= 该问一次）。"""
+        """这个人的那份状态；从没被问过就是 `None`。"""
 
         event = self._people.replay().get(str(person_id))
         if event is None:
             return None
-        channel = str(event.get("channel") or "")
-        if channel not in CHANNELS:
-            return None
-        return Preference(person_id=str(person_id), channel=channel,
-                          email=str(event.get("email") or ""))
+        return Preference(person_id=str(person_id),
+                          channel=str(event.get("channel") or CHANNEL_UNSET),
+                          email=str(event.get("email") or ""),
+                          ask_session=str(event.get("ask_session") or ""),
+                          ask_group=str(event.get("ask_group") or ""),
+                          ask_what=str(event.get("ask_what") or ""))
+
+    def _write_person(self, person_id: str, **fields: str) -> Preference:
+        event = {"key": str(person_id), "at": self._clock()}
+        event.update(fields)
+        self._people.append(event)
+        return self.preference(person_id)  # type: ignore[return-value]
 
     def remember_person(self, person_id: str, *, channel: str | None = None,
                         email: str | None = None) -> Preference:
-        """记下/刷新这个人的方式与地址。**只在新值非空时覆盖**（免得一次没带地址就抹掉）。
+        """记下/刷新这个人的方式与地址；**没给的那几项保持原样**。
 
         地址是核心递过来的那一份（见模块头）；`email=""` 表示"这次核心没给"，
-        不等于"他没有邮箱"，所以不覆盖。
+        不等于"他没有邮箱"，所以不覆盖。`channel=""` 同理（那是"还没答"）。
         """
 
         current = self.preference(person_id)
-        keep_channel = current.channel if current is not None else ""
-        keep_email = current.email if current is not None else ""
-        if channel is not None and channel in CHANNELS:
-            keep_channel = channel
-        if email:
-            keep_email = str(email)
-        event = {"key": str(person_id), "channel": keep_channel, "email": keep_email,
-                 "at": self._clock()}
-        self._people.append(event)
-        return Preference(person_id=str(person_id), channel=keep_channel, email=keep_email)
+        keep = current if current is not None else Preference(person_id=str(person_id))
+        return self._write_person(person_id,
+                                  channel=str(channel) if channel else keep.channel,
+                                  email=str(email) if email else keep.email,
+                                  ask_session=keep.ask_session,
+                                  ask_group=keep.ask_group, ask_what=keep.ask_what)
+
+    def note_ask(self, person_id: str, *, session_id: str, group_id: str,
+                 what: str) -> Preference:
+        """记下"到哪个会话里问他怎么叫他"（**问出去之前**一直留着）。"""
+
+        current = self.preference(person_id)
+        keep = current if current is not None else Preference(person_id=str(person_id))
+        return self._write_person(person_id, channel=keep.channel, email=keep.email,
+                                  ask_session=str(session_id),
+                                  ask_group=str(group_id), ask_what=str(what))
+
+    def clear_ask(self, person_id: str) -> Preference | None:
+        """那句问话发出去了（或他答了）→ 清掉，**以后不再问**。"""
+
+        current = self.preference(person_id)
+        if current is None:
+            return None
+        return self._write_person(person_id, channel=current.channel, email=current.email,
+                                  ask_session="", ask_group="", ask_what="")
+
+    def asking(self) -> tuple[Preference, ...]:
+        """**该问还没问**的那几个人（问话还没发出去）。"""
+
+        found: list[Preference] = []
+        for key, event in self._people.replay().items():
+            if str(event.get("channel") or "") or not str(event.get("ask_session") or ""):
+                continue
+            found.append(Preference(person_id=str(key),
+                                    email=str(event.get("email") or ""),
+                                    ask_session=str(event.get("ask_session") or ""),
+                                    ask_group=str(event.get("ask_group") or ""),
+                                    ask_what=str(event.get("ask_what") or "")))
+        return tuple(sorted(found, key=lambda item: item.person_id))
 
     # --- 提醒 ---------------------------------------------------------------
 
@@ -227,19 +296,20 @@ class RemindStore:
         found: dict[str, Reminder] = {}
         for key, event in self._reminders.replay().items():
             channel = str(event.get("channel") or "")
-            if channel not in CHANNELS:
-                continue
+            if channel and channel not in CHANNELS:
+                continue                      # 认不出的渠道：跳过（不猜），别带走整份数据
             found[key] = Reminder(
                 key=key,
                 person_id=str(event.get("person_id") or ""),
                 session_id=str(event.get("session_id") or ""),
                 group_id=str(event.get("group_id") or ""),
-                channel=channel,
                 at=float(event.get("at") or 0.0),
                 what=str(event.get("what") or ""),
+                channel=channel,
                 state=str(event.get("state") or WAITING),
                 tries=int(event.get("tries") or 0),
                 last_error=str(event.get("last_error") or ""),
+                told_no_session=bool(event.get("told_no_session") or False),
             )
         return found
 
@@ -251,7 +321,7 @@ class RemindStore:
         return reminder
 
     def add(self, *, person_id: str, session_id: str, group_id: str, at: float,
-            what: str, channel: str) -> Reminder:
+            what: str, channel: str = CHANNEL_UNSET) -> Reminder:
         """收下一条提醒。**同一条再来一次就是同一条**（主键一样，覆盖成待发）。"""
 
         key = reminder_key(person_id, session_id, at, what)
@@ -259,15 +329,14 @@ class RemindStore:
                                     session_id=str(session_id), group_id=str(group_id),
                                     channel=str(channel), at=float(at), what=str(what)))
 
-    def list_for(self, person_id: str, *, now: float | None = None,
-                 include_finished: bool = False) -> tuple[Reminder, ...]:
+    def list_for(self, person_id: str, *, now: float | None = None) -> tuple[Reminder, ...]:
         """这个人**还没发出去**的提醒，按时刻先后排。"""
 
         moment = self._clock() if now is None else float(now)
         found = [item for item in self._all().values()
                  if item.person_id == str(person_id)
                  and item.at > moment - 86400      # 一天以前的不再列（早该发过了）
-                 and (include_finished or item.live)]
+                 and item.state in (WAITING, FAILED)]
         return tuple(sorted(found, key=lambda item: (item.at, item.key)))
 
     def mark_sent(self, key: str) -> Reminder | None:
@@ -288,6 +357,56 @@ class RemindStore:
         if item is None or not item.live:
             return None
         return self._replace(item, state=CANCELLED)
+
+    def adopt_channel(self, person_id: str, channel: str) -> int:
+        """他刚选了 `channel` → 把这个人**还没定方式**的待发提醒一起改成它。
+
+        为什么必须有这一步：他第一次说"8 点提醒我交作业"时那条提醒是**在他答之前**
+        收下的（`channel=""`）。他随后选了"私聊"，那条提醒要是还留着"没定"，
+        到点就会按"他当时说话的地方"（可能是群里）叫他——**与他的选择相反**。
+        返回改了几条。
+        """
+
+        if channel not in CHANNELS:
+            return 0
+        changed = 0
+        for item in self._all().values():
+            if item.person_id == str(person_id) and item.live and not item.channel:
+                self._replace(item, channel=str(channel))
+                changed += 1
+        return changed
+
+    def mark_pending(self, key: str, reason: str) -> Reminder | None:
+        """这次**没有出口**（对面拒收 / 找不到那个人 / 发送口还没接上）→ 留在待发。
+
+        只把原因记下来：状态不动、**不**加 `tries`——它不是"发失败了"，
+        下一拍（或者他私聊过她之后）照样要发。
+        """
+
+        item = self.get(key)
+        if item is None:
+            return None
+        return self._replace(item, state=WAITING, last_error=str(reason)[:200])
+
+    def mark_given_up(self, key: str, error: str) -> Reminder | None:
+        """核心说"别重发"（`uncertain`：不知道那条到底出去没有）→ 记成不再试。
+
+        **不**把它算成"待发"：`list_for` 与 `due` 都不再碰它（它不会再发了），
+        原因留在数据里，日志里也有那一行。
+        """
+
+        item = self.get(key)
+        if item is None:
+            return None
+        return self._replace(item, state=GIVEN_UP, last_error=str(error)[:200])
+
+    def mark_told(self, key: str) -> Reminder | None:
+        """那句"先私聊我一次"已经跟他说过了（**只说一次**）。"""
+
+        item = self.get(key)
+        if item is None:
+            return None
+        return self._replace(item, told_no_session=True)
 
     def set_channel(self, key: str, channel: str) -> Reminder | None:
         item = self.get(key)

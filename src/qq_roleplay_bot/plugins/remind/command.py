@@ -4,16 +4,19 @@
 
 两件事分清楚：
 
-- **"8 点提醒我交作业"是对话调起**（用户明确要求，核心在它那次判定里认出来）；
-- **"看 / 改我的提醒"这条入口形态由我判断**（用户：优先对话、次选命令、说明理由）。
+- **"8 点提醒我交作业"是对话调起**（用户明确要求）：核心在它那次判定里认出来，
+  调 `registry.remind` 递给插件——这一条一个字都没走命令；
+- **"看 / 改我的提醒"这条入口的形态由我判断**（用户：优先对话、次选命令、说明理由）。
 
-我选命令，理由是一条硬的：**对话那条路要核心先认得这句话**（判定里多一个字段），
-而核心那一半当时还没提交完；命令这条路的核心契约（`name` / `min_level` / `match` /
-`handle`）早就稳了，**插件这一侧就能落地、今天就能用**。
+我选命令，理由是两条硬的：
 
-对话那条路我给留好了：真正的活干在 `RemindCapability.listing()` / `cancel()` /
-`set_channel()` 里，将来核心认得"看我的提醒"时直接调这三个函数，
-**命令这条入口用的就是同一份**——两处不会分叉。
+1. **对话那条路要核心先认得那句话**（判定里多一个字段），而核心那一侧今天只认
+   `<remind>时间|事情`；命令的契约（`name` / `min_level` / `match` / `handle`）早就稳了，
+   **插件这一侧就能落地、今天就能用**。
+2. **"他答了那句问话"也只能从这条路进来**：核心只在认到提醒请求时调插件，
+   他回一个"2"不会走到插件这一侧。所以"选方式"这个动作和"看 / 改"合成同一条入口，
+   由它调 `note_reply()` ——**核心将来若愿意把"正在等回答的那一句"转给插件，
+   调的是同一个函数**，两处不会分叉。
 
 ## 隐私这件事说清楚
 
@@ -30,7 +33,7 @@ from .remind import USAGE
 _PATTERN = re.compile(r"^/(?:提醒|remind)\s*(?P<rest>.*)$", re.IGNORECASE | re.DOTALL)
 #: "删 2" / "取消第 2 条" / "删掉 2" 都认；数字从 1 数起。
 _DELETE = re.compile(r"^(?:删|删除|删掉|取消)\s*第?\s*(\d+)\s*条?$")
-#: "换 2" / "换邮箱" 都认。
+#: "换 2" / "换邮箱" 都认（"换"后面那一段交给 `note_reply` 去认）。
 _SWITCH = re.compile(r"^(?:换|换个|改成)\s*(.+)$")
 
 
@@ -63,11 +66,15 @@ class RemindCommand:
             return None
         rest = self._rest(message)
         if not rest:
-            return await self._capability.listing(person)
+            return self._capability.listing(person)
         found = _DELETE.match(rest)
         if found is not None:
-            return await self._capability.cancel(person, int(found.group(1)))
+            return self._capability.cancel(person, int(found.group(1)))
         found = _SWITCH.match(rest)
         if found is not None:
-            return await self._capability.set_channel(person, found.group(1).strip())
+            # "他答了那句问话"与"换方式"是同一件事：都走 `note_reply`，
+            # 它负责记下来 + 回一句（认不出就再问一次）。
+            return self._capability.note_reply(
+                person, found.group(1).strip(),
+                session_id=str(getattr(message, "session_id", "") or ""))
         return USAGE
