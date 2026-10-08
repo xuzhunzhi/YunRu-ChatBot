@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from qq_roleplay_bot.plugins import PluginRegistry
-from qq_roleplay_bot.remind import RemindRequest
+from qq_roleplay_bot.remind import RemindEmailBook, RemindRequest
 from qq_roleplay_bot.stage3_main import DialogueEngine
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 
@@ -106,7 +106,9 @@ def test_the_plugin_gets_the_request_with_an_absolute_time() -> None:
 
     handed: list[RemindRequest] = []
     engine, _, _ = _engine(handed.append)
-    engine._remind_emails["100"] = "lele@example.com"   # 核心手里已经有他的邮箱
+    # 核心手里已经有他的邮箱（内存版的书：这一条只测投递，不碰磁盘）。
+    engine._remind_emails = RemindEmailBook(persist=False)
+    engine._remind_emails.remember("100", "lele@example.com")
     with patch.dict(os.environ, TZ):
         asyncio.run(engine.handle(_message()))
 

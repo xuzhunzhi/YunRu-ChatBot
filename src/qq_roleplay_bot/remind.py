@@ -14,19 +14,38 @@
 3. `find_email()`：从一句话里认出邮箱（保守正则）；
 4. `RemindRequest`：递给**插件**的那个不可变对象——只有它需要的那几个值
    （谁、什么时候、提醒什么、邮箱、发到哪个会话）。**它不携带引擎、不携带记忆服务、
-   也不携带任何回调**，所以插件拿不到记忆 API（测试逐个字段钉住）。
+   也不携带任何回调**，所以插件拿不到记忆 API（测试逐个字段钉住）；
+5. `RemindEmailBook`：**核心自己那一份按人的邮箱**（用户在聊天里说过的那一次），
+   **落盘在核心自己的状态文件**里（`data/remind_emails.json`，**不是** `data/memory/`），
+   重启后仍在——他上次给过的地址不该再问一遍。**它不是"从记忆库回查"**：
+   记忆库那条路只负责把"他说过邮箱"这句话**记进去**（按人），回查这一步没有做，
+   也正因为如此才有这个书（口径见独立审查 2026-10-09 第 10 条）。
 
 插件那一半（收下之后怎么存、到点怎么发、后台节拍）在插件里，核心一个字不管；
 插件没装时核心**什么都不做**（不报错、不回复）——见 `DialogueEngine.remind` 的说明。
 """
 from __future__ import annotations
 
+import json
+import logging
+import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from . import dev_config
+
+logger = logging.getLogger(__name__)
+
+#: 核心那一份按人邮箱最多记多少人（超出淘汰**最旧**的一条）。
+#: 与 `stage3_main` 里那些"按人小表"同一个纪律：有上限，不许无限长。
+MAX_REMIND_EMAILS = 256
+
+#: 状态文件的版本号（照 `state_store.STATE_VERSION` 的做法：读出来对不上就按空的重来）。
+REMIND_EMAILS_VERSION = 1
 
 #: 相对说法的单位：`20分钟后` / `3小时后` / `2天后` / `半小时后`。
 #: **只收这些写法**；"一会儿""晚点""待会儿"一律不认（不猜）。
@@ -66,8 +85,11 @@ class RemindRequest:
     """递给插件的那一条提醒。**只有这几个字段**——没有引擎、没有记忆服务、没有回调。
 
     `at` 是**绝对时刻**（epoch 秒，墙上时间）：核心算好了才交出去，插件不做时间推算
-    （它拿不到"群里这边"是哪个时区）。`email` 是**核心查好递过来的值**（可能为空串）：
-    插件要邮箱只能从这里拿，拿不到记忆。
+    （它拿不到"群里这边"是哪个时区）。`email` 是**核心手里那一份按人的邮箱**
+    （可能为空串）：来自他在聊天里说过的那一次，核心记在 `RemindEmailBook` 里
+    （落盘，重启后仍在）。**没有"从记忆库回查"这一步**——记忆库那条路只负责把
+    "他说过邮箱"这句话记进去（按人）；这里如实说清，不是"查出来的"
+    （独立审查 2026-10-09 第 10 条）。插件要邮箱只能从这里拿，拿不到记忆。
     """
 
     person_id: str
@@ -118,6 +140,142 @@ def find_email(text: str) -> str | None:
 
     found = _EMAIL.search(text or "")
     return found.group(0) if found else None
+
+
+def state_persistence_enabled() -> bool:
+    """是否落盘（**与运行状态那套同一个开关**：`QQBOT_STATE_PERSIST=0/false/off/no` 关掉）。
+
+    为什么要落盘：用户要求"**邮箱只第一次要，之后记住**"（2026-10-08）——只在内存里
+    记着，重启就忘，等于每次都重新问一遍（独立审查 2026-10-09 第 10 条）。
+
+    为什么**不**直接 `from .runtime import state_persistence_enabled`：
+    `runtime` 在模块层 import 本模块（它要 `RemindDelivery` / `RemindSendResult`），
+    模块层再反向 import 就是循环。这里**只在调用时**懒取那一份实现，
+    逻辑一处都不重复（离线测试入口把它设成 0，所以测试默认不碰磁盘）。
+    """
+
+    from .runtime import state_persistence_enabled as enabled
+
+    return enabled()
+
+
+def remind_emails_path() -> Path:
+    """核心那份按人邮箱落在哪：`QQBOT_REMIND_EMAILS_FILE` → `QQBOT_DATA_DIR` → `data/`。
+
+    写法照 `state_store.state_path_default()`。**刻意不是 `data/memory/`**：
+    那是记忆库（模型写的东西），这里是核心自己的一条流程状态，两回事。
+    """
+
+    explicit = os.environ.get("QQBOT_REMIND_EMAILS_FILE", "").strip()
+    if explicit:
+        return Path(explicit)
+    base = os.environ.get("QQBOT_DATA_DIR", "").strip()
+    root = Path(base) if base else Path(__file__).resolve().parents[2] / "data"
+    return root / "remind_emails.json"
+
+
+class RemindEmailBook:
+    """**核心那一份按人的邮箱**：落盘、重启后仍在、读写失败一律降级。
+
+    形状与失败口径都照 `state_store.RuntimeStateStore`：标准库 JSON、原子写入
+    （临时文件 + `os.replace`）、任何读写失败只记一行日志并"按空的重来"——
+    绝不阻塞对话。
+
+    **它不碰记忆库**：路径自己算（`remind_emails_path`），默认落在 `data/` 下。
+    """
+
+    def __init__(self, path: Path | str | None = None, *,
+                 limit: int = MAX_REMIND_EMAILS, persist: bool | None = None) -> None:
+        self.path = Path(path) if path is not None else remind_emails_path()
+        self.limit = max(1, int(limit))
+        self.persist = state_persistence_enabled() if persist is None else bool(persist)
+        self.last_error = ""
+        self._emails: dict[str, str] = {}
+        if self.persist:
+            self._load()
+
+    # --- 读 ---------------------------------------------------------------
+
+    def get(self, person_id: str, default: str = "") -> str:
+        return self._emails.get(str(person_id), default)
+
+    def as_dict(self) -> dict[str, str]:
+        return dict(self._emails)
+
+    def __contains__(self, person_id: object) -> bool:
+        return str(person_id) in self._emails
+
+    def __len__(self) -> int:
+        return len(self._emails)
+
+    def _load(self) -> None:
+        try:
+            raw = self.path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            self.last_error = type(exc).__name__
+            logger.warning("remind_emails_read_failed category=%s", type(exc).__name__)
+            return
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            self.last_error = "invalid_json"
+            logger.warning("remind_emails_invalid_json; starting empty")
+            return
+        if not isinstance(data, dict) or data.get("version") != REMIND_EMAILS_VERSION:
+            self.last_error = "unsupported_version"
+            logger.warning("remind_emails_unsupported_version; starting empty")
+            return
+        people = data.get("emails")
+        if not isinstance(people, dict):
+            self.last_error = "invalid_shape"
+            logger.warning("remind_emails_invalid_shape; starting empty")
+            return
+        # 只收"人 → 邮箱"这种两段字符串；别的键值一律丢掉（坏文件不许污染内存）。
+        for key, value in people.items():
+            if isinstance(key, str) and isinstance(value, str) and key and value:
+                self._emails[key] = value
+        while len(self._emails) > self.limit:
+            self._emails.pop(next(iter(self._emails)), None)
+
+    # --- 写 ---------------------------------------------------------------
+
+    def remember(self, person_id: str, email: str) -> None:
+        """记下他的邮箱（**立刻落盘**）——下一次提醒、甚至重启之后都还用得上。"""
+
+        person_id, email = str(person_id), str(email)
+        if not person_id or not email:
+            return
+        self._emails[person_id] = email
+        while len(self._emails) > self.limit:
+            self._emails.pop(next(iter(self._emails)), None)
+        self._save()
+
+    def _save(self) -> None:
+        if not self.persist:
+            return
+        payload = json.dumps({"version": REMIND_EMAILS_VERSION, "emails": self._emails},
+                             ensure_ascii=False, indent=2)
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            # 原子写入：同目录临时文件 + 替换（照 `state_store` 的做法）。
+            handle = tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", dir=str(self.path.parent), delete=False,
+                prefix=self.path.name + ".", suffix=".tmp")
+            try:
+                with handle:
+                    handle.write(payload)
+                os.replace(handle.name, self.path)
+            except BaseException:
+                try:
+                    os.unlink(handle.name)
+                except OSError:
+                    pass
+                raise
+        except OSError as exc:
+            self.last_error = type(exc).__name__
+            logger.warning("remind_emails_write_failed category=%s", type(exc).__name__)
 
 
 def _clock(body: str) -> tuple[int, int] | None:

@@ -51,7 +51,7 @@ from .onebot_ws import OneBotWebSocketTransport
 # 只用媒体标签，不需要插件；这样"有图的消息"这条路径不再从插件 import
 # （原来 `_apply_vision` 里是 `from .vision import replace_media_placeholder`）。
 from .media_segments import replace_media_placeholder
-from .remind import RemindRequest, find_email, parse_remind_time
+from .remind import RemindEmailBook, RemindRequest, find_email, parse_remind_time
 from .trigger import IdleTrigger, MessageDeduplicator
 from .stage3_runtime import (
     CLOSENESS_LABELS,
@@ -127,10 +127,11 @@ ACTIVE_TIMEOUT_SECONDS = 180.0
 # （`dev_config.FOCUS_QUEUE_LIMIT` × 群数），所以这个数只是兜底；从前它是 `set`
 # 且只在排空时清，被停用/排不出去的群会把条目永久留下（2026-10-08 隔离审计 [3]）。
 MAX_RESUMED_IDS = 4096
-# 「到点提醒」要用的两份按人状态（2026-10-08）：每人一份**邮箱**（核心查好递给插件的那份），
-# 以及"还在等他给邮箱"的待办。两个都有上限——照 `_promise` / `_resume_later` 那套：
-# `dict` 的插入序，超了淘汰**最旧**的一条。它们只活在这一轮进程里（重启即弃）。
-MAX_REMIND_EMAILS = 256
+# 「到点提醒」要用的两份按人状态（2026-10-08）：每人一份**邮箱**（核心手里那份，
+# 递给插件用；**落盘**，见 `remind.RemindEmailBook`），以及"还在等他给邮箱"的待办。
+# 两个都有上限——照 `_promise` / `_resume_later` 那套：`dict` 的插入序，超了淘汰
+# **最旧**的一条。邮箱那份重启后仍在（用户要求"只第一次要"）；**待办**只活在这一轮
+# 进程里（重启即弃：那条还没交出去的请求丢了就丢了，他再提一次就是）。
 MAX_REMIND_ASKS = 64
 
 # 冷群里 @ 她时先回的那句"稍等"。随机挑一条，四条属性见 docs/MULTI_GROUP_FOCUS.md：
@@ -1196,11 +1197,15 @@ class DialogueEngine:
         # **缺省 None = 这次部署没有提醒插件**：核心认到提醒意图也什么都不做
         # （不报错、不回复、不留半条状态）——`runtime.build_engine` 只按"有没有"取。
         self.remind = remind
-        #: 提醒用的两份**按人**状态（上限见 `MAX_REMIND_EMAILS` / `MAX_REMIND_ASKS`）：
-        #: `_remind_emails` 是核心查好、要递给插件的那个值；`_remind_asks` 是"他还没给
-        #: 邮箱"的待办（值就是那条还没交出去的请求）。**都只在核心手里**——插件那边
-        #: 只收到一个装好的 `RemindRequest`，没有任何读回记忆的口子。
-        self._remind_emails: dict[str, str] = {}
+        #: 提醒用的两份**按人**状态：
+        #: `_remind_emails` 是**核心自己那一份按人的邮箱**（`remind.RemindEmailBook`：
+        #: 落盘在 `data/remind_emails.json`、重启后仍在——用户要求"邮箱只第一次要"。
+        #: 它**不是从记忆库回查来的**：那个值来自他在聊天里说过的那一次；
+        #: 记忆库那条路只负责把这句话记进去（按人）。独立审查 2026-10-09 第 10 条）。
+        #: `_remind_asks` 是"他还没给邮箱"的待办（值就是那条还没交出去的请求，
+        #: 只在内存里）。**都只在核心手里**——插件那边只收到一个装好的
+        #: `RemindRequest`，没有任何读回记忆的口子。
+        self._remind_emails: RemindEmailBook = RemindEmailBook()
         self._remind_asks: dict[str, RemindRequest] = {}
         # 金句学习学出来的那份**材料**（`quote_learning.QuoteProfile`，可选）。
         # 它只是"读一份本地 JSON 挑几条"，**热路径上一次模型调用都没有**；
@@ -1587,7 +1592,7 @@ class DialogueEngine:
             at=at,
             what=intent.what,
         )
-        email = self._remind_emails.get(message.user_id, "")
+        email = self._remind_emails.get(message.user_id)
         if not email:
             # **还没有他的邮箱**：记下待办，这一轮核心让她顺口问一句（易变段那一行），
             # **先不交给插件**——插件要的是一条装好的请求，值不齐就别递半条过去。
@@ -1623,12 +1628,18 @@ class DialogueEngine:
         """他在聊天里把邮箱说给她 → **核心**记下来（按人）并补交那条待办。
 
         由来（2026-10-08 用户拍板）：**插件绝不碰记忆**。所以邮箱由核心收：
-        先从这一句里认出邮箱（保守正则，认不出就什么都不做、继续等），存进核心那份
-        按人的值（这是"插件要值时由核心查出递给它"里的那个值），再**明确**把它交给
-        **既有那条记忆捕获**（`memory_service.capture`，按人入队）——
+        先从这一句里认出邮箱（保守正则，认不出就什么都不做、继续等），存进核心自己
+        那一份按人的值（`RemindEmailBook`，**落盘、重启后仍在**——用户要求
+        "邮箱只第一次要，之后记住"；独立审查 2026-10-09 第 10 条），
+        再**明确**把它交给**既有那条记忆捕获**（`memory_service.capture`，按人入队）——
         这一步是**故意的**：他这一句常常只是"我的邮箱是 x@y"，走别的路容易被当成
         "不值得记"或被延迟；而这是用户明确给的、流程要用的值。同一个 message_id 在库里
         按事件键去重，所以不会记两遍。
+
+        **两处不是一回事，别混**：书（`data/remind_emails.json`）是核心执行这条流程
+        要用的值，**落盘**；记忆捕获是把"他说过邮箱"这件事记进记忆库（按人），
+        核心**不做**"以后从记忆库回查邮箱"那一步——从前注释里"核心查好"的说法不准，
+        这里改实话。
         """
 
         pending = self._remind_asks.get(message.user_id)
@@ -1637,9 +1648,7 @@ class DialogueEngine:
         email = find_email(message.text or "")
         if email is None:
             return
-        self._remind_emails[message.user_id] = email
-        if len(self._remind_emails) > MAX_REMIND_EMAILS:
-            self._remind_emails.pop(next(iter(self._remind_emails)), None)
+        self._remind_emails.remember(message.user_id, email)
         service = self.memory_service
         if service is not None:
             try:

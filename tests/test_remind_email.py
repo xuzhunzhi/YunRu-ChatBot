@@ -27,7 +27,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
-from qq_roleplay_bot.remind import RemindRequest
+from qq_roleplay_bot.remind import RemindEmailBook, RemindRequest
 from qq_roleplay_bot.stage3_main import DialogueEngine
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 
@@ -157,7 +157,8 @@ def test_without_the_email_the_core_asks_and_does_not_hand_over() -> None:
 def test_the_ask_line_is_gone_once_the_email_is_known() -> None:
     handed: list[RemindRequest] = []
     engine, _, reply, _ = _engine(handed.append)
-    engine._remind_emails["100"] = "lele@example.com"
+    engine._remind_emails = RemindEmailBook(persist=False)   # 内存版：这一条测的是流程
+    engine._remind_emails.remember("100", "lele@example.com")
     with patch.dict(os.environ, TZ):
         asyncio.run(engine.handle(_message(1, "@YunRu 明天8点提醒我交作业")))
 
@@ -182,7 +183,7 @@ def test_the_email_is_captured_into_memory_and_then_handed_over() -> None:
     assert handed[0].at == datetime(2026, 10, 9, 8, tzinfo=timezone(timedelta(hours=8))).timestamp()
     assert handed[0].what == "交作业"
     assert "100" not in engine._remind_asks, "待办没清掉"
-    assert engine._remind_emails["100"] == "lele@example.com"
+    assert engine._remind_emails.get("100") == "lele@example.com"
 
 
 def test_a_later_remind_reuses_the_remembered_email() -> None:
@@ -208,7 +209,7 @@ def test_a_message_without_an_email_keeps_waiting() -> None:
         asyncio.run(engine.handle(_message(1, "@YunRu 明天8点提醒我交作业")))
         asyncio.run(engine.handle(_message(2, "好，你说得对")))
 
-    assert engine._remind_emails == {}, "认不出邮箱却把它存下来了"
+    assert len(engine._remind_emails) == 0, "认不出邮箱却把它存下来了"
     assert handed == []
     assert "100" in engine._remind_asks, "还没给邮箱就把待办清了"
 
@@ -226,7 +227,7 @@ def test_an_email_without_a_pending_remind_is_ignored() -> None:
     with patch.dict(os.environ, TZ):
         asyncio.run(engine.handle(_message(2, "lele@example.com")))
 
-    assert engine._remind_emails == {}, "没在等邮箱也把它记下来了"
+    assert len(engine._remind_emails) == 0, "没在等邮箱也把它记下来了"
     assert handed == []
     assert engine._remind_asks == {}
 
