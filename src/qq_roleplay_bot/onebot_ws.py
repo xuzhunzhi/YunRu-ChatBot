@@ -371,22 +371,34 @@ class OneBotWebSocketTransport:
 
         只有给自己人发提醒这一处用它（2026-10-08）：@ 段由核心拼，插件递进来的
         永远只是一段正文。
+
+        **`user_id` 必须是数字**（2026-10-09 独立审查第 6 条）：`at` 段的 `qq` 直接进
+        对面协议，而 `_id_value` 对非数字**原样返回**——实测能拼出
+        `{"type": "at", "data": {"qq": "all"}}`，那是 NapCat 的"@全体"语义。
+        （要打得中得先能伪造事件，所以是低危；一行校验就能关掉，那就关掉。）
+        非数字（空串 / `all` / `123abc` / 全角数字…）一律**当成没有 @ 能力**：
+        **退回纯文本、消息照发**——与上面"没有就退"同一条规矩。
         """
 
         if not text:
             return
+        qq = str(user_id).strip()
+        if not (qq.isascii() and qq.isdigit()):
+            logger.info("send_at_fallback reason=non_numeric_user_id")
+            await self._send_text(target, text, reply_to=reply_to)
+            return
         segments: list[dict[str, object]] = []
         if reply_to:
             segments.append({"type": "reply", "data": {"id": reply_to}})
-        segments.append({"type": "at", "data": {"qq": self._id_value(user_id)}})
+        segments.append({"type": "at", "data": {"qq": self._id_value(qq)}})
         segments.append({"type": "text", "data": {"text": " " + text}})
         params: dict[str, object] = {"message": segments}
         if target.group_id is not None:
             params.update(message_type="group", group_id=self._id_value(target.group_id))
         else:
             params.update(message_type="private", user_id=self._id_value(target.user_id or ""))
-        await self._send_logged("send_msg", params, target, body=f"@{user_id} {text}", kind="text",
-                                reply_to=reply_to)
+        await self._send_logged("send_msg", params, target, body=f"@{qq} {text}", kind="text",
+                                reply_to=reply_to, part=None, total=None, origin="")
 
     async def send_image(self, target: MessageTarget, png: bytes, *, reply_to: str = "") -> None:
         """发一张图（帮助卡片用）。`png` 是本地字节，走 **base64** 消息段。
