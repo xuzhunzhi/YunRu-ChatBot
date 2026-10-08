@@ -237,7 +237,7 @@ class RemindCapability:
             return
         self._store.add(person_id=person, session_id=session_id, group_id=group_id,
                         at=at, what=what, channel=CHANNEL_UNSET)
-        if not known.ask_session:
+        if not known.ask_session and not known.asked:
             self._store.note_ask(person, session_id=session_id, group_id=group_id, what=what)
             logger.info("remind_ask_queued person=%s（第一次：要问一句怎么叫他）", person)
 
@@ -265,7 +265,7 @@ class RemindCapability:
         if picked == CHANNEL_MAIL and not has_email:
             return NEED_EMAIL                # 没地址就先别记，让他把地址发来
         self._store.remember_person(person_id, channel=picked)
-        self._store.clear_ask(person_id)
+        self._store.mark_asked(person_id)
         # 他答之前收下的那几条（`channel=""`）也归到他刚选的方式上——否则那几条到点会
         # 按"他当时说话的地方"叫他，与他的选择相反。
         self._store.adopt_channel(person_id, picked)
@@ -357,7 +357,7 @@ class RemindCapability:
                 self.ask_text(person.ask_what, has_email=person.has_email),
                 group_id=group_id)
             if outcome == SENT_OUT and delivery is not None:
-                self._store.clear_ask(person.person_id)
+                self._store.mark_asked(person.person_id)
                 handed.append(delivery)
             elif outcome == PENDING:
                 gaps.append(why)
@@ -383,7 +383,7 @@ class RemindCapability:
                 if not item.channel:
                     # 他没答就用他当时说话的地方——把这次的选择记下来，以后不再问。
                     self._store.remember_person(item.person_id, channel=channel)
-                    self._store.clear_ask(item.person_id)
+                    self._store.mark_asked(item.person_id)
                 self._store.mark_sent(item.key)
                 if delivery is not None:
                     handed.append(delivery)

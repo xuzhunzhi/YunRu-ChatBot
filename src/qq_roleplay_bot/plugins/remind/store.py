@@ -100,6 +100,9 @@ class Preference:
     ask_session: str = ""
     ask_group: str = ""
     ask_what: str = ""
+    #: **已经问过他了**（不管他答没答）。有了它，"只第一次问"才是真的按人只问一次——
+    #: 否则他每再提一条提醒，插件都会再问一遍"你想我怎么叫你"。
+    asked: bool = False
 
     @property
     def has_email(self) -> bool:
@@ -107,9 +110,9 @@ class Preference:
 
     @property
     def needs_ask(self) -> bool:
-        """**该问他"怎么叫你"吗**：他还没答，而且那句问话还没发出去过。"""
+        """**该问他"怎么叫你"吗**：他还没答、还没问过，而且问话已经排上了。"""
 
-        return not self.channel and bool(self.ask_session)
+        return not self.channel and not self.asked and bool(self.ask_session)
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,7 +236,8 @@ class RemindStore:
                           email=str(event.get("email") or ""),
                           ask_session=str(event.get("ask_session") or ""),
                           ask_group=str(event.get("ask_group") or ""),
-                          ask_what=str(event.get("ask_what") or ""))
+                          ask_what=str(event.get("ask_what") or ""),
+                          asked=bool(event.get("asked") or False))
 
     def _write_person(self, person_id: str, **fields: str) -> Preference:
         event = {"key": str(person_id), "at": self._clock()}
@@ -255,7 +259,8 @@ class RemindStore:
                                   channel=str(channel) if channel else keep.channel,
                                   email=str(email) if email else keep.email,
                                   ask_session=keep.ask_session,
-                                  ask_group=keep.ask_group, ask_what=keep.ask_what)
+                                  ask_group=keep.ask_group, ask_what=keep.ask_what,
+                                  asked=keep.asked)
 
     def note_ask(self, person_id: str, *, session_id: str, group_id: str,
                  what: str) -> Preference:
@@ -265,23 +270,30 @@ class RemindStore:
         keep = current if current is not None else Preference(person_id=str(person_id))
         return self._write_person(person_id, channel=keep.channel, email=keep.email,
                                   ask_session=str(session_id),
-                                  ask_group=str(group_id), ask_what=str(what))
+                                  ask_group=str(group_id), ask_what=str(what),
+                                  asked=keep.asked)
 
-    def clear_ask(self, person_id: str) -> Preference | None:
-        """那句问话发出去了（或他答了）→ 清掉，**以后不再问**。"""
+    def mark_asked(self, person_id: str) -> Preference | None:
+        """那句问话发出去了（或他已经答了）→ 清掉待问，并且**记下"问过了"**。
+
+        两件事一起做是有意的：`asked=True` 才是"只问一次"的保证——他之后再提十条提醒，
+        也不会再收到一遍"你想我怎么叫你"。
+        """
 
         current = self.preference(person_id)
         if current is None:
             return None
         return self._write_person(person_id, channel=current.channel, email=current.email,
-                                  ask_session="", ask_group="", ask_what="")
+                                  ask_session="", ask_group="", ask_what="", asked=True)
 
     def asking(self) -> tuple[Preference, ...]:
-        """**该问还没问**的那几个人（问话还没发出去）。"""
+        """**该问还没问**的那几个人（问话还没发出去、而且从没问过）。"""
 
         found: list[Preference] = []
         for key, event in self._people.replay().items():
             if str(event.get("channel") or "") or not str(event.get("ask_session") or ""):
+                continue
+            if bool(event.get("asked") or False):
                 continue
             found.append(Preference(person_id=str(key),
                                     email=str(event.get("email") or ""),

@@ -214,6 +214,29 @@ def test_the_question_is_asked_once_and_only_once() -> None:
         assert {item.channel for item in waiting} == {S.CHANNEL_PRIVATE}
 
 
+def test_the_question_is_not_repeated_while_he_has_not_answered() -> None:
+    """他还没答的时候：问话**只发一次**，不会每一拍都说一遍"你想我怎么叫你"。"""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        handed: list = []
+        capability = _capability(tmp, core=_core(handed), mail_send=_FakeMail().send_to)
+
+        capability(_request())
+        asyncio.run(capability.flush(now=NOW))
+        assert len(handed) == 1
+        # 他还没答，再跑三拍：一句都不该再问。
+        for _ in range(3):
+            asyncio.run(capability.flush(now=NOW))
+        assert len(handed) == 1, f"问话被重复发了：{[item.text for item in handed]}"
+
+        # 他还没答时又说了一条提醒：**还是只有那一句**问话（不是一人一句）。
+        capability(_request(at=NOW + 3600.0, what="带伞"))
+        asyncio.run(capability.flush(now=NOW))
+        assert len(handed) == 1, "又来一条就又问了一遍"
+        # 问的是**先说**的那一条（问话已经发出去了，不再被后面那条改写）。
+        assert "交作业" in handed[0].text and "带伞" not in handed[0].text
+
+
 def test_the_person_who_never_private_chatted_is_told_the_plain_truth() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         capability = _capability(tmp, core=_core([]), mail_send=_FakeMail().send_to)
