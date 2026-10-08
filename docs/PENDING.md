@@ -72,7 +72,7 @@
 | **边沿检测**（"一次只发一次"的全部实现） | `runtime.py:1318±` `_DisconnectNotifier`：迁移表在 `:1324-1331`；广播侧 `:1414` |
 | **插件** | `stage4-on-host:src/qq_roleplay_bot/plugins/outage_notice/`（`plugin.py` / `outage_notice.py` / `__init__.py`） |
 | **总闸** | `dev/src/qq_roleplay_bot/dev_config.py:209` `DISCONNECT_NOTICE_ENABLED` ← `QQBOT_DISCONNECT_NOTICE`（默认开） |
-| **邮件这一层** | `stage4-on-host:src/qq_roleplay_bot/dev_config.py:337` `MAIL_OUTAGE_NOTICE_ENABLED` ← `QQBOT_MAIL_OUTAGE_NOTICE`。**这个开关不在 `dev`（stage3-clean）的 `dev_config` 里**——它随 `e84dc7e` 加在插件分支上（那个提交动了核心文件 `src/qq_roleplay_bot/dev_config.py`，+8 行） |
+| **邮件这一层** | `dev/src/qq_roleplay_bot/dev_config.py` `MAIL_OUTAGE_NOTICE_ENABLED` ← `QQBOT_MAIL_OUTAGE_NOTICE`。**这个开关原来只在插件分支上**——它随 `e84dc7e` 加在插件线的**核心文件** `src/qq_roleplay_bot/dev_config.py`（+8 行）。现已作为一条独立的 Stage 3 提交**移回本体**：它与 `DISCONNECT_NOTICE_ENABLED` / `AUTO_APPROVE_JOIN` / `VISION_*` / `WEBUI_*` 同属"本体声明开关、插件读它"那一类，本体 `dev_config.py` 里本来就有这些 |
 
 ### 3.2 依赖方向（把话说准，别读反）
 
