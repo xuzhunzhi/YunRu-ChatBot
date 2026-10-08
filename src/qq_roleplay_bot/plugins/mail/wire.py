@@ -160,6 +160,51 @@ def build_operator_mail_sender(seams):
     return send_operator_mail
 
 
+def build_address_mail_sender(seams):
+    """把**"寄给某个地址"**这条窄能力放上注册表（`registry.mail.send_to`）。
+
+    由来（2026-10-08）：到点提醒的邮箱那一路要寄给**那个人**，而
+    `build_operator_mail_sender` 开放的那一条收件人写死是操作者（`MAIL_REPORT_TO`）。
+    两条能力**分开登记、各自独立**：合成一条会让"能不能寄给一个指定地址"与
+    "操作者是谁"缠在一起，而它们本来是两件事。
+
+    ## 这一条比上一条宽在哪（如实说）
+
+    上一条是"给操作者发一封"，用法指定不了收件人；这一条**收件人由调用方给**。
+    所以闸门放在**接缝**那一侧（`MailSeams.send_to` → `_one_address`）：一次只收
+    **一个**地址、地址必须是地址的形状、换行与多收件人一律拒。这一侧只做执行——
+    与上一条**同一个** `MailClient`、同一套配置、同一套错误（`MailError`），
+    **没有第二套发信逻辑**。
+
+    ## 与开关的关系（与上一条同一口径）
+
+    不看 `MAIL_REPORT_ENABLED`（那是"每天那封汇报发不发"），也不看 `MAIL_REPLY_ENABLED`。
+    发不发由**使用者**决定：到点提醒那一侧按人存着他的地址，**用户选了**才发。
+
+    ## 已经有人提供过就不覆盖（同上一条那次踩坑）
+
+    理由与 `build_operator_mail_sender` 那段一样：`discover()` 会把前置 `mail` 装一遍，
+    测试或部署自己先塞的那一条不该被静默换掉。
+    """
+
+    from .mail_client import MailClient
+
+    existing = getattr(seams, "address_sender", None)
+    if callable(existing):
+        logger.info("寄给某个地址的能力已经有人提供过，本次不覆盖")
+        return existing
+    client = MailClient(dev_config.MAIL_CLI, workdir=mail_workdir())
+
+    async def send_to(address: str, subject: str, body: str) -> dict:
+        """寄给**一个**地址（"是不是一个合法地址"由接缝那一侧把关，这里只执行）。"""
+
+        return await client.send(to=str(address), subject=str(subject), body=str(body))
+
+    seams.provide_address_sender(send_to)
+    logger.info("邮件能力已开放给别的插件：可以寄给指定的一个地址")
+    return send_to
+
+
 def build_mail_channel(chat):
     """装配读信回信。关掉开关、没配主人地址就返回 None。
 

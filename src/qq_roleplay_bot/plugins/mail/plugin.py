@@ -33,6 +33,11 @@ def register(registry) -> None:
     # 方向不许反：**这一个提供，那一个使用**；mail 不认识任何使用者的名字。
     wire.build_operator_mail_sender(registry.mail)
 
+    # **第二条前置能力**：把"寄给指定的一个地址"也开放出去（2026-10-08）。
+    # 到点提醒（`plugins/remind/`）的邮箱那一路要寄给**那个人**，而上面那一条的
+    # 收件人写死是操作者——两条能力各管各的，互不替换（旧的掉线通知一个字没动）。
+    wire.build_address_mail_sender(registry.mail)
+
     # 读信回信：只拿窄接缝 `chat`（四个函数），**不拿引擎**。
     channel = wire.build_mail_channel(registry.chat)
     if channel is not None:

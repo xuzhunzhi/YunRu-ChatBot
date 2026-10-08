@@ -129,6 +129,7 @@ import importlib
 import logging
 import os
 import pathlib
+import re
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -344,6 +345,29 @@ async def _maybe_await(value: object) -> object:
     if hasattr(value, "__await__"):
         return await value  # type: ignore[misc]
     return value
+
+
+#: 一个地址的形状（与 `remind.find_email` 同一个口径：必须是完整形状）。
+_ADDRESS_SHAPE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
+
+
+def _one_address(address: object) -> str:
+    """把"收件人"检查成**一个**地址的形状；不合法一律抛 `ValueError`。
+
+    拒掉的三类（`MailSeams.send_to` 的窄就窄在这里）：
+
+    - 空 / 只有空白：没有收件人就别发；
+    - 逗号、分号、空格分隔的**多个**地址：一次只寄给一个人；
+    - 换行（`\\r` / `\\n`）与任何不像地址的东西：头注入与"粘一段别的东西进去"都从这儿进来。
+
+    为什么校验放在**接缝这一侧**而不是 mail 插件里：mail 只是执行者，闸门要在
+    "谁能要求发"这一侧——换一个邮件实现，这条窄口仍然窄。
+    """
+
+    text = str(address if address is not None else "").strip()
+    if not _ADDRESS_SHAPE.match(text):
+        raise ValueError(f"不是一个邮箱地址：{text!r}")
+    return text
 
 
 @dataclass(frozen=True, slots=True)
@@ -663,10 +687,17 @@ class MailSeams:
 
     #: `(subject, body) -> await`：登记上来的发信函数；缺省 `None` = 这次部署没有 mail。
     #: 与 `LinkSeams.disconnect_sink` 同一形状（注册表自己持有名单，不需要引擎注入）。
-    __slots__ = ("operator_sender",)
+    __slots__ = ("operator_sender", "address_sender")
 
-    def __init__(self, operator_sender: object = None) -> None:
+    def __init__(self, operator_sender: object = None,
+                 address_sender: object = None) -> None:
         self.operator_sender = operator_sender
+        #: `(address, subject, body) -> await`：**寄给指定的一个地址**那条窄口
+        #: （2026-10-08 加，为了"到点提醒"的邮箱那一路）。与 `operator_sender` 是
+        #: **两条独立的能力**：那一条的收件人写死在 mail 自己的配置里（操作者），
+        #: 这一条由**使用者**指定一个地址。缺省 `None` = 这次部署不提供，
+        #: 使用者据此**不提供**那一路功能（fail-closed，不是"发个空的试试"）。
+        self.address_sender = address_sender
 
     def provide(self, sender: object) -> None:
         """**前置插件**（`mail`）把"发一封给操作者的邮件"放上来。
@@ -700,6 +731,48 @@ class MailSeams:
         if not callable(sender):
             raise RuntimeError("没有插件提供发信能力（registry.mail 是空的）")
         return await _maybe_await(sender(str(subject), str(body)))
+
+    # --- 第二条窄口：寄给**指定的一个**地址（2026-10-08 加） -------------------
+
+    def provide_address_sender(self, sender: object) -> None:
+        """**前置插件**（`mail`）把"寄给某个地址"放上来（与 `provide` 同一套纪律）。"""
+
+        if not callable(sender):
+            logger.warning("plugin_mail_address_sender_refused type=%s",
+                           type(sender).__name__)
+            return
+        self.address_sender = sender
+
+    def knows_address_sender(self) -> bool:
+        """**"寄给某个地址"这条口子接上了吗**（使用者据此不提供那一路功能）。
+
+        与 `knows()` 分开报：一个部署可能配了操作者收件人（`knows()` 为真）而这条口子
+        因为别的原因没接上——两件事合成一个布尔，使用者就分不出该退哪一半。
+        """
+
+        return callable(self.address_sender)
+
+    async def send_to(self, address: str, subject: str, body: str) -> object:
+        """寄一封给 `address`；**一次只寄给一个人**，而且地址必须是地址的形状。
+
+        窄在三处（要的就是这个）：
+
+        1. **收件人只有一个**：逗号 / 分号 / 空白分隔的多个地址一律拒——
+           "寄给任意一群人"这个原语不从这里出去；
+        2. **地址里的换行一律拒**（`To:` / `From:` 头注入最经典的入口）——
+           正文与主题怎么编码是 mail 那一侧的事，这一侧只管住地址；
+        3. **不给出别的**：拿不到 `MailClient`、拿不到邮箱配置、拿不到 transport，
+           也发不出"不是邮件"的任何东西。
+
+        没有提供者就抛 `RuntimeError`（同 `notify`：不许静默丢弃）。
+        """
+
+        sender = self.address_sender
+        if not callable(sender):
+            raise RuntimeError("没有插件提供「寄给某个地址」的能力"
+                               "（registry.mail 上只有发给操作者那条）")
+        return await _maybe_await(sender(_one_address(address), str(subject), str(body)))
+
 
 
 class PluginRegistry:
