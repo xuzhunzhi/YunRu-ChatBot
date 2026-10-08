@@ -252,6 +252,48 @@ def test_the_person_who_never_private_chatted_is_told_the_plain_truth() -> None:
             R.CHOOSE_OK[S.CHANNEL_PRIVATE]
 
 
+def test_the_question_path_classifies_results_like_the_due_path() -> None:
+    """**审查 2026-10-09 那条**：问话那条路原来只分"成功 / 没有出口"，
+    于是 `uncertain`/`rejected`/`not_delivered`/`error` 一律只记一行日志、状态不动 →
+    每 30 秒重发、永不封顶（实测 4 拍各送出 4 次），与模块头那张表**自相矛盾**。
+    """
+
+    # 四种"确定/不必再试"的结果：各只该送出**有限**的次数，然后收口。
+    for reason, expected in (("uncertain", 1), ("rejected", 1),
+                             ("not_delivered", S.MAX_TRIES), ("error", S.MAX_TRIES)):
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list = []
+            capability = _capability(tmp, core=_core(calls, sent=False, reason=reason),
+                                     mail_send=_FakeMail().send_to)
+            capability(_request())
+            for _ in range(5):                       # 5 拍
+                asyncio.run(capability.flush(now=NOW))
+            assert len(calls) == expected, (reason, len(calls))
+            # 收口之后：要么"问过了"，要么"试够了"——都不该再排着。
+            assert capability._store.asking() == (), reason
+            assert capability._store.preference(PERSON).asked is True, reason
+
+    # `no_target` / 接缝没接上：**留待发**——每拍都试，但**不烧次数**、不算失败。
+    with tempfile.TemporaryDirectory() as tmp:
+        calls = []
+        capability = _capability(tmp, core=_core(calls, sent=False, reason="no_target"))
+        capability(_request())
+        for _ in range(5):
+            asyncio.run(capability.flush(now=NOW))
+        assert len(calls) == 5, "没有出口时每拍都会试一次（留待发）"
+        pref = capability._store.preference(PERSON)
+        assert pref.ask_tries == 0 and pref.asked is False and pref.ask_session
+        assert capability._store.asking() != (), "没有出口时不该把问话丢掉"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        capability = _capability(tmp, core=None)     # 接缝还没接上
+        capability(_request())
+        for _ in range(3):
+            asyncio.run(capability.flush(now=NOW))
+        pref = capability._store.preference(PERSON)
+        assert pref.ask_tries == 0 and pref.asked is False and pref.ask_session
+
+
 def test_a_choice_that_cannot_be_read_is_asked_again() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         capability = _capability(tmp, core=_core([]), mail_send=_FakeMail().send_to)

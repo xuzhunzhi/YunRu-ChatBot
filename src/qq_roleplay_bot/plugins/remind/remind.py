@@ -65,7 +65,7 @@ from datetime import datetime
 from ... import dev_config
 from ...remind import RemindDelivery
 from .store import (CHANNEL_GROUP, CHANNEL_MAIL, CHANNEL_PRIVATE, CHANNEL_UNSET,
-                    Reminder, RemindStore)
+                    MAX_TRIES, Reminder, RemindStore)
 
 logger = logging.getLogger(__name__)
 
@@ -346,7 +346,18 @@ class RemindCapability:
         return tuple(handed)
 
     async def _ask_pending(self, gaps: list[str]) -> list[RemindDelivery]:
-        """把还没问出去的那句"你想我怎么叫你"发出去（发出去了才清掉：**只问一次**）。"""
+        """把还没问出去的那句"你想我怎么叫你"发出去。
+
+        **按结果分类收口**（与 `_send_due` 同一套语义，2026-10-09 审查：
+        这里原来"只分成功/没有出口"，于是 `uncertain`/`rejected`/`not_delivered`/`error`
+        一律只记一行日志、状态不动 → **每 30 秒重发、永不封顶**，与模块头那张表自相矛盾）：
+
+        * 发出去了 → `mark_asked`（**只问一次**，以后不再问）；
+        * `no_target` / 接缝没接上 → 留待发、**不烧次数**（接缝一接上就能问出口）；
+        * `rejected`（对面拒收）→ 只提示过一次就算了：`mark_asked`，别再重复问他；
+        * `uncertain`（不知道出去没有）→ 同上，**绝不再试**（重问就可能问两遍）；
+        * `not_delivered` / `error`（确定没送出去）→ 记一次，试够 `MAX_TRIES` 就停。
+        """
 
         handed: list[RemindDelivery] = []
         for person in self._store.asking():
@@ -361,9 +372,21 @@ class RemindCapability:
                 handed.append(delivery)
             elif outcome == PENDING:
                 gaps.append(why)
-            else:
-                logger.warning("remind_ask_failed person=%s outcome=%s why=%s",
+            elif outcome in (NO_SESSION, GIVEN_UP):
+                # 对面拒收 / 不知道出去没有：**都别再问第二遍**（问话重复比不问更烦人），
+                # 那几条提醒照旧留在待发里，到点按"他当时说话的地方"叫他。
+                self._store.mark_asked(person.person_id)
+                logger.warning("remind_ask_stopped person=%s outcome=%s why=%s",
                                person.person_id, outcome, why)
+            else:                                   # RETRY：确定没送出去，记一次
+                tries = self._store.bump_ask_tries(person.person_id)
+                if tries >= MAX_TRIES:
+                    self._store.mark_asked(person.person_id)
+                    logger.warning("remind_ask_gave_up person=%s tries=%s why=%s",
+                                   person.person_id, tries, why)
+                else:
+                    logger.warning("remind_ask_failed person=%s tries=%s why=%s",
+                                   person.person_id, tries, why)
         return handed
 
     async def _send_due(self, moment: float, gaps: list[str]) -> list[RemindDelivery]:

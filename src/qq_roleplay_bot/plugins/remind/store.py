@@ -103,6 +103,10 @@ class Preference:
     #: **已经问过他了**（不管他答没答）。有了它，"只第一次问"才是真的按人只问一次——
     #: 否则他每再提一条提醒，插件都会再问一遍"你想我怎么叫你"。
     asked: bool = False
+    #: 那句问话**确定送失败**了几次（"没有出口"不算——同 `MAX_TRIES` 的规矩）。
+    #: 没有它，"问一句怎么叫他"那条路失败时会每 30 秒重发、永不封顶
+    #: （2026-10-09 独立审查实测：四种失败各送出去 4 次）。
+    ask_tries: int = 0
 
     @property
     def has_email(self) -> bool:
@@ -237,7 +241,8 @@ class RemindStore:
                           ask_session=str(event.get("ask_session") or ""),
                           ask_group=str(event.get("ask_group") or ""),
                           ask_what=str(event.get("ask_what") or ""),
-                          asked=bool(event.get("asked") or False))
+                          asked=bool(event.get("asked") or False),
+                          ask_tries=int(event.get("ask_tries") or 0))
 
     def _write_person(self, person_id: str, **fields: str) -> Preference:
         event = {"key": str(person_id), "at": self._clock()}
@@ -260,7 +265,7 @@ class RemindStore:
                                   email=str(email) if email else keep.email,
                                   ask_session=keep.ask_session,
                                   ask_group=keep.ask_group, ask_what=keep.ask_what,
-                                  asked=keep.asked)
+                                  asked=keep.asked, ask_tries=keep.ask_tries)
 
     def note_ask(self, person_id: str, *, session_id: str, group_id: str,
                  what: str) -> Preference:
@@ -271,7 +276,7 @@ class RemindStore:
         return self._write_person(person_id, channel=keep.channel, email=keep.email,
                                   ask_session=str(session_id),
                                   ask_group=str(group_id), ask_what=str(what),
-                                  asked=keep.asked)
+                                  asked=keep.asked, ask_tries=keep.ask_tries)
 
     def mark_asked(self, person_id: str) -> Preference | None:
         """那句问话发出去了（或他已经答了）→ 清掉待问，并且**记下"问过了"**。
@@ -284,7 +289,24 @@ class RemindStore:
         if current is None:
             return None
         return self._write_person(person_id, channel=current.channel, email=current.email,
-                                  ask_session="", ask_group="", ask_what="", asked=True)
+                                  ask_session="", ask_group="", ask_what="", asked=True,
+                                  ask_tries=0)
+
+    def bump_ask_tries(self, person_id: str) -> int:
+        """那句问话**确定送失败**了一次 → 次数 +1，返回新的次数。
+
+        与到点那条路同一个规矩：只有"确定没送出去"才算一次；"没有出口"（接缝没接上、
+        找不到那个人）不算——那种情况下留待发，接缝一接上就发得出去。
+        """
+
+        current = self.preference(person_id)
+        if current is None:
+            return 0
+        self._write_person(person_id, channel=current.channel, email=current.email,
+                           ask_session=current.ask_session, ask_group=current.ask_group,
+                           ask_what=current.ask_what, asked=current.asked,
+                           ask_tries=current.ask_tries + 1)
+        return current.ask_tries + 1
 
     def asking(self) -> tuple[Preference, ...]:
         """**该问还没问**的那几个人（问话还没发出去、而且从没问过）。"""
@@ -299,7 +321,8 @@ class RemindStore:
                                     email=str(event.get("email") or ""),
                                     ask_session=str(event.get("ask_session") or ""),
                                     ask_group=str(event.get("ask_group") or ""),
-                                    ask_what=str(event.get("ask_what") or "")))
+                                    ask_what=str(event.get("ask_what") or ""),
+                                    ask_tries=int(event.get("ask_tries") or 0)))
         return tuple(sorted(found, key=lambda item: item.person_id))
 
     # --- 提醒 ---------------------------------------------------------------
