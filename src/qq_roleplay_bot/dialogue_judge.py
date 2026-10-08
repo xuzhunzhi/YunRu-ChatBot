@@ -34,6 +34,7 @@ import re
 from dataclasses import dataclass
 
 from .security import sanitize_chat_text
+from .remind import RemindIntent
 from .stage3_runtime import (
     SECTION_IS_DATA_RULE,
     _format_message,
@@ -90,6 +91,10 @@ JUDGE_SYSTEM_PROMPT = """你是 QQ 群聊的**回应判定器**，只判断"云�
 <specialist>YES|NO</specialist>
 <guard>UP|HOLD</guard>
 <guard_reason>一句话，写清是什么越了界；HOLD 时留空</guard_reason>
+<remind>时间|事情（有人让你到点提醒他，没有就留空）</remind>
+
+`remind`：有人让你**到点提醒他**一件事时才填：左边照他给的时间写，右边写那件事；
+不是这回事、或者时间说不清，就留空——**宁可不填，也别猜**。
 
 `related` 回答的是："这条还是在接着刚才那段跟云茹有关的话吗？"是就 YES，换到跟她无关的
 别的事就 NO。
@@ -196,6 +201,11 @@ class JudgeVerdict:
     # 越界的依据（一句话）。只进审计与 `/super affinity`，**不进回复 prompt**——
     # 她只该知道"现在该收着"，不该看到一句"因为 X 所以我防着你"的分析。
     guard_reason: str = ""
+    # 这一句是不是"到点提醒我"（2026-10-08 用户拍板：对话调起，不是斜杠命令）。
+    # **挤在这一次判定里**（不新增模型调用）：模型只填"时间怎么说 + 提醒什么"，
+    # 时间怎么算成绝对时刻由核心做（只有核心知道"群里这边"是哪个时区，见 `remind`）。
+    # 解析不出来就是 None——调用方把它当普通聊天，不猜、不追问。
+    remind: RemindIntent | None = None
 
     def describe(self) -> str:
         """简短描述，用于日志。"""
@@ -433,12 +443,32 @@ def parse_judge_output(
         guard_reason = sanitize_chat_text(_extract(raw, "guard_reason"), max_length=200).strip()
     common = dict(topic=topic, topic_start=topic_start, related=related, lore=lore,
                   understood=understood, specialist=specialist,
-                  guard_up=guard_up, guard_reason=guard_reason)
+                  guard_up=guard_up, guard_reason=guard_reason,
+                  # "到点提醒我"（2026-10-08）：**与上面那些同一次调用的返回**，
+                  # 不额外问模型。解析不出（没给、只给一半、太长）就是 None。
+                  remind=_parse_remind(_extract(raw, "remind")))
     if must_reply:
         return JudgeVerdict(should_reply=True, **common)
     if "REPLY" not in route or route.startswith("NO"):
         return JudgeVerdict(should_reply=False, **common)
     return JudgeVerdict(should_reply=True, **common)
+
+
+def _parse_remind(raw: str) -> RemindIntent | None:
+    """`<remind>时间|事情</remind>` → `RemindIntent`；给不全就算了（宁可不认，也不猜）。
+
+    "时间"是**原话**（`明天8点`），算成绝对时刻是核心的事（见 `remind.py`）。
+    只切第一个 `|`：事情里再出现 `|` 也不会被吃掉。
+    """
+
+    body = sanitize_chat_text(raw or "", max_length=200).strip()
+    if not body:
+        return None
+    time_text, _, what = body.partition("|")
+    time_text, what = time_text.strip(), what.strip()
+    if not time_text or not what:
+        return None
+    return RemindIntent(time_text=time_text, what=what)
 
 
 def _parse_seq(raw: str, known_seqs: frozenset[int]) -> int | None:
