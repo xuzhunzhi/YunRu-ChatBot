@@ -102,8 +102,11 @@ def test_without_the_plugin_nothing_happens_but_the_turn_still_replies() -> None
 
 
 def test_the_plugin_gets_the_request_with_an_absolute_time() -> None:
+    """核心算好绝对时刻、查出邮箱之后交过去（邮箱那一步见 `test_remind_email.py`）。"""
+
     handed: list[RemindRequest] = []
     engine, _, _ = _engine(handed.append)
+    engine._remind_emails["100"] = "lele@example.com"   # 核心手里已经有他的邮箱
     with patch.dict(os.environ, TZ):
         asyncio.run(engine.handle(_message()))
 
@@ -114,7 +117,19 @@ def test_the_plugin_gets_the_request_with_an_absolute_time() -> None:
     assert request.person_id == "100"
     assert request.session_id == SESSION
     assert request.group_id == GROUP
-    assert request.email == "", "这一步还没有邮箱，不许编一个"
+    assert request.email == "lele@example.com", "核心查出来的值要原样递过去"
+
+
+def test_without_an_email_the_request_is_not_handed_over_yet() -> None:
+    """值不齐就别递半条过去（邮箱那一步由核心走，见 `test_remind_email.py`）。"""
+
+    handed: list[RemindRequest] = []
+    engine, _, reply = _engine(handed.append)
+    with patch.dict(os.environ, TZ):
+        result = asyncio.run(engine.handle(_message()))
+
+    assert handed == [], "还没有邮箱就把请求交给插件了"
+    assert result is not None and result.text == reply.text
 
 
 def test_an_unclear_time_is_not_handed_over() -> None:

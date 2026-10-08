@@ -51,7 +51,7 @@ from .onebot_ws import OneBotWebSocketTransport
 # 只用媒体标签，不需要插件；这样"有图的消息"这条路径不再从插件 import
 # （原来 `_apply_vision` 里是 `from .vision import replace_media_placeholder`）。
 from .media_segments import replace_media_placeholder
-from .remind import RemindRequest, parse_remind_time
+from .remind import RemindRequest, find_email, parse_remind_time
 from .trigger import IdleTrigger, MessageDeduplicator
 from .stage3_runtime import (
     CLOSENESS_LABELS,
@@ -127,6 +127,11 @@ ACTIVE_TIMEOUT_SECONDS = 180.0
 # （`dev_config.FOCUS_QUEUE_LIMIT` × 群数），所以这个数只是兜底；从前它是 `set`
 # 且只在排空时清，被停用/排不出去的群会把条目永久留下（2026-10-08 隔离审计 [3]）。
 MAX_RESUMED_IDS = 4096
+# 「到点提醒」要用的两份按人状态（2026-10-08）：每人一份**邮箱**（核心查好递给插件的那份），
+# 以及"还在等他给邮箱"的待办。两个都有上限——照 `_promise` / `_resume_later` 那套：
+# `dict` 的插入序，超了淘汰**最旧**的一条。它们只活在这一轮进程里（重启即弃）。
+MAX_REMIND_EMAILS = 256
+MAX_REMIND_ASKS = 64
 
 # 冷群里 @ 她时先回的那句"稍等"。随机挑一条，四条属性见 docs/MULTI_GROUP_FOCUS.md：
 # 进她的历史 / 不进长期记忆 / 不算连回 50 条 / 立刻发不摆节奏。
@@ -1191,6 +1196,12 @@ class DialogueEngine:
         # **缺省 None = 这次部署没有提醒插件**：核心认到提醒意图也什么都不做
         # （不报错、不回复、不留半条状态）——`runtime.build_engine` 只按"有没有"取。
         self.remind = remind
+        #: 提醒用的两份**按人**状态（上限见 `MAX_REMIND_EMAILS` / `MAX_REMIND_ASKS`）：
+        #: `_remind_emails` 是核心查好、要递给插件的那个值；`_remind_asks` 是"他还没给
+        #: 邮箱"的待办（值就是那条还没交出去的请求）。**都只在核心手里**——插件那边
+        #: 只收到一个装好的 `RemindRequest`，没有任何读回记忆的口子。
+        self._remind_emails: dict[str, str] = {}
+        self._remind_asks: dict[str, RemindRequest] = {}
         # 金句学习学出来的那份**材料**（`quote_learning.QuoteProfile`，可选）。
         # 它只是"读一份本地 JSON 挑几条"，**热路径上一次模型调用都没有**；
         # 关掉开关或没有材料时回复 prompt 与改动前**逐字相同**（有测试钉住）。
@@ -1569,11 +1580,6 @@ class DialogueEngine:
             logger.info(
                 "Stage 3 remind: 时间说不清，这一句当普通聊天 session=%s", message.session_id)
             return
-        seam = self.remind
-        if seam is None:
-            logger.info("Stage 3 remind: 没有提醒插件（registry.remind 为空），只认不办 session=%s",
-                        message.session_id)
-            return
         request = RemindRequest(
             person_id=message.user_id,
             session_id=message.session_id,
@@ -1581,13 +1587,79 @@ class DialogueEngine:
             at=at,
             what=intent.what,
         )
+        email = self._remind_emails.get(message.user_id, "")
+        if not email:
+            # **还没有他的邮箱**：记下待办，这一轮核心让她顺口问一句（易变段那一行），
+            # **先不交给插件**——插件要的是一条装好的请求，值不齐就别递半条过去。
+            self._remember_remind_ask(request)
+            logger.info("Stage 3 remind: 还没有邮箱，先记待办 session=%s", message.session_id)
+            return
+        self._hand_over_remind(replace(request, email=email))
+
+    def _remember_remind_ask(self, request: RemindRequest) -> None:
+        """记下"等他给邮箱"的待办（超上限淘汰最旧的一条，同 `_promise` 的写法）。"""
+
+        self._remind_asks[request.person_id] = request
+        if len(self._remind_asks) > MAX_REMIND_ASKS:
+            self._remind_asks.pop(next(iter(self._remind_asks)), None)
+
+    def _hand_over_remind(self, request: RemindRequest) -> None:
+        """把装好的那一条交给插件（**核心唯一碰插件的这一处**）。"""
+
+        seam = self.remind
+        if seam is None:
+            logger.info("Stage 3 remind: 没有提醒插件（registry.remind 为空），只认不办 session=%s",
+                        request.session_id)
+            return
         try:
             seam(request)
         except Exception:  # noqa: BLE001 - 插件坏了也不能吃掉这一轮
-            logger.exception("Stage 3 remind: 插件没收下这一条 session=%s", message.session_id)
+            logger.exception("Stage 3 remind: 插件没收下这一条 session=%s", request.session_id)
             return
         logger.info("Stage 3 remind scheduled: what_len=%s session=%s",
-                    len(intent.what), message.session_id)
+                    len(request.what), request.session_id)
+
+    def _take_remind_email(self, message: IncomingMessage) -> None:
+        """他在聊天里把邮箱说给她 → **核心**记下来（按人）并补交那条待办。
+
+        由来（2026-10-08 用户拍板）：**插件绝不碰记忆**。所以邮箱由核心收：
+        先从这一句里认出邮箱（保守正则，认不出就什么都不做、继续等），存进核心那份
+        按人的值（这是"插件要值时由核心查出递给它"里的那个值），再**明确**把它交给
+        **既有那条记忆捕获**（`memory_service.capture`，按人入队）——
+        这一步是**故意的**：他这一句常常只是"我的邮箱是 x@y"，走别的路容易被当成
+        "不值得记"或被延迟；而这是用户明确给的、流程要用的值。同一个 message_id 在库里
+        按事件键去重，所以不会记两遍。
+        """
+
+        pending = self._remind_asks.get(message.user_id)
+        if pending is None:
+            return
+        email = find_email(message.text or "")
+        if email is None:
+            return
+        self._remind_emails[message.user_id] = email
+        if len(self._remind_emails) > MAX_REMIND_EMAILS:
+            self._remind_emails.pop(next(iter(self._remind_emails)), None)
+        service = self.memory_service
+        if service is not None:
+            try:
+                service.capture(message)
+            except Exception:  # noqa: BLE001 - 记不进去也不能吃掉这一轮
+                logger.exception("Stage 3 remind: 邮箱进记忆失败 session=%s", message.session_id)
+        self._remind_asks.pop(message.user_id, None)
+        self._hand_over_remind(replace(pending, email=email))
+
+    def _remind_ask_note(self, message: IncomingMessage) -> str:
+        """正在等他给邮箱时，给这一轮易变段加**一句**核心写的话（没有就空串）。
+
+        走的是既有的 `clarify_note` 口子（"一句话进易变段"）——**不是**插件提示词：
+        插件一个字都进不了 prompt；这一句是核心自己那条流程要说的话。措辞是交谈视角、
+        零机制词，而且只在他正好欠一个邮箱时出现。
+        """
+
+        if message.user_id not in self._remind_asks:
+            return ""
+        return "（他刚让你到点提醒他一件事，可你手上还没有他的邮箱——这轮顺口问一句就行。）\n"
 
     def _apply_guard_signal(self, verdict: JudgeVerdict, message: IncomingMessage) -> None:
         """把判定的 `<guard>UP` 立刻落到防备上——**在拼这一轮回复之前**。
@@ -4300,6 +4372,10 @@ class DialogueEngine:
         # **每轮现取**（不是每条消息共用）：`secrets` 取 7 位，见 `data_boundary`。
         marker = (data_boundary.session_marker()
                   if self._flags().data_marker_enabled else "")
+        # 「到点提醒」的邮箱那一步（2026-10-08）：他这一句里如果带着邮箱，而核心正等着
+        # 他给（上一轮认到提醒但没值），就在这里收下来——记进记忆（按人）+ 补交那条待办。
+        # 放在判定之前：他这一句常常就是"我的邮箱是 x@y"，判定很可能判 NO_REPLY。
+        self._take_remind_email(message)
         # 双 agent 结构：先由判定 agent 决定"要不要接"。它的 prompt 与窗口都小得多，
         # 所以这次调用便宜；判定说 NO_REPLY 就直接结束，省掉回复那一次完整调用。
         if self._judge_on(message.session_id):
@@ -4444,9 +4520,9 @@ class DialogueEngine:
             now=self.wall_clock(),
             # 这一轮**不再有**"没把握就先问一句"的现场提示（2026-10-05 晚拆掉那条路：
             # 用户否掉的就是它）。`clarify_note` 这个口子留着（它只进易变段），
-            # 但引擎这一侧现在**恒为空串**——没把握时不再教她怎么说话，
-            # 而是"没被叫到就不出声、被叫到就看她自己那一版有没有具体断言"。
-            clarify_note="",
+            # 现在由**核心**的提醒流程用它说一句话（正在等他给邮箱时才有；见
+            # `_remind_ask_note`）——**插件一个字都不进 prompt**。
+            clarify_note=self._remind_ask_note(message),
             # 「她自己的老习惯」（2026-10-06 金句学习）：按眼前这句的语境挑几条**材料**
             # 进 DATA 段。关掉开关 / 还没学出东西时是空串，请求与改动前逐字相同。
             style_material=self._style_material(message, state),
