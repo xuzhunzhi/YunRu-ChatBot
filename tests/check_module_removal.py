@@ -117,7 +117,13 @@ DEFAULT_MODULES = ("vision", "control_audit", "typing_sim", "help_card",
 #: 而 `group_roles` 是核心自己的模块、插件侧没有它——塞进去等于换一种方式撒谎。
 #:
 #: 同一轮里 `src/qq_roleplay_bot/qq_roles.py`（单源角色之后的死代码）已删除。
-PLUGIN_PROVIDED = ("vision",)
+#:
+#: 2026-10-08 追加 `remind`：**到点提醒**那一半能力由插件提供
+#: （`registry.remind`，形状同 `registry.vision`），核心只按"有没有"取——
+#: 没有它就"认到提醒意图也什么都不做"，所以"删掉那个插件，Stage 3 照样跑得起来"
+#: 与 `vision` 是同一条判据。**没有**放进 `DEFAULT_MODULES`：那份名单是要逐个
+#: 拔掉试跑的短名单，本树没有插件树，多一项只会让"实际那张表"的数字变说法。
+PLUGIN_PROVIDED = ("vision", "remind")
 
 #: 在一个**全新解释器**里拦掉指定的模块，然后看核心能不能起来。
 #: `{blocked!r}` 是完整模块名集合；`{src!r}` 是 `src` 的绝对路径。

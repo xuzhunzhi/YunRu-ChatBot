@@ -51,6 +51,7 @@ from .onebot_ws import OneBotWebSocketTransport
 # 只用媒体标签，不需要插件；这样"有图的消息"这条路径不再从插件 import
 # （原来 `_apply_vision` 里是 `from .vision import replace_media_placeholder`）。
 from .media_segments import replace_media_placeholder
+from .remind import RemindRequest, parse_remind_time
 from .trigger import IdleTrigger, MessageDeduplicator
 from .stage3_runtime import (
     CLOSENESS_LABELS,
@@ -1082,6 +1083,7 @@ class DialogueEngine:
         feature_logs: FeatureLogs | None = None,
         style_reviewer=None,
         vision=None,
+        remind=None,
         host: HostServices | None = None,
         quote_profile=None,
         slang_library=None,
@@ -1183,6 +1185,12 @@ class DialogueEngine:
         # 识图（可选）：有图的消息在**进判定之前**先看一眼，把 `[图片]` 换成一句描述。
         # 它只改正文，不新增决策路径——"要不要回、回什么"照旧全在原来那套里。
         self.vision = vision
+        # 「到点提醒」那一半能力（2026-10-08 用户拍板：**核心听懂 + 插件做事 + 核心记录
+        # + 核心发送**）。它是**插件提供**的一个可调用对象 `(RemindRequest) -> None`：
+        # 核心把绝对时刻与邮箱算好、装进那一条请求再交给它；插件自己存、自己到点发。
+        # **缺省 None = 这次部署没有提醒插件**：核心认到提醒意图也什么都不做
+        # （不报错、不回复、不留半条状态）——`runtime.build_engine` 只按"有没有"取。
+        self.remind = remind
         # 金句学习学出来的那份**材料**（`quote_learning.QuoteProfile`，可选）。
         # 它只是"读一份本地 JSON 挑几条"，**热路径上一次模型调用都没有**；
         # 关掉开关或没有材料时回复 prompt 与改动前**逐字相同**（有测试钉住）。
@@ -1537,6 +1545,49 @@ class DialogueEngine:
             self._stance_cache.clear()
         self._stance_cache[user_id] = (Stance(closeness, guardedness), now)
         return self._stance_cache[user_id][0]
+
+    def _note_remind(self, message: IncomingMessage, verdict: JudgeVerdict) -> None:
+        """判定认出来的"到点提醒我"：**核心算时间，把请求交给插件**（2026-10-08）。
+
+        形状是用户拍板的"**核心听懂 + 插件做事 + 核心记录 + 核心发送**"，而且**对话调起**
+        （群里说"云茹，8 点提醒我交作业"），不是斜杠命令——所以它读的是**判定那一次调用的
+        返回**（`JudgeVerdict.remind`），**一次模型调用都不多**。
+
+        这里只做核心该做的三件：把时间说法算成**绝对时刻**（只有核心知道"群里这边"是哪个
+        时区，见 `remind.parse_remind_time`）、把值装进 `RemindRequest`、有插件就交给它。
+        **时间认不清就当普通聊天**：不猜、不追问、什么都不发生。
+
+        **没有插件**（`self.remind is None`）= 认到了也什么都不做——不报错、不回复、
+        不留半条状态；插件自己抛错也一样只记一行日志，绝不吃掉这一轮回复。
+        """
+
+        intent = getattr(verdict, "remind", None)
+        if intent is None:
+            return
+        at = parse_remind_time(intent.time_text, now=self.wall_clock())
+        if at is None:
+            logger.info(
+                "Stage 3 remind: 时间说不清，这一句当普通聊天 session=%s", message.session_id)
+            return
+        seam = self.remind
+        if seam is None:
+            logger.info("Stage 3 remind: 没有提醒插件（registry.remind 为空），只认不办 session=%s",
+                        message.session_id)
+            return
+        request = RemindRequest(
+            person_id=message.user_id,
+            session_id=message.session_id,
+            group_id=message.target.group_id or "",
+            at=at,
+            what=intent.what,
+        )
+        try:
+            seam(request)
+        except Exception:  # noqa: BLE001 - 插件坏了也不能吃掉这一轮
+            logger.exception("Stage 3 remind: 插件没收下这一条 session=%s", message.session_id)
+            return
+        logger.info("Stage 3 remind scheduled: what_len=%s session=%s",
+                    len(intent.what), message.session_id)
 
     def _apply_guard_signal(self, verdict: JudgeVerdict, message: IncomingMessage) -> None:
         """把判定的 `<guard>UP` 立刻落到防备上——**在拼这一轮回复之前**。
@@ -4259,6 +4310,10 @@ class DialogueEngine:
             # 判定说"这一句越界了" → 先落库 + 让缓存失效，**再**拼回复的 prompt。
             # 顺序就是这条需求本身：让她变冷的那句话，回复当场就是冷的。
             self._apply_guard_signal(verdict, message)
+            # 「到点提醒我」（2026-10-08）：**同一次判定的返回**里就带着这个意图，
+            # 这里只把它交给插件（没有插件就什么都不做）。放在回复之前：核心那部分
+            # 不需要等回复，而且不改变"要不要回、回什么"。
+            self._note_remind(message, verdict)
             if group_chat and self.focus.is_hot(message.session_id):
                 # 有人接着这段话题（她被叫到，或判定说还在同一条线上）→ 刷新当值计时。
                 if addressed or verdict.related:

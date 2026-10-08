@@ -592,7 +592,7 @@ class PluginRegistry:
     """
 
     __slots__ = ("call_action", "notify", "roles", "loop", "chat", "report", "ui",
-                 "link", "vision", "action_caller", "commands", "backgrounds",
+                 "link", "vision", "remind", "action_caller", "commands", "backgrounds",
                  "_shared_roles", "_commands", "_prompts", "_prompt_defaults",
                  "_group_actions", "_owner_channels", "_disconnect_receivers", "loaded")
 
@@ -601,6 +601,7 @@ class PluginRegistry:
                  report: "ReportSeams | None" = None,
                  ui: "UiSeams | None" = None,
                  vision=None,
+                 remind=None,
                  action_caller=None) -> None:
         self.call_action = call_action
         self.notify = notify
@@ -612,6 +613,15 @@ class PluginRegistry:
         #: `plugins/vision/plugin.py`）。缺省 `None` = 这次部署没有识图，
         #: 有图的消息只留 `[图片]` 占位符。
         self.vision = vision
+        #: **到点提醒**那一半能力（2026-10-08 用户拍板："核心听懂 + 插件做事 + 核心记录
+        #: + 核心发送"）。形状比 `vision` 还窄：登记的是一个**可调用对象**
+        #: `(RemindRequest) -> None`——核心算好绝对时刻、装好那一条请求就交给它；
+        #: 插件自己存、自己到点发（那是它的后台节拍）。
+        #:
+        #: **它拿不到记忆**：`RemindRequest` 里只有"谁/什么时候/提醒什么/邮箱/发到哪个
+        #: 会话"这几个值（见 `remind.py`），邮箱是核心查好递过来的。缺省 `None` =
+        #: 这次部署没有提醒插件 → 核心认到提醒意图也**什么都不做**（不报错、不回复）。
+        self.remind = remind
         #: 对话那一侧的全部能力（四个函数）。缺省是"什么都没有"。
         self.chat: ChatSeams = chat if chat is not None else ChatSeams()
         #: 写日报/写信要的东西（快照、模型 client、记账、写信给人）。

@@ -706,6 +706,13 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
     # **其余一切照旧**。这正是判据"删掉它，Stage 3 照样跑得起来"。
     build_vision = getattr(registry, "vision", None)
     engine.vision = build_vision(usage_store) if callable(build_vision) else None
+    # **到点提醒**：能力由插件给，核心只问"有没有"（形状同识图那一行，但更窄）。
+    # 登记的是 `(RemindRequest) -> None`：核心算好**绝对时刻**（只有核心知道"群里这边"
+    # 是哪个时区）与**邮箱**（从记忆里查好）之后交给它；插件自己存、自己到点发，
+    # 后台节拍在插件那一侧——核心不加循环。
+    # 没有插件（删掉那个文件夹）= None = 核心**认到提醒意图也什么都不做**
+    # （不报错、不回复、不留半条状态）：判据"删掉它，Stage 3 照样跑得起来"靠它成立。
+    engine.remind = getattr(registry, "remind", None)
     # **群管理动作的执行函数**同样由插件给（`registry.provide_group_action(...)`）：
     # 核心不再 `from .plugins.group_admin.group_admin import execute`——那个写法把
     # 插件模块名写进了核心，改名就等于**静默丢功能**（见 `plugins/__init__.py` 那段）。
