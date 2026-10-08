@@ -592,7 +592,8 @@ class PluginRegistry:
     """
 
     __slots__ = ("call_action", "notify", "roles", "loop", "chat", "report", "ui",
-                 "link", "vision", "remind", "action_caller", "commands", "backgrounds",
+                 "link", "vision", "remind", "remind_send", "action_caller", "commands",
+                 "backgrounds",
                  "_shared_roles", "_commands", "_prompts", "_prompt_defaults",
                  "_group_actions", "_owner_channels", "_disconnect_receivers", "loaded")
 
@@ -602,6 +603,7 @@ class PluginRegistry:
                  ui: "UiSeams | None" = None,
                  vision=None,
                  remind=None,
+                 remind_send=None,
                  action_caller=None) -> None:
         self.call_action = call_action
         self.notify = notify
@@ -622,6 +624,17 @@ class PluginRegistry:
         #: 会话"这几个值（见 `remind.py`），邮箱是核心查好递过来的。缺省 `None` =
         #: 这次部署没有提醒插件 → 核心认到提醒意图也**什么都不做**（不报错、不回复）。
         self.remind = remind
+        #: **提醒怎么发出去**：核心给的那条窄投递口，形状是
+        #: `async (RemindDelivery) -> RemindSendResult`（见 `remind.py`）。
+        #:
+        #: 为什么必须有它：出站能力是**核心**的事（`AGENTS.md` §2.3：插件拿不到
+        #: `transport`、也拿不到任意 action 名），而插件那一侧要的只是"把这句话送到
+        #: 那个人手上"。所以核心负责"群里 @ 他 / 私聊直接发 / 失败如实回结果"，
+        #: 插件只递一个**只有目标与人、正文**的意图对象。
+        #:
+        #: 缺省 `None` = 这一侧没接上（例如直接手工造注册表）：插件必须容忍它
+        #: （那就什么都不发），核心这边不报错——"删掉插件，核心照跑"靠同一条纪律。
+        self.remind_send = remind_send
         #: 对话那一侧的全部能力（四个函数）。缺省是"什么都没有"。
         self.chat: ChatSeams = chat if chat is not None else ChatSeams()
         #: 写日报/写信要的东西（快照、模型 client、记账、写信给人）。

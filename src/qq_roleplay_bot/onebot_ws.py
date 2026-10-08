@@ -361,6 +361,33 @@ class OneBotWebSocketTransport:
         await self._send_logged("send_msg", params, target, body=text, kind="text",
                                 reply_to=reply_to, part=part, total=total, origin=origin)
 
+    async def send_at(self, target: MessageTarget, user_id: str, text: str,
+                      *, reply_to: str = "") -> None:
+        """在群里发一条**带 @** 的消息（`@某人 正文`）。
+
+        **可选能力**（同 `send_segmented` / `send_typing`）：不支持它的传输层照样能用，
+        调用方必须自己退回 `send`（`runtime._SeamBinder.remind_send` 就是这么做的）——
+        少一个 @ 可以接受，**消息发不出去不行**。
+
+        只有给自己人发提醒这一处用它（2026-10-08）：@ 段由核心拼，插件递进来的
+        永远只是一段正文。
+        """
+
+        if not text:
+            return
+        segments: list[dict[str, object]] = []
+        if reply_to:
+            segments.append({"type": "reply", "data": {"id": reply_to}})
+        segments.append({"type": "at", "data": {"qq": self._id_value(user_id)}})
+        segments.append({"type": "text", "data": {"text": " " + text}})
+        params: dict[str, object] = {"message": segments}
+        if target.group_id is not None:
+            params.update(message_type="group", group_id=self._id_value(target.group_id))
+        else:
+            params.update(message_type="private", user_id=self._id_value(target.user_id or ""))
+        await self._send_logged("send_msg", params, target, body=f"@{user_id} {text}", kind="text",
+                                reply_to=reply_to)
+
     async def send_image(self, target: MessageTarget, png: bytes, *, reply_to: str = "") -> None:
         """发一张图（帮助卡片用）。`png` 是本地字节，走 **base64** 消息段。
 

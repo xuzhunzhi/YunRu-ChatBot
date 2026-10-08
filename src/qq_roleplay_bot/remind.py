@@ -78,6 +78,33 @@ class RemindRequest:
     email: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class RemindDelivery:
+    """插件交给核心的**一条投递意图**：发给谁、发到哪、说什么。
+
+    就这三个字段——插件塞不进别的东西：**没有 transport、没有 action 名、没有权限名单**。
+    怎么发由核心决定（群里 **@ 那个人** / 私聊直接发；见
+    `runtime._SeamBinder.remind_send`）。`group_id` 为空串 = 私聊。
+    """
+
+    person_id: str
+    text: str
+    group_id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RemindSendResult:
+    """核心**如实回**的投递结果（不抛异常出去；计数与重试归插件那侧）。
+
+    `reason` 就是失败分类：`ok` / `no_target` / `not_delivered`（确定没送出去，可重发）/
+    `uncertain`（不知道，别重发）/ `rejected`（对面拒收，别重发）/ `error`（别的异常）。
+    """
+
+    sent: bool
+    reason: str
+    detail: str = ""
+
+
 def find_email(text: str) -> str | None:
     """从一句话里认出邮箱；认不出返回 None（保守：必须是完整形状）。"""
 

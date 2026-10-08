@@ -70,7 +70,15 @@ from .plugins import (
     inventory,
     mount_data_plugins,
 )
-from .transport import IncomingMessage, MessageTarget, QQTransport
+from .transport import (
+    DeliveryRejected,
+    DeliveryUncertain,
+    IncomingMessage,
+    MessageNotDelivered,
+    MessageTarget,
+    QQTransport,
+)
+from .remind import RemindDelivery, RemindSendResult
 
 logger = logging.getLogger(__name__)
 
@@ -684,6 +692,9 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
                               chat=_chat_seams_for(engine),
                               report=_report_seams_for(engine),
                               ui=_ui_seams_for(engine),
+                              # 提醒那条投递口（2026-10-08）：**核心拥有出站**，
+                              # 插件只递一个"发给谁/发到哪/说什么"的意图对象。
+                              remind_send=binder.remind_send,
                               action_caller=binder.action_caller)
     # **把核心的角色事实服务放到共享位上**：插件要问"某人是不是管理员"就走
     # `registry.shared_roles()`，拿到的是核心这一份——插件**不自己取**（`AGENTS.md`
@@ -984,6 +995,55 @@ class _SeamBinder:
             await _send_or_queue(
                 transport, getattr(engine, "outbox", None), MessageTarget(user_id=user_id), text
             )
+
+    async def remind_send(self, delivery: RemindDelivery) -> RemindSendResult:
+        """把一条提醒**发出去**：`async (RemindDelivery) -> RemindSendResult`。
+
+        用户 2026-10-08 拍板 (a)：**核心拥有出站，插件只交意图**（AGENTS §2.3 的既有规矩
+        ——插件拿不到 `transport`，也拿不到任意 action 名）。所以插件递进来的
+        `RemindDelivery` **只有**"发给谁 / 发到哪 / 说什么"三个字段，怎么发由这里定：
+
+        * **群里** → 用 `@那个人` 发（传输层支持 `send_at` 就用；不支持就退回纯文本，
+          消息本身照发——少一个 @ 可以接受，**发不出去不行**）；
+        * **私聊** → 直接发给他；对面拒收（还不是好友 / 没有临时会话）时，
+          传输层那条"给操作者一句人话"的路照旧（`onebot_ws` 那一处），
+          这里把结果**如实**回成 `rejected`，让插件自己记数与决定要不要再试。
+
+        **不抛异常给插件**（"别抛到没人接"）：确定没送出去 / 不知道 / 被拒 / 别的异常，
+        一律分类成 `RemindSendResult` 返回。**不复用 `_send_or_queue`**：补发队列会让
+        插件看不到失败，而"计数与重试"是插件那一侧的事。
+
+        只有"接缝自己丢了绑定"（`_require*`）照旧抛——那是核心的 bug，不是投递结果。
+        """
+
+        engine = self._require()
+        transport = self._require_transport()
+        person_id = str(getattr(delivery, "person_id", "") or "")
+        text = str(getattr(delivery, "text", "") or "")
+        group_id = str(getattr(delivery, "group_id", "") or "")
+        del engine  # 只要它还在（绑定没丢）——值本身这里不用，见上面的说明
+        if not person_id or not text:
+            # 认不出的投递：什么都不发，也不报错（fail-closed）。
+            return RemindSendResult(False, "no_target", "person_id/text 为空")
+        target = (MessageTarget(group_id=group_id) if group_id
+                  else MessageTarget(user_id=person_id))
+        try:
+            send_at = getattr(transport, "send_at", None)
+            if group_id and callable(send_at):
+                await send_at(target, person_id, text)
+            else:
+                await transport.send(target, text)
+        except MessageNotDelivered as exc:
+            return RemindSendResult(False, "not_delivered", str(exc))
+        except DeliveryUncertain as exc:
+            return RemindSendResult(False, "uncertain", str(exc))
+        except DeliveryRejected as exc:
+            return RemindSendResult(False, "rejected", str(exc))
+        except Exception as exc:  # noqa: BLE001 - 传输层没分类的异常也如实回
+            logger.exception("remind_send failed: target=%s", target.group_id or person_id)
+            return RemindSendResult(False, "error", type(exc).__name__)
+        logger.info("remind delivered: group=%s person=%s", group_id or "-", person_id)
+        return RemindSendResult(True, "ok")
 
     # --- ChatSeams -------------------------------------------------------
 
