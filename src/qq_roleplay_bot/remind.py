@@ -82,14 +82,22 @@ class RemindRequest:
 class RemindDelivery:
     """插件交给核心的**一条投递意图**：发给谁、发到哪、说什么。
 
-    就这三个字段——插件塞不进别的东西：**没有 transport、没有 action 名、没有权限名单**。
+    字段就这四个——插件塞不进别的东西：**没有 transport、没有 action 名、没有权限名单**。
     怎么发由核心决定（群里 **@ 那个人** / 私聊直接发；见
-    `runtime._SeamBinder.remind_send`）。`group_id` 为空串 = 私聊。
+    `runtime._SeamBinder.remind_send`）。
+
+    `channel` 是**明说发到哪一类地方**（`"group"` / `"private"`）；留空串 = 老插件没给，
+    核心按 `group_id` 推（给了群号就是群、没给就是私聊）。**为什么要这个字段**：
+    独立审查 2026-10-09（`docs/audits/review-remind-2026-10-09.md` 第 9 条）实测——
+    插件那一侧说的是"发到群里"、回复也说"我在群里 @ 你"，而 `group_id` 是空的，
+    核心于是**悄悄按私聊发了**：等于把群里该说的话塞进私聊。现在说 `"group"` 却缺群号
+    = **不合法**：什么都不发、如实回 `no_target`（判据见 `runtime._SeamBinder.remind_send`）。
     """
 
     person_id: str
     text: str
     group_id: str = ""
+    channel: str = ""
 
 
 @dataclass(frozen=True, slots=True)

@@ -35,7 +35,7 @@ from qq_roleplay_bot.transport import (
 
 GROUP = "717151356"
 PERSON = "100"
-ALLOWED_FIELDS = frozenset({"person_id", "text", "group_id"})
+ALLOWED_FIELDS = frozenset({"person_id", "text", "group_id", "channel"})
 
 
 class _FakeTransport:
@@ -107,6 +107,57 @@ def test_a_private_delivery_goes_to_the_person() -> None:
     assert result.sent is True
     assert transport.mentions == [], "私聊不该走 @"
     assert transport.sent == [(MessageTarget(user_id=PERSON), "交作业")]
+
+
+def test_an_explicit_channel_is_honoured() -> None:
+    """明说 `"group"` / `"private"` 时按它发（不看群号推）。"""
+
+    group_transport = _FakeTransport()
+    group = asyncio.run(_seam(group_transport).remind_send(
+        RemindDelivery(person_id=PERSON, text="交作业", group_id=GROUP, channel="group")))
+    assert group.sent is True and len(group_transport.mentions) == 1
+
+    private_transport = _FakeTransport()
+    private = asyncio.run(_seam(private_transport).remind_send(
+        RemindDelivery(person_id=PERSON, text="交作业", channel="private")))
+    assert private.sent is True
+    assert private_transport.sent == [(MessageTarget(user_id=PERSON), "交作业")]
+
+
+# --- 1b. 说了发到哪、却缺那个号：不合法，什么都不发 ---------------------------
+
+
+def test_a_group_delivery_without_a_group_id_is_refused() -> None:
+    """独立审查 2026-10-09 第 9 条：从前这里会**悄悄按私聊发**。
+
+    "说的是发到群里、回复也说'我在群里 @ 你'，可没给群号" —— 那等于把群里该说的
+    话塞进私聊。现在是不合法：什么都不发、如实回 `no_target`。
+    """
+
+    transport = _FakeTransport()
+    result = asyncio.run(_seam(transport).remind_send(
+        RemindDelivery(person_id=PERSON, text="交作业", group_id="", channel="group")))
+
+    assert result.sent is False and result.reason == "no_target", result
+    assert transport.sent == [] and transport.mentions == [], "不许改投私聊"
+
+
+def test_a_private_delivery_with_a_group_id_is_refused() -> None:
+    transport = _FakeTransport()
+    result = asyncio.run(_seam(transport).remind_send(
+        RemindDelivery(person_id=PERSON, text="交作业", group_id=GROUP, channel="private")))
+
+    assert result.sent is False and result.reason == "no_target", result
+    assert transport.sent == [] and transport.mentions == []
+
+
+def test_an_unrecognised_channel_is_refused() -> None:
+    transport = _FakeTransport()
+    result = asyncio.run(_seam(transport).remind_send(
+        RemindDelivery(person_id=PERSON, text="交作业", group_id=GROUP, channel="telepathy")))
+
+    assert result.sent is False and result.reason == "no_target", result
+    assert transport.sent == [] and transport.mentions == []
 
 
 # --- 3. 失败如实回结果；认不出的什么都不发 -----------------------------------
