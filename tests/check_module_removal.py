@@ -51,8 +51,17 @@
 | 情况 | 处理 |
 | --- | --- |
 | 包根 `<名字>.py` 在，或 `plugins/<名字>/plugin.py` 在 | 正常拦掉它、探一次 |
-| 由插件提供（`PLUGIN_PROVIDED`），**而这条线不带插件** | 显式说明"本树没有插件，故不参与检查"，**不计入通过数** |
+| 由插件提供（`PLUGIN_PROVIDED`） | **只拦插件子树** `qq_roleplay_bot.plugins.<名字>`（`_plugin_block_target`）——名字在包根可能还有一个**核心**模块，包根优先会拦错对象（2026-10-08 实测，见下）；本树没有那个插件目录时这一拦是恒等操作，算进通过数 |
 | 哪儿都没有，而**这条线带插件** | 报错、退出码 1（名字写错 / 能力被删了） |
+
+**2026-10-08 第二版**：`PLUGIN_PROVIDED` 那几项**不再有"不参与检查"这一档**。
+起因是 `remind`：它的**核心**那一半就在包根（`qq_roleplay_bot/remind.py`：认意图 + 算
+绝对时刻），插件那一半才是 `plugins/remind/`。老写法先看包根 → 拦到核心模块 →
+核心当然起不来 → 报出来却是"这个可插能力没解耦"（**红错了对象**）；而且它没进
+`DEFAULT_MODULES`，默认那一跑根本不探它——"删掉 remind 插件，核心照跑"这条硬判据
+当时**没有机械覆盖**。现在它两项都在名单里、都按插件子树探，`vision` 走同一条路
+（它今天没有这个错对象问题：包根已经没有 `vision.py` 了，但它原来落在"不参与检查"
+那一支，判据同样没有机械覆盖）。
 
 "这条线带不带插件"由 `_has_plugin_folders()` 判：它看 **git 跟踪的**文件
 （`plugins/` 下除 `__init__.py` 之外还有没有别的），因为光看目录会出错——
@@ -85,7 +94,7 @@ PY = ROOT / ".venv" / "Scripts" / "python.exe"
 #: 问的正是它，所以**不能**因为"文件不在包根了"就把它从名单里去（那等于把这道
 #: 门槛悄悄关掉）。名字保持 `vision`，拦截的模块名由 `probe()` 现算
 #: （见 `_block_target`）。
-DEFAULT_MODULES = ("vision", "control_audit", "typing_sim", "help_card",
+DEFAULT_MODULES = ("vision", "remind", "control_audit", "typing_sim", "help_card",
                    "provider_registry", "runtime_diagnostics")
 
 #: 名单里**由插件提供**的那几个（包根已经没有对应的 `.py` 了）。
@@ -113,16 +122,21 @@ DEFAULT_MODULES = ("vision", "control_audit", "typing_sim", "help_card",
 #:
 #: 所以它的名字从 `DEFAULT_MODULES` 里撤掉了，并**没有**改成"算一项通过"：
 #: 它的缺席是"搭不起来"，不是"已解耦"。为什么不放进下面这一组：
-#: `PLUGIN_PROVIDED` 的含义是"**名字由插件提供**、这条线不带插件所以查不了"，
-#: 而 `group_roles` 是核心自己的模块、插件侧没有它——塞进去等于换一种方式撒谎。
+#: `PLUGIN_PROVIDED` 的含义是"**这个名字由插件提供**（核心只是按'有没有'取它）"，
+#: 而 `group_roles` 是核心自己的能力、插件侧没有它——塞进去等于换一种方式撒谎。
 #:
 #: 同一轮里 `src/qq_roleplay_bot/qq_roles.py`（单源角色之后的死代码）已删除。
 #:
 #: 2026-10-08 追加 `remind`：**到点提醒**那一半能力由插件提供
-#: （`registry.remind`，形状同 `registry.vision`），核心只按"有没有"取——
-#: 没有它就"认到提醒意图也什么都不做"，所以"删掉那个插件，Stage 3 照样跑得起来"
-#: 与 `vision` 是同一条判据。**没有**放进 `DEFAULT_MODULES`：那份名单是要逐个
-#: 拔掉试跑的短名单，本树没有插件树，多一项只会让"实际那张表"的数字变说法。
+#: （`registry.remind` / `registry.remind_send`，形状同 `registry.vision`），核心只按
+#: "有没有"取——没有它就"认到提醒意图也什么都不做"，所以"删掉那个插件，Stage 3 照样
+#: 跑得起来"与 `vision` 是同一条判据。**同时**（2026-10-08 第二版）发现老写法拦错了对象：
+#: `remind` 在**包根**也有一个**核心**模块（`qq_roleplay_bot/remind.py`，认意图 + 算时间
+#: 是核心的那一半），而 `_block_target` 先看包根 → 拦到核心 → 核心当然起不来、
+#: 报出来的却是"这个可插能力没解耦"。所以这一类现在**只拦插件子树**
+#: `qq_roleplay_bot.plugins.<名字>`（见 `_plugin_block_target`），并且**每一项都要探**
+#: （不再有"本树没有插件所以不参与检查"那一档——拦一个本树没有的插件子树是恒等操作，
+#: 它问的正是"核心有没有绕过去直连它"）。
 PLUGIN_PROVIDED = ("vision", "remind")
 
 #: 在一个**全新解释器**里拦掉指定的模块，然后看核心能不能起来。
@@ -335,6 +349,10 @@ def _block_target(name: str) -> str | None:
       `qq_roleplay_bot.plugins.<name>`（**整棵子树**：连它自己的 `vision.py` 一起拦掉，
       等价于"这个文件夹整个不在"）。拦整棵子树而不是只拦 `plugin.py`：核心就算
       绕过插件去 import 里面的模块，也必须能降级——那正是判据要问的。
+
+    **`PLUGIN_PROVIDED` 那一类不走这里**（走 `_plugin_block_target`）：它们的名字
+    可能在包根也有一个**核心**模块（`remind` 就是：认意图 + 算时间是核心那一半），
+    包根优先会把核心模块拦掉——那是**红错了对象**（2026-10-08 实测）。
     """
 
     if (PKG / f"{name}.py").exists():
@@ -344,10 +362,31 @@ def _block_target(name: str) -> str | None:
     return None
 
 
-def probe(module: str) -> tuple[bool, bool, str]:
-    """拦掉 `module` 之后探一次：`(能不能 import 核心, build_engine 能不能起, 原因)`。"""
+def _plugin_block_target(name: str) -> str:
+    """**插件提供**的那一类拦什么：`qq_roleplay_bot.plugins.<name>` 整棵子树。
 
-    full = _block_target(module) or f"qq_roleplay_bot.{module}"
+    判据问的是"**删掉那个插件目录**（或它压根没装），核心还起不起得来"，所以这一类
+    **只认插件子树**，包根有没有同名模块都不看：
+
+    * 本树没有这个目录（本体侧的正常形态）→ 拦一个不存在的模块 = 恒等操作，
+      探出来的是"核心**没有**绕过去直连它"（这正是要机械覆盖的那条）；
+    * 核心真去 `import qq_roleplay_bot.plugins.<name>` → 拦掉之后核心起不来 → 红，
+      **指名道姓说的还是这个插件**，不是"某个核心模块被拦了"。
+    """
+
+    return f"qq_roleplay_bot.plugins.{name}"
+
+
+def probe(module: str, *, plugin_side: bool = False) -> tuple[bool, bool, str]:
+    """拦掉 `module` 之后探一次：`(能不能 import 核心, build_engine 能不能起, 原因)`。
+
+    `plugin_side=True`：只拦**插件子树**（`_plugin_block_target`），不看包根同名模块。
+    """
+
+    if plugin_side:
+        full = _plugin_block_target(module)
+    else:
+        full = _block_target(module) or f"qq_roleplay_bot.{module}"
     env = {**os.environ, "PYTHONPATH": str(ROOT / "src"), "PYTHONIOENCODING": "utf-8",
            # 干跑：别碰真实的运行状态文件
            "QQBOT_STATE_PERSIST": "0"}
@@ -446,15 +485,20 @@ def main(argv: list[str]) -> int:
         return 2
     names = argv or list(DEFAULT_MODULES)
     verdicts = []
-    plugin_provided = []      # 名字由插件提供，而**这条线不带插件** → 无从检查
     nowhere = []              # 包根与 plugins/ 下都没有，而这条线并不缺插件 → 名单出错了
     tree_has_plugins = _has_plugin_folders()
     for name in names:
-        if _block_target(name) is not None:
+        if name in PLUGIN_PROVIDED:
+            # **插件提供的那一类：只拦插件子树，而且每一项都要探**（2026-10-08 修）。
+            # 它**不再**因为"本树没有插件文件夹"就不参与检查：拦一个本树没有的插件子树
+            # 是恒等操作，探出来的正是"核心有没有绕过去直连它"；插件在这条线上时，
+            # 这一拦就是"那个文件夹整个不在"。老写法先看包根 → `remind` 拦到了核心
+            # 自己那个 `remind.py`（核心当然起不来），红错了对象。
+            core_ok, engine_ok, reason = probe(name, plugin_side=True)
+            verdicts.append((name, core_ok, engine_ok, reason, test_files_importing(name)))
+        elif _block_target(name) is not None:
             core_ok, engine_ok, reason = probe(name)
             verdicts.append((name, core_ok, engine_ok, reason, test_files_importing(name)))
-        elif name in PLUGIN_PROVIDED and not tree_has_plugins:
-            plugin_provided.append(name)
         else:
             nowhere.append(name)
 
@@ -471,6 +515,15 @@ def main(argv: list[str]) -> int:
         print(f"{name:20} {core:9} {engine:22} {', '.join(own_tests) or '—'}")
         if not engine_ok:
             print(f"{'':20} 原因: {reason}")
+    print("=" * 96)
+    # 探的是**什么**要说清：这一类拦的是插件子树，本树没有那个目录时它就是恒等操作
+    # ——结论是"核心没有绕过去直连它"，**不是**"这个插件在本树被拔过一次"。
+    if any(name in PLUGIN_PROVIDED for name, *_ in verdicts):
+        print("说明：{} 这几项拦的是**插件子树** `qq_roleplay_bot.plugins.<名字>` 整棵。"
+              .format("、".join(n for n, *_ in verdicts if n in PLUGIN_PROVIDED)))
+        print("      本树 plugins/ 下{}这个目录；没有时这一拦等于拦了个不存在的模块，"
+              .format("有" if tree_has_plugins else "没有"))
+        print("      它问的是**核心有没有绕过去直连它**（有的话 core 那列就是「不能」）。")
     print("=" * 96)
 
     # --- 第二列检查：**核心有没有直连插件目录**（2026-10-06 加） -----------------
@@ -505,16 +558,8 @@ def main(argv: list[str]) -> int:
         print("  要么把它从 CORE_TO_PLUGIN_COUPLINGS 里如实交代掉，要么改回名字——"
               "**不许让一项静默消失**。")
 
-    # 没参与检查的那几项**必须显式列出来**：静默少查一项，结论就不该长得像"全过"。
-    if plugin_provided:
-        print(f"由插件提供、这条线不带插件，故**不参与检查**"
-              f"（{len(plugin_provided)} 项）：{', '.join(plugin_provided)}")
-        print(f"  说明：这些能力在 plugins/<名字>/plugin.py 里，而本树的 "
-              f"{PKG / 'plugins'} 下没有插件文件夹。")
-        print(f"  本体侧的正常形态就是这样：{', '.join(plugin_provided)} 由插件提供，"
-              f"核心不依赖它才是对的。")
-        print("  要真正验它们得在**带插件的树**上跑（插件侧那条分支）——"
-              "所以这项**没有**算进下面的通过数。")
+    # 2026-10-08：**没有"不参与检查"这一档了**。`PLUGIN_PROVIDED` 那几项现在也探
+    # （拦插件子树，见 `_plugin_block_target`），所以每一项都有判决、都算进下面的通过数。
     if nowhere:
         print(f"**名单里有名字，但包根与 plugins/ 下都找不到（{len(nowhere)} 项）："
               f"{', '.join(nowhere)}**")
@@ -530,8 +575,6 @@ def main(argv: list[str]) -> int:
         return 1
     # 报数如实：查了几项、几项没查。**不要**把没查的算进"全过"里。
     tail = f"检查了 {len(verdicts)} 项，全部能拔掉而核心照跑。"
-    if plugin_provided:
-        tail += f"另有 {len(plugin_provided)} 项由插件提供、这条线不带插件，未参与检查。"
     if nowhere:
         tail += f"另有 {len(nowhere)} 项在包根与 plugins/ 下都找不到。"
     if couplings:
