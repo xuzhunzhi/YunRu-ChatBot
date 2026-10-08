@@ -682,6 +682,55 @@ def test_the_mail_audit_line_never_carries_the_body(caplog=None) -> None:
         assert "交作业" not in audit[0], audit[0]        # 正文不许进日志
 
 
+def test_the_pending_list_and_one_tick_are_both_capped() -> None:
+    """审查第 4 条：实测"一次 300 条全在一拍交出去"，而且发过的条目一条不清。"""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        handed: list = []
+        capability = _capability(tmp, core=_core(handed))
+        store = capability._store
+        for index in range(40):                    # 一个人塞 40 条
+            store.add(person_id=PERSON, session_id=GROUP_SESSION, group_id=GROUP,
+                      at=NOW + 600 + index, what=f"第{index}条", channel=S.CHANNEL_GROUP)
+        live = store.list_for(PERSON, now=NOW)
+        assert len(live) == S.MAX_LIVE_PER_PERSON, len(live)
+        # 丢的是**最旧**的（第 0..7 条），最新的还在。
+        assert live[-1].what == "第39条"
+        assert "第0条" not in [item.what for item in live]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        handed: list = []
+        capability = _capability(tmp, core=_core(handed))
+        store = capability._store
+        for index in range(30):                    # 30 条**全部到点**
+            store.add(person_id=PERSON, session_id=GROUP_SESSION, group_id=GROUP,
+                      at=NOW - 1 - index, what=f"第{index}条", channel=S.CHANNEL_GROUP)
+        sent = asyncio.run(capability.flush(now=NOW))
+        assert len(sent) == R.MAX_PER_TICK, len(sent)
+        assert len(store.list_for(PERSON, now=NOW)) == 30 - R.MAX_PER_TICK
+        # 下一拍接着发剩下的（不是丢掉）。
+        sent2 = asyncio.run(capability.flush(now=NOW))
+        assert len(sent2) == 10, len(sent2)
+        assert store.list_for(PERSON, now=NOW) == ()
+
+
+def test_finished_entries_do_not_pile_up_forever() -> None:
+    """发完的条目留 7 天就从待发数据里清掉（审查："已发的 300 条一条不清"）。"""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        capability = _capability(tmp, core=_core([]))
+        store = capability._store
+        store.add(person_id=PERSON, session_id=GROUP_SESSION, group_id=GROUP,
+                  at=NOW - 1, what="刚发完的", channel=S.CHANNEL_GROUP)
+        key = store.list_for(PERSON, now=NOW)[0].key
+        store.mark_sent(key)
+        # 让它"发完很久了"：把时钟往后拨 8 天。
+        store._clock = lambda: NOW + 8 * 86400          # noqa: SLF001
+        store.compact()
+        store.compact()                                  # 真写一次
+        assert store.get(key) is None, "发完 8 天的条目还留在数据里"
+
+
 def test_the_plain_truth_is_told_once_per_person_not_per_reminder() -> None:
     """审查第 3 条：三条提醒同时到点且都被拒 → 原来他在群里收到**三遍**同一句人话。"""
 

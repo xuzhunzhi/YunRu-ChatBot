@@ -78,6 +78,13 @@ MAX_TRIES = 3
 #: 折叠阈值：行数超过"有效条数 × 这个倍数"时，把日志压一次。
 COMPACT_FACTOR = 4
 
+#: **一个人最多挂多少条还没发的提醒**（2026-10-09 审查第 4 条：实测一次 300 条全在
+#: 一拍交出去）。超了就丢**最旧**的那条并记一行（照核心那两份 dict 的插入序淘汰写法）。
+MAX_LIVE_PER_PERSON = 32
+#: 已经发完 / 取消 / 放弃的条目，留几天就从数据里清掉（审查："已发的 300 条一条不清"）。
+KEEP_FINISHED_DAYS = 7
+FINISHED_STATES = (SENT, CANCELLED, GIVEN_UP)
+
 
 def reminder_key(person_id: str, session_id: str, at: float, what: str) -> str:
     """一条提醒的稳定主键（同一个人、同一个时刻、同一件事 = 同一条）。
@@ -391,12 +398,36 @@ class RemindStore:
 
     def add(self, *, person_id: str, session_id: str, group_id: str, at: float,
             what: str, channel: str = CHANNEL_UNSET) -> Reminder:
-        """收下一条提醒。**同一条再来一次就是同一条**（主键一样，覆盖成待发）。"""
+        """收下一条提醒。**同一条再来一次就是同一条**（主键一样，覆盖成待发）。
+
+        收下之后按人看一眼**还没发的条数**：超过 `MAX_LIVE_PER_PERSON` 就丢**最旧**的
+        那几条（记一行 warning + 条数）。不这么做的话，一个人（或者一个刷屏的群）
+        能往这里塞任意多条，到点那一拍把它们全交出去（审查实测 300 条）。
+        """
 
         key = reminder_key(person_id, session_id, at, what)
-        return self._write(Reminder(key=key, person_id=str(person_id),
+        item = self._write(Reminder(key=key, person_id=str(person_id),
                                     session_id=str(session_id), group_id=str(group_id),
                                     channel=str(channel), at=float(at), what=str(what)))
+        self._trim_person(str(person_id))
+        return item
+
+    def _trim_person(self, person_id: str) -> int:
+        """把这个人的待发条数压到上限以内（丢最旧的）；返回丢了几条。"""
+
+        live = sorted((item for item in self._all().values()
+                       if item.person_id == person_id and item.live),
+                      key=lambda item: (item.at, item.key))
+        dropped = 0
+        while len(live) > MAX_LIVE_PER_PERSON:
+            oldest = live.pop(0)
+            self._write(replace(oldest, state=CANCELLED,
+                                last_error=f"超过每人 {MAX_LIVE_PER_PERSON} 条，这条最旧、丢掉了"))
+            dropped += 1
+        if dropped:
+            logger.warning("remind_list_capped person=%s dropped=%s cap=%s",
+                           person_id, dropped, MAX_LIVE_PER_PERSON)
+        return dropped
 
     def list_for(self, person_id: str, *, now: float | None = None) -> tuple[Reminder, ...]:
         """这个人**还没发出去**的提醒，按时刻先后排。"""
@@ -515,8 +546,22 @@ class RemindStore:
         """把三本日志各自压一次（行数远多于有效条数时才真写）。"""
 
         self._people.maybe_compact(self._people.replay())
-        self._reminders.maybe_compact(self._reminders.replay())
         # 账本按"天"裁：过期的行直接丢掉（`replay()` 里按主键折叠，过期行没了就没了）。
-        live = {str(row["key"]): {k: v for k, v in row.items() if k != "key"}
-                for row in self.mail_ledger()}
-        self._mail.maybe_compact(live)
+        ledger_all = {str(row["key"]): {k: v for k, v in row.items() if k != "key"}
+                      for row in self.mail_ledger()}
+        if len(ledger_all) < len(self._mail.replay()):
+            self._mail.compact(ledger_all)           # 有东西要清就真写一次
+        else:
+            self._mail.maybe_compact(ledger_all)
+        # 发完 / 取消 / 放弃的条目留 `KEEP_FINISHED_DAYS` 天就从待发数据里清掉
+        # （审查："已发的 300 条一条不清"）。`replay()` 按主键折叠，所以"不写回去"
+        # 就等于"删掉"；真写一次之后它们就没了。
+        cutoff = float(self._clock()) - KEEP_FINISHED_DAYS * 86400.0
+        recorded = self._reminders.replay()
+        kept = {key: event for key, event in recorded.items()
+                if str(event.get("state") or "") not in FINISHED_STATES
+                or float(event.get("at") or 0.0) >= cutoff}
+        if len(kept) < len(recorded):
+            self._reminders.compact(kept)            # 有东西要清就真写一次
+        else:
+            self._reminders.maybe_compact(kept)

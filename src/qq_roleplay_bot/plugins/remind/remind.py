@@ -73,6 +73,10 @@ logger = logging.getLogger(__name__)
 #: 到点的节拍：提醒是"到分钟"的事，半分钟看一次足够细（核心的节拍循环另有下限）。
 POLL_SECONDS = 30.0
 
+#: **一拍最多交出去多少条**（2026-10-09 审查第 4 条：实测一次 300 条全在一拍发出去，
+#: 那就是 300 条消息的突发）。多的留在待发里，下一拍接着发——不是丢掉。
+MAX_PER_TICK = 20
+
 #: 用户会读到的每一句（测试逐个扫机制词——"协议 / 接口 / 调用 / 触发 / 令牌"这类词
 #: 一个字都不许出现在她要说出口的话里）。**加新句子时必须同时加进这个元组。**
 ASK_HEAD = "要我提醒你「{what}」——你想我怎么叫你？"
@@ -365,7 +369,7 @@ class RemindCapability:
         handed: list[RemindDelivery] = []
         gaps: list[str] = []
         handed.extend(await self._ask_pending(gaps))
-        handed.extend(await self._send_due(moment, gaps))
+        handed.extend(await self._send_due(moment, gaps, room=MAX_PER_TICK - len(handed)))
         if gaps:
             logger.warning("remind_no_way_out 这一拍有 %s 件事送不出去（留待发，不算失败）：%s",
                            len(gaps), "；".join(sorted(set(gaps))))
@@ -416,11 +420,21 @@ class RemindCapability:
                                    person.person_id, tries, why)
         return handed
 
-    async def _send_due(self, moment: float, gaps: list[str]) -> list[RemindDelivery]:
-        """把到点的那些交出去；还没答渠道的，按**他当时说话的地方**叫他并记下来。"""
+    async def _send_due(self, moment: float, gaps: list[str], *,
+                        room: int = MAX_PER_TICK) -> list[RemindDelivery]:
+        """把到点的那些交出去；还没答渠道的，按**他当时说话的地方**叫他并记下来。
+
+        `room` 是这一拍还允许交出去几条（`MAX_PER_TICK` 减去问话用掉的那几拍）——
+        到点的比这多就**先发早的**，剩下的留在待发里，下一拍接着发（不丢）。
+        """
 
         handed: list[RemindDelivery] = []
-        for item in self._store.due(moment):
+        pending_due = self._store.due(moment)
+        if len(pending_due) > room:
+            logger.warning("remind_tick_capped due=%s sending=%s（其余留到下一拍）",
+                           len(pending_due), max(room, 0))
+            pending_due = pending_due[:max(room, 0)]
+        for item in pending_due:
             channel = item.channel or session_channel(item.session_id)
             notice = ""
             if channel == CHANNEL_MAIL:
