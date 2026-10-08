@@ -42,6 +42,12 @@ logger = logging.getLogger(__name__)
 DIR_NAME = "remind"
 PEOPLE_LOG = "people.jsonl"
 REMINDERS_LOG = "reminders.jsonl"
+#: 寄出去的每一封邮件记一行（**只记谁 / 寄到哪 / 什么时候**，绝不记正文）：
+#: 它是"每人每天 / 全局每天"两个上限的账本（2026-10-09 独立审查：邮件那一路原来
+#: **没有任何授权或频次闸**——任何能触发提醒的人三步就能让操作者的邮箱替它寄信）。
+MAIL_SENT_LOG = "mail_sent.jsonl"
+#: 账本保留几天（过期行在读的时候顺手丢掉）。
+MAIL_LEDGER_KEEP_DAYS = 7
 
 #: 三种叫他方式。**没有第四种**：加一种要同时改核心的发送侧，那是另一侧的事。
 CHANNEL_GROUP = "group"
@@ -107,6 +113,12 @@ class Preference:
     #: 没有它，"问一句怎么叫他"那条路失败时会每 30 秒重发、永不封顶
     #: （2026-10-09 独立审查实测：四种失败各送出去 4 次）。
     ask_tries: int = 0
+    #: **已经跟他说过"私聊得你先来私聊我一次"了**。
+    #: 2026-10-09 审查：原来这个记号记在**每一条提醒**上，于是三条同时到点且都被拒 →
+    #: 他在群里收到**三遍**同一句人话。改成**按人**记：同一句只说一次。
+    told_rejected: bool = False
+    #: **已经跟他说过"那条提醒我没寄出去"了**（同上：按人，别刷屏）。
+    told_mail_failed: bool = False
 
     @property
     def has_email(self) -> bool:
@@ -137,9 +149,7 @@ class Reminder:
     state: str = WAITING
     tries: int = 0
     last_error: str = ""
-    #: **已经告诉过他"先私聊我一次"了**（核心回 `rejected` 时那条人话只发一次，
-    #: 不然他每拍都会收到一遍，那是骚扰）。
-    told_no_session: bool = False
+
 
     @property
     def live(self) -> bool:
@@ -157,8 +167,7 @@ class Reminder:
                 "session_id": self.session_id, "group_id": self.group_id,
                 "channel": self.channel, "at": self.at, "what": self.what,
                 "state": self.state, "tries": self.tries,
-                "last_error": self.last_error,
-                "told_no_session": self.told_no_session}
+                "last_error": self.last_error}
 
 
 class JsonlLog:
@@ -225,6 +234,7 @@ class RemindStore:
         base = pathlib.Path(root) if root is not None else data_dir() / DIR_NAME
         self._people = JsonlLog(base / PEOPLE_LOG)
         self._reminders = JsonlLog(base / REMINDERS_LOG)
+        self._mail = JsonlLog(base / MAIL_SENT_LOG)
         self._clock = clock
 
     # --- 人 -----------------------------------------------------------------
@@ -242,11 +252,30 @@ class RemindStore:
                           ask_group=str(event.get("ask_group") or ""),
                           ask_what=str(event.get("ask_what") or ""),
                           asked=bool(event.get("asked") or False),
-                          ask_tries=int(event.get("ask_tries") or 0))
+                          ask_tries=int(event.get("ask_tries") or 0),
+                          told_rejected=bool(event.get("told_rejected") or False),
+                          told_mail_failed=bool(event.get("told_mail_failed") or False))
 
-    def _write_person(self, person_id: str, **fields: str) -> Preference:
-        event = {"key": str(person_id), "at": self._clock()}
-        event.update(fields)
+    #: `mark_told()` 认得的那两个记号（"已经跟他说过这句话了"，按人记）。
+    TOLD_FLAGS = ("told_rejected", "told_mail_failed")
+
+    def _write_person(self, person_id: str, **changes: object) -> Preference:
+        """把"这个人当前的状态"**整份**写一条事件（只覆盖 `changes` 里那几个字段）。
+
+        为什么整份写、而不是只写改了的字段：字段会越加越多，而"某个调用点忘了带上某个
+        字段"是**静默清空**它——那正是 2026-10-09 审查里"`told_no_session` 记在提醒上"
+        这类形状的来源。整份写之后，新加一个字段只要改**这一处**。
+        """
+
+        current = self.preference(person_id) or Preference(person_id=str(person_id))
+        event: dict = {"key": str(person_id), "at": self._clock(),
+                       "channel": current.channel, "email": current.email,
+                       "ask_session": current.ask_session, "ask_group": current.ask_group,
+                       "ask_what": current.ask_what, "asked": current.asked,
+                       "ask_tries": current.ask_tries,
+                       "told_rejected": current.told_rejected,
+                       "told_mail_failed": current.told_mail_failed}
+        event.update(changes)
         self._people.append(event)
         return self.preference(person_id)  # type: ignore[return-value]
 
@@ -260,37 +289,33 @@ class RemindStore:
 
         current = self.preference(person_id)
         keep = current if current is not None else Preference(person_id=str(person_id))
-        return self._write_person(person_id,
-                                  channel=str(channel) if channel else keep.channel,
-                                  email=str(email) if email else keep.email,
-                                  ask_session=keep.ask_session,
-                                  ask_group=keep.ask_group, ask_what=keep.ask_what,
-                                  asked=keep.asked, ask_tries=keep.ask_tries)
+        changes: dict = {}
+        if channel:
+            changes["channel"] = str(channel)
+        if email:
+            changes["email"] = str(email)
+        if not changes:
+            return keep
+        return self._write_person(person_id, **changes)
 
     def note_ask(self, person_id: str, *, session_id: str, group_id: str,
                  what: str) -> Preference:
         """记下"到哪个会话里问他怎么叫他"（**问出去之前**一直留着）。"""
 
-        current = self.preference(person_id)
-        keep = current if current is not None else Preference(person_id=str(person_id))
-        return self._write_person(person_id, channel=keep.channel, email=keep.email,
-                                  ask_session=str(session_id),
-                                  ask_group=str(group_id), ask_what=str(what),
-                                  asked=keep.asked, ask_tries=keep.ask_tries)
+        return self._write_person(person_id, ask_session=str(session_id),
+                                  ask_group=str(group_id), ask_what=str(what))
 
     def mark_asked(self, person_id: str) -> Preference | None:
-        """那句问话发出去了（或他已经答了）→ 清掉待问，并且**记下"问过了"**。
+        """那句问话发出去了（或不用再问了）→ 清掉待问，并且**记下"问过了"**。
 
         两件事一起做是有意的：`asked=True` 才是"只问一次"的保证——他之后再提十条提醒，
         也不会再收到一遍"你想我怎么叫你"。
         """
 
-        current = self.preference(person_id)
-        if current is None:
+        if self.preference(person_id) is None:
             return None
-        return self._write_person(person_id, channel=current.channel, email=current.email,
-                                  ask_session="", ask_group="", ask_what="", asked=True,
-                                  ask_tries=0)
+        return self._write_person(person_id, ask_session="", ask_group="", ask_what="",
+                                  asked=True, ask_tries=0)
 
     def bump_ask_tries(self, person_id: str) -> int:
         """那句问话**确定送失败**了一次 → 次数 +1，返回新的次数。
@@ -302,11 +327,21 @@ class RemindStore:
         current = self.preference(person_id)
         if current is None:
             return 0
-        self._write_person(person_id, channel=current.channel, email=current.email,
-                           ask_session=current.ask_session, ask_group=current.ask_group,
-                           ask_what=current.ask_what, asked=current.asked,
-                           ask_tries=current.ask_tries + 1)
+        self._write_person(person_id, ask_tries=current.ask_tries + 1)
         return current.ask_tries + 1
+
+    def mark_told(self, person_id: str, flag: str) -> Preference | None:
+        """记下"这句人话已经跟他说过了"（`TOLD_FLAGS` 里那两个之一，**按人**）。
+
+        2026-10-09 审查：这记号原来记在**每一条提醒**上 → 三条同时到点被拒就刷三遍。
+        按人记之后，同一句话一个人只说一次（其余几次只进日志）。
+        """
+
+        if flag not in self.TOLD_FLAGS:
+            raise ValueError(f"不认识的记号：{flag}")
+        if self.preference(person_id) is None:
+            return None
+        return self._write_person(person_id, **{flag: True})
 
     def asking(self) -> tuple[Preference, ...]:
         """**该问还没问**的那几个人（问话还没发出去、而且从没问过）。"""
@@ -344,7 +379,6 @@ class RemindStore:
                 state=str(event.get("state") or WAITING),
                 tries=int(event.get("tries") or 0),
                 last_error=str(event.get("last_error") or ""),
-                told_no_session=bool(event.get("told_no_session") or False),
             )
         return found
 
@@ -435,13 +469,6 @@ class RemindStore:
             return None
         return self._replace(item, state=GIVEN_UP, last_error=str(error)[:200])
 
-    def mark_told(self, key: str) -> Reminder | None:
-        """那句"先私聊我一次"已经跟他说过了（**只说一次**）。"""
-
-        item = self.get(key)
-        if item is None:
-            return None
-        return self._replace(item, told_no_session=True)
 
     def set_channel(self, key: str, channel: str) -> Reminder | None:
         item = self.get(key)
@@ -459,8 +486,37 @@ class RemindStore:
                  if item.is_due(now, max_tries=max_tries)]
         return tuple(sorted(found, key=lambda item: (item.at, item.key)))
 
+    # --- 邮件配额（每人每天 / 全局每天） ---------------------------------------
+
+    def mail_ledger(self) -> tuple[dict[str, dict], ...]:
+        """最近若干天的寄信记录（`MAIL_LEDGER_KEEP_DAYS` 天以内，过期行不返回）。"""
+
+        cutoff = float(self._clock()) - MAIL_LEDGER_KEEP_DAYS * 86400.0
+        rows = [dict(event, key=str(key))
+                for key, event in self._mail.replay().items()
+                if float(event.get("at") or 0.0) >= cutoff]
+        return tuple(rows)
+
+    def mail_sent_on(self, day: str, *, person: str | None = None) -> int:
+        """`day` 那天寄了几封（给了 `person` 就只数他的）。"""
+
+        return sum(1 for row in self.mail_ledger()
+                   if str(row.get("day") or "") == str(day)
+                   and (person is None or str(row.get("person") or "") == str(person)))
+
+    def note_mail_sent(self, day: str, person: str) -> None:
+        """记一封（主键带上时间戳，同一天同一个人寄多封也各占一行）。"""
+
+        self._mail.append({"key": f"{day}|{person}|{int(self._clock() * 1000)}",
+                           "day": str(day), "person": str(person),
+                           "at": self._clock()})
+
     def compact(self) -> None:
-        """把两本日志各自压一次（行数远多于有效条数时才真写）。"""
+        """把三本日志各自压一次（行数远多于有效条数时才真写）。"""
 
         self._people.maybe_compact(self._people.replay())
         self._reminders.maybe_compact(self._reminders.replay())
+        # 账本按"天"裁：过期的行直接丢掉（`replay()` 里按主键折叠，过期行没了就没了）。
+        live = {str(row["key"]): {k: v for k, v in row.items() if k != "key"}
+                for row in self.mail_ledger()}
+        self._mail.maybe_compact(live)

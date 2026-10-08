@@ -426,7 +426,7 @@ def test_a_rejected_private_reminder_tells_him_once_and_stays_pending() -> None:
         assert R.NO_PRIVATE in [item.text for item in handed], "那句人话没跟他说"
         item = store.list_for(PERSON, now=NOW)[0]
         assert item.state == S.WAITING and item.tries == 0, item
-        assert item.told_no_session is True
+        assert store.preference(PERSON).told_rejected is True
 
         # 下一拍：**不再重复说**那句人话（否则就是每半分钟骚扰他一次）。
         asyncio.run(capability.flush(now=NOW))
@@ -487,9 +487,227 @@ def test_the_mail_channel_goes_through_the_mail_plugins_ability() -> None:
         assert len(mail.sent) == 1, "邮件那一路没走邮件插件"
         address, subject, body = mail.sent[0]
         assert address == "lele@example.com"
-        assert subject == R.MAIL_SUBJECT.format(what="交作业") and "交作业" in body
+        assert subject == R.MAIL_SUBJECT and "交作业" in body
         assert handed == [], "邮件那一路不该再经核心发一遍"
         assert sent == ()
+
+
+class _BadMail:
+    """邮件接缝的替身：一寄就抛给定的那个异常（`kind` 分类那条路要用）。"""
+
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+        self.calls = 0
+
+    async def send_to(self, address: str, subject: str, body: str) -> dict:
+        self.calls += 1
+        raise self.error
+
+
+def _mail_refusal(call):
+    """跑一次 mail 那边的校验，把**它真的会抛的那个**异常拿到手（别自己造一个像的）。"""
+
+    from qq_roleplay_bot.plugins.mail.mail_client import MailError
+
+    try:
+        call()
+    except MailError as exc:
+        return exc
+    raise AssertionError("这一句居然没被邮件那边拒——那这条用例就没在验东西")
+
+
+def test_the_subject_is_fixed_so_quotes_and_ampersands_still_go_out() -> None:
+    """审查 2026-10-09 第 5 条：主题原来是 `到点提醒：{what}`，而主题是邮件那边**唯一进
+    命令行**的自由文本，`& " %` 这些字符会让它**拒发**——于是"提醒里带了引号"就等于
+    "这封信永远寄不出去"。现在主题是固定文案，`what` 只进正文（正文走文件）。"""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        mail = _FakeMail()
+        capability = _capability(tmp, core=_core([]), mail_send=mail.send_to)
+        store = capability._store
+        store.remember_person(PERSON, channel=S.CHANNEL_MAIL, email="lele@example.com")
+        store.add(person_id=PERSON, session_id=GROUP_SESSION, group_id=GROUP,
+                  at=NOW - 1, what='交"作业" & 带伞 50%', channel=S.CHANNEL_MAIL)
+
+        asyncio.run(capability.flush(now=NOW))
+
+        assert len(mail.sent) == 1
+        _address, subject, body = mail.sent[0]
+        assert subject == R.MAIL_SUBJECT
+        assert not (set(subject) & set('"\'`%&|<>^!()$')), subject
+        # 原话照旧进正文（那里不走命令行，这些字符没问题）。
+        assert '&' in body and '%' in body and '交"作业"' in body
+
+
+def test_a_mail_failure_that_will_never_succeed_is_refused_not_retried() -> None:
+    """**确定性失败不许当"可重试"**（审查第 5 条）：地址/格式不合邮件那边的口径时，
+    原来会白烧三次、然后永远卡在"待发"里且用户看不到原因。现在：试**一次**、
+    跟他说一句人话（**按人只一次**）、把这条收口。"""
+
+    from qq_roleplay_bot.plugins.mail.mail_client import clean_email, clean_subject
+
+    refusals = [
+        _mail_refusal(lambda: clean_email("lele@example.c0m")),      # 地址口径不一致
+        _mail_refusal(lambda: clean_subject('提醒他交"作业"')),        # 主题含禁用字符
+    ]
+    for refusal in refusals:
+        with tempfile.TemporaryDirectory() as tmp:
+            handed: list = []
+            mail = _BadMail(refusal)
+            capability = _capability(tmp, core=_core(handed), mail_send=mail.send_to)
+            store = capability._store
+            store.remember_person(PERSON, channel=S.CHANNEL_MAIL, email="lele@example.com")
+            store.add(person_id=PERSON, session_id=GROUP_SESSION, group_id=GROUP,
+                      at=NOW - 1, what="交作业", channel=S.CHANNEL_MAIL)
+
+            for _ in range(4):                       # 4 拍
+                asyncio.run(capability.flush(now=NOW))
+
+            assert mail.calls == 1, f"{refusal.kind} 被重试了 {mail.calls} 次"
+            told = [item.text for item in handed]
+            assert told.count(R.MAIL_FAILED) == 1, told      # 人话：按人只说一次
+            assert capability._store.list_for(PERSON, now=NOW) == ()   # 收口了，不再挂着
+            item = next(iter(capability._store._all().values()))       # noqa: SLF001
+            assert item.state == S.GIVEN_UP and refusal.kind in item.last_error
+
+        # 对照：**可重试**的那一类（网络那种）照旧试满 MAX_TRIES。
+        with tempfile.TemporaryDirectory() as tmp:
+            mail = _BadMail(RuntimeError("网络断了"))
+            capability = _capability(tmp, core=_core([]), mail_send=mail.send_to)
+            store = capability._store
+            store.remember_person(PERSON, channel=S.CHANNEL_MAIL, email="lele@example.com")
+            store.add(person_id=PERSON, session_id=GROUP_SESSION, group_id=GROUP,
+                      at=NOW - 1, what="交作业", channel=S.CHANNEL_MAIL)
+            for _ in range(5):
+                asyncio.run(capability.flush(now=NOW))
+            assert mail.calls == S.MAX_TRIES, mail.calls
+
+
+def test_the_mail_channel_has_a_per_person_and_a_global_daily_cap() -> None:
+    """审查第 1 条（人裁，按最保守）：任何能触发提醒的人原来三步就能让**操作者的邮箱**
+    替他寄信、条数不限。现在每人每天 1 封、全局每天 5 封（调用时现读 + 钳制），
+    超限就回一句人话、**不烧重试次数**、而且每次尝试都留一行审计（不含正文）。"""
+
+    def env(**overrides):
+        return patch.dict(os.environ, {**{"QQBOT_DATA_DIR": ""}, **overrides})
+
+    # 每人每天 1 封：同一个人两条到点 → 只寄一封，第二条被配额挡住并告诉他。
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch.dict(os.environ, {"QQBOT_REMIND_MAIL_PER_PERSON_PER_DAY": "1",
+                                     "QQBOT_REMIND_MAIL_PER_DAY": "5"}):
+            handed: list = []
+            mail = _FakeMail()
+            capability = _capability(tmp, core=_core(handed), mail_send=mail.send_to)
+            store = capability._store
+            store.remember_person(PERSON, channel=S.CHANNEL_MAIL, email="lele@example.com")
+            store.add(person_id=PERSON, session_id=GROUP_SESSION, group_id=GROUP,
+                      at=NOW - 1, what="交作业", channel=S.CHANNEL_MAIL)
+            store.add(person_id=PERSON, session_id=GROUP_SESSION, group_id=GROUP,
+                      at=NOW - 2, what="带伞", channel=S.CHANNEL_MAIL)
+
+            asyncio.run(capability.flush(now=NOW))
+
+            assert len(mail.sent) == 1, "每人每天 1 封没生效"
+            assert [item.text for item in handed].count(R.MAIL_QUOTA) == 1, handed
+            assert capability._store.mail_sent_on(capability._today(NOW),
+                                                  person=PERSON) == 1
+
+    # 全局每天 5 封：6 个人各一条 → 只寄 5 封。
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch.dict(os.environ, {"QQBOT_REMIND_MAIL_PER_PERSON_PER_DAY": "1",
+                                     "QQBOT_REMIND_MAIL_PER_DAY": "5"}):
+            mail = _FakeMail()
+            capability = _capability(tmp, core=_core([]), mail_send=mail.send_to)
+            store = capability._store
+            for index in range(6):
+                who = str(200 + index)
+                store.remember_person(who, channel=S.CHANNEL_MAIL, email=f"p{index}@example.com")
+                store.add(person_id=who, session_id=GROUP_SESSION, group_id=GROUP,
+                          at=NOW - 1, what="交作业", channel=S.CHANNEL_MAIL)
+            asyncio.run(capability.flush(now=NOW))
+            assert len(mail.sent) == 5, len(mail.sent)
+
+    # 配置写歪了 / 越界：钳制，不许把上限放开。
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch.dict(os.environ, {"QQBOT_REMIND_MAIL_PER_PERSON_PER_DAY": "999",
+                                     "QQBOT_REMIND_MAIL_PER_DAY": "不是数"}):
+            capability = _capability(tmp, core=_core([]), mail_send=_FakeMail().send_to)
+            assert capability._quota() == (R.QUOTA_PERSON_MAX, R.QUOTA_TOTAL_DEFAULT)
+        with patch.dict(os.environ, {"QQBOT_REMIND_MAIL_PER_PERSON_PER_DAY": "0",
+                                     "QQBOT_REMIND_MAIL_PER_DAY": "0"}):
+            capability = _capability(tmp, core=_core([]), mail_send=_FakeMail().send_to)
+            assert capability._quota() == (0, 0)
+            store = capability._store
+            store.remember_person(PERSON, channel=S.CHANNEL_MAIL, email="lele@example.com")
+            store.add(person_id=PERSON, session_id=GROUP_SESSION, group_id=GROUP,
+                      at=NOW - 1, what="交作业", channel=S.CHANNEL_MAIL)
+            mail = capability._mail_send
+            asyncio.run(capability.flush(now=NOW))
+            assert store.due(NOW) == () and capability._store.mail_sent_on(
+                capability._today(NOW)) == 0
+
+
+def test_the_mail_audit_line_never_carries_the_body(caplog=None) -> None:
+    """审计留一行（谁 · 寄到哪 · 成没成），**正文不进日志**。"""
+
+    import logging as _logging
+
+    with tempfile.TemporaryDirectory() as tmp:
+        records: list = []
+
+        class _Grab(_logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        handler = _Grab()
+        logger = _logging.getLogger("qq_roleplay_bot.plugins.remind.remind")
+        before = logger.level
+        logger.addHandler(handler)
+        logger.setLevel(_logging.INFO)          # 审计那一行是 INFO，别被根的级别挡掉
+        try:
+            mail = _FakeMail()
+            capability = _capability(tmp, core=_core([]), mail_send=mail.send_to)
+            store = capability._store
+            store.remember_person(PERSON, channel=S.CHANNEL_MAIL, email="lele@example.com")
+            store.add(person_id=PERSON, session_id=GROUP_SESSION, group_id=GROUP,
+                      at=NOW - 1, what="交作业", channel=S.CHANNEL_MAIL)
+            asyncio.run(capability.flush(now=NOW))
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(before)
+
+        audit = [line for line in records if line.startswith("remind_mail_audit")]
+        assert len(audit) == 1, records
+        assert "lele@example.com" in audit[0] and "result=sent" in audit[0]
+        assert "交作业" not in audit[0], audit[0]        # 正文不许进日志
+
+
+def test_the_plain_truth_is_told_once_per_person_not_per_reminder() -> None:
+    """审查第 3 条：三条提醒同时到点且都被拒 → 原来他在群里收到**三遍**同一句人话。"""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        handed: list = []
+
+        async def rejected(delivery: RemindDelivery) -> RemindSendResult:
+            handed.append(delivery)
+            if delivery.text == R.NO_PRIVATE:
+                return RemindSendResult(True, "ok")          # 人话发到群里成了
+            return RemindSendResult(False, "rejected", "还不是好友")
+
+        capability = _capability(tmp, core=rejected)
+        store = capability._store
+        store.remember_person(PERSON, channel=S.CHANNEL_PRIVATE)
+        for index, what in enumerate(("交作业", "带伞", "买牛奶")):
+            store.add(person_id=PERSON, session_id=GROUP_SESSION, group_id=GROUP,
+                      at=NOW - 1 - index, what=what, channel=S.CHANNEL_PRIVATE)
+
+        asyncio.run(capability.flush(now=NOW))
+
+        told = [item.text for item in handed]
+        assert told.count(R.NO_PRIVATE) == 1, f"同一句人话说了 {told.count(R.NO_PRIVATE)} 遍"
+        # 三条都还在待发里（他私聊过她之后都发得出去）。
+        assert len(store.list_for(PERSON, now=NOW)) == 3
+        assert store.preference(PERSON).told_rejected is True
 
 
 # --- 5. 看 / 改（命令那条入口用的是能力上同一份函数） -----------------------

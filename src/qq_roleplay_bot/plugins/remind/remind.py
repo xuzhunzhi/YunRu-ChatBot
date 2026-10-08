@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import os
 import time
 from datetime import datetime
 
@@ -94,15 +95,40 @@ LIST_TAIL = "回「/提醒 删 序号」可以不提醒了，「/提醒 换 1|2|
 LIST_TAIL_EMPTY = "想让我提醒你什么，说一句「几点提醒我什么事」就行。"
 USAGE = "用法：「/提醒」看还有哪些；「/提醒 删 2」删掉第 2 条；「/提醒 换 2」换我叫你的方式。"
 BAD_INDEX = "没找到第 {index} 条——先发一句「/提醒」看看有哪些。"
-MAIL_SUBJECT = "到点提醒：{what}"
+#: **主题是固定文案**（2026-10-09 审查第 5 条）：主题是邮件那边**唯一进命令行**的自由文本，
+#: 而 `clean_subject` 会因为 `& " %` 这类字符**拒发**——原来的 `"到点提醒：{what}"`
+#: 于是让"写了一句带引号的提醒"变成"这封信永远寄不出去、还安静地挂着"。
+#: `what` 只进正文（正文走文件、不走命令行，这些字符没问题）。
+MAIL_SUBJECT = "到点提醒"
 MAIL_BODY = "你让我在这个时候提醒你：{what}\n—— 这封是到点自动寄的。"
+#: 她要说的一句人话：这条提醒**寄不出去**（地址或内容不合邮件那边的口径）。
+MAIL_FAILED = "你那条提醒我没寄出去——邮箱地址或者内容不太合适，你改一下再说一声，我再试。"
+MAIL_QUOTA = "今天的邮件已经寄到上限了，这条我没寄出去。急的话先在群里说一声。"
 DUE_TEXT = "到点了：{what}"
+
+#: 邮件那边**确定性**拒绝的几类（`MailError.kind`）。这些再试也不会变：
+#: 地址不合口径、主题/正文格式被拒。**与"网络出错"分开**，否则就是白烧三次 + 一直挂着。
+MAIL_REFUSAL_KINDS = frozenset({"bad_recipient", "bad_subject", "empty_body",
+                                "too_long", "secret_in_body"})
+
+#: 邮件那一路的两个上限（**每人每天 / 全局每天**）。用户 2026-10-08 的口径是"最保守先上"：
+#: 任何能触发提醒的人都能让**操作者的邮箱**替他寄信，所以默认每人 1 封、全局 5 封。
+#:
+#: **读环境变量而不是 `dev_config`**：`dev_config` 是核心的文件，插件线不许改它
+#: （`tests/check_plugin_branch_scope.py` 会拦）。两个名字写进 `docs/CONFIG_GUIDE.md`。
+#: **调用时现读**（改完不用重启）+ **钳制**（配置写歪了不许把上限放开）。
+QUOTA_PERSON_VAR = "QQBOT_REMIND_MAIL_PER_PERSON_PER_DAY"
+QUOTA_TOTAL_VAR = "QQBOT_REMIND_MAIL_PER_DAY"
+QUOTA_PERSON_DEFAULT = 1
+QUOTA_TOTAL_DEFAULT = 5
+QUOTA_PERSON_MAX = 20
+QUOTA_TOTAL_MAX = 50
 
 #: 她要说出口的话（测试扫这一个元组）。**加新句子就加进来。**
 USER_TEXTS = (ASK_HEAD, ASK_GROUP, ASK_PRIVATE, ASK_MAIL, ASK_TAIL,
               *CHOOSE_OK.values(), NO_PRIVATE, NO_MAIL, NEED_EMAIL, ASK_AGAIN,
               NOTHING, LIST_HEAD, LIST_TAIL, LIST_TAIL_EMPTY, USAGE, BAD_INDEX,
-              MAIL_SUBJECT, MAIL_BODY, DUE_TEXT)
+              MAIL_SUBJECT, MAIL_BODY, MAIL_FAILED, MAIL_QUOTA, DUE_TEXT)
 
 #: 这一拍跑完的几种结局（`_deliver_*` 的返回值）。
 SENT_OUT = "sent"           # 发出去了
@@ -110,6 +136,7 @@ PENDING = "pending"         # 没有出口（发送口没接上 / 找不到那�
 RETRY = "retry"             # 确定没送出去 → 记一次失败，可重试
 NO_SESSION = "no_session"   # 对面拒收（他还没私聊过她）→ 说一次人话，留待发
 GIVEN_UP = "given_up"       # 别重发（不知道出去没有）→ 不再试
+REFUSED = "refused"         # **确定性发不出去**（地址/格式不合口径、配额用完）→ 说一句 + 收口
 
 
 def _field(source: object, name: str, default: object = None) -> object:
@@ -395,8 +422,9 @@ class RemindCapability:
         handed: list[RemindDelivery] = []
         for item in self._store.due(moment):
             channel = item.channel or session_channel(item.session_id)
+            notice = ""
             if channel == CHANNEL_MAIL:
-                outcome, why = await self._deliver_mail(item)
+                outcome, why, notice = await self._deliver_mail(item, now=moment)
                 delivery = None
             else:
                 group_id = item.group_id if channel == CHANNEL_GROUP else ""
@@ -418,10 +446,20 @@ class RemindCapability:
                 self._store.mark_pending(item.key, why)
             elif outcome == NO_SESSION:
                 gaps.append(why)
-                await self._tell_him_once(item, gaps)
+                await self._tell_once(item, NO_PRIVATE, flag="told_rejected", gaps=gaps)
                 # **留待发**：他私聊过她之后这一条就能发出去——只记下原因，
                 # 不烧重试次数、也不算失败（用户 2026-10-08 的裁决）。
                 self._store.mark_pending(item.key, why)
+            elif outcome == REFUSED:
+                # 这一条**确定性发不出去**（邮箱地址不合邮件那边的口径 / 主题·正文格式、
+                # 或者今天的配额用完了）：不许当"可重试"白烧三次，也不许安静地永远挂着——
+                # 跟他说一句人话（**按人只说一次**），然后把这条收口。
+                gaps.append(why)
+                await self._tell_once(item, notice or MAIL_FAILED,
+                                      flag="told_mail_failed", gaps=gaps)
+                self._store.mark_given_up(item.key, why)
+                logger.warning("remind_refused person=%s channel=%s why=%s（不再试）",
+                               item.person_id, channel, why)
             elif outcome == GIVEN_UP:
                 self._store.mark_given_up(item.key, why)
                 logger.warning("remind_given_up person=%s why=%s（不再试）", item.person_id, why)
@@ -432,38 +470,103 @@ class RemindCapability:
                     item.person_id, channel, why)
         return handed
 
-    async def _tell_him_once(self, item: Reminder, gaps: list[str]) -> None:
-        """核心回 `rejected`（他还没私聊过她）→ **只对他说一次**"先私聊我一次…"。
+    async def _tell_once(self, item: Reminder, text: str, *, flag: str,
+                         gaps: list[str]) -> None:
+        """对他说一句人话——**按人只说一次**（2026-10-09 审查：原来按条记 → 刷屏）。
 
         说在**他当时说话的地方**（群里说的就发到那个群、@ 他）。他本来就在私聊里说的
-        时候这条不适用（私聊那条路正是发不出去的那条）。
+        时候这条不适用（私聊那条路正是发不出去的那条），但仍然记下"说过了"，
+        免得每一拍都为此再试一遍。
         """
 
-        if item.told_no_session or not str(item.session_id).startswith("group:"):
+        person = self._store.preference(item.person_id)
+        if person is not None and getattr(person, flag, False):
             return
-        outcome, why, _ = await self._deliver_core(item.person_id, NO_PRIVATE,
+        if not str(item.session_id).startswith("group:"):
+            self._store.mark_told(item.person_id, flag)
+            return
+        outcome, why, _ = await self._deliver_core(item.person_id, text,
                                                   group_id=item.group_id)
-        if outcome == SENT_OUT:
-            self._store.mark_told(item.key)
-        else:
-            gaps.append(why)
+        if outcome == PENDING:
+            gaps.append(why)                       # 没有出口：留待发，下一拍再说
+            return
+        # 别的结果（发出去了 / 拒收 / 不知道 / 确定失败）都**记下"说过了"**：
+        # 这句话是"告知"，不是"必须送到"——反复重试只会变成骚扰。
+        self._store.mark_told(item.person_id, flag)
 
-    async def _deliver_mail(self, item: Reminder) -> tuple[str, str]:
-        """邮箱那一路：走邮件插件的能力（`MailSeams.send_to`），**不经核心**。"""
+    def _quota(self) -> tuple[int, int]:
+        """读两个上限（**每人每天 / 全局每天**）：调用时现读环境变量 + 钳制。
+
+        钳制是两层：认不出（空 / 不是数）就用默认值；认出来但超出上限就压到上限。
+        **不写进 `dev_config`**：那是核心的文件，插件线不许改它（那道范围门槛会拦）。
+        """
+
+        def read(name: str, default: int, ceiling: int) -> int:
+            raw = str(os.environ.get(name, "") or "").strip()
+            try:
+                value = int(raw) if raw else default
+            except ValueError:
+                logger.warning("remind_quota_bad_value name=%s value=%r（用默认值）", name, raw)
+                value = default
+            return max(0, min(ceiling, value))
+
+        return (read(QUOTA_PERSON_VAR, QUOTA_PERSON_DEFAULT, QUOTA_PERSON_MAX),
+                read(QUOTA_TOTAL_VAR, QUOTA_TOTAL_DEFAULT, QUOTA_TOTAL_MAX))
+
+    def _today(self, moment: float) -> str:
+        """今天（按**核心那份显式配置的时区**，与"到点"用的是同一个）。"""
+
+        try:
+            return datetime.fromtimestamp(float(moment),
+                                          tz=dev_config.local_timezone()).strftime("%Y-%m-%d")
+        except (OverflowError, OSError, ValueError):
+            return "unknown"
+
+    async def _deliver_mail(self, item: Reminder, *, now: float) -> tuple[str, str, str]:
+        """邮箱那一路：走邮件插件的能力（`MailSeams.send_to`），**不经核心**。
+
+        三件事按顺序：
+
+        1. **配额闸**（2026-10-09 审查第 1 条，人裁按最保守）：每人每天 / 全局每天各一个
+           上限，超了就 `REFUSED` + 一句人话（**"不是失败"，所以不烧重试次数**）；
+        2. 真的寄（主题是固定文案，`what` 只进正文）；
+        3. `(结局, 原因, 要跟他说的人话)`：**确定性失败与可重试失败分开**——地址不合邮件
+           那边的口径（`bad_recipient`）、格式被拒（`bad_subject`/…）、我们自己的地址闸门
+           （`ValueError`）**再试一万次也不会变** → `REFUSED`；别的（网络、CLI）才是 `RETRY`。
+
+        每次**尝试**都留一行审计（谁 · 寄到哪 · 成没成），**绝不记正文**。
+        """
 
         if self._mail_send is None:
-            return PENDING, "邮件插件没给「寄给某个地址」的口子"
+            return PENDING, "邮件插件没给「寄给某个地址」的口子", ""
         person = self._store.preference(item.person_id)
         address = person.email if person is not None else ""
         if not address:
-            return PENDING, "手上没有他的邮箱（核心这次没递过来）"
+            return PENDING, "手上没有他的邮箱（核心这次没递过来）", ""
+        day = self._today(now)
+        per_person, total = self._quota()
+        used_person = self._store.mail_sent_on(day, person=item.person_id)
+        used_total = self._store.mail_sent_on(day)
+        if used_person >= per_person or used_total >= total:
+            logger.warning("remind_mail_quota person=%s day=%s per_person=%s/%s total=%s/%s",
+                           item.person_id, day, used_person, per_person, used_total, total)
+            return REFUSED, f"今天的邮件配额用完了（{used_person}/{per_person}、{used_total}/{total}）", \
+                MAIL_QUOTA
+        subject = MAIL_SUBJECT                       # **固定文案**：`what` 只进正文
+        body = MAIL_BODY.format(what=item.what)
         try:
-            await _maybe_await(self._mail_send(
-                address, MAIL_SUBJECT.format(what=item.what),
-                MAIL_BODY.format(what=item.what)))
+            await _maybe_await(self._mail_send(address, subject, body))
         except Exception as exc:  # noqa: BLE001 - 发不出去要记下来，不许带走这一拍
-            return RETRY, f"{type(exc).__name__}: {exc}"
-        return SENT_OUT, ""
+            kind = str(getattr(exc, "kind", "") or "")
+            logger.info("remind_mail_audit person=%s to=%s day=%s result=failed kind=%s",
+                        item.person_id, address, day, kind or type(exc).__name__)
+            if isinstance(exc, ValueError) or kind in MAIL_REFUSAL_KINDS:
+                return REFUSED, f"{kind or type(exc).__name__}: {exc}", MAIL_FAILED
+            return RETRY, f"{type(exc).__name__}: {exc}", ""
+        self._store.note_mail_sent(day, item.person_id)
+        logger.info("remind_mail_audit person=%s to=%s day=%s result=sent",
+                    item.person_id, address, day)
+        return SENT_OUT, "", ""
 
     async def _deliver_core(self, person_id: str, text: str, *,
                             group_id: str) -> tuple[str, str, RemindDelivery | None]:
