@@ -153,7 +153,7 @@ def test_the_plugin_hands_its_capability_to_the_core_through_discovery() -> None
         registry.remind_send = _core([])
         loaded = discover(registry, only=("remind",))
 
-        assert loaded[:2] == ("mail", "remind"), f"前置要先装：{loaded}"
+        assert "remind" in loaded, loaded
         seam = getattr(registry, "remind", None)
         assert isinstance(seam, RemindCapability), "交上去的不是那个能力对象"
         # **同步**：核心那一侧就是 `seam(request)`（不 await、不读返回值）。
@@ -163,7 +163,8 @@ def test_the_plugin_hands_its_capability_to_the_core_through_discovery() -> None
 
         poller = _poller(registry)
         assert poller.interval_seconds > 0 and poller.enabled is True
-        assert remind_plugin.REQUIRES == ("mail",) and remind_plugin.TITLE
+        # **不声明 `REQUIRES`**（审查第 8 条）：没有 mail 插件时提醒照装、另外两条路照常。
+        assert getattr(remind_plugin, "REQUIRES", ()) == () and remind_plugin.TITLE
         command = _command(registry)
         assert command.name == "remind" and command.min_level == "public"
 
@@ -729,6 +730,48 @@ def test_finished_entries_do_not_pile_up_forever() -> None:
         store.compact()
         store.compact()                                  # 真写一次
         assert store.get(key) is None, "发完 8 天的条目还留在数据里"
+
+
+def test_it_still_works_without_the_mail_plugin_at_all() -> None:
+    """审查第 8 条：原来 `REQUIRES = ("mail",)` 让"没有 mail"等于"整个提醒消失"。
+    现在没有邮件能力只是**少一个选项**，群里 @ 与私聊照常。"""
+
+    with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"QQBOT_DATA_DIR": tmp}):
+        registry = PluginRegistry(call_action=_no_action)     # 连 mail 都不装
+        loaded = discover(registry, only=("remind",))
+        assert loaded == ("remind",), f"没有 mail 就不装了？{loaded}"
+        assert getattr(registry, "mail", None) is not None     # 缺省那个空接缝
+        capability = RemindCapability(RemindStore(pathlib.Path(tmp) / S.DIR_NAME),
+                                      mail_send=remind_plugin.person_mail_sender(registry.mail),
+                                      core_sender=lambda: None, clock=lambda: NOW)
+        assert capability.can_mail is False
+        question = capability.ask_text("交作业", has_email=True)
+        assert R.ASK_GROUP in question and R.ASK_PRIVATE in question
+        assert R.ASK_MAIL not in question, question
+
+
+def test_a_group_reminder_needs_a_numeric_person_and_a_group_id() -> None:
+    """审查第 6、7 条的**插件侧半边**：这两种请求**不出**（核心那边会 @全体 / 按私聊发）。"""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        handed: list = []
+        capability = _capability(tmp, core=_core(handed))
+        store = capability._store
+
+        # ① 人号不是数字（`all` 在 NapCat 语义里是 @全体）→ 不出。
+        store.remember_person("all", channel=S.CHANNEL_GROUP)
+        store.add(person_id="all", session_id=GROUP_SESSION, group_id=GROUP,
+                  at=NOW - 1, what="交作业", channel=S.CHANNEL_GROUP)
+        # ② 要发群里却没给群号 → 核心会按私聊发 → 不出。
+        store.remember_person(PERSON, channel=S.CHANNEL_GROUP)
+        store.add(person_id=PERSON, session_id=GROUP_SESSION, group_id="",
+                  at=NOW - 1, what="带伞", channel=S.CHANNEL_GROUP)
+
+        assert asyncio.run(capability.flush(now=NOW)) == ()
+        assert handed == [], handed
+        # 两条都还在待发里（留待发，不是丢掉，也不是发错地方）。
+        assert len(store.list_for("all", now=NOW)) == 1
+        assert len(store.list_for(PERSON, now=NOW)) == 1
 
 
 def test_the_plain_truth_is_told_once_per_person_not_per_reminder() -> None:

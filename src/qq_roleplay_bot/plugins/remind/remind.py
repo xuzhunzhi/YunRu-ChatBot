@@ -397,7 +397,7 @@ class RemindCapability:
             outcome, why, delivery = await self._deliver_core(
                 person.person_id,
                 self.ask_text(person.ask_what, has_email=person.has_email),
-                group_id=group_id)
+                channel=session_channel(person.ask_session), group_id=group_id)
             if outcome == SENT_OUT and delivery is not None:
                 self._store.mark_asked(person.person_id)
                 handed.append(delivery)
@@ -443,7 +443,8 @@ class RemindCapability:
             else:
                 group_id = item.group_id if channel == CHANNEL_GROUP else ""
                 outcome, why, delivery = await self._deliver_core(
-                    item.person_id, DUE_TEXT.format(what=item.what), group_id=group_id)
+                    item.person_id, DUE_TEXT.format(what=item.what), channel=channel,
+                    group_id=group_id)
             if outcome == SENT_OUT:
                 if not item.channel:
                     # 他没答就用他当时说话的地方——把这次的选择记下来，以后不再问。
@@ -500,6 +501,7 @@ class RemindCapability:
             self._store.mark_told(item.person_id, flag)
             return
         outcome, why, _ = await self._deliver_core(item.person_id, text,
+                                                  channel=CHANNEL_GROUP,
                                                   group_id=item.group_id)
         if outcome == PENDING:
             gaps.append(why)                       # 没有出口：留待发，下一拍再说
@@ -582,7 +584,7 @@ class RemindCapability:
                     item.person_id, address, day)
         return SENT_OUT, "", ""
 
-    async def _deliver_core(self, person_id: str, text: str, *,
+    async def _deliver_core(self, person_id: str, text: str, *, channel: str,
                             group_id: str) -> tuple[str, str, RemindDelivery | None]:
         """交给核心的发送口：`(结局, 原因, 交出去的那条意图)`。
 
@@ -591,6 +593,18 @@ class RemindCapability:
         `rejected` = 对面拒收（说一次人话、留待发）；`uncertain` = 不知道（不再试）。
         """
 
+        # **两处"别产出这种请求"的守卫**（2026-10-09 审查第 6、7 条，插件侧的半边）：
+        #   ① 群里那一路要 @ 他，而核心把 person_id **原样**塞进 at 段（`onebot_ws.send_at`
+        #      只试 `int()`、失败就回原串）——`all` 在 NapCat 语义里是 **@全体**。
+        #      人号不是纯数字就**不出这一条**（留待发）。
+        #   ② `channel=group` 但**没有群号**：核心会**按私聊**发（实测目标 user_id），
+        #      与插件回他的"好，到时候我在群里 @ 你"不符——宁可不出。
+        # （核心那两处本身也该收紧，但那是**本体树**的事，我不动那里，只写进汇报。）
+        if channel == CHANNEL_GROUP:
+            if not str(group_id or "").strip():
+                return PENDING, "要发到群里却没拿到群号（核心会按私聊发），这一条先不出", None
+            if not str(person_id).isdigit():
+                return PENDING, f"人号不是数字（{person_id!r}），不敢让核心去 @ 他", None
         delivery = RemindDelivery(person_id=str(person_id), text=str(text),
                                   group_id=str(group_id or ""))
         sender = self._core_sender()

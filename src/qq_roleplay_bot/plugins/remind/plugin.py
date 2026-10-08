@@ -20,7 +20,8 @@
 2. **邮件插件的 `registry.mail.send_to`**：邮箱那一路用它。取不到就**不提供那一路**
    （问他的时候不列第 3 条），绝不自造 SMTP、也绝不把邮件错寄给操作者。
 
-`REQUIRES = ("mail",)` 保证 mail 先装；但 mail 只负责**提供**，用不用由本插件决定。
+**没有 `REQUIRES`**（2026-10-09 审查第 8 条）：mail 在就用它的能力、不在就少一个选项，
+本插件照装、另外两条路照常——详见下面 `REQUIRES` 那一段。
 """
 from __future__ import annotations
 
@@ -33,10 +34,11 @@ from .store import RemindStore
 
 logger = logging.getLogger(__name__)
 
-#: **前置插件**：邮箱那一路走 mail 的发信能力（方向：mail 提供，本插件使用，
-#: 与掉线通知同一条规矩）。`discover()` 会先装 mail，mail 装不上就跳过本插件，
-#: 核心照常跑。
-REQUIRES = ("mail",)
+#: **不声明 `REQUIRES`**（2026-10-09 审查第 8 条）：原来写 `REQUIRES = ("mail",)`，
+#: 实际后果是"**没有 mail 插件 → 整个提醒功能消失**"（连"在群里 @ 你"和"私聊你"
+#: 这两条路都没了），而这里本来就是"取不到邮件能力就不提供邮箱那一路"。
+#: 删掉之后：mail 在就用它、不在就少一个选项，另外两条路照常。
+#: （依赖仍然只经由**接缝**：本插件从不 import mail 的任何模块。）
 
 #: 面板上的显示名（`plugins.inventory()` 读它）。
 TITLE = "到点提醒"
@@ -47,13 +49,22 @@ def person_mail_sender(seams) -> object | None:
 
     注意取的**不是** `notify`：那一条的收件人写死在 mail 自己的配置里（操作者）。
     提醒要寄给**那一个人**，所以用的是 2026-10-08 新加的那条窄口。
+
+    ⚠️ 判断"这条口子接上了没有"要用接缝自己的 `knows_address_sender()`，
+    **不能**用 `getattr(seams, "send_to", None)`——`send_to` 是**类上的方法**，
+    永远是可调用的，那样问等于"永远为真"（2026-10-09 的一次用例当场抓到：
+    没有 mail 插件时 `can_mail` 也是真，邮箱那个选项照旧摆出来、真发时才炸）。
     """
 
-    sender = getattr(seams, "send_to", None)
-    if callable(sender):
-        return sender
-    logger.warning("到点提醒：邮件插件没给「寄给某个地址」的口子，"
-                   "这次不提供邮箱那一路（问他的时候不列第 3 条）")
+    knows = getattr(seams, "knows_address_sender", None)
+    if callable(knows):
+        provided = bool(knows())
+    else:  # 别家实现：退回"有没有人登记过那个字段"
+        provided = callable(getattr(seams, "address_sender", None))
+    if provided:
+        return getattr(seams, "send_to", None)
+    logger.info("到点提醒：这次没有「寄给某个地址」的能力（没有 mail 插件、或它没接上），"
+                "邮箱那一路不提供（问他的时候不列第 3 条），群里 @ 与私聊照常")
     return None
 
 
