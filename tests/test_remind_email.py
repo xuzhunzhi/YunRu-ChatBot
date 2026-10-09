@@ -123,9 +123,9 @@ def _engine(remind) -> tuple[DialogueEngine, _ScriptedJudge, _ScriptedReply, _Me
     from qq_roleplay_bot.runtime_flags import RuntimeFlags
 
     judge = _ScriptedJudge([
-        "<route>REPLY</route><topic>提醒</topic><remind>明天8点|交作业</remind>",
+        "<route>REPLY</route><topic>提醒</topic><remind>明天8点|交作业|3</remind>",
         "<route>REPLY</route><topic>邮箱</topic>",
-        "<route>REPLY</route><topic>提醒</topic><remind>后天9点|开会</remind>",
+        "<route>REPLY</route><topic>提醒</topic><remind>后天9点|开会|3</remind>",
     ])
     reply = _ScriptedReply()
     memory = _MemoryStub()

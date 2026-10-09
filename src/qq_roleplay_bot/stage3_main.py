@@ -51,7 +51,13 @@ from .onebot_ws import OneBotWebSocketTransport
 # 只用媒体标签，不需要插件；这样"有图的消息"这条路径不再从插件 import
 # （原来 `_apply_vision` 里是 `from .vision import replace_media_placeholder`）。
 from .media_segments import replace_media_placeholder
-from .remind import RemindEmailBook, RemindRequest, find_email, parse_remind_time
+from .remind import (
+    RemindEmailBook,
+    RemindRequest,
+    find_email,
+    parse_remind_time,
+    remind_channel,
+)
 from .trigger import IdleTrigger, MessageDeduplicator
 from .stage3_runtime import (
     CLOSENESS_LABELS,
@@ -1585,28 +1591,62 @@ class DialogueEngine:
             logger.info(
                 "Stage 3 remind: 时间说不清，这一句当普通聊天 session=%s", message.session_id)
             return
-        request = RemindRequest(
-            person_id=message.user_id,
-            session_id=message.session_id,
-            group_id=message.target.group_id or "",
-            at=at,
-            what=intent.what,
-        )
+        channel = remind_channel(intent.channel)
         email = self._remind_emails.get(message.user_id)
-        if not email:
-            # **还没有他的邮箱**：记下待办，这一轮核心让她顺口问一句（易变段那一行），
-            # **先不交给插件**——插件要的是一条装好的请求，值不齐就别递半条过去。
-            self._remember_remind_ask(request)
-            logger.info("Stage 3 remind: 还没有邮箱，先记待办 session=%s", message.session_id)
-            return
-        self._hand_over_remind(replace(request, email=email))
+        pending = self._remind_asks.get(message.user_id)
+        if pending is not None and pending.what == intent.what:
+            # **同一件事**：把这一轮读到的新东西并进去（他可能这一轮才说清怎么收、
+            # 或者时间说法更准了），**不新开一条**——这就是"只记一次待办"。
+            request = replace(pending, at=at, channel=channel or pending.channel, email=email)
+            changed = request != pending
+        else:
+            request = RemindRequest(
+                person_id=message.user_id,
+                session_id=message.session_id,
+                group_id=message.target.group_id or "",
+                at=at,
+                what=intent.what,
+                email=email,
+                channel=channel,
+            )
+            changed = True
+        self._remember_remind_ask(request)
+        if changed:
+            logger.info("Stage 3 remind: 记下这一条（怎么收=%s）session=%s",
+                        request.channel or "还没说", message.session_id)
+        self._try_hand_over_remind(request)
 
     def _remember_remind_ask(self, request: RemindRequest) -> None:
-        """记下"等他给邮箱"的待办（超上限淘汰最旧的一条，同 `_promise` 的写法）。"""
+        """记下待办（一个人一条；超上限淘汰最旧的一条，同 `_promise` 的写法）。
+
+        **一个人同时只留一条**：值不齐（还没定怎么收 / 选了邮箱却还没邮箱）的那一条。
+        值一齐就交给插件、从待办里删掉（见 `_try_hand_over_remind`）。
+        """
 
         self._remind_asks[request.person_id] = request
         if len(self._remind_asks) > MAX_REMIND_ASKS:
             self._remind_asks.pop(next(iter(self._remind_asks)), None)
+
+    def _try_hand_over_remind(self, request: RemindRequest) -> None:
+        """**值齐了才交给插件**；不齐就留在待办里，由 `_remind_ask_note` 让她自己问。
+
+        2026-10-09 用户实测（富哥之家那一晚）：频道还没定就把请求交给了插件，插件只好
+        自己发一条罐头问话（"1 在本群里 @ 你 2 私聊你 3 寄到你的邮箱…"），而她**自己**
+        也在群里问同一件事——同一件事两个声音，群里就"乱的要死"。所以"要不要问"
+        由核心决定、"怎么问"交给她；插件只在**一条装好的请求**到手时才办事，
+        它于是**没有理由再问一遍**。
+        """
+
+        if not request.channel:
+            logger.info("Stage 3 remind: 还没问清他想怎么收，先不交给插件 session=%s",
+                        request.session_id)
+            return
+        if request.channel == "email" and not request.email:
+            logger.info("Stage 3 remind: 他想收邮箱、可邮箱还没有，先不交给插件 session=%s",
+                        request.session_id)
+            return
+        self._remind_asks.pop(request.person_id, None)
+        self._hand_over_remind(request)
 
     def _hand_over_remind(self, request: RemindRequest) -> None:
         """把装好的那一条交给插件（**核心唯一碰插件的这一处**）。"""
@@ -1655,20 +1695,28 @@ class DialogueEngine:
                 service.capture(message)
             except Exception:  # noqa: BLE001 - 记不进去也不能吃掉这一轮
                 logger.exception("Stage 3 remind: 邮箱进记忆失败 session=%s", message.session_id)
-        self._remind_asks.pop(message.user_id, None)
-        self._hand_over_remind(replace(pending, email=email))
+        updated = replace(pending, email=email)
+        self._remember_remind_ask(updated)
+        self._try_hand_over_remind(updated)
 
     def _remind_ask_note(self, message: IncomingMessage) -> str:
-        """正在等他给邮箱时，给这一轮易变段加**一句**核心写的话（没有就空串）。
+        """正在等一个答复时（怎么收 / 邮箱），给这一轮易变段加**一句**核心写的话。
 
-        走的是既有的 `clarify_note` 口子（"一句话进易变段"）——**不是**插件提示词：
-        插件一个字都进不了 prompt；这一句是核心自己那条流程要说的话。措辞是交谈视角、
-        零机制词，而且只在他正好欠一个邮箱时出现。
+        走的是既有的 `clarify_note` 口子（"一句话进易变段"）——**不是**插件提示词，
+        也**不是**"核心直接替她发言"：2026-10-09 用户实测（富哥之家）那条"乱"正是
+        她自己在群里问的同时、插件那条罐头问话也发进了群。这里的做法是**把要问的问法
+        交给她，让她用自己的话说**；群里看到的只有她的话。
         """
 
-        if message.user_id not in self._remind_asks:
+        pending = self._remind_asks.get(message.user_id)
+        if pending is None:
             return ""
-        return "（他刚让你到点提醒他一件事，可你手上还没有他的邮箱——这轮顺口问一句就行。）\n"
+        if not pending.channel:
+            return ("（他刚让你到点提醒他一件事，你还没问清他想怎么收到——在群里 @ 他、"
+                    "私聊他、还是寄到他邮箱？这轮顺口问一句就行。）\n")
+        if pending.channel == "email" and not pending.email:
+            return "（他刚让你到点提醒他一件事，可你手上还没有他的邮箱——这轮顺口问一句就行。）\n"
+        return ""
 
     def _apply_guard_signal(self, verdict: JudgeVerdict, message: IncomingMessage) -> None:
         """把判定的 `<guard>UP` 立刻落到防备上——**在拼这一轮回复之前**。

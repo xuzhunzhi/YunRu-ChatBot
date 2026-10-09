@@ -113,7 +113,7 @@ def test_a_restarted_engine_does_not_ask_again() -> None:
 
         with patch.dict(os.environ, TZ):
             first = _engine([
-                "<route>REPLY</route><topic>提醒</topic><remind>明天8点|交作业</remind>",
+                "<route>REPLY</route><topic>提醒</topic><remind>明天8点|交作业|3</remind>",
                 "<route>REPLY</route><topic>邮箱</topic>",
             ])
             asyncio.run(first.handle(_message(1, "@YunRu 明天8点提醒我交作业")))
@@ -123,7 +123,7 @@ def test_a_restarted_engine_does_not_ask_again() -> None:
 
             # 重启：新进程、新引擎、新书，同一个文件。
             second = _engine([
-                "<route>REPLY</route><topic>提醒</topic><remind>后天9点|开会</remind>",
+                "<route>REPLY</route><topic>提醒</topic><remind>后天9点|开会|3</remind>",
             ])
             assert second._remind_emails.get("100") == "lele@example.com"
             asyncio.run(second.handle(_message(3, "@YunRu 后天9点提醒我开会")))

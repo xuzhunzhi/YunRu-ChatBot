@@ -44,6 +44,21 @@ logger = logging.getLogger(__name__)
 #: 与 `stage3_main` 里那些"按人小表"同一个纪律：有上限，不许无限长。
 MAX_REMIND_EMAILS = 256
 
+#: "同一件事"在多长时间里**只办一次**（秒）。
+#:
+#: 2026-10-09 用户实测（富哥之家）：同一句提醒请求被**每一轮**重新认出来——核心连记 5 次
+#: 待办、插件那边**生成了两条提醒**（一次时间不对、一次是 +5 分钟）。重复来自"那句话还在
+#: 判定读得到的窗口里"。10 分钟够盖住一轮对话里的反复识别，又不会把"过一阵子又提同一件事"
+#: 挡掉（那才是真新请求）。
+REMIND_DEDUPE_WINDOW_SECONDS = 600
+
+#: 上面那张"已经认过的同一件事"表最多几行（超出淘汰最旧的一条）。
+MAX_REMIND_SEEN = 256
+
+#: 判定给的"他想怎么收"（1/2/3）→ 核心这边的话。
+#: 词与投递那条 `RemindDelivery.channel` 对齐（`group` / `private`），第三档是邮箱。
+REMIND_CHANNEL_WORDS = {"1": "group", "2": "private", "3": "email"}
+
 #: 状态文件的版本号（照 `state_store.STATE_VERSION` 的做法：读出来对不上就按空的重来）。
 REMIND_EMAILS_VERSION = 1
 
@@ -120,10 +135,17 @@ _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
 
 @dataclass(frozen=True, slots=True)
 class RemindIntent:
-    """判定认出来的"这是提醒请求"：**时间怎么说**（原话）+ **提醒什么事**。"""
+    """判定认出来的"这是提醒请求"：**时间怎么说**（原话）+ **提醒什么事** + **他想怎么收**。
+
+    `channel` 是判定从聊天里读到的那个选择（`"1"` 群里 @ / `"2"` 私聊 / `"3"` 邮箱），
+    空串 = 他还没说。它**不是**另一次调用：与 `time_text` / `what` 挤在同一个
+    `<remind>` 字段里（判定 prompt 的大小有测试钉着，另开一个标签会顶破它）。
+    `remind_channel()` 把它翻成核心的说法（`group` / `private` / `email`）。
+    """
 
     time_text: str
     what: str
+    channel: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +166,11 @@ class RemindRequest:
     at: float
     what: str
     email: str = ""
+    #: 他想**怎么收到**这条提醒：`"group"`（群里 @ 他）/ `"private"`（私聊）/ `"email"`（寄邮箱）。
+    #: 留空串 = **还没问清**——那种情况下核心**不把请求交给插件**（先让她自己问一句，
+    #: 见 `DialogueEngine._try_hand_over_remind`）。2026-10-09 用户实测那条"乱"就是这么来的：
+    #: 频道没定就把请求交出去，插件只好自己发一条罐头问话，于是同一件事两个声音在群里说。
+    channel: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +213,19 @@ def find_email(text: str) -> str | None:
 
     found = _EMAIL.search(text or "")
     return found.group(0) if found else None
+
+
+def remind_channel(raw: str) -> str:
+    """判定给的那点东西（`1` / `2` / `3`，可能带着"群里 @"这种尾巴）→ 核心的说法。
+
+    认不出、或者他还没说 → 空串（**不猜**：猜一个就可能把话送到错的地方）。
+    """
+
+    for char in str(raw or ""):
+        word = REMIND_CHANNEL_WORDS.get(char)
+        if word is not None:
+            return word
+    return ""
 
 
 def state_persistence_enabled() -> bool:

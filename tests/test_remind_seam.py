@@ -34,7 +34,8 @@ NOW = datetime(2026, 10, 8, 22, 12, tzinfo=timezone(timedelta(hours=8))).timesta
 TZ = {"QQBOT_LOCAL_TZ_OFFSET_HOURS": "8"}
 
 #: 插件那一侧只允许看到这几个值（白名单，第 5 条判据）。
-ALLOWED_FIELDS = frozenset({"person_id", "session_id", "group_id", "at", "what", "email"})
+ALLOWED_FIELDS = frozenset({"person_id", "session_id", "group_id", "at", "what", "email",
+                            "channel"})
 
 
 class _RemindJudge:
@@ -63,7 +64,7 @@ def _message(text: str = "@YunRu 明天8点提醒我交作业") -> IncomingMessa
                            sender_name="某人", is_bot_mentioned=True)
 
 
-def _engine(remind, *, remind_tag: str = "<remind>明天8点|交作业</remind>"):
+def _engine(remind, *, remind_tag: str = "<remind>明天8点|交作业|2</remind>"):
     from qq_roleplay_bot.runtime_flags import RuntimeFlags
 
     judge = _RemindJudge(remind_tag)
@@ -102,7 +103,7 @@ def test_without_the_plugin_nothing_happens_but_the_turn_still_replies() -> None
 
 
 def test_the_plugin_gets_the_request_with_an_absolute_time() -> None:
-    """核心算好绝对时刻、查出邮箱之后交过去（邮箱那一步见 `test_remind_email.py`）。"""
+    """核心算好绝对时刻、问清怎么收、查出邮箱之后才交过去。"""
 
     handed: list[RemindRequest] = []
     engine, _, _ = _engine(handed.append)
@@ -119,24 +120,27 @@ def test_the_plugin_gets_the_request_with_an_absolute_time() -> None:
     assert request.person_id == "100"
     assert request.session_id == SESSION
     assert request.group_id == GROUP
+    assert request.channel == "private", "判定给的 `2` 要翻成核心的说法"
     assert request.email == "lele@example.com", "核心查出来的值要原样递过去"
 
 
 def test_without_an_email_the_request_is_not_handed_over_yet() -> None:
-    """值不齐就别递半条过去（邮箱那一步由核心走，见 `test_remind_email.py`）。"""
+    """他选的是邮箱那条路、而邮箱还没有 → 不交（让她先问，见 `test_remind_email.py`）。"""
 
     handed: list[RemindRequest] = []
-    engine, _, reply = _engine(handed.append)
+    engine, _, reply = _engine(handed.append, remind_tag="<remind>明天8点|交作业|3</remind>")
     with patch.dict(os.environ, TZ):
         result = asyncio.run(engine.handle(_message()))
 
     assert handed == [], "还没有邮箱就把请求交给插件了"
+    assert engine._remind_asks["100"].channel == "email", "待办里要记着他想收邮箱"
     assert result is not None and result.text == reply.text
 
 
 def test_an_unclear_time_is_not_handed_over() -> None:
     handed: list[RemindRequest] = []
-    engine, _, reply = _engine(handed.append, remind_tag="<remind>有空提醒我|交作业</remind>")
+    engine, _, reply = _engine(handed.append,
+                               remind_tag="<remind>有空提醒我|交作业|2</remind>")
     with patch.dict(os.environ, TZ):
         result = asyncio.run(engine.handle(_message()))
 
@@ -160,6 +164,8 @@ def test_a_plugin_error_does_not_eat_the_turn() -> None:
         raise RuntimeError("插件炸了")
 
     engine, _, reply = _engine(boom)
+    engine._remind_emails = RemindEmailBook(persist=False)
+    engine._remind_emails.remember("100", "lele@example.com")
     with patch.dict(os.environ, TZ):
         result = asyncio.run(engine.handle(_message()))
     assert result is not None and result.text == reply.text

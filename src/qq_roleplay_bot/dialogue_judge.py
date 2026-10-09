@@ -91,10 +91,11 @@ JUDGE_SYSTEM_PROMPT = """你是 QQ 群聊的**回应判定器**，只判断"云�
 <specialist>YES|NO</specialist>
 <guard>UP|HOLD</guard>
 <guard_reason>一句话，写清是什么越了界；HOLD 时留空</guard_reason>
-<remind>时间|事情（有人让你到点提醒他，没有就留空）</remind>
+<remind>时间|事情|怎么收（有人让你到点提醒他，没有就留空）</remind>
 
-`remind`：有人让你**到点提醒他**一件事时才填：左边照他给的时间写，右边写那件事；
-不是这回事、或者时间说不清，就留空——**宁可不填，也别猜**。
+`remind`：有人让你**到点提醒他**一件事时才填：左边照他给的时间写，中间写那件事；
+时间说不清就留空——**宁可不填，也别猜**。第三段是他想怎么收（1 群里 @ 他、2 私聊、
+3 邮箱），他没说就空着。
 
 `related` 回答的是："这条还是在接着刚才那段跟云茹有关的话吗？"是就 YES，换到跟她无关的
 别的事就 NO。
@@ -455,20 +456,43 @@ def parse_judge_output(
 
 
 def _parse_remind(raw: str) -> RemindIntent | None:
-    """`<remind>时间|事情</remind>` → `RemindIntent`；给不全就算了（宁可不认，也不猜）。
+    """`<remind>时间|事情|怎么收</remind>` → `RemindIntent`；给不全就算了（宁可不认，也不猜）。
 
     "时间"是**原话**（`明天8点`），算成绝对时刻是核心的事（见 `remind.py`）。
-    只切第一个 `|`：事情里再出现 `|` 也不会被吃掉。
+    第三段（**他想怎么收**，`1`/`2`/`3`）可以没有——他还没说时就空着；认不出也当没给。
+
+    **事情里带 `|` 怎么办**（2026-10-08 定的老规矩：只切第一个 `|`）：只有第三段真的
+    认得出是个收法时才把它当第三段，否则整段并回"事情"里（`交作业|顺手带伞` 照旧是
+    一件事）。
     """
 
     body = sanitize_chat_text(raw or "", max_length=200).strip()
     if not body:
         return None
-    time_text, _, what = body.partition("|")
-    time_text, what = time_text.strip(), what.strip()
+    parts = body.split("|", 2)
+    time_text = parts[0].strip()
+    rest = parts[1:]
+    channel = ""
+    if len(rest) == 2:
+        maybe = _remind_channel_digit(rest[1])
+        if maybe:
+            channel, rest = maybe, rest[:1]
+    what = "|".join(rest).strip()
     if not time_text or not what:
         return None
-    return RemindIntent(time_text=time_text, what=what)
+    return RemindIntent(time_text=time_text, what=what, channel=channel)
+
+
+def _remind_channel_digit(raw: str) -> str:
+    """第三段里的"怎么收"：只认 `1` / `2` / `3`（`1 群里 @` 这种尾巴也认）。
+
+    别的（`9`、`邮箱`、空）一律空串 = 他还没说——**不猜**。
+    """
+
+    for char in raw or "":
+        if char in "123":
+            return char
+    return ""
 
 
 def _parse_seq(raw: str, known_seqs: frozenset[int]) -> int | None:
