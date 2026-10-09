@@ -839,3 +839,84 @@ class LayoutIsCssDrivenTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GroupPageTests(_PanelCase):
+    """「群聊」那一页：列**她所在的全部群**，数据只经 `registry.ui.groups` 这一条接缝。
+
+    用户 2026-10-09：*"群聊页，应当展示**云茹所在的所有群聊**并展示**群名**
+    而不是群号"*。这一组钉两件事：
+
+    * 列表**就是**那条接缝给的那些行（不是"开过对话的群"，也不是"有会话的群"）；
+    * **不另开取数通道**——面板要是自己去调 `call_action` 列群，这里的替身当场报错。
+    """
+
+    def _install_runner(self) -> None:
+        """`ui.groups` 是协程：面板靠装配点注入的 runner 跨线程跑它（同核心那套）。"""
+
+        import asyncio
+
+        from qq_roleplay_bot.plugins.webui import webui_panel
+
+        before = webui_panel._ASYNC_RUNNER  # noqa: SLF001 - 测的就是这个注入点
+        webui_panel.install_async_runner(lambda coro: asyncio.run(coro))
+        self.addCleanup(webui_panel.install_async_runner, before)
+
+    def test_the_list_is_exactly_what_the_seam_gives(self) -> None:
+        called: list[str] = []
+
+        async def groups():
+            called.append("groups")
+            return ({"id": "111", "name": "富哥之家", "dialogue_on": True, "memory_on": False},
+                    {"id": "222", "name": "", "dialogue_on": False, "memory_on": True})
+
+        def call_action(*args, **kwargs):
+            raise AssertionError(f"面板不该调 action 来列群：{args} {kwargs}")
+
+        self._install_runner()
+        panel = Panel({"data_root": str(self.root), "ui_groups": groups,
+                       "call_action": call_action},
+                      WebAccess(mode=LOCAL, token=TOKEN))
+        response = panel.handle("GET", "/api/groups", b"",
+                               {"accept": "application/json",
+                                "authorization": "Bearer " + TOKEN}, "127.0.0.1")
+
+        body = json.loads(response.body.decode("utf-8"))
+        self.assertEqual(called, ["groups"], "群列表不是从 `ui.groups` 来的")
+        data = body["data"]
+        self.assertTrue(data["available"], "接缝给了数据，面板却说读不到")
+        rows = data["rows"]
+        self.assertEqual([row["id"] for row in rows], ["111", "222"],
+                         "没把接缝给的那些群**全都**列出来（顺序也该照原样）")
+        self.assertEqual(rows[0]["name"], "富哥之家")
+        self.assertEqual(rows[1]["name"], "群 222", "空群名没有回落到「群 <号>」")
+        self.assertTrue(rows[0]["dialogue_on"] and not rows[0]["memory_on"])
+        self.assertTrue(rows[1]["memory_on"] and not rows[1]["dialogue_on"])
+
+    def test_a_missing_seam_says_so_instead_of_guessing(self) -> None:
+        """接缝没接上（老核心 / 装错了）→ 如实说读不到，**不猜、不 500**。"""
+
+        response = self.request("GET", "/api/groups")
+        self.assertEqual(response.status, 200, "读不到群列表不该是 5xx")
+        data = self.payload(response)["data"]
+        self.assertFalse(data["available"])
+        self.assertEqual(data["rows"], [])
+
+
+class GroupSeamWiringTests(unittest.TestCase):
+    """装配点那一侧：`registry.ui.groups` 必须真的递给面板（名字也要对得上）。
+
+    路由读的是 `self._seam("ui_groups")`，而这一条接缝是 `_panel_seams()` 从
+    `registry.ui.groups` 里取的——两边任何一处改了名字，页面就永远显示"读不到群列表"，
+    而且**不会有任何东西报错**（面板那侧取不到就当没启用）。所以在这里钉住。
+    """
+
+    def test_the_panel_gets_the_groups_seam_under_the_name_it_reads(self) -> None:
+        here = pathlib.Path(__file__).resolve().parents[1]
+        plugin = here / "src" / "qq_roleplay_bot" / "plugins" / "webui"
+        text = (plugin / "wire.py").read_text(encoding="utf-8")
+        self.assertRegex(
+            text, r'seams\["ui_groups"\] = ui\.groups',
+            "装配点没有把 `ui.groups` 递给面板（或者名字与路由读的不一样）")
+        panel = (plugin / "webui_panel.py").read_text(encoding="utf-8")
+        self.assertIn('self._seam("ui_groups")', panel, "路由读的接缝名字变了")

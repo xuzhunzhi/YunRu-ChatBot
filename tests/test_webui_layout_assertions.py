@@ -1287,3 +1287,63 @@ class PersonRecordsTests(unittest.TestCase):
                          "记录表行高还是挤的")
         self.assertRegex(self.css, r"\.clamp\s*\{[^}]*cursor: pointer",
                          "折起来那一段没有「可以点」的样子")
+
+
+class GroupPageLayoutTests(unittest.TestCase):
+    """判据：群聊页把**群名**放主标题位、**群号**放次要位，且列的是**全部群**。
+
+    用户 2026-10-09：*"群聊页，应当展示云茹所在的**所有**群聊并展示**群名**而不是群号"*。
+    """
+
+    def setUp(self) -> None:
+        self.js = _asset("app.js")
+        self.css = _asset("app.css")
+
+    def _body(self) -> str:
+        return _uncomment(_function_body(self.js, "viewGroup", kind="async"))
+
+    def test_the_name_is_the_title_and_the_number_is_secondary(self) -> None:
+        body = self._body()
+        # 主标题位（`pref-title`）里放的是**群名**；群号在 `pref-summary` 里。
+        title = re.search(r'<div class="pref-title">(.*?)</div>', body, re.S)
+        self.assertIsNotNone(title, "找不到群名那一行的主标题位")
+        self.assertIn("row.name", title.group(1), "主标题不是群名")
+        # 群号只许当**没名字时的回落**（`row.name || \`群 ${row.id}\``），不许直接当标题。
+        self.assertRegex(title.group(1), r"row\.name\s*\|\|",
+                         "群名不是主标题（群号只该在没名字时回落）")
+        self.assertNotRegex(title.group(1), r"esc\(row\.id\)", "主标题直接就是群号")
+        summary = re.search(r'<div class="pref-summary">(.*?)</div>', body, re.S)
+        self.assertIsNotNone(summary, "找不到群号那一行的次要位")
+        self.assertIn("row.id", summary.group(1), "群号不在次要位")
+        self.assertIn("copyable", summary.group(1), "群号没有做成可复制的小字")
+        self.assertRegex(self.css, r"\.copyable\s*\{[^}]*user-select: all",
+                         "群号那段不是「点一下就能复制」")
+
+    def test_every_group_is_listed_not_only_the_ones_with_dialogue(self) -> None:
+        body = self._body()
+        self.assertIn('api("/api/groups")', body, "群列表没有走那条只读接缝")
+        self.assertEqual(body.count('api("/api/groups")'), 1,
+                         "群列表取了不止一次")
+        self.assertNotIn("enabled_group_ids", body,
+                         "又变回「只列开过对话的群」了——那一页要的是**全部群**")
+        # 也不许**筛**：接缝给多少就列多少（筛掉没开对话的就是同一个毛病）。
+        self.assertNotIn(".filter(", body, "群列表被筛过了（那一页要的是全部群）")
+        self.assertIn("群聊", _asset("app.js"), "页签不见了")
+
+    def test_the_two_states_are_badges_and_memory_stays_read_only(self) -> None:
+        body = self._body()
+        self.assertIn("dialogue_on", body, "没有标出「对话」那个状态")
+        self.assertIn("memory_on", body, "没有标出「记忆」那个状态")
+        self.assertEqual(body.count("group-badge"), 2, "两个状态没做成两枚徽标")
+        # 记忆那个**只读**：这一页不许出现写记忆的入口（面板没有按群开关记忆这回事）。
+        self.assertNotIn("memory", body.replace("memory_on", ""),
+                         "群聊页出现了碰记忆的入口（那个只有只读的份）")
+        self.assertRegex(self.css, r"\.group-badge\s*\{", "徽标没有样式")
+
+    def test_the_dialogue_switch_reuses_the_existing_entry(self) -> None:
+        """「对话」沿用**既有的**开关能力（`group-off`），关着的那几个不另造写入口。"""
+
+        body = self._body()
+        self.assertIn('class="group-off"', body, "对话的开关没有沿用既有入口")
+        handlers = _uncomment(_function_body(self.js, "bind"))
+        self.assertIn('act("group-off"', handlers, "既有的开关入口不见了")

@@ -104,6 +104,12 @@ def _panel_seams(ui, call_action) -> dict[str, object]:
         audit = ControlAudit()
     seams["control_audit"] = audit
 
+    # 「群聊」那一页：**她所在的全部群**（只读）。核心那侧是 `runtime.ui_groups`——
+    # 没有参数、缓存 600 秒、取失败会回落（`plugins.UiSeams.groups`）。
+    # 面板**只经这一条接缝**拿群，不去调任何"能列群的 action"。
+    if callable(getattr(ui, "groups", None)):
+        seams["ui_groups"] = ui.groups
+
     if callable(getattr(ui, "execute_action", None)):
         seams["execute_action"] = ui.execute_action
     if callable(getattr(ui, "apply_overrides", None)):

@@ -1441,13 +1441,25 @@ async function viewSettings() {
 async function viewGroup() {
   const stateData = await api("/api/state");
   const pending = await api("/api/approvals/pending");
-  // 群列表也用偏好行：左边群号 + 状态，右边一个"关闭"。表格那套（表头 + 三列）
-  // 在一行只有一个动作时很空，而且跟设置页的观感不是一套。
-  const groups = (stateData.enabled_group_ids || []).map((id) =>
+  // **她所在的全部群**（用户 2026-10-09：*"应当展示云茹所在的所有群聊并展示群名
+  // 而不是群号"*）。数据只从 `/api/groups` 来——那是核心 `registry.ui.groups` 那一条
+  // 只读窄接缝，**不是**"开过对话的群"（那是 `enabled_group_ids`，只列一部分）。
+  // 每行：**群名当主标题**、群号放次要位（小字 mono，可复制）、两个状态徽标。
+  const groupData = await api("/api/groups");
+  const groups = (groupData.rows || []).map((row) =>
     prefRow(
-      `<div class="pref-title mono">${esc(id)}</div>` +
-      `<div class="pref-summary"><span class="tag live">已启用</span></div>`,
-      `<button class="group-off" data-id="${esc(id)}">关闭</button>`,
+      `<div class="pref-title">${esc(row.name || `群 ${row.id}`)}</div>` +
+      `<div class="pref-summary"><code class="copyable mono">${esc(row.id)}</code>` +
+      `<span class="group-badge${row.dialogue_on ? " on" : ""}">对话${
+        row.dialogue_on ? "开" : "关"}</span>` +
+      // 记忆那个**只读**：面板现在没有按群开关记忆的入口，所以只显示、不给按钮。
+      `<span class="group-badge${row.memory_on ? " on" : ""}">记忆${
+        row.memory_on ? "开" : "关"}</span></div>`,
+      // 对话那个**沿用现有的开关能力**（`group-off` 那条既有入口）；关着的不在这里
+      // 另造一个"开启"按钮——页面上本来就有开启的入口。
+      row.dialogue_on
+        ? `<button class="group-off" data-id="${esc(row.id)}">关闭</button>`
+        : "",
       { icon: "group" })).join("");
   const pendingRows = (pending.rows || []).map((row) =>
     prefRow(
@@ -1473,8 +1485,12 @@ async function viewGroup() {
            data-needs-target="${action.needs_target ? 1 : 0}"
            data-needs-message="${action.needs_message ? 1 : 0}">执行</button></td>
     </tr>`).join("");
-  return `<div class="pref-group"><div class="pref-group-title">启停群</div>
-      <div class="pref-list">${groups || '<p class="hint pref-empty">没有启用的群</p>'}</div></div>
+  return `<div class="pref-group"><div class="pref-group-title">她所在的群（${
+      num((groupData.rows || []).length)} 个）</div>
+      <div class="pref-list">${
+        groupData.available === false
+          ? '<p class="hint pref-empty">读不到群列表（核心那条只读接缝这次没给）。</p>'
+          : (groups || '<p class="hint pref-empty">她还没进任何群。</p>')}</div></div>
       <div class="row pref-add-group"><input id="group-add" type="text" placeholder="要开启的群号">
        <button id="group-on">开启</button></div>`
     + `<div class="pref-group"><div class="pref-group-title">入群申请</div>

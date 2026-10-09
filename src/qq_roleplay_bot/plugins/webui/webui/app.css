@@ -1105,6 +1105,25 @@ td .hint { margin: 2px 0 0; }
 .cols-profile td:first-child, .cols-profile th:first-child { padding-left: 2px; }
 .cols-profile td:last-child, .cols-profile th:last-child { padding-right: 2px; text-align: right; }
 
+/* 群聊页：群名当主标题、群号次要位（小字 mono、可复制）、两个状态徽标。
+ * 观感与人物画像页同一套：无描边、大圆角、行高松、点按区够大。 */
+.pref-title { font-size: 15.5px; line-height: 1.5; }
+.copyable {
+  user-select: all;               /* 点一下就能整段选中复制 */
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+.group-badge {
+  margin-left: 8px;
+  padding: 2px 9px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-container-high);
+  color: var(--text-4);
+  font-size: 12px;
+}
+.group-badge.on { background: var(--secondary-container); color: var(--on-surface); }
+.pref-list .pref { min-height: 56px; }   /* 触屏够点 */
+
 /* ---------- 人物画像页：头部三样 / 分段 / 说明那个「?」 ----------
  * 用户 2026-10-09 的口径：说明收进「?」（每节最多一行）；头部三样 = 称呼 + QQ 号 + 群；
  * 三节**一次只显示一块**；观感照 HyperOS（白卡无描边、大圆角、行高松、点按区够大）。 */

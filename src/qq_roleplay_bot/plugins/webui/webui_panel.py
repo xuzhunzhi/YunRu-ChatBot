@@ -351,6 +351,8 @@ class Panel:
                     "flags": self._flags(),
                     "access": self.access.stats(),
                 }))
+            if path == "/api/groups":
+                return self._groups_list()
             if path == "/api/state":
                 return json_response(_envelope(webui_data.read_state(state, root)))
             # 「她自己是谁」（账号页那张资料头卡用）：**只走既有的 `self_id` 接缝**。
@@ -614,6 +616,36 @@ class Panel:
         text += "。" if changed else "（本来就是这个状态）。"
         self._audit("group_switch", payload, text, source)
         return json_response(_envelope({"ok": True, "changed": bool(changed), "message": text}))
+
+    def _groups_list(self) -> Response:
+        """「群聊」那一页的列表：**她所在的全部群**，只读。
+
+        数据只从装配点给的 `registry.ui.groups`（→ `seams["ui_groups"]`）来：
+        它没参数、只读、核心那侧缓存 600 秒、取失败回落。**这里不另开取数通道**
+        （不去调"能列群的 action"、也不自己去问传输层）。取不到就如实说"读不到"，
+        由页面显示成一行提示——**不猜**。
+        """
+
+        seam = self._seam("ui_groups")
+        if seam is None:
+            return json_response(_envelope({"available": False, "rows": []}))
+        try:
+            raw = _call(seam) or ()
+        except Exception:  # noqa: BLE001 - 接缝出问题不该让页面 500
+            logger.warning("webui_groups_failed", exc_info=True)
+            return json_response(_envelope({"available": False, "rows": []}))
+        rows: list[dict[str, object]] = []
+        for row in raw:
+            if not isinstance(row, dict):
+                continue
+            group_id = str(row.get("id") or "").strip()
+            if not group_id:
+                continue
+            rows.append({"id": group_id,
+                         "name": str(row.get("name") or "").strip() or f"群 {group_id}",
+                         "dialogue_on": bool(row.get("dialogue_on")),
+                         "memory_on": bool(row.get("memory_on"))})
+        return json_response(_envelope({"available": True, "rows": rows}))
 
     def _clear_session(self, payload: dict[str, object], source: str) -> Response:
         clear = self._seam("session_clear")
