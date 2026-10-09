@@ -271,11 +271,14 @@ confidence=0到1之间的小数
 - `memory_inbox.py`：有界异步捕获队列（512），按 `sha256(group:session:user_id:message_id:speaker)` 幂等；敏感或超长内容直接丢弃。
 - `memory_store.py`：本地 SQLite（WAL），租约、幂等提交、墓碑删除、按群 inbox 配额、重放表与保留期清理；另有四张**只加不改旧数据**的表（schema v4）：`relationships` / `relationship_log`（好感度）与 `record_subjects` / `people`（记忆↔人的对应、本群见过的名字，见 `docs/MEMORY_PEOPLE.md`）。
 - `memory_maintenance_agent.py`：独立后台模型调用，单实例锁，每轮最多 `max_batches` 批，异常立即退避。
+- `memory_grounding.py`：写入前的**依据闸门**（2026-10-09 加，见下面那段"写入的机械兜底"）：
+  归属是不是他本人说的、处境类是不是他本人在自述、数字与型号有没有凭空补全、正文是不是空的。
+  判据全在这里，`memory_store` 只负责计数、留痕、逐条跳过。
 - `memory_service.py`：Stage 3 读取（0.3 秒超时，失败降级为空记忆）、捕获、发送确认与生命周期。
 
 记忆作用域：`user_global` 按 QQ 号跨群共享，`user_group` 按 `group_id + user_id` 隔离，`group` 按 `group_id` 隔离。Agent 自主决定 ADD/UPDATE/MERGE/DELETE/IGNORE，但不能修改人格、知识库、安全规则或 system prompt。
 
-**写入的三道机械兜底**（都不依赖模型自觉，2026-09-27 体检后补齐）：
+**写入的机械兜底**（都不依赖模型自觉；前三条是 2026-09-27 体检后补的，后四条 2026-10-09 补的）：
 
 - **近重复**：同 scope 内词元重合 ≥ `NEAR_DUPLICATE_RATIO`（0.4，阈值是量出来的）→ 不新增；
 - **每日配额**：每群滚动 24 小时最多新增 `DEFAULT_DAILY_ADD_LIMIT`（8）条，之后只允许改已有事实；
@@ -283,6 +286,24 @@ confidence=0到1之间的小数
   真库里曾有 6 条"看机器人反驳""该条在 prompt 中被列为不愿提及内容""修机器人上下文问题"
   "测试过用显示替换…"活着——这类内容每轮被检索回来等于反复提醒她自己是程序（AGENTS.md §2.2）。
   正则**不含"云茹"**：本群记忆大量是"某人对云茹的设定感兴趣"，按名字拦一次会砍掉 19/50 条。
+- **归属闸**（`memory_grounding`）：被引用的发言里只要有一个"规范化之后也不是他"的号
+  （`rejected_other_speaker`），或者个人事实一条本人发言都没有（`rejected_no_evidence`，
+  只放行"正文一个字没改"的复查）→ 不写。归属一直是 `batch.user_id`（那一批的说话人），
+  从前没有任何一道闸检查"内容说的是谁"。
+- **自述闸**（`status` 类）：依据里得有第一人称自述（我/咱/俺/自己/本人）或者正文就是照抄
+  （`QUOTE_RATIO` 0.6），否则 `rejected_not_self_statement`。"大家只是在讨论电赛"不该变成
+  "他在参与电赛"。称呼/偏好/边界不走这道闸（它们另有近重复与称呼证据的要求）。
+- **具体记号闸**：正文里**含数字**的记号（型号/编号/容量）必须在**这一批看到过的材料**里出现过
+  （`rejected_ungrounded_specifics`）。日期与年份豁免；纯拉丁词不查（"MC JE"写成
+  "Minecraft Java 版"是概括，不是编造——拿真库 165 条活跃记录回放量过，查纯拉丁词会误杀 15%）。
+- **空正文闸**：`rejected_empty_content`（正常路径上 `memory_model.parse_operations` 已经拦掉，
+  这是存储层兜底）。
+  前四条闸的拒绝码逐条进 audit 与 `MemoryStore.rejected`，`/super status` 会印"本次拒写 N 条"。
+- **同键就地更新**（2026-10-09）：同一个 `(scope_type, scope_key, normalized_key)` 再写一次是
+  **刷新那一行**（正文 + `updated_at` + `revision`+1，证据取并集），不再"标 superseded、插一行新的"。
+  换键的 UPDATE、MERGE 的目标、强化搬层、DELETE 仍然照旧标 `superseded` 并留痕。
+  历史遗留的多行**只统计不清理**（`/super status` 与 `/super memory` 里的"同键多行"），
+  因为删记忆要用户点头（AGENTS §五）。
 
 **TTL 收口**：`ttl_days` 由维护 agent 填，存储层按 `TTL_CAP_DAYS` 夹上限（preference ≤365、
 group_fact ≤180、name/boundary ≤3650），并让带时间限定的处境（`STATE_MARKERS`：最近/目前/
