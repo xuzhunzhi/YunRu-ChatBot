@@ -389,6 +389,15 @@ def read_memory_table(table: str, *, root: Path | None = None, filters: dict[str
     `kinds` / `exclude_kinds` 用来把**人物画像**（`kind='profile'`）和普通旧事分开——
     面板上是两块（用户 2026-10-01："人物画像和记忆分两个面板"）。画像是一条人一条、
     跟着人走、不进按词检索，跟"你记得的旧事"本来就不是一层，混在一起看不出来。
+
+    **`records` 默认只看生效的**（2026-10-09）：`status != 'active'` 那些行里，
+    已删的**正文是故意清空的**（删除路径先归档、再把正文置空，物理行等 7 天保留期
+    才清），面板把它们列出来就是用户看到的"**空正文的记录**"。所以：
+
+    * **没提 `status`** 的调用方 → 一律按 `active` 取（绝大多数页面要的就是这个）；
+    * 要看历史（「记忆」页那个"全部状态"页签）就**显式**给 `status=any`
+      —— 那是"这一列不过滤"的哨兵（不能用空串：`parse_qs` 默认会把空值丢掉，
+      `?status=` 根本到不了这里，2026-10-09 踩到过）；给具体状态值就按它取。
     """
 
     if table not in _LIST_SQL:
@@ -407,12 +416,23 @@ def read_memory_table(table: str, *, root: Path | None = None, filters: dict[str
         where: list[str] = []
         params: list[object] = []
         allowed = _FILTERS.get(table, {})
+        given: set[str] = set()
         for key, value in (filters or {}).items():
             column = allowed.get(str(key))
-            if column is None or value in (None, ""):
+            if column is None:
                 continue
+            given.add(str(key))
+            text = "" if value is None else str(value)
+            if text == "":
+                continue                      # 参数表里给空 = 这一列不过滤（老写法，留着）
+            if str(key) == "status" and text.strip().casefold() in {"any", "*"}:
+                continue                      # 显式哨兵：**这一列不过滤**（"全部状态"）
             where.append(f"{column} = ?")
-            params.append(str(value))
+            params.append(text)
+        if table == "records" and "status" not in given:
+            # 没提 status 的调用方 → **只看生效的**（见上面那段：已删的正文是空的）。
+            where.append("status = ?")
+            params.append("active")
         if kinds is not None:
             where.append(f"kind IN ({','.join('?' for _ in kinds)})")
             params.extend(kinds)

@@ -1438,3 +1438,29 @@ class MemoryGroupSwitchLayoutTests(unittest.TestCase):
         self.assertRegex(self.css, r"\.row-switch\s*\{[^}]*min-height: 44px",
                          "开关那一块点按区太小")
         self.assertIn("input.switch", self.css, "开关不是那套既有的滑块")
+
+
+class RecordsStatusLayoutTests(unittest.TestCase):
+    """判据：页面侧也跟着"默认只看生效的"（2026-10-09 用户报的"空正文的记录"）。"""
+
+    def setUp(self) -> None:
+        self.js = _asset("app.js")
+
+    def test_the_memory_page_asks_for_history_explicitly(self) -> None:
+        """「记忆」页那个"全部状态"页签必须**显式**发哨兵（空串在 `parse_qs` 那步就没了）。"""
+
+        body = _uncomment(_function_body(self.js, "viewMemory", kind="async"))
+        self.assertIn('status=${encodeURIComponent(statusFilter || "any")}', body,
+                      "「全部状态」没有显式发哨兵（那一档会看不到历史）")
+        self.assertIn('state.last.memoryStatus || "active"', body,
+                      "默认那一档不是 `active`")
+
+    def test_the_profile_page_no_longer_counts_superseded_rows(self) -> None:
+        """画像页现在只看生效的：不再另取"被顶替的旧版"，那句计数也删了，
+        改成在「?」里说一句"历史去「记忆」页看"（判据：不 quietly 少一块信息）。"""
+
+        body = _uncomment(_function_body(self.js, "viewPersonProfiles", kind="async"))
+        self.assertNotIn("superseded", body, "画像页还在取被顶替的旧版")
+        block = _uncomment(_function_body(self.js, "personBlock"))
+        self.assertNotIn("superseded", block, "画像块还在用被顶替的旧版")
+        self.assertIn("全部状态", self.js, "没有一句指路说历史去哪儿看")

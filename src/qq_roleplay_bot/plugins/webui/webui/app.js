@@ -706,7 +706,10 @@ async function viewMemory() {
   // （2026-10-01 用户："关于浪迹星海的记忆有很多重复…"）。
   // 提示词那边本来就只用 `status='active'`，所以这里对齐它。
   const statusFilter = state.last.memoryStatus || "active";
-  const query = statusFilter ? `&status=${encodeURIComponent(statusFilter)}` : "";
+  // **显式**带上 `status`：`any` 是"这一列不过滤"的哨兵（后端靠"有没有提这一列"
+  // 区分"全部状态"与"没提、按默认只看生效的"——2026-10-09 那一改之后必须发出来；
+  // 不能用空串，空值在 `parse_qs` 那一步就没了）。
+  const query = `&status=${encodeURIComponent(statusFilter || "any")}`;
   // 画像**不在这张页里取了**（2026-10-06）：它属于「记忆」这一档、有自己的页
   // （左栏「记忆」卡里的「人物画像」，与「记忆」**平级**，见 `CARDS`）。这里只取旧事——后端默认
   // 就排除 `kind='profile'`（`docs/MEMORY_PEOPLE.md` 第八节）。
@@ -2264,7 +2267,8 @@ function noteTip(text) {
 const PROFILE_NOTES = `画像就是记忆里的一类（<code>kind=profile</code>）：<b>一个人一张</b>、
   跟着人走、不按词检索。它由记忆维护 agent 写——真的看出"这个人的整体样子"时才写一条，
   不是每人一条。面板对记忆<b>只读</b>：写入只走记忆维护 agent，删除入口在「记忆」页。
-  每类最多看 ${PROFILE_LIMIT} 条，超出的没列出来（不是没有）。`;
+  每类最多看 ${PROFILE_LIMIT} 条，超出的没列出来（不是没有）。
+  这里**只看生效的**；已删 / 被顶替的旧版在「记忆」页切"全部状态"才看得到。`;
 
 /* **一个人一块**：三节——整体印象 / 零散记录 / 关系，**一次只显示一节**。
  *
@@ -2283,7 +2287,6 @@ const PROFILE_NOTES = `画像就是记忆里的一类（<code>kind=profile</code
 function personBlock(key, data) {
   const rows = data.impression.get(key);
   const main = rows ? rows[0] : null;
-  const older = (data.superseded.get(key) || []).length;
   const own = data.mentions.get(key) || [];
   const relation_ = data.relation[key];
   const label = personLabel(key, data);
@@ -2305,8 +2308,7 @@ function personBlock(key, data) {
   // 整体印象：有就写出来（带版本），没有就一句短的——**不拿旧事冒充印象**。
   const impression = main
     ? `<div class="impression">${esc(main.content || "（空）")}</div>${
-        main.revision ? `<p class="hint">第 ${num(main.revision)} 版</p>` : ""}${
-        older ? `<p class="hint">另有 ${num(older)} 条旧版（被顶替）；按状态筛选能在「记忆」页看到。</p>` : ""}`
+        main.revision ? `<p class="hint">第 ${num(main.revision)} 版</p>` : ""}`
     : `<p class="hint">还没成形像——她在真的看出"这个人的整体样子"时才会写，不是每人一条。</p>`;
 
   // ⑤ **类别筛选**：这一节里出现过的类别各一枚（带条数），"全部"一枚；
@@ -2391,14 +2393,14 @@ async function viewPersonProfiles() {
     relation[String(row.user_id || "").trim()] = row;
   });
 
-  // 按人分组：画像与被顶替的旧版分开（默认只把**生效的**那条当"她的印象"）。
+  // 按人分组。**只看生效的**（2026-10-09）：接口默认就给 `status='active'` 的行，
+  // 所以这里不再分"被顶替的旧版"那一堆——已删/已替换的不进正常视图，
+  // 要看历史去「记忆」页切"全部状态"（那页显式发 `status=`）。
   const impression = new Map();
-  const superseded = new Map();
   (profiles.rows || []).forEach((row) => {
     const key = personKey(row) || "（无归属人）";
-    const bucket = row.status === "active" ? impression : superseded;
-    if (!bucket.has(key)) bucket.set(key, []);
-    bucket.get(key).push(row);
+    if (!impression.has(key)) impression.set(key, []);
+    impression.get(key).push(row);
   });
   const mentions = new Map();
   (records.rows || []).forEach((row) => {
@@ -2447,7 +2449,7 @@ async function viewPersonProfiles() {
                                                   row.scope_key));
   (records.rows || []).forEach((row) => addGroup(personKey(row), row.scope_key));
 
-  const data = { impression, superseded, mentions, names, relation, groups };
+  const data = { impression, mentions, names, relation, groups };
   const wanted = String(state.last.profileKey || "");
   // **按最近活跃排**（用户 2026-10-09：默认选最近活跃那个）。"活跃"取这三样的最新一个：
   // 画像那一条的更新时间、他名下任意一条记录的时间、关系两轴的更新时间。

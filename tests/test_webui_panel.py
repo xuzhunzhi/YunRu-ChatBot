@@ -28,6 +28,7 @@ import re
 import socket
 import sys
 import tempfile
+import time
 import unittest
 from importlib import resources
 from unittest import mock
@@ -998,3 +999,95 @@ class GroupMemorySwitchTests(_PanelCase):
                                             "confirm": True})
         self.assertEqual(response.status, 503)
         self.assertEqual(body["error"], "engine_unavailable")
+
+
+class RecordsDefaultStatusTests(_PanelCase):
+    """用户 2026-10-09 看到"空正文的记录"：真库里 56 条空正文**全是 `status='deleted'`**
+    （删除路径先把正文清空，物理行等 7 天保留期才清）——问题在**面板把非 active 的行
+    也列出来了**。这一组用**真形状**的库钉住：
+
+    * 默认（没提 `status`）→ **只有生效的那条**，计数也只数它；
+    * 显式 `status=any` → 那一档仍然看得到历史（「记忆」页那个"全部状态"页签靠它）。
+    """
+
+    GROUP = "800000001"
+    USER = "1001"
+
+    def _write_tea(self, store, evidence: str = "e1") -> str:
+        """写一条 `likes_tea` 进去，返回它的 id（`commit` 回的是操作对象，所以回库问）。"""
+
+        from qq_roleplay_bot.memory_model import InboxEvent
+
+        # 时间戳要用**现在**：太老的待处理材料 `claim` 不认领（认领窗口是活的）。
+        store.append(InboxEvent(evidence, self.GROUP, self.USER, "user", "喜欢喝奶茶",
+                                time.time()))
+        batch = store.claim({self.GROUP}, lease_seconds=60)
+        self.assertIsNotNone(batch, "事件应当能被认领成一批")
+        # 这份 JSON 的形状照 `tests/test_memory_people.py::add_fact`（少一个字段就是
+        # `invalid_operation`——`ttl_days` 与 `evidence_event_ids` 都在里面）。
+        raw = ('{"operations":[{"op":"ADD","scope_type":"user_group","kind":"preference",'
+               '"normalized_key":"likes_tea","content":"喜欢喝奶茶","confidence":0.9,'
+               '"ttl_days":null,"evidence_event_ids":[' + f'"{evidence}"' + '],"targets":[]}]}')
+        self.assertTrue(list(store.commit(batch, raw)), "没写进去")
+        with store.connection() as db:
+            found: list = []
+            for table in ("memory_short", "memory_long"):
+                found.extend(dict(row) for row in db.execute(
+                    f"SELECT id, status FROM {table} WHERE normalized_key='likes_tea'"))
+        # 第二次写的时候，同一个键上已经有一条（被上一段改成 deleted 的那条），
+        # 所以要认**生效的**那一条——它才是我刚写进去的。
+        active = [row for row in found if str(row["status"]) == "active"]
+        self.assertTrue(active, "刚写进去的那条（生效的）没找到")
+        return str(active[0]["id"])
+
+    def _seed(self) -> str:
+        """**同一个键**上两条：一条 deleted（**正文被清空**，用户看到的就是它）、
+        一条 active——界面上只该看见后面那一条、计数也只数它。
+
+        真库里的形状就是这样：删掉的那条先归档、正文置空，物理行等保留期到了才清；
+        之后同一个键再学一次就是新的一条（生效的）。
+        """
+
+        from qq_roleplay_bot.memory_store import MemoryStore
+
+        store = MemoryStore(self.root / "memory" / "memory.sqlite3")
+        store.note_person(self.GROUP, self.USER, "乐乐")
+        deleted = self._write_tea(store)
+        # 照**删除路径的形状**把第一条变成"已删 + 正文清空"（两层的表都要动）。
+        with store.connection() as db:
+            for table in ("memory_short", "memory_long"):
+                db.execute(f"UPDATE {table} SET content='', status='deleted' WHERE id=?",
+                           (deleted,))
+        # 同一个键再写一条（现在生效的是它）。证据 id 必须换一个：
+        # 同一个 id 的事件已经被上一批消费掉了，再来一次没有可认领的东西。
+        self._write_tea(store, evidence="e2")
+        return deleted
+
+    def test_the_default_view_leaves_the_deleted_ones_out(self) -> None:
+        deleted = self._seed()
+        data = self.payload(self.request("GET", "/api/memory/records?limit=50"))["data"]
+        self.assertEqual(data["total"], 1, "计数把已删的也算进去了")
+        self.assertEqual([row["id"] for row in data["rows"]], [
+            row["id"] for row in data["rows"] if row["id"] != deleted])
+        self.assertEqual(len(data["rows"]), 1, "已删的那条还在列表里")
+        self.assertEqual(data["rows"][0]["status"], "active")
+        self.assertTrue(data["rows"][0]["content"], "留下那条不该是空正文")
+
+    def test_the_explicit_any_sentinel_still_shows_everything(self) -> None:
+        """要历史的地方（「记忆」页"全部状态"）**显式**给哨兵——那一档不能也看不到。"""
+
+        deleted = self._seed()
+        data = self.payload(
+            self.request("GET", "/api/memory/records?limit=50&status=any"))["data"]
+        self.assertEqual(data["total"], 2, "显式要全部状态时反而看不到了")
+        by_id = {row["id"]: row for row in data["rows"]}
+        self.assertIn(deleted, by_id)
+        self.assertEqual(by_id[deleted]["content"], "",
+                         "那条本来就是空正文——用户看到的就是它")
+
+    def test_an_explicit_active_wins_over_the_default(self) -> None:
+        self._seed()
+        data = self.payload(
+            self.request("GET", "/api/memory/records?limit=50&status=active"))["data"]
+        self.assertEqual(data["total"], 1)
+        self.assertTrue(all(row["status"] == "active" for row in data["rows"]))
