@@ -1498,7 +1498,9 @@ class ProfileBadgeAndGroupChipTests(unittest.TestCase):
         self.assertIn('=== "user_group"', inner, "没有认 `scope_type === 'user_group'`")
         self.assertIn("split(\":\")[0]", inner, "`user_group` 没取冒号前那段（群号）")
         # **个人 scope 必须落空**：不许出现"别的都当群号"那种兜底。
-        self.assertNotRegex(inner, r"return raw;\s*\n\s*\};", "个人 scope 也被当成群了")
+        # **末尾那条必须是 `return "";`**——个人 scope 落空就靠它（用整段结尾来钉，
+        # 上一版写成"`return raw;` 后面紧跟 `};`"那种形状判据，突变跑出过"绿"）。
+        self.assertRegex(inner, r'return "";\s*$', "个人 scope 没有落空（最后一条 return 不是空串）')
         self.assertNotIn("row.scope_key)", body, "还有地方直接把 scope_key 当群号用")
 
     def test_the_list_has_breathing_room_under_the_search_box(self) -> None:
