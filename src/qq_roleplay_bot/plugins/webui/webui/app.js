@@ -1609,7 +1609,11 @@ async function viewHistory() {
 //: 写地址栏用 `replaceState`（不往历史里塞一堆条目，返回键仍然退页签），
 //: 环境不支持（`file://` 之类）就只留在内存里——**不许因此把选人弄坏**。
 function rememberPerson(key) {
-  state.last.profileKey = String(key || "");
+  const next = String(key || "");
+  // **换人就把类别筛选清掉**（2026-10-09）：那个筛选是"看这个人时的临时口径"，
+  // 留着会给下一个人筛出 0 条，而徽标/计数又说有——正是用户截到的那个不一致。
+  if (next !== String(state.last.profileKey || "")) state.last.profileKind = "";
+  state.last.profileKey = next;
   try {
     history.replaceState(null, "", "#" + state.tab
       + (state.last.profileKey ? "&people=" + encodeURIComponent(state.last.profileKey) : ""));
@@ -2328,6 +2332,7 @@ function personBlock(key, data) {
       .join("")}</div>` : "";
   // "共 N 条"——这里只数**手上这些**；一页每类最多取 200 条，取满了就如实说一句。
   const countLine = `<p class="hint">共 ${num(shownOwn.length)} 条${
+    kindPick ? `（筛自 ${num(own.length)} 条）` : ""}${
     own.length >= PROFILE_LIMIT ? `（这一页每类最多取 ${PROFILE_LIMIT} 条）` : ""}</p>`;
   // 「类别」这一列**不许 nowrap**：类别名有长有短（`alias` / `preference` / `boundary`），
   // 在中等档（内容区只剩 ~575px）里最短的那一列装不下最长的类别名，而 `nowrap`
@@ -2345,7 +2350,10 @@ function personBlock(key, data) {
   //    换人重画之后还停在同一节上。
   const panes = [
     ["impression", "整体印象", "", impression],
-    ["records", "零散记录", `(${num(own.length)})`,
+    // 徽标数的是**这一节看得见的条数**（`shownOwn`），与下面"共 N 条"、与那张表
+    // 用的是同一个口径——用户 2026-10-09 截到的是「零散记录 (1)」点进去「共 0 条」：
+    // 徽标数的是全部、表按类别筛过（而那个筛选还会跨人留着）。
+    ["records", "零散记录", `(${num(shownOwn.length)})`,
       own.length ? `${kindChips}${countLine}${ownTable}`
         : '<p class="hint">这个人名下还没有别的记录。</p>'],
   ];
@@ -2439,6 +2447,20 @@ async function viewPersonProfiles() {
     const list = (groups[uid] = groups[uid] || []);
     if (!list.includes(gid)) list.push(gid);
   });
+  // 一条记录落在哪个群：**只看来源字段 `scope_type`**，不看那个值长得像不像群号——
+  // 用户 2026-10-09 截到的是「群 1613078653」，而那其实是**这个人自己的 QQ 号**：
+  // `user_global` 那种个人 scope 的 `scope_key` 存的就是人的号。所以：
+  //   `group`      → `scope_key` 就是群号；
+  //   `user_group` → `scope_key` 形如 `<群号>:<人号>`（隔离那一维），取冒号前那段；
+  //   其余（`user_global` 这类个人 scope）→ **没有群**，返回空串。
+  const groupOfRecord = (row) => {
+    const type = String(row.scope_type || "").trim();
+    const raw = String(row.scope_key || "").trim();
+    if (!raw) return "";
+    if (type === "group") return raw;
+    if (type === "user_group") return raw.split(":")[0].trim();
+    return "";
+  };
   const addGroup = (key, gid) => {
     const id = String(gid || "").trim();
     if (!key || !id) return;
@@ -2446,8 +2468,8 @@ async function viewPersonProfiles() {
     if (!list.includes(id)) list.push(id);
   };
   (profiles.rows || []).forEach((row) => addGroup(personKey(row) || "（无归属人）",
-                                                  row.scope_key));
-  (records.rows || []).forEach((row) => addGroup(personKey(row), row.scope_key));
+                                                  groupOfRecord(row)));
+  (records.rows || []).forEach((row) => addGroup(personKey(row), groupOfRecord(row)));
 
   const data = { impression, mentions, names, relation, groups };
   const wanted = String(state.last.profileKey || "");

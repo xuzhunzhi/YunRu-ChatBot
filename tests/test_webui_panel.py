@@ -1091,3 +1091,33 @@ class RecordsDefaultStatusTests(_PanelCase):
             self.request("GET", "/api/memory/records?limit=50&status=active"))["data"]
         self.assertEqual(data["total"], 1)
         self.assertTrue(all(row["status"] == "active" for row in data["rows"]))
+
+
+class RecordsShapeForGroupChipsTests(_PanelCase):
+    """② 的**数据侧**前提：接口得把"这条记录落在哪种 scope"给出来，前端才判得出是不是群
+    （`scope_type` + `scope_key`）。用户截到的「群 1613078653」就是 `user_global`
+    那种个人 scope——它的 `scope_key` 是**人的号**。
+    """
+
+    def test_the_api_exposes_the_scope_so_the_page_can_tell_a_group_from_a_person(self) -> None:
+        from qq_roleplay_bot.memory_model import InboxEvent
+        from qq_roleplay_bot.memory_store import MemoryStore
+
+        store = MemoryStore(self.root / "memory" / "memory.sqlite3")
+        store.note_person("800000001", "1001", "乐乐")
+        # 一条**群内个人** scope（`<群号>:<人号>`），一条**个人全局** scope（`scope_key` 是人号）。
+        for evidence, scope, key in (("e1", "user_group", "likes_tea"),
+                                     ("e2", "user_global", "likes_coffee")):
+            store.append(InboxEvent(evidence, "800000001", "1001", "user", "记一笔", time.time()))
+            batch = store.claim({"800000001"}, lease_seconds=60)
+            self.assertIsNotNone(batch, "事件应当能被认领成一批")
+            raw = ('{"operations":[{"op":"ADD","scope_type":"%s","kind":"preference",'
+                   '"normalized_key":"%s","content":"记一笔","confidence":0.9,'
+                   '"ttl_days":null,"evidence_event_ids":["%s"],"targets":[]}]}'
+                   % (scope, key, evidence))
+            self.assertTrue(list(store.commit(batch, raw)), "没写进去")
+
+        data = self.payload(self.request("GET", "/api/memory/records?limit=50"))["data"]
+        scopes = sorted((str(row["scope_type"]), str(row["scope_key"])) for row in data["rows"])
+        self.assertEqual(scopes, [("user_global", "1001"), ("user_group", "800000001:1001")],
+                         "接口没把 scope 原样给出来（前端就没法区分群与人）")

@@ -1246,6 +1246,9 @@ td .hint { margin: 2px 0 0; }
 .person-list {
   display: flex;
   flex-direction: column;
+  margin-top: 6px;                 /* 与搜索框之间留一口气（用户 2026-10-09 截到的贴死） */
+  padding: 2px 0;                  /* 顶/底各留 2px：滚动到边时那一行不会被截掉半截 */
+  scroll-padding: 4px;             /* 键盘走列表时也留出同样的余量 */
   max-height: 320px;               /* 人再多也不把卡片撑成一条长龙 */
   overflow-y: auto;
   border-radius: var(--radius-inner);

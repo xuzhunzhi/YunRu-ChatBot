@@ -488,8 +488,8 @@ class PersonProfilePlacementTests(unittest.TestCase):
         self.assertIn("rememberPerson", handler.group(1),
                       "点了人没有走「记下来 + 重画」那一步")
         remember = _function_body(self.js, "rememberPerson")
-        self.assertIn("state.last.profileKey = String(key", remember,
-                      "记下来的不是「选的是谁」")
+        self.assertRegex(remember, r"state\.last\.profileKey = (String\(key|next)",
+                         "记下来的不是「选的是谁」")
         self.assertIn("render()", remember, "换了人只改了高亮、没有重画内容")
 
     def test_the_profile_page_takes_its_data_from_the_existing_memory_seam(self) -> None:
@@ -1464,3 +1464,45 @@ class RecordsStatusLayoutTests(unittest.TestCase):
         block = _uncomment(_function_body(self.js, "personBlock"))
         self.assertNotIn("superseded", block, "画像块还在用被顶替的旧版")
         self.assertIn("全部状态", self.js, "没有一句指路说历史去哪儿看")
+
+
+class ProfileBadgeAndGroupChipTests(unittest.TestCase):
+    """用户 2026-10-09 截图报的两处 + 一处间距：
+
+    ① 标签页徽标与内容不是一个口径（「零散记录 (1)」点进去「共 0 条」）；
+    ② 群标签出现「群 <这个人的号>」——`user_global` 那种个人 scope 的 `scope_key`
+       存的就是人的号，被当成群号了；
+    ③ 搜索框与列表贴死、列表最上面那行被截一半。
+    """
+
+    def setUp(self) -> None:
+        self.js = _asset("app.js")
+        self.css = _asset("app.css")
+
+    def test_the_tab_count_uses_the_same_rows_as_the_pane(self) -> None:
+        block = _uncomment(_function_body(self.js, "personBlock"))
+        self.assertRegex(block, r'\["records", "零散记录", `\(\$\{num\(shownOwn\.length\)\}\)`',
+                         "徽标数的不是那一节看得见的条数")
+        self.assertRegex(block, r"共 \$\{num\(shownOwn\.length\)\} 条", "计数与列表不是一个口径")
+        # 换人必须把类别筛选清掉（不然会给下一个人筛出 0 条，徽标却还说有）。
+        remember = _function_body(self.js, "rememberPerson")
+        self.assertIn("state.last.profileKind = \"\"", remember, "换人没清掉类别筛选")
+
+    def test_group_chips_only_ever_come_from_group_scopes(self) -> None:
+        body = _uncomment(_function_body(self.js, "viewPersonProfiles", kind="async"))
+        self.assertIn("groupOfRecord", body, "群标签不是从来源字段判出来的")
+        picker = re.search(r"const groupOfRecord = \(row\) => \{(.*?)\n  \};", body, re.S)
+        self.assertIsNotNone(picker, "找不到 `groupOfRecord`")
+        inner = picker.group(1)
+        self.assertIn('=== "group"', inner, "没有认 `scope_type === 'group'`")
+        self.assertIn('=== "user_group"', inner, "没有认 `scope_type === 'user_group'`")
+        self.assertIn("split(\":\")[0]", inner, "`user_group` 没取冒号前那段（群号）")
+        # **个人 scope 必须落空**：不许出现"别的都当群号"那种兜底。
+        self.assertNotRegex(inner, r"return raw;\s*\n\s*\};", "个人 scope 也被当成群了")
+        self.assertNotIn("row.scope_key)", body, "还有地方直接把 scope_key 当群号用")
+
+    def test_the_list_has_breathing_room_under_the_search_box(self) -> None:
+        self.assertRegex(self.css, r"\.person-list\s*\{[^}]*margin-top: 6px",
+                         "搜索框与列表之间还是贴死的")
+        self.assertRegex(self.css, r"\.person-list\s*\{[^}]*padding: 2px 0",
+                         "列表没有上下留白（最上面那行会被截）")
