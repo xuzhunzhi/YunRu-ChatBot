@@ -31,8 +31,10 @@
 别人记忆里的词"会命中 47%），所以那一条只落在维护 prompt 的规矩里（见
 `test_the_maintenance_prompt_states_the_four_rules`），机械侧只做数字与型号。
 """
+import atexit
 import json
 import os
+import shutil
 import unittest
 import uuid
 from pathlib import Path
@@ -51,6 +53,9 @@ OTHER = "242003347"
 # 临时目录权限，系统 temp 下的目录之后连删除都会被拒）。
 _SCRATCH_ROOT = (Path(__file__).resolve().parents[1] / ".tmp_test_run"
                  / f"grounding-{os.getpid()}-{uuid.uuid4().hex[:8]}")
+# 整个根目录在进程退出时收掉：只收每个用例的子目录会把这层空壳留在
+# `.tmp_test_run/` 里，跑几次就攒一串（与 tests/test_memory.py 同一手法）。
+atexit.register(shutil.rmtree, _SCRATCH_ROOT, ignore_errors=True)
 
 
 class _Scratch:
@@ -60,8 +65,6 @@ class _Scratch:
         Path(self.name).mkdir(parents=True, exist_ok=True)
 
     def cleanup(self) -> None:
-        import shutil
-
         shutil.rmtree(self.name, ignore_errors=True)
 
 
