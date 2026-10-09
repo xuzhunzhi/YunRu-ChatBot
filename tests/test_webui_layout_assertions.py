@@ -1140,6 +1140,9 @@ class PersonRepaintTests(unittest.TestCase):
         paint = re.search(r"profilePaint = \(who\) => \{(.*?)\n  \};", body, re.S)
         self.assertIsNotNone(paint, "找不到 profilePaint 的实现")
         self.assertNotIn("api(", paint.group(1), "重画那一段里又去取数了")
+        # **`render()` 也是取数路径**（它整页重来），所以一起禁掉——只查 `api(` 会漏掉
+        # "重画时调 render()"这种写法（2026-10-09 突变时发现的缺口）。
+        self.assertNotIn("render(", paint.group(1), "重画那一段里调了整页 render()")
         self.assertIn("innerHTML", paint.group(1), "重画那一段没有换内容")
 
     def test_the_repaint_keeps_the_search_box_and_the_scroll(self) -> None:
