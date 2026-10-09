@@ -1271,7 +1271,21 @@ class _SeamBinder:
             plugins=inventory,
             # 她**学来的东西**（金句 / 黑话）的读写：见下面 `learned_seams()`。
             learned=self.learned_seams(),
+            # 「群聊」那一页：**只读**的群列表（名字 + 两个开关）。见 `ui_groups`。
+            groups=self.ui_groups,
         )
+
+    async def ui_groups(self) -> tuple[dict[str, object], ...]:
+        """面板「群聊」那一页要的列表（2026-10-09 用户："展示云茹所在的所有群聊并展示群名"）。
+
+        **只读、只这一件事**：没有参数（传什么都 `TypeError`——想调别的请走
+        `execute_action`，那口过得是核心的闸门与审计）；每一项只有
+        `id` / `name` / `dialogue_on` / `memory_on` 四个字段（白名单由
+        `tests/test_ui_groups_seam.py` 逐个钉住），没有成员表、没有消息。
+        缓存、以及"取失败回落上一次的已知列表"都在 `DialogueEngine.list_groups` 里。
+        """
+
+        return await self._require().list_groups()
 
     # --- LearnedSeams（她学来的东西：金句 / 黑话）--------------------------
     #

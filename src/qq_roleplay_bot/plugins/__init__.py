@@ -445,6 +445,12 @@ class UiSeams:
     #: 她**学来的东西**（金句 / 黑话）的读写接缝（见 `LearnedSeams`）。**只碰这两份数据**，
     #: 没有记忆入口、也没有对话入口——那份函数清单由测试逐个钉住。
     learned: object = None
+    #: `async () -> tuple[dict, ...]`：**云茹所在的群聊**那一页要的只读列表
+    #: （2026-10-09 用户："展示云茹所在的所有群聊并展示**群名**"）。每一项**只有**
+    #: `id` / `name` / `dialogue_on` / `memory_on` 四个字段——没有成员表、没有消息、
+    #: 也没有"顺手调个 action"的口子（字段白名单由 `tests/test_ui_groups_seam.py` 钉住）。
+    #: 群名只能核心取（`get_group_list`），所以这一口必须是核心给的。
+    groups: object = None
 
 
 @dataclass(frozen=True, slots=True)

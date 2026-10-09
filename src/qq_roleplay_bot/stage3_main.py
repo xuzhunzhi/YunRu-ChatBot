@@ -145,6 +145,9 @@ MAX_RESUMED_IDS = 4096
 # **最旧**的一条。邮箱那份重启后仍在（用户要求"只第一次要"）；**待办**只活在这一轮
 # 进程里（重启即弃：那条还没交出去的请求丢了就丢了，他再提一次就是）。
 MAX_REMIND_ASKS = 64
+# 「群聊」那一页要的列表：一次最多列多少个群（多出来的截掉——它是给人看的一页，
+# 不是数据导出），以及缓存下来的那一份（`_groups_cache` / `_groups_cache_at`）。
+MAX_GROUPS_LIST = 200
 
 # 冷群里 @ 她时先回的那句"稍等"。随机挑一条，四条属性见 docs/MULTI_GROUP_FOCUS.md：
 # 进她的历史 / 不进长期记忆 / 不算连回 50 条 / 立刻发不摆节奏。
@@ -1244,6 +1247,10 @@ class DialogueEngine:
         #: 这一轮里提醒意图**被闸拦下**了 → `人 → 消息 id`：要让她知道"没排上"，
         #: 否则她会照旧答应一个时间（2026-10-09 实测：`一点四十叫你`，而 13:40 什么都不会发生）。
         self._remind_blocked: dict[str, str] = {}
+        #: 「群聊」那一页的**群列表缓存**（`list_groups`）：一次查询的结果 + 取到的时刻
+        #: （墙上钟）。ttl 见 `dev_config.groups_cache_seconds()`（默认 600 秒）。
+        self._groups_cache: tuple[dict[str, object], ...] = ()
+        self._groups_cache_at = 0.0
         # 金句学习学出来的那份**材料**（`quote_learning.QuoteProfile`，可选）。
         # 它只是"读一份本地 JSON 挑几条"，**热路径上一次模型调用都没有**；
         # 关掉开关或没有材料时回复 prompt 与改动前**逐字相同**（有测试钉住）。
@@ -3841,6 +3848,69 @@ class DialogueEngine:
 
         self._resumed_ids.pop(message_id, None)
         self._promised_ids.pop(message_id, None)
+
+    async def list_groups(self) -> tuple[dict[str, object], ...]:
+        """云茹所在的群聊（**给面板那一页用的只读列表**，2026-10-09 用户要求）。
+
+        用户原话：*"群聊页，应当展示**云茹所在的所有群聊**并展示**群名**而不是群号"*。
+        群名只能从核心这条 `get_group_list` 取（面板拿不到 transport），所以这一份是
+        核心给的。每一项**只有四个字段**：`id` / `name` / `dialogue_on` / `memory_on`
+        ——字段白名单由 `tests/test_ui_groups_seam.py` 逐个钉住，多一个就是多一条缝。
+
+        **缓存**：`dev_config.groups_cache_seconds()`（默认 600 秒，**调用时现读**）
+        之内连着调用只打一次 OneBot；**取失败回落上一次的已知列表**（再没有就用
+        "哪些群开对话 / 开记忆"那两张名单自己拼、名字写成"群 <id>"）——
+        **绝不抛异常**：面板那一页不许因为对面抖一下就崩掉。
+        """
+
+        now = self.wall_clock()
+        ttl = dev_config.groups_cache_seconds()
+        if self._groups_cache and ttl > 0 and now - self._groups_cache_at < ttl:
+            return self._groups_cache
+        transport = getattr(self, "transport", None)
+        if transport is None:
+            return self._groups_fallback()
+        try:
+            response = await transport.call_api("get_group_list")
+        except Exception:  # noqa: BLE001 - 面板那一页不许因为对面抖一下就崩
+            logger.exception("群列表查询失败，回落上一次的已知列表")
+            return self._groups_fallback()
+        rows = []
+        # 回执拆包**复用同一份实现**（`OneBotRelayTargetResolver` 的静态方法）——不另写一套：
+        # 两处拆法一旦分叉，"有的路认得回执、有的认不得"这类怪事就来了。
+        for item in OneBotRelayTargetResolver._data_list(response):
+            row = self._groups_row(item)
+            if row is not None:
+                rows.append(row)
+        if not rows:
+            return self._groups_fallback()
+        self._groups_cache = tuple(rows[:MAX_GROUPS_LIST])
+        self._groups_cache_at = now
+        return self._groups_cache
+
+    def _groups_row(self, item: dict[str, object]) -> dict[str, object] | None:
+        """群列表里的一条 → 面板那一页要的四个字段（名字空就写"群 <id>"）。"""
+
+        group_id = OneBotRelayTargetResolver._id_text(item.get("group_id"))
+        if not group_id:
+            return None
+        return {
+            "id": group_id,
+            "name": OneBotRelayTargetResolver._text(item.get("group_name")) or f"群 {group_id}",
+            "dialogue_on": group_id in self.enabled_group_ids,
+            "memory_on": group_id in self.memory_group_ids,
+        }
+
+    def _groups_fallback(self) -> tuple[dict[str, object], ...]:
+        """取不到群列表时给什么：**上一次的已知列表**；再没有就用那两张名单自己拼。"""
+
+        if self._groups_cache:
+            return self._groups_cache
+        known = sorted(self.enabled_group_ids | self.memory_group_ids)[:MAX_GROUPS_LIST]
+        return tuple({"id": group_id, "name": f"群 {group_id}",
+                      "dialogue_on": group_id in self.enabled_group_ids,
+                      "memory_on": group_id in self.memory_group_ids}
+                     for group_id in known)
 
     def enable_group(self, group_id: str) -> bool:
         if not group_id.isdigit() or not 5 <= len(group_id) <= 12:

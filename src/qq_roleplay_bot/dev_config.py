@@ -374,6 +374,20 @@ def remind_min_interval_seconds() -> int:
     return _int_clamped("QQBOT_REMIND_MIN_INTERVAL_SECONDS", 300, 0, 3600)
 
 
+def groups_cache_seconds() -> int:
+    """面板那份**群列表**缓多久（`QQBOT_GROUPS_CACHE_SECONDS`，默认 **600**，夹在 0..86400）。
+
+    由来（2026-10-09 用户："群聊页应当展示云茹所在的所有群聊并展示**群名**"）：群名只能
+    靠核心那条 `get_group_list` 取，而面板每开一次页面就问一次是白打 OneBot。
+    默认 10 分钟——群列表这种东西慢一点没有关系，取失败还会回落上一次的已知列表。
+
+    **0 = 不缓存**（每次现取，给排查用）。**调用时现读**（与 `turn_timeout_seconds`
+    同一条纪律）：改配置不必重启；坏值回落默认、越界夹取。
+    """
+
+    return _int_clamped("QQBOT_GROUPS_CACHE_SECONDS", 600, 0, 86400)
+
+
 # --- 记忆库那张"只增"的关系流水的保留期（2026-10-08 隔离增长审计 [8]）--------
 # `relationship_log`（好感/关系的每一次变动）从前**没有任何保留期**，只增不减。
 # 它同时是**关系数据**，所以清理必须保守：只按时间删**旧行**，近期一行都不动，
