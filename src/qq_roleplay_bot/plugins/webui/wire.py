@@ -110,6 +110,12 @@ def _panel_seams(ui, call_action) -> dict[str, object]:
     if callable(getattr(ui, "groups", None)):
         seams["ui_groups"] = ui.groups
 
+    # 「记忆」页那一颗**按群的记忆开关**：核心新给的那条写接缝
+    # （`runtime.ui_set_group_memory` → 引擎既有那对 `enable/disable_group_memory`；
+    # 群号校验、幂等、审计都在核心那侧）。面板**只用它**，两件事两个写路径。
+    if callable(getattr(ui, "set_group_memory", None)):
+        seams["set_group_memory"] = ui.set_group_memory
+
     if callable(getattr(ui, "execute_action", None)):
         seams["execute_action"] = ui.execute_action
     if callable(getattr(ui, "apply_overrides", None)):

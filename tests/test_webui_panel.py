@@ -920,3 +920,81 @@ class GroupSeamWiringTests(unittest.TestCase):
             "装配点没有把 `ui.groups` 递给面板（或者名字与路由读的不一样）")
         panel = (plugin / "webui_panel.py").read_text(encoding="utf-8")
         self.assertIn('self._seam("ui_groups")', panel, "路由读的接缝名字变了")
+
+
+class GroupMemorySwitchTests(_PanelCase):
+    """「记忆」页那颗**按群的记忆开关**：只经 `ui.set_group_memory` 这一条写接缝。
+
+    用户 2026-10-09：*"记忆开关肯定要上面板啊，**在记忆页**"*。它与对话那颗
+    （`POST /api/groups`）是**两条写路径**——所以这里拿一个"一被调用就报错"的
+    `group_switch` 替身看着：谁要是把两件事混成一条路，当场红。
+    """
+
+    def _panel_with(self, seam, *, group_switch=None) -> Panel:
+        def boom(*args, **kwargs):
+            raise AssertionError(f"记忆那颗开关不该走对话那条路：{args} {kwargs}")
+
+        seams = {"data_root": str(self.root), "set_group_memory": seam,
+                 "group_switch": group_switch or boom,
+                 "ui_groups": None}
+        return Panel(seams, WebAccess(mode=LOCAL, token=TOKEN))
+
+    def _post(self, panel: Panel, body: dict):
+        response = panel.handle("POST", "/api/memory/groups",
+                                json.dumps(body).encode("utf-8"),
+                                {"accept": "application/json", "content-type": "application/json",
+                                 "authorization": "Bearer " + TOKEN}, "127.0.0.1")
+        return response, json.loads(response.body.decode("utf-8"))
+
+    def test_the_route_calls_the_memory_seam_once_with_confirm(self) -> None:
+        calls: list[tuple] = []
+
+        def seam(group_id, enabled):
+            calls.append((group_id, enabled))
+            return True
+
+        response, body = self._post(self._panel_with(seam),
+                                    {"group_id": "123456", "enabled": False, "confirm": True})
+        self.assertEqual(response.status, 200)
+        self.assertEqual(calls, [("123456", False)], "没有（或者不止一次）调那条写接缝")
+        self.assertTrue(body["data"]["ok"])
+        self.assertTrue(body["data"]["changed"], "接缝说改了，返回的 changed 却是假")
+
+    def test_idempotent_result_comes_back_as_changed_false(self) -> None:
+        """本来就是这个状态 → 核心回 `False`，面板如实回 `changed: false` 并把话说清楚。"""
+
+        response, body = self._post(self._panel_with(lambda group_id, enabled: False),
+                                    {"group_id": "123456", "enabled": True, "confirm": True})
+        self.assertEqual(response.status, 200)
+        self.assertFalse(body["data"]["changed"])
+        self.assertIn("本来就是这个状态", body["data"]["message"])
+
+    def test_without_confirm_it_is_refused_and_nothing_is_written(self) -> None:
+        calls: list[tuple] = []
+
+        def seam(group_id, enabled):
+            calls.append((group_id, enabled))
+            return True
+
+        response, body = self._post(self._panel_with(seam),
+                                    {"group_id": "123456", "enabled": True})
+        self.assertEqual(response.status, 400)
+        self.assertEqual(body["error"], "needs_confirmation")
+        self.assertEqual(calls, [], "没带 confirm 也把开关写下去了")
+
+    def test_a_bad_group_id_is_refused(self) -> None:
+        called: list[tuple] = []
+        panel = self._panel_with(lambda group_id, enabled: called.append((group_id, enabled)))
+        for bad in ("", "abc", "123"):
+            response, body = self._post(panel, {"group_id": bad, "enabled": True,
+                                                "confirm": True})
+            self.assertEqual(response.status, 400, f"{bad!r} 居然过了")
+            self.assertEqual(body["error"], "bad_request")
+        self.assertEqual(called, [])
+
+    def test_a_missing_seam_says_engine_unavailable(self) -> None:
+        panel = Panel({"data_root": str(self.root)}, WebAccess(mode=LOCAL, token=TOKEN))
+        response, body = self._post(panel, {"group_id": "123456", "enabled": True,
+                                            "confirm": True})
+        self.assertEqual(response.status, 503)
+        self.assertEqual(body["error"], "engine_unavailable")

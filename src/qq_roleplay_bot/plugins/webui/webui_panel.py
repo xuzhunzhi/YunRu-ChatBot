@@ -498,6 +498,8 @@ class Panel:
             return self._groups(payload, source)
         if path == "/api/session/clear":
             return self._clear_session(payload, source)
+        if path == "/api/memory/groups":
+            return self._group_memory(payload, source)
         if path == "/api/memory/purge":
             return self._memory_purge(payload, source)
         if path == "/api/memory/affinity":
@@ -616,6 +618,30 @@ class Panel:
         text += "。" if changed else "（本来就是这个状态）。"
         self._audit("group_switch", payload, text, source)
         return json_response(_envelope({"ok": True, "changed": bool(changed), "message": text}))
+
+    def _group_memory(self, payload: dict[str, object], source: str) -> Response:
+        """「记忆」页那一颗**按群的记忆开关**：只经 `ui.set_group_memory`。
+
+        与对话那颗（`POST /api/groups`）是**两条写路径**——两件事，别混。
+        这里转发给核心：群号校验与幂等（本来就是这个状态返回 `False`）都在引擎那两个
+        方法里；**审计也由核心写**（动作名 `memory_group_switch`、`source="panel"`），
+        所以这里**不重复记一条**。`confirm: true` 照旧由 `write()` 带上、这里也校验。
+        """
+
+        if not _confirmed(payload):
+            return failure("needs_confirmation",
+                           detail="危险动作必须在请求里带 confirm=true", status=400)
+        seam = self._seam("set_group_memory")
+        if seam is None:
+            return failure("engine_unavailable", status=503)
+        group_id = str(payload.get("group_id") or "").strip()
+        enabled = bool(payload.get("enabled"))
+        if not (group_id.isdigit() and 5 <= len(group_id) <= 12):
+            return failure("bad_request", detail="群号不合法", status=400)
+        changed = bool(_call(seam, group_id, enabled))
+        text = ("已开启" if enabled else "已关闭") + f"群 {group_id} 的记忆"
+        text += "。" if changed else "（本来就是这个状态）。"
+        return json_response(_envelope({"ok": True, "changed": changed, "message": text}))
 
     def _groups_list(self) -> Response:
         """「群聊」那一页的列表：**她所在的全部群**，只读。

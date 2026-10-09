@@ -721,13 +721,46 @@ async function viewMemory() {
     .map(([value, label]) =>
       `<button class="mem-status ${statusFilter === value ? "on" : ""}" `
       + `data-status="${esc(value)}">${esc(label)}</button>`).join("");
+  // **按群的记忆开关**（用户 2026-10-09：*"记忆开关肯定要上面板啊，**在记忆页**"*）。
+  // 数据只走 `ui.groups` 这一条（就是群聊页那条 `/api/groups`）；写出去只走
+  // `/api/memory/groups` —— 与对话那颗是**两条写路径**，两件事别混。
+  const groupData = await api("/api/groups");
+  const memoryGroups = groupData.rows || [];
+  const memoryRow = (row) => prefRow(
+    `<div class="pref-title">${esc(row.name || `群 ${row.id}`)}</div>` +
+    `<div class="pref-summary"><code class="copyable mono">${esc(row.id)}</code>` +
+    `<span class="group-badge${row.dialogue_on ? " on" : ""}">对话${
+      row.dialogue_on ? "开" : "关"}</span></div>`,
+    `<label class="row-switch" title="这个群的记忆开关">
+       <span class="switch-text">记忆</span>
+       <input class="switch group-memory-switch" type="checkbox" data-id="${esc(row.id)}"
+         data-on="${row.memory_on ? 1 : 0}"${row.memory_on ? " checked" : ""}
+         aria-label="群 ${esc(row.id)} 的记忆开关"></label>`);
+  memoryGroupPaint = (id, on) => {
+    const box = document.querySelector(`.group-memory-switch[data-id="${id}"]`);
+    const holder = box && box.closest(".pref");
+    if (!holder) return false;
+    const known = memoryGroups.find((item) => item.id === id)
+      || { id, name: "", dialogue_on: false };
+    holder.outerHTML = memoryRow({ ...known, memory_on: on });
+    return true;
+  };
+  const memoryGroupCard = card("按群的记忆开关", `
+    <p class="hint">一个群一份：关掉之后她在那个群里不记也不用长期记忆
+      （对话开关在旁边那页「群聊」里）。</p>
+    <div class="pref-list">${
+      groupData.available === false
+        ? '<p class="hint pref-empty">读不到群列表（核心那条只读接缝这次没给）。</p>'
+        : (memoryGroups.map(memoryRow).join("")
+           || '<p class="hint pref-empty">她还没进任何群。</p>')}</div>`);
+
   return card("概览", readoutGrid(Object.entries(counts).map(([key, value]) => ({
       // 后端给的是表名（`short` / `long` / `archive`…）。直接把它们印在格子上，
       // 一屏英文键名看着像没做完（2026-10-06 外观返工核对时看到的）——所以给一份
       // **人话**标签；以后后端多一张表，没登记的那个**照样显示原名**，不吞掉。
       label: MEMORY_COUNT_LABELS[key] || key,
       value: num(value),
-    }))))
+    })))) + memoryGroupCard
     + card("问题记忆（只能删，不能改）", rows.length
       ? `<p class="hint">这里没有任何"新增 / 编辑记忆"的入口：记忆的写入只走记忆维护 agent，
          面板能做的只是把明显有问题的删掉。删除会先把整条原文归档到 archive（保留 30 天），
@@ -1454,7 +1487,8 @@ async function viewGroup() {
     `<div class="pref-title">${esc(row.name || `群 ${row.id}`)}</div>` +
     `<div class="pref-summary"><code class="copyable mono">${esc(row.id)}</code>` +
     // 记忆那个**只读**：面板没有按群开关记忆的接缝，所以只显示、不给控件。
-    `<span class="group-badge${row.memory_on ? " on" : ""}">记忆${
+    `<span class="group-badge${row.memory_on ? " on" : ""}"
+      title="要改去「记忆」页（这里只显示）">记忆${
       row.memory_on ? "开" : "关"}</span></div>`,
     `<label class="row-switch" title="这个群的对话开关">
        <span class="switch-text">对话</span>
@@ -1858,6 +1892,26 @@ function bind() {
     box.dataset.on = on ? "1" : "0";
     if (!(groupRowPaint && groupRowPaint(box.dataset.id, on))) render();
   });
+  // 「记忆」页那一颗**按群的记忆开关**：同一套写法，但走**另一条写路径**
+  // （`/api/memory/groups` → 核心的 `ui.set_group_memory`）。三条规矩一样：
+  // 不乐观、失败在行里说一句、成功只重画那一行。
+  $("view").addEventListener("change", async (event) => {
+    const box = event.target;
+    if (!(box instanceof HTMLElement) || !box.classList.contains("group-memory-switch")) return;
+    const row = box.closest(".pref");
+    const on = box.checked;
+    box.classList.add("is-pending");
+    const done = await write("/api/memory/groups", { group_id: box.dataset.id, enabled: on },
+      (on ? "开启群 " : "关闭群 ") + box.dataset.id + " 的记忆？");
+    box.classList.remove("is-pending");
+    if (!done) {
+      box.checked = box.dataset.on === "1";     // **失败不翻状态**
+      sayInRow(row, "没改成——刚才那一下没成功，还是原来的样子。");
+      return;
+    }
+    box.dataset.on = on ? "1" : "0";
+    if (!(memoryGroupPaint && memoryGroupPaint(box.dataset.id, on))) render();
+  });
   // 搜索框：**输入即筛**。重画之后把光标放回末尾（不重画的话列表不会跟着变）。
   $("view").addEventListener("input", (event) => {
     const target = event.target;
@@ -2163,6 +2217,10 @@ let profilePaint = null;
 //: 「群聊」那一页当前那次渲染留下的**单行重画**：改完一个开关**只重画那一行**
 //: （用户 2026-10-09 那条"换人不刷新"的规矩，同样适用于这里——不整页重画、不重取整张表）。
 let groupRowPaint = null;
+
+//: 「记忆」页那一节按群的记忆开关留下的**单行重画**（与上面那两处同一条规矩：
+//: 改完只重画那一行，不整页重画、不重取整张表）。
+let memoryGroupPaint = null;
 
 //: 一条记忆"关于谁"：优先 `subject_user_id`（隔离那一维），退回 `subjects`（关联人）。
 function personKey(row) {

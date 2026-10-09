@@ -1378,3 +1378,63 @@ class GroupPageLayoutTests(unittest.TestCase):
         self.assertNotIn('api("/api/groups"', inner, "成功之后又去取了一遍整张表")
         self.assertRegex(self.css, r"\.row-switch\s*\{[^}]*min-height: 44px",
                          "开关那一块点按区太小")
+
+
+class MemoryGroupSwitchLayoutTests(unittest.TestCase):
+    """判据：**记忆页**里那个按群的记忆开关（用户："记忆开关肯定要上面板啊，在记忆页"）。
+
+    它读的是 `ui.groups` 的那份 `memory_on`（与群聊页同一个数据源），写的是
+    **另一条**路径 `/api/memory/groups`（对话那颗走 `/api/groups`）——两件事两个写路径。
+    """
+
+    def setUp(self) -> None:
+        self.js = _asset("app.js")
+        self.css = _asset("app.css")
+
+    def _memory(self) -> str:
+        return _uncomment(_function_body(self.js, "viewMemory", kind="async"))
+
+    def test_the_memory_page_lists_every_group_with_a_memory_switch(self) -> None:
+        body = self._memory()
+        self.assertIn("group-memory-switch", body, "记忆页没有那个按群开关")
+        self.assertIn('api("/api/groups")', body, "群列表没走 `ui.groups` 那条只读接缝")
+        self.assertIn("memory_on", body, "开关读的不是 `memory_on`")
+        self.assertIn("memory_on ? 1 : 0", body, "开关没记住它原来是开还是关")
+        self.assertIn('memory_on ? " checked" : ""', body, "开着的那几行没打勾")
+        # 群名在主标题位、群号在次要位（与群聊页同一套）。
+        title = re.search(r'<div class="pref-title">(.*?)</div>', body, re.S)
+        self.assertIsNotNone(title, "记忆页那一行没有主标题位")
+        self.assertIn("row.name", title.group(1), "主标题不是群名")
+        self.assertIn("copyable", body, "群号没有做成可复制的小字")
+
+    def test_the_switch_writes_on_its_own_path_not_the_dialogue_one(self) -> None:
+        body = self._memory()
+        self.assertIn("memoryGroupPaint", body, "成功之后没有只重画那一行")
+        handlers = _uncomment(_function_body(self.js, "bind"))
+        changed = re.search(
+            r'group-memory-switch"\)\) return;(.*?)\n  \}\);', handlers, re.S)
+        self.assertIsNotNone(changed, "找不到记忆开关那个 change 委托")
+        inner = changed.group(1)
+        self.assertEqual(inner.count('write("/api/memory/groups"'), 1,
+                         "写出去的不是那条按群记忆的路径（或者不止一处）")
+        self.assertNotIn('write("/api/groups"', inner, "复用了对话那条写路径")
+        self.assertIn("enabled: on", inner, "写出去的开关状态不对")
+        self.assertIn('box.checked = box.dataset.on === "1"', inner,
+                      "写失败也把状态翻过去了（乐观更新）")
+        self.assertIn("sayInRow", inner, "写失败没有在行里说一句")
+        self.assertIn("memoryGroupPaint", inner, "成功之后没有只重画那一行")
+        self.assertNotIn("render();", inner.split("memoryGroupPaint(box.dataset.id, on)")[0],
+                         "还没重画就整页 render 了")
+
+    def test_the_group_page_keeps_only_a_badge_so_there_is_one_write_place(self) -> None:
+        """一处写：群聊页那颗「记忆」只是**徽标**（不给开关），开关只在记忆页。"""
+
+        group = _uncomment(_function_body(self.js, "viewGroup", kind="async"))
+        self.assertNotIn("group-memory-switch", group, "两页各放了一个记忆开关")
+        self.assertIn("group-badge", group, "群聊页那颗「记忆」徽标不见了")
+        self.assertIn("要改去「记忆」页", group, "徽标没有指一句去哪改")
+
+    def test_the_switch_is_comfortable_to_tap(self) -> None:
+        self.assertRegex(self.css, r"\.row-switch\s*\{[^}]*min-height: 44px",
+                         "开关那一块点按区太小")
+        self.assertIn("input.switch", self.css, "开关不是那套既有的滑块")
