@@ -52,6 +52,8 @@ from .onebot_ws import OneBotWebSocketTransport
 # （原来 `_apply_vision` 里是 `from .vision import replace_media_placeholder`）。
 from .media_segments import replace_media_placeholder
 from .remind import (
+    MAX_REMIND_SEEN,
+    REMIND_DEDUPE_WINDOW_SECONDS,
     RemindEmailBook,
     RemindRequest,
     find_email,
@@ -1213,6 +1215,11 @@ class DialogueEngine:
         #: `RemindRequest`，没有任何读回记忆的口子。
         self._remind_emails: RemindEmailBook = RemindEmailBook()
         self._remind_asks: dict[str, RemindRequest] = {}
+        #: "这件事刚认过"：`(人, 事情)` → 过期时刻（墙上钟）。**同一件事只办一次**——
+        #: 判定每轮都读得到窗口里那句老话，于是同一句提醒会被反复认出来
+        #: （2026-10-09 用户实测：连记 5 次待办、插件那边生成了两条提醒）。
+        #: 窗口见 `remind.REMIND_DEDUPE_WINDOW_SECONDS`，上限见 `MAX_REMIND_SEEN`。
+        self._remind_seen: dict[tuple[str, str], float] = {}
         # 金句学习学出来的那份**材料**（`quote_learning.QuoteProfile`，可选）。
         # 它只是"读一份本地 JSON 挑几条"，**热路径上一次模型调用都没有**；
         # 关掉开关或没有材料时回复 prompt 与改动前**逐字相同**（有测试钉住）。
@@ -1594,6 +1601,19 @@ class DialogueEngine:
         channel = remind_channel(intent.channel)
         email = self._remind_emails.get(message.user_id)
         pending = self._remind_asks.get(message.user_id)
+        now = self.wall_clock()
+        # **同一件事只办一次**（2026-10-09 用户实测：同一句提醒被每一轮重新认出来——
+        # 核心连记 5 次待办、插件那边生成了**两条**提醒）。去重键是 `(人, 事情)`：
+        # 那两条提醒正是"同一个 what、不同的 at"（一次时间不对、一次 +5 分钟），
+        # 所以带绝对时刻的键**拦不住**它；而重复的来源本来就是"窗口里那句老话"。
+        key = (message.user_id, intent.what)
+        hot = self._remind_seen.get(key, 0.0) > now
+        if hot and not (pending is not None and pending.what == intent.what):
+            logger.info("Stage 3 remind: 同一件事已经认过，跳过重复 session=%s",
+                        message.session_id)
+            return
+        if not hot:
+            self._remember_remind_seen(key, now)
         if pending is not None and pending.what == intent.what:
             # **同一件事**：把这一轮读到的新东西并进去（他可能这一轮才说清怎么收、
             # 或者时间说法更准了），**不新开一条**——这就是"只记一次待办"。
@@ -1615,6 +1635,20 @@ class DialogueEngine:
             logger.info("Stage 3 remind: 记下这一条（怎么收=%s）session=%s",
                         request.channel or "还没说", message.session_id)
         self._try_hand_over_remind(request)
+
+    def _remember_remind_seen(self, key: tuple[str, str], now: float) -> None:
+        """记下"这件事刚认过"（`(人, 事情)` → 过期时刻），顺手清掉过期的、并加上限。
+
+        窗口是 `remind.REMIND_DEDUPE_WINDOW_SECONDS`（10 分钟）：够盖住一轮对话里的反复
+        识别，又不会把"过一阵子又提同一件事"挡掉——那种是真新请求。
+        """
+
+        expired = [item for item, until in self._remind_seen.items() if until <= now]
+        for item in expired:
+            self._remind_seen.pop(item, None)
+        self._remind_seen[key] = now + REMIND_DEDUPE_WINDOW_SECONDS
+        while len(self._remind_seen) > MAX_REMIND_SEEN:
+            self._remind_seen.pop(next(iter(self._remind_seen)), None)
 
     def _remember_remind_ask(self, request: RemindRequest) -> None:
         """记下待办（一个人一条；超上限淘汰最旧的一条，同 `_promise` 的写法）。
