@@ -1119,6 +1119,35 @@ td .hint { margin: 2px 0 0; }
 .switch-text { color: var(--text-3); font-size: 13.5px; }
 .row-say { margin: 4px 0 0; color: var(--danger, #b3261e); }
 
+/* 记忆页的筛选条（2026-10-09）：输入框 + 两排小胶囊 + 清空 + 显式条数。
+ * 观感与那两页一致：无描边、大圆角、点按区够大、胶囊是 pill。 */
+.mem-filter { display: flex; flex-direction: column; gap: 8px; margin: 10px 0 12px; }
+.filter-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.filter-input {
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: var(--surface-container-high);
+  color: var(--on-surface);
+  font-size: 14.5px;
+  flex: 1 1 200px;
+  min-width: 0;
+}
+.filter-input:focus { outline: 2px solid var(--primary); outline-offset: -2px; }
+.filter-chip {
+  min-height: 40px;
+  min-width: 0;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--surface-container-high);
+  color: var(--text-3);
+  font-size: 13.5px;
+}
+.filter-chip.on { background: var(--primary); color: var(--on-primary); font-weight: 600; }
+#mf-count b { color: var(--primary); }
+
 /* 群聊页：群名当主标题、群号次要位（小字 mono、可复制）、两个状态徽标。
  * 观感与人物画像页同一套：无描边、大圆角、行高松、点按区够大。 */
 .pref-title { font-size: 15.5px; line-height: 1.5; }

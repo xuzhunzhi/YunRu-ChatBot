@@ -1509,3 +1509,60 @@ class ProfileBadgeAndGroupChipTests(unittest.TestCase):
                          "搜索框与列表之间还是贴死的")
         self.assertRegex(self.css, r"\.person-list\s*\{[^}]*padding: 2px 0",
                          "列表没有上下留白（最上面那行会被截）")
+
+
+class MemoryFilterTests(unittest.TestCase):
+    """判据（第一步）：记忆页的**筛选条**（2026-10-09 用户："加个记忆筛选吧……我真没招了"）。
+
+    五种条件可叠加：类别（kind，多选）· 人（名字/号）· 关键词 · 时间范围 · 状态；
+    结果条数**显式**；一键清空；筛选状态**进 URL**（可分享、刷新不丢，与 `people=` 一套）；
+    而且**只有一个来源**（`state.last.memoryFilter`）——上一轮"筛选悄悄串到别人身上"的教训。
+    """
+
+    def setUp(self) -> None:
+        self.js = _asset("app.js")
+        self.css = _asset("app.css")
+
+    def _memory(self) -> str:
+        return _uncomment(_function_body(self.js, "viewMemory", kind="async"))
+
+    def test_the_bar_carries_all_five_conditions(self) -> None:
+        bar = _uncomment(_function_body(self.js, "memoryFilterBar"))
+        for piece in ("mf-person", "mf-q", "data-mf-kind", "data-mf-days", "mf-clear",
+                      "mf-count"):
+            self.assertIn(piece, bar, f"筛选条少了 {piece}")
+        self.assertIn("MEMORY_TIME_RANGES", bar, "时间范围没有那几档")
+        picker = _uncomment(_function_body(self.js, "shownRecordsFor"))
+        for piece in ("kinds", "person", "days"):
+            self.assertIn(piece, picker, f"筛的条件里少了 {piece}（多条件要能叠加）")
+        self.assertIn("subjects", picker, "按人筛没有看 `subjects`")
+
+    def test_the_filter_state_goes_into_the_url(self) -> None:
+        setter = _uncomment(_function_body(self.js, "setMemoryFilter"))
+        self.assertIn("history.replaceState", setter, "筛选状态没有写进地址栏")
+        self.assertIn('"&mf=" + encodeURIComponent(JSON.stringify(next))', setter,
+                      "地址栏里那一段不是 `mf=<编码过的筛选>`")
+        self.assertIn('match(/(?:^|[&])mf=([^&]*)/)', self.js,
+                      "载入时没有从地址栏把筛选读回来")
+        self.assertIn("memoryFilter: (() => {", self.js, "筛选没有自己的初值")
+
+    def test_the_filter_has_exactly_one_source(self) -> None:
+        """**只认 `state.last.memoryFilter`**——不然就是"悄悄串到别人身上"那个 bug 的复现。"""
+
+        reader = _uncomment(_function_body(self.js, "memoryFilter"))
+        self.assertIn("state.last.memoryFilter", reader, "筛选不是从那一处读的")
+        for other in ("profileKind", "memoryStatus", "profileKey"):
+            self.assertNotIn(other, reader, f"筛选还认了 {other}（会串味）")
+        body = self._memory()
+        self.assertIn("shownRecordsFor(records.rows || [])", body, "没有按筛选算那批行")
+        self.assertIn("shownRecords", body, "表不是用筛后的行铺的")
+
+    def test_the_keyword_goes_to_the_server_and_the_count_is_explicit(self) -> None:
+        body = self._memory()
+        self.assertIn("&q=${encodeURIComponent(keyword)}", body, "关键词没有交给后端筛")
+        self.assertIn("mf-count", _uncomment(_function_body(self.js, "memoryFilterBar")),
+                      "没有显式条数")
+        self.assertRegex(self.css, r"\.filter-chip\s*\{[^}]*min-height: 40px",
+                         "筛选胶囊点按区太小")
+        self.assertRegex(self.css, r"\.filter-input\s*\{[^}]*min-height: 44px",
+                         "筛选输入框太小")

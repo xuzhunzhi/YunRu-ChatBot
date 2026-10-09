@@ -228,6 +228,13 @@ const state = {
   last: {
     profileKey: decodeURIComponent(
       (location.hash.match(/(?:^|[&])people=([^&]*)/) || [])[1] || ""),
+    //: 记忆页的筛选（见 `memoryFilter()`）：`&mf=<编码过的 JSON>`，可分享、刷新不丢。
+    memoryFilter: (() => {
+      const raw = decodeURIComponent(
+        (location.hash.match(/(?:^|[&])mf=([^&]*)/) || [])[1] || "");
+      if (!raw) return {};
+      try { return JSON.parse(raw) || {}; } catch (error) { return {}; }
+    })(),
   },
   //: 插件清单（`/api/plugins`）。初值是空数组——卡片据此退回占位口。
   plugins: [],
@@ -694,6 +701,53 @@ const MEMORY_COUNT_LABELS = {
   tombstones: "墓碑",
 };
 
+/* 筛：类别 / 人 / 时间在面板自己算（关键词与状态已经在后端那一次取数里带上了）。
+ * **只读** `memoryFilter()` 一处状态——不认别的键，免得又出现"筛选悄悄串到别人身上"。 */
+function shownRecordsFor(rows) {
+  const filter = memoryFilter();
+  const kinds = Array.isArray(filter.kinds) ? filter.kinds.map(String) : [];
+  const person = String(filter.person || "").trim().toLowerCase();
+  const days = Number(filter.days || 0);
+  const cutoff = days ? Date.now() / 1000 - days * 86400 : 0;
+  return (rows || []).filter((row) => {
+    if (kinds.length && !kinds.includes(String(row.kind || ""))) return false;
+    if (person) {
+      const hay = [row.about, row.subject_user_id,
+                   ...(Array.isArray(row.subjects) ? row.subjects : [])]
+        .map((value) => String(value || "").toLowerCase()).join(" ");
+      if (!hay.includes(person)) return false;
+    }
+    if (cutoff && Number(row.updated_at || 0) < cutoff) return false;
+    return true;
+  });
+}
+
+//: 筛选条：人 / 关键词两个输入 + 类别与时间两排小胶囊 + 清空 + **显式条数**。
+function memoryFilterBar(allRows, shownRows) {
+  const filter = memoryFilter();
+  const kinds = Array.isArray(filter.kinds) ? filter.kinds.map(String) : [];
+  const choices = [...new Set((allRows || [])
+    .map((row) => String(row.kind || "").trim()).filter(Boolean))].sort();
+  const chips = choices.map((kind) => `<button type="button" class="filter-chip${
+    kinds.includes(kind) ? " on" : ""}" data-mf-kind="${esc(kind)}">${esc(kind)}</button>`).join("");
+  const ranges = MEMORY_TIME_RANGES.map(([value, label]) => `<button type="button"
+    class="filter-chip${String(filter.days || "") === value ? " on" : ""}"
+    data-mf-days="${esc(value)}">${esc(label)}</button>`).join("");
+  return `<div class="mem-filter">
+    <div class="filter-row">
+      <input id="mf-person" class="filter-input" type="search" autocomplete="off"
+        placeholder="按人筛：名字 / 号" value="${esc(filter.person || "")}">
+      <input id="mf-q" class="filter-input" type="search" autocomplete="off"
+        placeholder="关键词（内容 / 键）" value="${esc(filter.q || "")}">
+    </div>
+    <div class="filter-row">${chips || '<span class="hint">这一页里没有别的类别。</span>'}</div>
+    <div class="filter-row">${ranges}
+      <button type="button" id="mf-clear" class="filter-chip">清空筛选</button>
+      <span class="hint" id="mf-count">筛出 <b>${num((shownRows || []).length)}</b> 条
+        （这一页取到 ${num((allRows || []).length)} 条）</span></div>
+  </div>`;
+}
+
 async function viewMemory() {
   const overview = await api("/api/memory/overview");
   if (!overview.available) {
@@ -713,7 +767,12 @@ async function viewMemory() {
   // 画像**不在这张页里取了**（2026-10-06）：它属于「记忆」这一档、有自己的页
   // （左栏「记忆」卡里的「人物画像」，与「记忆」**平级**，见 `CARDS`）。这里只取旧事——后端默认
   // 就排除 `kind='profile'`（`docs/MEMORY_PEOPLE.md` 第八节）。
-  const records = await api(`/api/memory/records?limit=50${query}`);
+  // 关键词（`q`）交给后端筛（它走的是 LIKE，比前端子串更省事也更准）；
+  // 人 / 类别 / 时间在下面**面板自己算**。取宽一点：要筛，50 条太浅。
+  const filterNow = memoryFilter();
+  const keyword = String(filterNow.q || "").trim();
+  const records = await api(`/api/memory/records?limit=${PROFILE_LIMIT}${query}`
+    + (keyword ? `&q=${encodeURIComponent(keyword)}` : ""));
   const archive = await api("/api/memory/archive?limit=20");
   const relationships = await api("/api/memory/relationships?limit=50");
   const rows = problem.rows || [];
@@ -748,6 +807,8 @@ async function viewMemory() {
     holder.outerHTML = memoryRow({ ...known, memory_on: on });
     return true;
   };
+  // 筛后的行（筛选条 + 那张表都用它，口径只此一处）。
+  const shownRecords = shownRecordsFor(records.rows || []);
   const memoryGroupCard = card("按群的记忆开关", `
     <p class="hint">一个群一份：关掉之后她在那个群里不记也不用长期记忆
       （对话开关在旁边那页「群聊」里）。</p>
@@ -786,6 +847,7 @@ async function viewMemory() {
           <span class="hint">「已被顶替 / 已删」是记忆更新留下的旧版，不算重复——
             提示词那边只用「生效中」的那些。画像不在这一块——它在左栏
             「记忆」卡里那项「人物画像」（与「记忆」平级），按人排。</span></div>`
+      + memoryFilterBar(records.rows || [], shownRecords)
       + table([
         { label: "层", get: (r) => (r.tier === "long" ? "长期" : "中短期"), nowrap: true },
         // 「关于谁」这一列是关键：记忆是**跟人对应**的（docs/MEMORY_PEOPLE.md），
@@ -796,7 +858,7 @@ async function viewMemory() {
         { label: "内容", get: (r) => r.content },
         { label: "状态", get: (r) => `<span class="tag ${r.status === "active" ? "live" : "restart"}">${esc(r.status)}</span>`, html: true, nowrap: true },
         { label: "版本", get: (r) => `r${num(r.revision)}`, nowrap: true },
-      ], records.rows || [], {
+      ], shownRecords, {
         cols: "cols-records",
         widths: ["8%", "13%", "10%", "15%", "28%", "14%", "12%"],
       }))
@@ -1855,6 +1917,20 @@ function bind() {
     // 要的是"一个卡片里来回切换"，内容必须跟着换）。2026-10-09 换成"搜索框 + 列表"，
     // 选中的那个人同时写进地址栏（可分享、刷新不丢）。
     if (act("person-row", (el) => rememberPerson(el.dataset.person))) return;
+    // 记忆页筛选：类别胶囊（可多选）· 时间范围（单选）· 清空。
+    if (act("filter-chip", (el) => {
+      const kind = el.dataset.mfKind;
+      if (kind !== undefined) {
+        const picked = (Array.isArray(memoryFilter().kinds) ? memoryFilter().kinds : [])
+          .map(String);
+        const next = picked.includes(kind)
+          ? picked.filter((item) => item !== kind) : picked.concat(kind);
+        setMemoryFilter({ kinds: next });
+        return;
+      }
+      if (el.dataset.mfDays !== undefined) { setMemoryFilter({ days: el.dataset.mfDays }); return; }
+      if (el.id === "mf-clear") { setMemoryFilter({ kinds: [], person: "", q: "", days: "" }); }
+    })) return;
     // 人物画像页的分段：整体印象 / 零散记录 / 关系——**一次只显示一块**。
     // 只改这一块里的 `hidden`（不重画、不取数），并把"看的哪一节"记进 `state.last`
     // （这样换个人回来还停在同一节上）。
@@ -1918,6 +1994,14 @@ function bind() {
     }
     box.dataset.on = on ? "1" : "0";
     if (!(memoryGroupPaint && memoryGroupPaint(box.dataset.id, on))) render();
+  });
+  // 记忆页筛选的两个输入框：**输入即筛**（重画走 `setMemoryFilter`，它会把光标放回末尾）。
+  $("view").addEventListener("input", (event) => {
+    const box = event.target;
+    if (!(box instanceof HTMLElement)) return;
+    if (box.id === "mf-person" || box.id === "mf-q") {
+      setMemoryFilter(box.id === "mf-person" ? { person: box.value } : { q: box.value }, box.id);
+    }
   });
   // 搜索框：**输入即筛**。重画之后把光标放回末尾（不重画的话列表不会跟着变）。
   $("view").addEventListener("input", (event) => {
@@ -2224,6 +2308,49 @@ let profilePaint = null;
 //: 「群聊」那一页当前那次渲染留下的**单行重画**：改完一个开关**只重画那一行**
 //: （用户 2026-10-09 那条"换人不刷新"的规矩，同样适用于这里——不整页重画、不重取整张表）。
 let groupRowPaint = null;
+
+/* ---------- 记忆页的筛选（2026-10-09 用户："加个记忆筛选吧……现在一条一条的我真没招了"）--
+ *
+ * 五种条件，**可叠加**：类别（kind，可多选）· 人（名字或号）· 关键词（内容 / 键）·
+ * 时间范围（近 7 天 / 近 30 天 / 全部）· 状态（生效中 / 全部，沿用那一排既有的页签）。
+ *
+ * 数据只走既有的 `/api/memory/records`：**关键词与状态是后端筛**（`q` / `status`），
+ * 人、类别、时间在**面板自己算**（`records.rows` 就在手上，不必新增核心接缝）。
+ *
+ * 状态放在 `state.last.memoryFilter` **一处**，并且**写进地址栏**（`#<页签>&mf=<编码>`，
+ * 与 `people=` 同一套）——可分享、刷新不丢；换页签回来也还在，因为它**画在筛选条上**，
+ * 不会"悄悄留着"（这正是上一轮那个徽标/筛选串味的教训）。
+ */
+const MEMORY_TIME_RANGES = [["7", "近 7 天"], ["30", "近 30 天"], ["", "全部时间"]];
+
+//: 当前的筛选（**唯一来源**）。没设过就是空对象。
+function memoryFilter() {
+  const raw = state.last.memoryFilter;
+  return (raw && typeof raw === "object") ? raw : {};
+}
+
+//: 改筛选：合并 → 写地址栏（静默）→ 重画这一页（后端那两项靠重画时才带上）。
+function setMemoryFilter(patch, focus) {
+  const next = { ...memoryFilter(), ...patch };
+  for (const key of Object.keys(next)) {
+    if (next[key] === "" || next[key] === null) delete next[key];
+    if (Array.isArray(next[key]) && !next[key].length) delete next[key];
+  }
+  state.last.memoryFilter = next;
+  state.last.memoryFocus = focus || "";
+  try {
+    const encoded = Object.keys(next).length
+      ? "&mf=" + encodeURIComponent(JSON.stringify(next)) : "";
+    history.replaceState(null, "", "#" + state.tab
+      + (state.last.profileKey && state.tab === "memory_profile"
+        ? "&people=" + encodeURIComponent(state.last.profileKey) : "") + encoded);
+  } catch (error) { /* 只留在内存里 */ }
+  render().then(() => {
+    if (!focus) return;
+    const box = $(focus);
+    if (box) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); }
+  });
+}
 
 //: 「记忆」页那一节按群的记忆开关留下的**单行重画**（与上面那两处同一条规矩：
 //: 改完只重画那一行，不整页重画、不重取整张表）。
