@@ -1072,34 +1072,56 @@ td .hint { margin: 2px 0 0; }
  * ⚠️ 面板全局把滚动条藏了（用户 2026-10-01 要求），横滑条上因此看不到滑块——
  * 所以卡里那句提示写明了"上面这条横向可以滑"，别只靠滚动条暗示。
  */
-.person-bar {
-  display: flex;
-  flex-wrap: nowrap;
-  gap: 8px;
-  overflow-x: auto;
-  padding: 2px 2px 12px;
-  margin-bottom: 4px;
-  border-bottom: 1px solid var(--divider);
-}
-.person-chip {
-  flex: 0 0 auto;                  /* 人多了也不许被压扁 */
-  min-width: 0;                    /* 压掉全局 `button` 的 min-width: 58px */
-  min-height: 34px;
-  padding: 6px 14px;
-  border-radius: var(--radius-pill);
-  border: 1px solid var(--outline);
+/* **搜索框 + 竖排列表**（2026-10-09 用户："**主要是，横向的没法选人啊**"——原来那条
+ * 33 人的横向胶囊带在触屏上根本找不到人）。观感照 HyperOS：白卡**无描边**、大圆角、
+ * 行高松、分隔线**从文字处缩进**（伪元素只画 `left/right: 14px` 那一段）、
+ * 点按区 ≥48px（平板也好点）。 */
+.person-picker { display: flex; flex-direction: column; gap: 8px; margin-bottom: 4px; }
+.person-search {
+  width: 100%;
+  min-height: 48px;
+  padding: 10px 14px;
+  border: 0;
+  border-radius: var(--radius-control);
   background: var(--surface-container-high);
   color: var(--on-surface);
-  font-size: 14px;
-  white-space: nowrap;
+  font-size: 15px;
 }
-.person-chip:hover { background: var(--secondary-container); }
-.person-chip.on {
-  background: var(--primary);
-  color: var(--on-primary);
-  border-color: transparent;
-  font-weight: 600;
+.person-search:focus { outline: 2px solid var(--primary); outline-offset: -2px; }
+.person-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 320px;               /* 人再多也不把卡片撑成一条长龙 */
+  overflow-y: auto;
+  border-radius: var(--radius-inner);
+  background: var(--surface-variant);
 }
+.person-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 48px;                /* 触屏够大 */
+  padding: 0 14px;
+  border: 0;                       /* 无描边 */
+  border-radius: 0;
+  background: transparent;
+  color: var(--on-surface);
+  font-size: 15px;
+  text-align: left;
+}
+.person-row + .person-row::before {   /* 分隔线从文字处缩进 */
+  content: "";
+  position: absolute;
+  top: 0; left: 14px; right: 14px;
+  height: 1px;
+  background: var(--divider);
+}
+.person-row:hover { background: var(--surface-container-high); }
+.person-row.on { color: var(--primary); font-weight: 600; }
+.person-row-tail { font-size: 13px; color: var(--text-4); }
+.person-row.on .person-row-tail { color: var(--primary); }
 
 
 /* 一串号码/标签：**在号码之间**折行，不在号码内部断。 */

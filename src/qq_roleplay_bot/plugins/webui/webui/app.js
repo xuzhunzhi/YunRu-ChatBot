@@ -222,7 +222,13 @@ const state = {
   tab: (location.hash.replace("#", "").split("&")
     .find((part) => part && !/^(token|theme)/.test(part))) || "overview",
   token: localStorage.getItem("yunru_panel_token") || "",
-  last: {},
+  //: 人物画像页选的那个人。地址栏里带着 `people=<号>` 就先用它——**可分享、刷新不丢**
+  //: （2026-10-09 用户："主要是，横向的没法选人啊"，选完能看出是谁是这一步的要求之一）。
+  //: 格式与页签同一套：`#记忆页签&people=10001`（`&` 分开的段，`token=`/`theme=` 是保留段）。
+  last: {
+    profileKey: decodeURIComponent(
+      (location.hash.match(/(?:^|[&])people=([^&]*)/) || [])[1] || ""),
+  },
   //: 插件清单（`/api/plugins`）。初值是空数组——卡片据此退回占位口。
   plugins: [],
   pluginsError: "",
@@ -1533,6 +1539,23 @@ async function viewHistory() {
 
 /* ---------- 事件绑定（事件委托，避免每次重绘都重绑） ---------- */
 
+//: 选中一个人：记进 `state.last`、写地址栏（`#<页签>&people=<号>`）、重画。
+//: 写地址栏用 `replaceState`（不往历史里塞一堆条目，返回键仍然退页签），
+//: 环境不支持（`file://` 之类）就只留在内存里——**不许因此把选人弄坏**。
+function rememberPerson(key) {
+  state.last.profileKey = String(key || "");
+  try {
+    history.replaceState(null, "", "#" + state.tab
+      + (state.last.profileKey ? "&people=" + encodeURIComponent(state.last.profileKey) : ""));
+  } catch (error) { /* 只留在内存里 */ }
+  render();
+}
+
+//: 人员列表里"筛出来的那几个人"（**DOM 就是真相**：不再抄一份筛选逻辑）。
+function personRowsInDom() {
+  return [...document.querySelectorAll(".person-row")].map((el) => el.dataset.person);
+}
+
 function bind() {
   $("view").addEventListener("click", async (event) => {
     const target = event.target;
@@ -1737,12 +1760,54 @@ function bind() {
       render();
       return;
     }
-    // 人物画像页的人名条：换一个人看（**重画**，不是只换个高亮——用户 2026-10-06
-    // 要的是"一个卡片里来回切换"，内容必须跟着换）。
-    if (act("person-chip", (el) => {
-      state.last.profileKey = el.dataset.person;
-      render();
-    })) return;
+    // 人物画像页的人员列表：选一个人看（**重画**，不是只换个高亮——用户 2026-10-06
+    // 要的是"一个卡片里来回切换"，内容必须跟着换）。2026-10-09 换成"搜索框 + 列表"，
+    // 选中的那个人同时写进地址栏（可分享、刷新不丢）。
+    if (act("person-row", (el) => rememberPerson(el.dataset.person))) return;
+  });
+  // 搜索框：**输入即筛**。重画之后把光标放回末尾（不重画的话列表不会跟着变）。
+  $("view").addEventListener("input", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement) || target.id !== "person-search") return;
+    state.last.profileQuery = target.value;
+    const caret = target.value.length;
+    render().then(() => {
+      const box = $("person-search");
+      if (box) { box.focus(); box.setSelectionRange(caret, caret); }
+    });
+  });
+  // 键盘：**↑↓ 在筛出来的名单里走、回车选中**（触屏没鼠标，键盘也一样要能用）。
+  $("view").addEventListener("keydown", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement) || target.id !== "person-search") return;
+    const keys = personRowsInDom();
+    if (!keys.length) return;
+    if (event.key === "Enter") {
+      event.preventDefault();
+      rememberPerson(state.last.profileKey || keys[0]);
+      return;
+    }
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    const at = keys.indexOf(String(state.last.profileKey || ""));
+    const step = event.key === "ArrowDown" ? 1 : -1;
+    const next = at < 0
+      ? (step > 0 ? 0 : keys.length - 1)
+      : Math.min(keys.length - 1, Math.max(0, at + step));
+    rememberPerson(keys[next]);
+    // `rememberPerson` 会重画，重画之后把焦点还给搜索框（否则键盘用一半就掉了）。
+    const box = $("person-search");
+    if (box) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); }
+  });
+  // 下面这一个是**原来那个大委托的续段**（人物画像那一行之后的动作）：
+  // 上面那段插进来时把它切成了两半，所以它自己也要有 `target` / `act` 这两样。
+  $("view").addEventListener("click", async (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    const act = (name, handler) => {
+      if (target.classList.contains(name)) { handler(target); return true; }
+      return false;
+    };
     // --- 金句审核页 ---------------------------------------------------------
     // 列表里选一条（键是 `message_id`，与详情用的是同一份数据）；换群 / 翻页同理：
     // 都只是改 `state.last` 再 `render()`，不新开任何读通道。
@@ -2008,6 +2073,12 @@ function personName(row) {
   return String(row.about || "").trim();
 }
 
+//: 列表里跟在称呼后面的**尾部号**：QQ 号太长，露最后四位最好认（用户 2026-10-09 的要求）。
+function personTail(key) {
+  const digits = String(key || "").replace(/\D/g, "");
+  return digits.length > 4 ? digits.slice(-4) : digits;
+}
+
 //: 切换条上那个人的显示名：优先画像那条的 `about`，其次他名下任意一条记录的 `about`，
 //: 都没有就用他自己的键（QQ 号）；"（无归属人）"照原样留着。
 function personLabel(key, data) {
@@ -2135,17 +2206,43 @@ async function viewPersonProfiles() {
 
   const data = { impression, superseded, mentions, names, relation };
   const wanted = String(state.last.profileKey || "");
-  const current = all.includes(wanted) ? wanted : (all[0] || "");
-  // 切换条：**横向可滑**的人名条（MIUI 那种筛选条）。人再多也不换行——换行会把卡片撑很高，
-  // 那正是用户嫌的"翻多久"。选中那枚是主色药丸；`data-person` 就是那个人的键。
-  const chips = all.map((key) => {
+  // **按最近活跃排**（用户 2026-10-09：默认选最近活跃那个）。"活跃"取这三样的最新一个：
+  // 画像那一条的更新时间、他名下任意一条记录的时间、关系两轴的更新时间。
+  const activity = (key) => Math.max(
+    (impression.get(key) || []).reduce(
+      (most, row) => Math.max(most, Number(row.updated_at || 0)), 0),
+    latest(mentions.get(key)),
+    Number((relation[key] || {}).updated_at || 0));
+  const ordered = all.slice().sort(
+    (a, b) => (activity(b) - activity(a)) || String(a).localeCompare(String(b)));
+  const current = ordered.includes(wanted) ? wanted : (ordered[0] || "");
+
+  // **搜索框 + 竖排列表**（2026-10-09 用户："**主要是，横向的没法选人啊**"——
+  // 原来那条 33 人的横向胶囊带在触屏上根本找不到人）。输入即筛：**名字 / 名片 / 号**都能搜
+  // （都是这个人名下的文本，`data.names[key]` 是 `people` 表里那些称呼/名片）。
+  // 选中的人写进地址栏（`rememberPerson`），刷新 / 分享都还在。
+  const query = String(state.last.profileQuery || "").trim().toLowerCase();
+  const haystack = (key) => [personLabel(key, data), key, ...(data.names[key] || [])]
+    .join(" ").toLowerCase();
+  const shown = ordered.filter((key) => !query || haystack(key).includes(query));
+  const rows = shown.map((key) => {
     const label = personLabel(key, data);
-    return `<button class="person-chip${key === current ? " on" : ""}"`
-      + ` data-person="${esc(key)}" title="${esc(label)}">${esc(label)}</button>`;
+    const on = key === current;
+    return `<button type="button" class="person-row${on ? " on" : ""}"`
+      + ` data-person="${esc(key)}" role="option" aria-selected="${on ? "true" : "false"}">`
+      + `<span class="person-row-name">${esc(label)}</span>`
+      + `<span class="person-row-tail mono">…${esc(personTail(key))}</span></button>`;
   }).join("");
-  const switcher = `<div class="person-bar" role="tablist" aria-label="换一个人看">${chips}</div>
-    <p class="hint">共 ${num(all.length)} 个人（有画像的在前）——<b>同一时刻只显示一个人</b>，
-      上面这条<b>横向可以滑</b>；换页签回来还是这个人。</p>`;
+  const switcher = `<div class="person-picker">
+    <input id="person-search" class="person-search" type="search" autocomplete="off"
+      aria-label="搜人" placeholder="搜人：名字 / 名片 / 号"
+      value="${esc(state.last.profileQuery || "")}" />
+    <div class="person-list" role="listbox" aria-label="选一个人看">${
+      rows || '<p class="hint">没有匹配的人——换个词，或者清空搜索框。</p>'}</div>
+    <p class="hint">共 ${num(ordered.length)} 个人${
+      query ? `，筛出 ${num(shown.length)} 个` : ""}——按<b>最近活跃</b>排，
+      <b>↑↓ 能走、回车选中</b>。</p>
+  </div>`;
 
   const head = card("人物画像（记忆这一档）", `
     <p class="hint">这里是<b>一个人一张</b>：她对这个人的整体印象（记忆里 <code>kind=profile</code>

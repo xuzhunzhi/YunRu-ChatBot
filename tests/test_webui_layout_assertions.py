@@ -451,39 +451,42 @@ class PersonProfilePlacementTests(unittest.TestCase):
                       "没有画像的人那一档没有如实写「还没成形像」")
 
     def test_the_switcher_lists_exactly_the_people_the_api_gives(self) -> None:
-        """切换条上的人 = **有画像的 ∪ 有记录但还没成形像的**（一个都不许漏）。
+        """人员列表里的人 = **有画像的 ∪ 有记录但还没成形像的**（一个都不许漏）。
 
         用户这一轮明确要求"名单里要有'有记录但还没成形像'的人"——所以判据是那条并集，
-        以及每枚按钮都带着那个人的键（`data-person`）；选中态只有一处（模板里的三元）。
+        以及**每一行都带着那个人的键**（`data-person`）；选中态只有一处（模板里的三元）。
+        2026-10-09：控件从"横向胶囊"换成"搜索框 + 竖排列表"（用户："**主要是，横向的
+        没法选人啊**"），判据跟着换成 `person-row`——**名单口径一个字没改**。
         """
 
         body = _uncomment(_function_body(self.js, "viewPersonProfiles", kind="async"))
         self.assertRegex(body, r"keys\.concat\(withoutProfile\)",
-                         "切换条的名单不是「有画像 ∪ 有记录没画像」")
+                         "名单不是「有画像 ∪ 有记录没画像」")
         self.assertIn("mentions.keys()", body,
                       "没画像但有记录的人没有进名单（用户要求他们也能选到）")
-        self.assertRegex(body, r"all\.map\(", "切换条不是按那份完整名单铺的")
+        self.assertRegex(body, r"ordered\.filter\(", "列表不是按那份完整名单铺的")
         self.assertIn('data-person="${esc(key)}"', body,
-                      "切换条的人名按钮没有带那个人的键")
-        self.assertIn('class="person-chip', body, "切换条不是 `person-chip` 那套控件")
+                      "人员行没有带那个人的键")
+        self.assertIn('class="person-row', body, "人员列表不是 `person-row` 那套控件")
         self.assertEqual(
             len(re.findall(r'\? " on" : ""', body)), 1,
-            "选中态不止一处（或者没了）——同一时刻只该有一枚被选中")
+            "选中态不止一处（或者没了）——同一时刻只该有一行被选中")
 
     def test_switching_a_person_re_renders_the_block(self) -> None:
-        """换人必须**重画**（内容跟着换），不是只换个高亮。"""
+        """选人必须**重画**（内容跟着换），不是只换个高亮。"""
 
         body = _uncomment(_function_body(self.js, "viewPersonProfiles", kind="async"))
         self.assertIn('String(state.last.profileKey || "")', body,
                       "当前是谁没有从 `state.last.profileKey` 取")
         bound = _uncomment(_function_body(self.js, "bind"))
-        handler = re.search(r'act\("person-chip", \(el\) => \{(.*?)\}\)', bound, re.S)
-        self.assertIsNotNone(handler, "切换条的人名按钮没有接上（`bind()` 里找不到）")
-        inner = handler.group(1)
-        self.assertIn("state.last.profileKey = el.dataset.person", inner,
-                      "点了人名没有记下「选的是谁」")
-        self.assertIn("render()", inner,
-                      "换了人只改了高亮、没有重画内容")
+        handler = re.search(r'act\("person-row", \(el\) => (.*?)\)\) return;', bound, re.S)
+        self.assertIsNotNone(handler, "人员行没有接上（`bind()` 里找不到）")
+        self.assertIn("rememberPerson", handler.group(1),
+                      "点了人没有走「记下来 + 重画」那一步")
+        remember = _function_body(self.js, "rememberPerson")
+        self.assertIn("state.last.profileKey = String(key", remember,
+                      "记下来的不是「选的是谁」")
+        self.assertIn("render()", remember, "换了人只改了高亮、没有重画内容")
 
     def test_the_profile_page_takes_its_data_from_the_existing_memory_seam(self) -> None:
         """取数只走面板**既有**的记忆读接口 `/api/memory/*`，不新开通道、不读库文件。
@@ -1038,3 +1041,74 @@ class QuoteEvidencePageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PersonPickerTests(unittest.TestCase):
+    """判据（2'）：人员选择是**搜索框 + 竖排列表**。
+
+    用户 2026-10-09 指着截图说：*"**主要是，横向的没法选人啊**"*——所以那条 33 人的
+    横向胶囊带**不是"不好看"，是"选不了人"**（触屏上找不到人、滚动也不明显）。
+    这一组钉住换掉之后那几件必须成立的事：
+
+    1. 横向胶囊带**撤了**（`person-chip` / `person-bar` 一个字都不许留）；
+    2. **输入即筛**：名字 / 名片 / 号都能搜（筛的文本就是这三样拼出来的）；
+    3. 按**最近活跃**排，**默认选最近活跃那个**；
+    4. 列表是**竖排**的，每行"**称呼 + 尾部号**"，点按区够大（≥48px）；
+    5. **键盘能走**（↑↓ + 回车），而且走的是"筛出来的那几个人"；
+    6. 选中的那个人**写进地址栏**（`#<页签>&people=<号>`），载入时从那里读回来
+       —— 可分享、刷新不丢。
+    """
+
+    def setUp(self) -> None:
+        self.js = _asset("app.js")
+        self.css = _asset("app.css")
+
+    def test_the_horizontal_chip_bar_is_gone(self) -> None:
+        self.assertNotIn("person-chip", self.js, "横向胶囊带还在（它正是“选不了人”那条）")
+        self.assertNotIn("person-bar", self.css, "旧胶囊带的样式还留着")
+
+    def test_the_search_box_filters_as_you_type(self) -> None:
+        body = _function_body(self.js, "viewPersonProfiles", kind="async")
+        self.assertIn('id="person-search"', body, "没有搜索框")
+        self.assertIn("profileQuery", body, "搜索词没进 state（重画就丢了）")
+        self.assertRegex(body, r"haystack|includes\(query\)", "没有“输入即筛”这一步")
+        # 名字 / 名片 / 号三样都要进筛的文本。
+        self.assertRegex(body, r"personLabel\(key, data\)", "筛的文本里没有“称呼”")
+        self.assertRegex(body, r"data\.names\[key\]", "筛的文本里没有“名片”")
+        self.assertRegex(body, r"\.\.\.\[\]|\[personLabel\(key, data\), key",
+                         "筛的文本里没有“号”")
+        bind = _uncomment(_function_body(self.js, "bind"))
+        self.assertIn('addEventListener("input"', bind, "输入事件没接（打字列表不会变）")
+
+    def test_the_default_pick_is_the_most_recently_active_person(self) -> None:
+        body = _function_body(self.js, "viewPersonProfiles", kind="async")
+        self.assertRegex(body, r"const activity = \(key\) => Math\.max",
+                         "没有“最近活跃”这个读数")
+        self.assertRegex(
+            body, r"const current = ordered\.includes\(wanted\) \? wanted : \(ordered\[0\] \|\| \"\"\)",
+            "默认选中的不是“最近活跃”那一个")
+
+    def test_the_list_is_vertical_with_name_and_tail_and_big_targets(self) -> None:
+        body = _function_body(self.js, "viewPersonProfiles", kind="async")
+        self.assertIn("person-row", body, "没有竖排行")
+        self.assertIn("personTail", body, "行里没有“尾部号”")
+        self.assertIn('role="listbox"', body, "列表没有 listbox 语义")
+        self.assertRegex(self.css, r"\.person-list\s*\{[^}]*flex-direction: column", "列表不是竖排")
+        self.assertRegex(self.css, r"\.person-row\s*\{[^}]*min-height: 48px", "点按区不够大")
+        self.assertRegex(self.css, r"\.person-row \+ \.person-row::before\s*\{[^}]*left: 14px",
+                         "分隔线没有从文字处缩进")
+
+    def test_keyboard_walks_the_filtered_list_and_enter_picks(self) -> None:
+        bind = _uncomment(_function_body(self.js, "bind"))
+        for key in ('"ArrowDown"', '"ArrowUp"', '"Enter"'):
+            self.assertIn(key, bind, f"键盘少了 {key}")
+        self.assertIn("personRowsInDom", bind, "键盘走的不是“筛出来的那几个人”")
+
+    def test_the_picked_person_lands_in_the_url_and_survives_a_reload(self) -> None:
+        self.assertRegex(self.js, r"history\.replaceState\(null, \"\", \"#\" \+ state\.tab",
+                         "选完没写地址栏")
+        self.assertIn("people=", self.js, "地址栏里没有那个人的号")
+        self.assertRegex(self.js, r"profileKey: decodeURIComponent",
+                         "载入时没有从地址栏读回来")
+        self.assertIn("render()", _function_body(self.js, "rememberPerson"),
+                      "选完没有重画（内容不跟着换）")
