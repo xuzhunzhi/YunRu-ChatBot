@@ -357,7 +357,12 @@ def test_ask_budget_limits_per_topic_and_per_window() -> None:
 #: 生产上真人格那份是 **7061**（改之前是 7378 = 7061 + 317 字的规矩）。
 #: 这是个"逐字"级别的钉子：**谁再往常驻 system 里加/减东西，这里都会红**。
 #: 合理地改了人格或回话格式时，请一并更新这个数字（并说明为什么）。
-SYSTEM_PROMPT_CHARS = 6187
+#:
+#: 2026-10-09 更新 **6187 → 6788（+601）**：加的是「默认温着说 + 先看这场子能不能开损」
+#: 那一条（`stage3_runtime.TONE_READS_THE_ROOM_RULE`，用户拍板的 A+C）。它有**自己的判据**
+#: （`tests/test_tone_reads_the_room.py`：规矩在不在、默认档温不温、现场那几条嘲讽只能落在
+#: 反例一侧），所以这个数字照旧按"逐字长度"更新，没有放松——多一个字、少一个字仍然红。
+SYSTEM_PROMPT_CHARS = 6788
 
 
 def test_the_resident_system_prompt_carries_no_unsure_rule() -> None:
