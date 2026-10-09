@@ -1571,6 +1571,9 @@ function bind() {
       if (target.classList.contains(name)) { handler(target); return true; }
       return false;
     };
+    // ⑤ 长内容折起来那一下：点一下看全、再点一下收回（只改这一个 span 的 class）。
+    const clamped = target.closest(".clamp");
+    if (clamped) { clamped.classList.toggle("open"); return; }
     if (act("group-off", async (el) => {
       const done = await write("/api/groups", { group_id: el.dataset.id, enabled: false },
         "关闭群 " + el.dataset.id + " 的对话？");
@@ -1774,6 +1777,11 @@ function bind() {
     // 人物画像页的分段：整体印象 / 零散记录 / 关系——**一次只显示一块**。
     // 只改这一块里的 `hidden`（不重画、不取数），并把"看的哪一节"记进 `state.last`
     // （这样换个人回来还停在同一节上）。
+    // ⑤ 点类别：只换这一类，**原地重画那一块**（不取数）；重画装不上才退回整页。
+    if (act("kind-chip", (el) => {
+      state.last.profileKind = el.dataset.kind || "";
+      if (!(profilePaint && profilePaint(state.last.profileKey))) render();
+    })) return;
     if (act("person-tab", (el) => {
       state.last.profilePane = el.dataset.pane;
       const block = el.closest(".person-block");
@@ -2177,23 +2185,43 @@ function personBlock(key, data) {
         older ? `<p class="hint">另有 ${num(older)} 条旧版（被顶替）；按状态筛选能在「记忆」页看到。</p>` : ""}`
     : `<p class="hint">还没成形像——她在真的看出"这个人的整体样子"时才会写，不是每人一条。</p>`;
 
+  // ⑤ **类别筛选**：这一节里出现过的类别各一枚（带条数），"全部"一枚；
+  // 挑了哪一类记在 `state.last.profileKind` 里（换人回来还停在同一类）。
+  const ownKinds = [...new Set(own.map((row) => String(row.kind || "").trim())
+    .filter(Boolean))].sort();
+  const kindPick = String(state.last.profileKind || "");
+  const shownOwn = kindPick
+    ? own.filter((row) => String(row.kind || "").trim() === kindPick)
+    : own;
+  const countOf = (kind) => own.filter((row) => String(row.kind || "").trim() === kind).length;
+  const kindChips = ownKinds.length > 1 ? `<div class="kind-filter" role="group"
+      aria-label="按类别看">${[["", `全部 ${num(own.length)}`]]
+      .concat(ownKinds.map((kind) => [kind, `${kind} ${num(countOf(kind))}`]))
+      .map(([kind, label]) => `<button type="button" class="kind-chip${
+        kind === kindPick ? " on" : ""}" data-kind="${esc(kind)}">${esc(label)}</button>`)
+      .join("")}</div>` : "";
+  // "共 N 条"——这里只数**手上这些**；一页每类最多取 200 条，取满了就如实说一句。
+  const countLine = `<p class="hint">共 ${num(shownOwn.length)} 条${
+    own.length >= PROFILE_LIMIT ? `（这一页每类最多取 ${PROFILE_LIMIT} 条）` : ""}</p>`;
   // 「类别」这一列**不许 nowrap**：类别名有长有短（`alias` / `preference` / `boundary`），
   // 在中等档（内容区只剩 ~575px）里最短的那一列装不下最长的类别名，而 `nowrap`
   // 会让它**溢到旁边「键」那一列下面**、两列的字叠在一起（2026-10-06 截图核对抓到的）。
   // 让它自己折行就没有这个问题——`table-layout: fixed` 下折行不会把列撑宽。
+  // ⑤ 「内容」用 `clamp` 折起来：**默认两行**，点一下看全（`.clamp.open`）。
   const ownTable = table([
     { label: "类别", key: "kind", mono: true },
     { label: "键", key: "normalized_key", mono: true, wide: true },
-    { label: "内容", get: (r) => r.content },
+    { label: "内容", html: true, get: (r) => `<span class="clamp">${esc(r.content)}</span>` },
     { label: "更新", get: (r) => ts(r.updated_at), nowrap: true },
-  ], own, { cols: "cols-profile", widths: ["20%", "20%", "44%", "16%"] });
+  ], shownOwn, { cols: "cols-profile", widths: ["20%", "20%", "44%", "16%"] });
 
   // ④ 三节（**一次只显示一节**）：哪一节在看由 `state.last.profilePane` 记着，
   //    换人重画之后还停在同一节上。
   const panes = [
     ["impression", "整体印象", "", impression],
     ["records", "零散记录", `(${num(own.length)})`,
-      own.length ? ownTable : '<p class="hint">这个人名下还没有别的记录。</p>'],
+      own.length ? `${kindChips}${countLine}${ownTable}`
+        : '<p class="hint">这个人名下还没有别的记录。</p>'],
   ];
   // ③ **没有关系读数就整块不出现**（不留"还没有…"那种占位句）。
   if (relation_) {

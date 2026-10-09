@@ -1225,3 +1225,59 @@ class PersonPageShapeTests(unittest.TestCase):
         self.assertIsNotNone(tabs, "分段那一段找不到")
         self.assertIn("pane.hidden =", tabs.group(1), "点分段没有换显示的那一节")
         self.assertNotIn("render(", tabs.group(1), "点分段去整页重画了")
+
+
+class PersonRecordsTests(unittest.TestCase):
+    """判据（3）：零散记录表那两件事（用户 2026-10-09 指着截图点的 ⑤⑥）。
+
+    ⑤ 记录表：**类别筛选**（这一节里出现过的类别各一枚、带条数）+
+    **长内容默认两行、点开看全** + 显示「**共 N 条**」（取满 200 就如实说一句）；
+    ⑥ 观感照 HyperOS：点按区够大、行高松一点（无描边大圆角那几条在整体样式里）。
+    """
+
+    def setUp(self) -> None:
+        self.js = _asset("app.js")
+        self.css = _asset("app.css")
+
+    def test_the_records_can_be_filtered_by_kind(self) -> None:
+        block = _uncomment(_function_body(self.js, "personBlock"))
+        self.assertIn("ownKinds", block, "没有按类别归拢过")
+        self.assertIn("kind-chip", block, "没有类别筛选那几枚")
+        self.assertIn("state.last.profileKind", block, "挑了哪一类没有记下来")
+        self.assertIn("shownOwn", block, "表不是按挑中的那一类铺的")
+        self.assertRegex(block, r"(?s)table\(\[.*?\], shownOwn,",
+                         "表铺的还是全部记录")
+        # 点类别：**原地重画**，不取数。
+        handlers = _uncomment(_function_body(self.js, "bind"))
+        self.assertIn('act("kind-chip"', handlers, "类别筛选没有接线")
+        picked = re.search(r'act\("kind-chip", \(el\) => \{(.*?)\}\)\) return;', handlers, re.S)
+        self.assertIsNotNone(picked, "类别那一段找不到")
+        self.assertIn("state.last.profileKind = el.dataset.kind", picked.group(1),
+                      "点类别没有换挑选项")
+        self.assertIn("profilePaint", picked.group(1), "点类别没有原地重画")
+        self.assertNotIn("api(", picked.group(1), "点类别去取数了")
+
+    def test_long_content_is_clamped_until_you_open_it(self) -> None:
+        block = _uncomment(_function_body(self.js, "personBlock"))
+        self.assertIn('class="clamp"', block, "内容没有折起来的壳")
+        self.assertIn("html: true", block, "那个壳会被转义掉（`table()` 的 `html` 开关）")
+        self.assertRegex(self.css, r"\.clamp\s*\{[^}]*-webkit-line-clamp: 2", "默认不是两行")
+        self.assertRegex(self.css, r"\.clamp\.open\s*\{[^}]*line-clamp: unset", "点开没有看全")
+        handlers = _uncomment(_function_body(self.js, "bind"))
+        self.assertIn('target.closest(".clamp")', handlers, "点开那一下没有接线")
+        self.assertIn('classList.toggle("open")', handlers, "点开没有切换 class")
+
+    def test_the_count_line_tells_how_many_rows_are_here(self) -> None:
+        block = _uncomment(_function_body(self.js, "personBlock"))
+        self.assertRegex(block, r"共 \$\{num\(shownOwn\.length\)\} 条", "没有「共 N 条」")
+        self.assertIn("PROFILE_LIMIT", block, "取满一页时没有如实说一句")
+        self.assertIn("kindChips", block, "记录那一节没有放筛选")
+        self.assertIn("countLine", block, "记录那一节没有放计数那一行")
+
+    def test_the_touch_targets_and_rows_are_comfortable(self) -> None:
+        self.assertRegex(self.css, r"\.kind-chip\s*\{[^}]*min-height: 40px",
+                         "类别那几枚点按区太小")
+        self.assertRegex(self.css, r"\.cols-profile th, \.cols-profile td \{[^}]*line-height: 1\.55",
+                         "记录表行高还是挤的")
+        self.assertRegex(self.css, r"\.clamp\s*\{[^}]*cursor: pointer",
+                         "折起来那一段没有「可以点」的样子")

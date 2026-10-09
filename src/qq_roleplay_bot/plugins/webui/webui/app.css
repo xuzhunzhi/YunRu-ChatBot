@@ -1072,6 +1072,39 @@ td .hint { margin: 2px 0 0; }
  * ⚠️ 面板全局把滚动条藏了（用户 2026-10-01 要求），横滑条上因此看不到滑块——
  * 所以卡里那句提示写明了"上面这条横向可以滑"，别只靠滚动条暗示。
  */
+/* ⑤ 长内容：默认两行，点一下看全（再点收回）。 */
+.clamp {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  cursor: pointer;
+}
+.clamp.open { display: block; -webkit-line-clamp: unset; overflow: visible; }
+
+.kind-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 2px 0 10px;
+}
+.kind-chip {
+  min-height: 40px;               /* 触屏够点 */
+  min-width: 0;                   /* 压掉全局 button 的 min-width */
+  padding: 0 14px;
+  border: 0;                      /* 无描边 */
+  border-radius: var(--radius-pill);
+  background: var(--surface-container-high);
+  color: var(--text-3);
+  font-size: 13.5px;
+}
+.kind-chip.on { background: var(--primary); color: var(--on-primary); font-weight: 600; }
+
+/* ⑥ 观感收尾：记录表行高松一点、点按区够大（平板）。 */
+.cols-profile th, .cols-profile td { padding: 12px 10px; line-height: 1.55; }
+.cols-profile td:first-child, .cols-profile th:first-child { padding-left: 2px; }
+.cols-profile td:last-child, .cols-profile th:last-child { padding-right: 2px; text-align: right; }
+
 /* ---------- 人物画像页：头部三样 / 分段 / 说明那个「?」 ----------
  * 用户 2026-10-09 的口径：说明收进「?」（每节最多一行）；头部三样 = 称呼 + QQ 号 + 群；
  * 三节**一次只显示一块**；观感照 HyperOS（白卡无描边、大圆角、行高松、点按区够大）。 */
