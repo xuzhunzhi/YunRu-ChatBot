@@ -69,12 +69,14 @@ if TYPE_CHECKING:  # 只为类型标注：这一层不需要认识存储或模�
 FIRST_PERSON_MARKERS = ("我", "咱", "俺", "自己", "本人")
 #: 正文与依据的词元重合到这个比例，就算"照抄他那句话"（豁免第一人称这一条）。
 QUOTE_RATIO = 0.6
-#: "一个人一条"的事实类。`group` 是群公共事实，不属于任何人，不走归属闸。
-PERSONAL_KINDS = frozenset({"name", "preference", "boundary", "status", "profile"})
 #: **自述那道闸只对处境类**（`status`）生效。理由：处境只凭一句话就写下来、
 #: 下一句就会被讲出来（她会在下一轮问"电赛准备得怎么样"），错记的代价最直接；
 #: 而称呼/偏好/边界另有既有的闸门（近重复、系统自身过滤、称呼的证据要求）。
 #: 真库里用户报上来的三条全是 `status`。
+#: （归属/无证据那两道闸**不分 kind**：2026-10-09 审查实测 `topic_summary`@user
+#: 不在旧 `PERSONAL_KINDS` 名单里、整体绕开了归属闸——"他在准备电赛"引用别人的
+#: 原话"带我打电赛"就这么放行了。只要这条记录是**关于一个人**的（user scope），
+#: 依据就得是他本人的话，与 kind 无关；`group` 公共事实不属于任何人，仍不走。）
 SELF_STATEMENT_KINDS = frozenset({"status"})
 #: 具体记号 = **含数字的记号**（型号 / 编号 / 版本 / 容量：`5050`、`12450H`、`i5-12490F`、
 #: `17T`、`1.9%`）。只认含数字的：纯拉丁词（`Minecraft`/`AMD`/`Overcooked`/`Windows`）
@@ -82,11 +84,12 @@ SELF_STATEMENT_KINDS = frozenset({"status"})
 #: "《胡闹厨房》"写 `Overcooked`），把它们也算成"凭空补全"会误杀约 15% 的活跃记录
 #: （165 条里 25 条，实测）。
 SPECIFIC_PATTERN = re.compile(r"[A-Za-z0-9_.+-]*\d[A-Za-z0-9_.+-]*")
-#: 日期与年份不算"具体记号"：正文里的"2026-10 上旬""前后"是**什么时候说的**的标注，
-#: 本来就该由写的人自己算（维护 prompt 允许这种标注）。把它当成"凭空补全"会误杀——
-#: 拿真库 + 真日志的 165 条活跃记录回放，去掉日期豁免后多拦 26 条（16%），
-#: 被拦的理由全是"2026-10 不在原话里"。
-DATE_PATTERN = re.compile(r"\d{4}\s*[-/年]\s*\d{1,2}(\s*[-/月]\s*\d{1,2}\s*日?)?|\d{4}\s*年")
+# 日期与年份**不再整段豁免**（2026-10-09 独立审查发现 3）：原先先把 `2026-10` 这类
+# 日期从正文里删掉再查，结果"上旬/前后"的许可被放大成整段日期免检——
+# "他在 2026-11 参加电赛"就这么放行了。现在日期也是含数字的具体记号，
+# 与 `5050` 同一条规则：**在这一批材料里出现过才算数**，凭空补时间照样被拦。
+# （"上旬/前后"这类相对词不含数字，本来就不在 `SPECIFIC_PATTERN` 的命中范围里，
+# 维护 prompt 允许的那种时间标注不受影响。）
 
 # 单字与高频虚词命中没有区分度。**与检索共用同一份**（`memory_store` 从这里 import，
 # 别抄第二份：两份实现一定会漂移）。
@@ -104,6 +107,7 @@ REJECTION_LABELS = {
     "rejected_no_evidence": "没有依据就改正文",
     "rejected_not_self_statement": "不是他本人在自述",
     "rejected_ungrounded_specifics": "具体记号不在原话里",
+    "rejected_ungrounded_promotion": "无依据还升长期档/改类别",
 }
 
 
@@ -145,18 +149,24 @@ def coverage(content: str, ground: str) -> float:
 
 
 def invented_specifics(content: str, ground: str) -> tuple[str, ...]:
-    """正文里出现、而这一批材料里**没出现过**的数字/拉丁词（日期与年份不算）。"""
+    """正文里出现、而这一批材料里**没出现过**的具体记号（含数字的记号与日期）。
+
+    2026-10-09 修：原先这里先把 `DATE_PATTERN` 命中的日期从正文里删掉再查，
+    自造的日期（"他在 2026-11 参加电赛"）因此免检。现在**先查全文**，
+    日期与型号同一条规则——都必须在 `ground` 里出现过；`ground` 里真有那个
+    日期的合法标注照旧放行。
+    """
 
     haystack = (ground or "").casefold()
-    text = DATE_PATTERN.sub(" ", content or "")
     return tuple(dict.fromkeys(
-        token for token in SPECIFIC_PATTERN.findall(text)
+        token for token in SPECIFIC_PATTERN.findall(content or "")
         if token.casefold() not in haystack
     ))
 
 
 def grounding_rejection(op: "MemoryOperation", *, cited: tuple["InboxEvent", ...], ground: str,
                         target_contents: tuple[str, ...] = (),
+                        target_kinds: tuple[str, ...] = (),
                         foreign_speakers: tuple[str, ...] = ()) -> str:
     """这条事实站不站得住。返回拒绝码，或空串表示放行。
 
@@ -164,6 +174,7 @@ def grounding_rejection(op: "MemoryOperation", *, cited: tuple["InboxEvent", ...
     - `ground`：这一批**看到过**的材料全文（引用到的原话 + 目标记录正文 +
       本批其它事件），只用来做"数字/型号不许凭空补全"。
     - `target_contents`：`op.targets` 解出来的目标记录正文，用来判断"正文有没有被改"。
+    - `target_kinds`：目标记录的 kind，用来判断"无证据的复查有没有顺手改类别"。
     - `foreign_speakers`：被引用的发言里**不属于归属人**的那些号。归属人自己的其他号
       （`person_aliases`）由调用方先按规范号算好，所以到了这里只剩"真是别人"的号。
     """
@@ -173,9 +184,12 @@ def grounding_rejection(op: "MemoryOperation", *, cited: tuple["InboxEvent", ...
     if not content.strip():
         return "rejected_empty_content"
 
-    personal = op.kind in PERSONAL_KINDS and op.scope_type != "group"
-    if personal:
-        # 1. 归属：依据必须是**他本人**说的；引用别人的话当自己的依据 → 不记。
+    # 1. 归属：依据必须是**他本人**说的；引用别人的话当自己的依据 → 不记。
+    #    2026-10-09 修：这道闸原先只对 `PERSONAL_KINDS` 生效，user scope 的
+    #    `topic_summary` 整体绕了过去（审查实测"他在准备电赛"引用别人的原话放行）。
+    #    现在它对**所有 user scope** 的记录生效（归属问的是"这条关于谁的事实、
+    #    依据是谁说的话"，与 kind 无关）；`group` 公共事实不属于任何人，仍不走。
+    if op.scope_type != "group":
         if foreign_speakers:
             return "rejected_other_speaker"
         spoken = tuple(e for e in cited if e.speaker == "user")
@@ -183,17 +197,25 @@ def grounding_rejection(op: "MemoryOperation", *, cited: tuple["InboxEvent", ...
             # 没有本人发言：只放行"正文一个字没改"的复查（周期复查常常只确认一下），
             # 其余（拿旧记录当依据改出新正文）一律不记——真库那条 `participating_in_diansai`
             # 的 rev3 就是 evidence=[] 改写出来的（`memory.jsonl` line=1489）。
-            if (op.op == "UPDATE" and len(target_contents) == 1
-                    and content.strip() == target_contents[0].strip()):
-                return ""
-            return "rejected_no_evidence"
+            recheck = (op.op == "UPDATE" and len(target_contents) == 1
+                       and content.strip() == target_contents[0].strip())
+            if not recheck:
+                return "rejected_no_evidence"
+            # 2026-10-09 修：复查豁免**只豁免"无本人发言"这一道**——它原先是个
+            # 提前 `return ""`，连后面的数字闸都跳过了，而且无证据的记录可以
+            # 借这条路翻成 durable / 换 kind 推进长期。升档必须过全部闸：
+            # 无证据时既不许标 durable，也不许换类别。
+            if getattr(op, "durable", False):
+                return "rejected_ungrounded_promotion"
+            if target_kinds and op.kind not in target_kinds:
+                return "rejected_ungrounded_promotion"
         # 2. 自述：处境类必须是他本人在自述（第一人称），或者正文就是照抄他那句话。
-        if op.kind in SELF_STATEMENT_KINDS and not (
+        elif op.kind in SELF_STATEMENT_KINDS and not (
                 any(has_first_person(e.text) for e in spoken)
                 or coverage(content, " ".join(e.text for e in spoken)) >= QUOTE_RATIO):
             return "rejected_not_self_statement"
 
-    # 3. 数字与型号不许凭空补全。
+    # 3. 数字与型号（含日期）不许凭空补全——复查豁免的路也要走到这里。
     if invented_specifics(content, ground):
         return "rejected_ungrounded_specifics"
     return ""

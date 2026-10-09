@@ -773,7 +773,8 @@ class MemoryStore:
                         ground=" ".join([e.text for e in cited]
                                         + [e.text for e in batch.events]
                                         + list(target_contents)),
-                        target_contents=target_contents)
+                        target_contents=target_contents,
+                        target_kinds=tuple(row["kind"] or "" for row in targets))
                     if rejection:
                         self.rejected[rejection] = self.rejected.get(rejection, 0) + 1
                         db.execute("INSERT INTO audit VALUES (?,?,?,?,?)",

@@ -319,6 +319,112 @@ class AttributionGateTests(_Base):
         self.assertEqual([op.op for op in applied], ["UPDATE"])
         self.assertEqual(len(self.rows("contest")), 1)
 
+    def test_a_topic_summary_at_user_scope_still_passes_attribution(self):
+        """user-scope 的 `topic_summary` 引用**本人**的话 → 照旧放行（不许误伤）。"""
+
+        applied = self.write("我说要参加的是雏雁和大创", "ADD", kind="topic_summary",
+                             key="contest_plan", scope="user_group",
+                             content="他打算参加雏雁和大创", ttl=30)
+        self.assertEqual([op.op for op in applied], ["ADD"])
+        self.assertEqual(self.counts_for("contest_plan")["content"], "他打算参加雏雁和大创")
+
+    def test_a_topic_summary_citing_someone_else_is_refused(self):
+        """user-scope 的 `topic_summary` 引用**别人**的原话 → 不落库。
+
+        独立审查（2026-10-09）发现 2 的实测绕过形状：`topic_summary` 不在旧的
+        `PERSONAL_KINDS` 里，归属/自述两道闸对它全部不生效——"他在准备电赛"
+        （引用别人 `242003347` 的"带我打电赛"）就这么放行了，正是用户报过的
+        `participating_in_diansai` 那类错误换个 kind 原样再现。
+        突变：把归属闸收回"只对个人 kind 生效"的分支 → 这条必须红。
+        """
+
+        batch = self.other_user_batch("带我打电赛", owner_text="我在看比赛")
+        applied = self.commit(batch, "ADD", evidence=["e2"], kind="topic_summary",
+                              scope="user_group", key="participating_in_diansai",
+                              content="他在准备电赛，被别人催", ttl=30)
+        self.assertEqual(applied, [])
+        self.assertEqual(self.rows("participating_in_diansai"), [],
+                         "引用别人的话当依据 → 换成 topic_summary 也不许落库")
+        self.assertEqual(self.store.rejection_counts(), {"rejected_other_speaker": 1})
+
+    def test_an_evidence_free_recheck_cannot_flag_durable_or_change_kind(self):
+        """无证据的复查豁免**不许顺手升档**：标 durable / 换 kind 都要被拒。
+
+        独立审查（2026-10-09）发现 1 的另一半：`return ""` 早退让无任何本人发言的
+        UPDATE 把脏记录翻成 durable 推进长期。升档必须过全部闸。
+        """
+
+        self.write("我在准备雏雁", "ADD", key="chuyan", content="在准备雏雁", ttl=7)
+        self.now += 1
+        event = self.event("嗯")
+        self.store.append(event)
+        batch = self.store.claim({GROUP}, lease_seconds=60)
+        # 正文一个字没改，但顺手标 durable → 拒（新码），库里的 durable 不许被翻。
+        applied = self.commit(batch, "UPDATE", evidence=[], key="chuyan",
+                              content="在准备雏雁", ttl=None, durable=True,
+                              targets=[self.rows("chuyan")[0]])
+        self.assertEqual(applied, [])
+        self.assertEqual(self.store.rejection_counts(), {"rejected_ungrounded_promotion": 1})
+        self.assertEqual(self.counts_for("chuyan")["durable"], 0, "无证据不许翻 durable")
+        # 换 kind 同理 → 拒。
+        self.now += 1
+        event2 = self.event("嗯")
+        self.store.append(event2)
+        batch2 = self.store.claim({GROUP}, lease_seconds=60)
+        applied = self.commit(batch2, "UPDATE", evidence=[], kind="preference", key="chuyan",
+                              content="在准备雏雁", ttl=None, targets=[self.rows("chuyan")[0]])
+        self.assertEqual(applied, [])
+        self.assertEqual(self.store.rejection_counts()["rejected_ungrounded_promotion"], 2)
+
+    def test_the_recheck_exemption_does_not_skip_the_specifics_gate(self):
+        """复查豁免只豁免"无本人发言"那一道，**数字闸照走**（审查发现 1 的主缝）。
+
+        审查实测形状：对已有记录发一条 `evidence_event_ids=[]` 的 UPDATE，
+        早退 `return ""` 连 `invented_specifics` 都没跑。这里直接打函数——
+        存储路径上 ground 里总含目标正文，正文没改时数字必然"出现过"，
+        所以这道缝只能在函数级看见、也就在函数级钉死。
+        突变：把豁免改回提前 `return ""` → 这条必须红。
+        """
+
+        event = self.event("我在看比赛")
+        op = MemoryOperation("UPDATE", "user_global", "status", "dirty", "在用 4060 打游戏",
+                             0.8, 7, [])
+        self.assertEqual(
+            memory_grounding.grounding_rejection(
+                op, cited=(), ground=event.text,
+                target_contents=("在用 4060 打游戏",), target_kinds=("status",)),
+            "rejected_ungrounded_specifics",
+            "正文没改的复查豁免不许跳过数字闸")
+        # 豁免仍然有效的那一半：正文没改、也没有数字要查 → 照旧放行。
+        clean = replace(op, content="在看比赛")
+        self.assertEqual(
+            memory_grounding.grounding_rejection(
+                clean, cited=(), ground=event.text,
+                target_contents=("在看比赛",), target_kinds=("status",)),
+            "")
+
+    def test_an_invented_date_is_refused_like_any_other_specific(self):
+        """自造日期不再整段免检："他在 2026-11 参加电赛" → 不落库。
+
+        独立审查（2026-10-09）发现 3：原先 `DATE_PATTERN` 先把日期删掉再查，
+        "上旬/前后"的许可被放大成整段日期免检。现在日期与型号同一条规则。
+        突变：恢复"先删日期再查" → 这条必须红。
+        """
+
+        applied = self.write("我要参加比赛", "ADD", key="diansai_2026",
+                             content="在 2026-11 参加电赛", ttl=30)
+        self.assertEqual(applied, [])
+        self.assertEqual(self.rows("diansai_2026"), [])
+        self.assertEqual(self.store.rejection_counts(), {"rejected_ungrounded_specifics": 1})
+
+    def test_a_date_that_was_actually_said_still_passes(self):
+        """原话里真有的日期照旧放行（不许误伤合法的时间标注）。"""
+
+        applied = self.write("我 2026-11 参加电赛", "ADD", key="diansai_date",
+                             content="2026-11 参加电赛", ttl=30)
+        self.assertEqual([op.op for op in applied], ["ADD"])
+        self.assertEqual(self.counts_for("diansai_date")["content"], "2026-11 参加电赛")
+
     def test_a_conclusion_with_numbers_that_were_never_said_is_refused(self):
         """数字与型号必须照原话（"5050/4060/7700"不在被引用的那句话里）→ 不落库。"""
 
