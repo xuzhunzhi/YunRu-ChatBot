@@ -39,7 +39,6 @@ uncertain / rejected / error`。**计数与重试归本插件**（核心只如�
 | --- | --- | --- |
 | 核心认到提醒请求 | `__call__(request)`（同步） | 收下这条提醒；**第一次**还要记下"到哪个会话里问他" |
 | 本插件的后台节拍 | `flush(now)` | ① 把还没问出去的问话发出去；② 把到点的提醒交出去 |
-| 他答了（`/提醒 换 2` 那类） | `note_reply(...)` | 记下他选的方式（答过就不再问） |
 
 ## 邮箱那一路走邮件插件的能力（不走核心）
 
@@ -65,8 +64,8 @@ from datetime import datetime
 
 from ... import dev_config
 from ...remind import RemindDelivery
-from .store import (CHANNEL_GROUP, CHANNEL_MAIL, CHANNEL_PRIVATE, CHANNEL_UNSET,
-                    MAX_TRIES, Reminder, RemindStore)
+from .store import (CHANNEL_GROUP, CHANNEL_MAIL, CHANNEL_PRIVATE,
+                    Reminder, RemindStore)
 
 logger = logging.getLogger(__name__)
 
@@ -79,25 +78,12 @@ MAX_PER_TICK = 20
 
 #: 用户会读到的每一句（测试逐个扫机制词——"协议 / 接口 / 调用 / 触发 / 令牌"这类词
 #: 一个字都不许出现在她要说出口的话里）。**加新句子时必须同时加进这个元组。**
-ASK_HEAD = "要我提醒你「{what}」——你想我怎么叫你？"
-ASK_GROUP = "1 在本群里 @ 你"
-ASK_PRIVATE = "2 私聊你"
-ASK_MAIL = "3 寄到你的邮箱"
-ASK_TAIL = "回我一句「/提醒 换 2」（想选哪个就把那个数写进去）就行。"
-CHOOSE_OK = {
-    CHANNEL_GROUP: "好，到时候我在群里 @ 你。",
-    CHANNEL_PRIVATE: "好，到时候我私聊你。",
-    CHANNEL_MAIL: "好，到时候我寄邮件给你。",
-}
 NO_PRIVATE = "私聊得你先来私聊我一次，之后我就能私聊提醒你了。"
-NO_MAIL = "我还没法把邮件寄给你——要不先选 1 或者 2？"
-NEED_EMAIL = "我还不知道你的邮箱。你把地址发我一句（比如「我的邮箱是 xx@yy」），下次就能寄给你。"
-ASK_AGAIN = "我只看懂 1、2、3 这三个数——你想我怎么叫你？"
 NOTHING = "这会儿没有还没发的提醒。"
 LIST_HEAD = "你还有这些提醒："
-LIST_TAIL = "回「/提醒 删 序号」可以不提醒了，「/提醒 换 1|2|3」换我叫你的方式。"
+LIST_TAIL = "回「/提醒 删 序号」可以不提醒了。"
 LIST_TAIL_EMPTY = "想让我提醒你什么，说一句「几点提醒我什么事」就行。"
-USAGE = "用法：「/提醒」看还有哪些；「/提醒 删 2」删掉第 2 条；「/提醒 换 2」换我叫你的方式。"
+USAGE = "用法：「/提醒」看还有哪些；「/提醒 删 2」删掉第 2 条。"
 BAD_INDEX = "没找到第 {index} 条——先发一句「/提醒」看看有哪些。"
 #: **主题是固定文案**（2026-10-09 审查第 5 条）：主题是邮件那边**唯一进命令行**的自由文本，
 #: 而 `clean_subject` 会因为 `& " %` 这类字符**拒发**——原来的 `"到点提醒：{what}"`
@@ -128,13 +114,13 @@ QUOTA_TOTAL_DEFAULT = 5
 QUOTA_PERSON_MAX = 20
 QUOTA_TOTAL_MAX = 50
 
-#: 她要说出口的话（测试扫这一个元组）。**加新句子就加进来。**
-USER_TEXTS = (ASK_HEAD, ASK_GROUP, ASK_PRIVATE, ASK_MAIL, ASK_TAIL,
-              *CHOOSE_OK.values(), NO_PRIVATE, NO_MAIL, NEED_EMAIL, ASK_AGAIN,
-              NOTHING, LIST_HEAD, LIST_TAIL, LIST_TAIL_EMPTY, USAGE, BAD_INDEX,
-              MAIL_SUBJECT, MAIL_BODY, MAIL_FAILED, MAIL_QUOTA, DUE_TEXT)
 
 #: 这一拍跑完的几种结局（`_deliver_*` 的返回值）。
+#: 她要说出口的话（测试扫这一个元组）。**加新句子就加进来。**
+USER_TEXTS = (NO_PRIVATE, NOTHING, LIST_HEAD, LIST_TAIL, LIST_TAIL_EMPTY,
+              USAGE, BAD_INDEX, MAIL_SUBJECT, MAIL_BODY, MAIL_FAILED, MAIL_QUOTA,
+              DUE_TEXT)
+
 SENT_OUT = "sent"           # 发出去了
 PENDING = "pending"         # 没有出口（发送口没接上 / 找不到那个人）→ 留待发，不烧次数
 RETRY = "retry"             # 确定没送出去 → 记一次失败，可重试
@@ -161,6 +147,22 @@ def _read_request(request: object) -> tuple[str, float, str]:
     return person, at, what
 
 
+def channel_of(request: object, session_id: str) -> str:
+    """核心给的那一档（`RemindRequest.channel`）→ 本插件内部的三种渠道。
+
+    核心的词是 `group` / `private` / `email`（见核心 `remind.REMIND_CHANNEL_WORDS`），
+    本插件内部叫 `CHANNEL_GROUP` / `CHANNEL_PRIVATE` / `CHANNEL_MAIL`。
+    **核心没给**（老版本、或装错了）就按"他当时说话的地方"定——fail-closed，不猜。
+    """
+
+    word = str(_field(request, "channel", "") or "").strip().casefold()
+    if word in (CHANNEL_GROUP, CHANNEL_PRIVATE):
+        return word
+    if word in (CHANNEL_MAIL, "email", "mail"):
+        return CHANNEL_MAIL
+    return session_channel(session_id)
+
+
 def session_channel(session_id: str) -> str:
     """**他当时是在哪儿说的**：私聊里说的 → `private`，别的（群里）→ `group`。
 
@@ -171,33 +173,6 @@ def session_channel(session_id: str) -> str:
     """
 
     return CHANNEL_PRIVATE if str(session_id or "").startswith("private:") else CHANNEL_GROUP
-
-
-def parse_channel(text: str, *, allow_mail: bool = True) -> str | None:
-    """把他回的那句话认成一种方式；**认不出返回 `None`**（调用方据此再问一次，不猜）。
-
-    收 `1` / `2` / `3`，也收"本群 / 群里"、"私聊"、"邮箱 / 邮件"。
-    一句话里出现两个不同的数字（"1 或者 2"）**不算选**。
-    """
-
-    body = (text or "").strip()
-    if not body:
-        return None
-    digits = {char for char in body if char in "123"}
-    if len(digits) == 1:
-        picked = digits.pop()
-        if picked == "1":
-            return CHANNEL_GROUP
-        if picked == "2":
-            return CHANNEL_PRIVATE
-        return CHANNEL_MAIL if allow_mail else None
-    if any(word in body for word in ("本群", "群里", "群聊", "@")):
-        return CHANNEL_GROUP
-    if "私聊" in body:
-        return CHANNEL_PRIVATE
-    if any(word in body for word in ("邮箱", "邮件", "写信")):
-        return CHANNEL_MAIL if allow_mail else None
-    return None
 
 
 async def _maybe_await(value: object) -> object:
@@ -257,78 +232,20 @@ class RemindCapability:
         session_id = str(_field(request, "session_id", "") or "")
         group_id = str(_field(request, "group_id", "") or "")
         email = str(_field(request, "email", "") or "")
-        known = self._store.preference(person)
-        if known is None or (email and email != known.email):
-            known = self._store.remember_person(person, email=email)
-        if known.channel in self._available(has_email=known.has_email):
-            # 他早说过怎么叫他 → **不再问**（用户要的"以后 @ 一句就够"）。
-            self._store.add(person_id=person, session_id=session_id, group_id=group_id,
-                            at=at, what=what, channel=known.channel)
-            logger.info("remind_accepted person=%s channel=%s", person, known.channel)
-            return
+        # **渠道由核心给**（`RemindRequest.channel`，非空：`group` / `private` / `email`）——
+        # 2026-10-09 的契约：核心已经在她自己的话里问过"怎么收"，交过来的永远是"值齐了"
+        # 的那一条。插件**不再发罐头问话**（再问就是同一件事两个声音）。
+        channel = channel_of(request, session_id)
+        self._store.remember_person(person, email=email)
         self._store.add(person_id=person, session_id=session_id, group_id=group_id,
-                        at=at, what=what, channel=CHANNEL_UNSET)
-        if not known.ask_session and not known.asked:
-            self._store.note_ask(person, session_id=session_id, group_id=group_id, what=what)
-            logger.info("remind_ask_queued person=%s（第一次：要问一句怎么叫他）", person)
-
-    # --- 他答了 ---------------------------------------------------------------
-
-    def note_reply(self, person_id: str, reply: str, *, session_id: str = "") -> str:
-        """他回了一句（应该是那个选择）→ 记下来，返回要回给他的那句话。
-
-        **今天这条路由 `/提醒 换 N` 走通**（命令插件收得到消息）。核心将来若愿意把
-        "正在等回答的那一句"也转给插件，调**同一个函数**就行——两处不会分叉。
-        认不出就**再问一次**：不猜、也不静默记一个默认值。
-        """
-
-        known = self._store.preference(person_id)
-        has_email = bool(known and known.has_email)
-        picked = parse_channel(reply, allow_mail=has_email and self.can_mail)
-        if picked is None:
-            body = (reply or "").strip()
-            wants_mail = "3" in body or "邮箱" in body or "邮件" in body
-            if wants_mail and not self.can_mail:
-                return NO_MAIL               # 邮件那一路这次没接上
-            if wants_mail and not has_email:
-                return NEED_EMAIL            # 能寄，但还不知道寄哪儿
-            return ASK_AGAIN
-        if picked == CHANNEL_MAIL and not has_email:
-            return NEED_EMAIL                # 没地址就先别记，让他把地址发来
-        self._store.remember_person(person_id, channel=picked)
-        self._store.mark_asked(person_id)
-        # 他答之前收下的那几条（`channel=""`）也归到他刚选的方式上——否则那几条到点会
-        # 按"他当时说话的地方"叫他，与他的选择相反。
-        self._store.adopt_channel(person_id, picked)
-        if picked == CHANNEL_PRIVATE and session_channel(session_id) != CHANNEL_PRIVATE:
-            # 记住了（他选的就是它），但**把话说清**：他这句话是在群里说的，
-            # 插件这一侧看不到任何"他私聊过她"的证据 → 先把那句人话说了。
-            # （真发的时候如果对面拒收，核心会回 `rejected`，那时还有一次补救。）
-            return NO_PRIVATE
-        return CHOOSE_OK[picked]
+                        at=at, what=what, channel=channel)
+        logger.info("remind_accepted person=%s channel=%s", person, channel)
 
     @property
     def can_mail(self) -> bool:
         """邮箱那一路现在能不能用（邮件插件给了"寄给某个地址"那条口子没有）。"""
 
         return self._mail_send is not None
-
-    def _available(self, *, has_email: bool) -> tuple[str, ...]:
-        found = [CHANNEL_GROUP, CHANNEL_PRIVATE]
-        if has_email and self.can_mail:
-            found.append(CHANNEL_MAIL)
-        return tuple(found)
-
-    def ask_text(self, what: str, *, has_email: bool) -> str:
-        """第一次问他的那一句。**只列真能做的那几条**——列一条做不到的是骗人。"""
-
-        lines = [ASK_HEAD.format(what=what), ASK_GROUP, ASK_PRIVATE]
-        if has_email and self.can_mail:
-            lines.append(ASK_MAIL)
-        lines.append(ASK_TAIL)
-        return "\n".join(lines)
-
-    # --- 看 / 改（命令那条入口用；核心将来认得"看我的提醒"时用同一条） ----------
 
     def listing(self, person_id: str) -> str:
         """他问"我还有哪些提醒"。"""
@@ -368,57 +285,12 @@ class RemindCapability:
         moment = self._clock() if now is None else float(now)
         handed: list[RemindDelivery] = []
         gaps: list[str] = []
-        handed.extend(await self._ask_pending(gaps))
         handed.extend(await self._send_due(moment, gaps, room=MAX_PER_TICK - len(handed)))
         if gaps:
             logger.warning("remind_no_way_out 这一拍有 %s 件事送不出去（留待发，不算失败）：%s",
                            len(gaps), "；".join(sorted(set(gaps))))
         self._store.compact()
         return tuple(handed)
-
-    async def _ask_pending(self, gaps: list[str]) -> list[RemindDelivery]:
-        """把还没问出去的那句"你想我怎么叫你"发出去。
-
-        **按结果分类收口**（与 `_send_due` 同一套语义，2026-10-09 审查：
-        这里原来"只分成功/没有出口"，于是 `uncertain`/`rejected`/`not_delivered`/`error`
-        一律只记一行日志、状态不动 → **每 30 秒重发、永不封顶**，与模块头那张表自相矛盾）：
-
-        * 发出去了 → `mark_asked`（**只问一次**，以后不再问）；
-        * `no_target` / 接缝没接上 → 留待发、**不烧次数**（接缝一接上就能问出口）；
-        * `rejected`（对面拒收）→ 只提示过一次就算了：`mark_asked`，别再重复问他；
-        * `uncertain`（不知道出去没有）→ 同上，**绝不再试**（重问就可能问两遍）；
-        * `not_delivered` / `error`（确定没送出去）→ 记一次，试够 `MAX_TRIES` 就停。
-        """
-
-        handed: list[RemindDelivery] = []
-        for person in self._store.asking():
-            group_id = (person.ask_group
-                        if session_channel(person.ask_session) == CHANNEL_GROUP else "")
-            outcome, why, delivery = await self._deliver_core(
-                person.person_id,
-                self.ask_text(person.ask_what, has_email=person.has_email),
-                channel=session_channel(person.ask_session), group_id=group_id)
-            if outcome == SENT_OUT and delivery is not None:
-                self._store.mark_asked(person.person_id)
-                handed.append(delivery)
-            elif outcome == PENDING:
-                gaps.append(why)
-            elif outcome in (NO_SESSION, GIVEN_UP):
-                # 对面拒收 / 不知道出去没有：**都别再问第二遍**（问话重复比不问更烦人），
-                # 那几条提醒照旧留在待发里，到点按"他当时说话的地方"叫他。
-                self._store.mark_asked(person.person_id)
-                logger.warning("remind_ask_stopped person=%s outcome=%s why=%s",
-                               person.person_id, outcome, why)
-            else:                                   # RETRY：确定没送出去，记一次
-                tries = self._store.bump_ask_tries(person.person_id)
-                if tries >= MAX_TRIES:
-                    self._store.mark_asked(person.person_id)
-                    logger.warning("remind_ask_gave_up person=%s tries=%s why=%s",
-                                   person.person_id, tries, why)
-                else:
-                    logger.warning("remind_ask_failed person=%s tries=%s why=%s",
-                                   person.person_id, tries, why)
-        return handed
 
     async def _send_due(self, moment: float, gaps: list[str], *,
                         room: int = MAX_PER_TICK) -> list[RemindDelivery]:
@@ -446,10 +318,6 @@ class RemindCapability:
                     item.person_id, DUE_TEXT.format(what=item.what), channel=channel,
                     group_id=group_id)
             if outcome == SENT_OUT:
-                if not item.channel:
-                    # 他没答就用他当时说话的地方——把这次的选择记下来，以后不再问。
-                    self._store.remember_person(item.person_id, channel=channel)
-                    self._store.mark_asked(item.person_id)
                 self._store.mark_sent(item.key)
                 if delivery is not None:
                     handed.append(delivery)

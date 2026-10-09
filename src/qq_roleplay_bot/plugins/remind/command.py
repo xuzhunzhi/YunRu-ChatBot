@@ -15,8 +15,7 @@
    **插件这一侧就能落地、今天就能用**。
 2. **"他答了那句问话"也只能从这条路进来**：核心只在认到提醒请求时调插件，
    他回一个"2"不会走到插件这一侧。所以"选方式"这个动作和"看 / 改"合成同一条入口，
-   由它调 `note_reply()` ——**核心将来若愿意把"正在等回答的那一句"转给插件，
-   调的是同一个函数**，两处不会分叉。
+   由   调的是同一个函数**，两处不会分叉。
 
 ## 隐私这件事说清楚
 
@@ -33,12 +32,14 @@ from .remind import USAGE
 _PATTERN = re.compile(r"^/(?:提醒|remind)\s*(?P<rest>.*)$", re.IGNORECASE | re.DOTALL)
 #: "删 2" / "取消第 2 条" / "删掉 2" 都认；数字从 1 数起。
 _DELETE = re.compile(r"^(?:删|删除|删掉|取消)\s*第?\s*(\d+)\s*条?$")
-#: "换 2" / "换邮箱" 都认（"换"后面那一段交给 `note_reply` 去认）。
-_SWITCH = re.compile(r"^(?:换|换个|改成)\s*(.+)$")
 
 
 class RemindCommand:
-    """`/提醒`：看还有哪些、删一条、换以后叫我的方式。"""
+    """`/提醒`：看还有哪些、删一条。
+
+    "怎么收"由**核心**在她自己的话里问（2026-10-09 的契约），插件不再发罐头问话、
+    也不再有"换方式"这一支——所以他答的那句话不会再走到这里。
+    """
 
     name = "remind"
     #: 谁都能看自己的——插件**不判权限**，档位只是声明（判定在核心）。
@@ -51,7 +52,7 @@ class RemindCommand:
         return bool(_PATTERN.match(str(getattr(message, "text", "") or "").strip()))
 
     def help_text(self) -> str:
-        return "/提醒 —— 看、删、换（到点提醒）"
+        return "/提醒 —— 看、删（到点提醒）"
 
     @staticmethod
     def _rest(message) -> str:
@@ -70,11 +71,4 @@ class RemindCommand:
         found = _DELETE.match(rest)
         if found is not None:
             return self._capability.cancel(person, int(found.group(1)))
-        found = _SWITCH.match(rest)
-        if found is not None:
-            # "他答了那句问话"与"换方式"是同一件事：都走 `note_reply`，
-            # 它负责记下来 + 回一句（认不出就再问一次）。
-            return self._capability.note_reply(
-                person, found.group(1).strip(),
-                session_id=str(getattr(message, "session_id", "") or ""))
         return USAGE

@@ -54,7 +54,6 @@ CHANNEL_GROUP = "group"
 CHANNEL_PRIVATE = "private"
 CHANNEL_MAIL = "mail"
 CHANNELS = (CHANNEL_GROUP, CHANNEL_PRIVATE, CHANNEL_MAIL)
-#: **还没答**（第一次收到他的提醒、那句"你想我怎么叫你"还没发出去 / 还没答）。
 CHANNEL_UNSET = ""
 
 #: 一条提醒的状态。
@@ -102,24 +101,14 @@ class Preference:
     """一个人的那份状态：他选了哪种方式、他有没有邮箱、那句问话发没发出去。
 
     `channel == ""` = **还没答**（第一次收到他的提醒时就是这样）；这时
-    `ask_session` 记着"到哪个会话里去问他"（他当时说话的地方），问出去之后清掉——
     **只问一次**（用户 2026-10-08：以后 @ 一句就够）。
     """
 
     person_id: str
-    channel: str = CHANNEL_UNSET
     email: str = ""
-    #: 还没问出去时：问在哪个会话 / 哪个群 / 提醒的是什么事（问话里要带上它）。
-    ask_session: str = ""
-    ask_group: str = ""
-    ask_what: str = ""
-    #: **已经问过他了**（不管他答没答）。有了它，"只第一次问"才是真的按人只问一次——
-    #: 否则他每再提一条提醒，插件都会再问一遍"你想我怎么叫你"。
-    asked: bool = False
     #: 那句问话**确定送失败**了几次（"没有出口"不算——同 `MAX_TRIES` 的规矩）。
     #: 没有它，"问一句怎么叫他"那条路失败时会每 30 秒重发、永不封顶
     #: （2026-10-09 独立审查实测：四种失败各送出去 4 次）。
-    ask_tries: int = 0
     #: **已经跟他说过"私聊得你先来私聊我一次"了**。
     #: 2026-10-09 审查：原来这个记号记在**每一条提醒**上，于是三条同时到点且都被拒 →
     #: 他在群里收到**三遍**同一句人话。改成**按人**记：同一句只说一次。
@@ -130,12 +119,6 @@ class Preference:
     @property
     def has_email(self) -> bool:
         return bool(self.email)
-
-    @property
-    def needs_ask(self) -> bool:
-        """**该问他"怎么叫你"吗**：他还没答、还没问过，而且问话已经排上了。"""
-
-        return not self.channel and not self.asked and bool(self.ask_session)
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,13 +236,7 @@ class RemindStore:
         if event is None:
             return None
         return Preference(person_id=str(person_id),
-                          channel=str(event.get("channel") or CHANNEL_UNSET),
                           email=str(event.get("email") or ""),
-                          ask_session=str(event.get("ask_session") or ""),
-                          ask_group=str(event.get("ask_group") or ""),
-                          ask_what=str(event.get("ask_what") or ""),
-                          asked=bool(event.get("asked") or False),
-                          ask_tries=int(event.get("ask_tries") or 0),
                           told_rejected=bool(event.get("told_rejected") or False),
                           told_mail_failed=bool(event.get("told_mail_failed") or False))
 
@@ -276,18 +253,14 @@ class RemindStore:
 
         current = self.preference(person_id) or Preference(person_id=str(person_id))
         event: dict = {"key": str(person_id), "at": self._clock(),
-                       "channel": current.channel, "email": current.email,
-                       "ask_session": current.ask_session, "ask_group": current.ask_group,
-                       "ask_what": current.ask_what, "asked": current.asked,
-                       "ask_tries": current.ask_tries,
+                       "email": current.email,
                        "told_rejected": current.told_rejected,
                        "told_mail_failed": current.told_mail_failed}
         event.update(changes)
         self._people.append(event)
         return self.preference(person_id)  # type: ignore[return-value]
 
-    def remember_person(self, person_id: str, *, channel: str | None = None,
-                        email: str | None = None) -> Preference:
+    def remember_person(self, person_id: str, *, email: str | None = None) -> Preference:
         """记下/刷新这个人的方式与地址；**没给的那几项保持原样**。
 
         地址是核心递过来的那一份（见模块头）；`email=""` 表示"这次核心没给"，
@@ -296,46 +269,9 @@ class RemindStore:
 
         current = self.preference(person_id)
         keep = current if current is not None else Preference(person_id=str(person_id))
-        changes: dict = {}
-        if channel:
-            changes["channel"] = str(channel)
-        if email:
-            changes["email"] = str(email)
-        if not changes:
+        if not email:
             return keep
-        return self._write_person(person_id, **changes)
-
-    def note_ask(self, person_id: str, *, session_id: str, group_id: str,
-                 what: str) -> Preference:
-        """记下"到哪个会话里问他怎么叫他"（**问出去之前**一直留着）。"""
-
-        return self._write_person(person_id, ask_session=str(session_id),
-                                  ask_group=str(group_id), ask_what=str(what))
-
-    def mark_asked(self, person_id: str) -> Preference | None:
-        """那句问话发出去了（或不用再问了）→ 清掉待问，并且**记下"问过了"**。
-
-        两件事一起做是有意的：`asked=True` 才是"只问一次"的保证——他之后再提十条提醒，
-        也不会再收到一遍"你想我怎么叫你"。
-        """
-
-        if self.preference(person_id) is None:
-            return None
-        return self._write_person(person_id, ask_session="", ask_group="", ask_what="",
-                                  asked=True, ask_tries=0)
-
-    def bump_ask_tries(self, person_id: str) -> int:
-        """那句问话**确定送失败**了一次 → 次数 +1，返回新的次数。
-
-        与到点那条路同一个规矩：只有"确定没送出去"才算一次；"没有出口"（接缝没接上、
-        找不到那个人）不算——那种情况下留待发，接缝一接上就发得出去。
-        """
-
-        current = self.preference(person_id)
-        if current is None:
-            return 0
-        self._write_person(person_id, ask_tries=current.ask_tries + 1)
-        return current.ask_tries + 1
+        return self._write_person(person_id, email=str(email))
 
     def mark_told(self, person_id: str, flag: str) -> Preference | None:
         """记下"这句人话已经跟他说过了"（`TOLD_FLAGS` 里那两个之一，**按人**）。
@@ -346,28 +282,9 @@ class RemindStore:
 
         if flag not in self.TOLD_FLAGS:
             raise ValueError(f"不认识的记号：{flag}")
-        if self.preference(person_id) is None:
-            return None
+        # **没有这条记录也要建一条**：他第一次被拒时 records 里可能还没有他
+        # （`remember_person(email="")` 不写盘），那就等于记号存不下来 → 每拍都说一遍。
         return self._write_person(person_id, **{flag: True})
-
-    def asking(self) -> tuple[Preference, ...]:
-        """**该问还没问**的那几个人（问话还没发出去、而且从没问过）。"""
-
-        found: list[Preference] = []
-        for key, event in self._people.replay().items():
-            if str(event.get("channel") or "") or not str(event.get("ask_session") or ""):
-                continue
-            if bool(event.get("asked") or False):
-                continue
-            found.append(Preference(person_id=str(key),
-                                    email=str(event.get("email") or ""),
-                                    ask_session=str(event.get("ask_session") or ""),
-                                    ask_group=str(event.get("ask_group") or ""),
-                                    ask_what=str(event.get("ask_what") or ""),
-                                    ask_tries=int(event.get("ask_tries") or 0)))
-        return tuple(sorted(found, key=lambda item: item.person_id))
-
-    # --- 提醒 ---------------------------------------------------------------
 
     def _all(self) -> dict[str, Reminder]:
         found: dict[str, Reminder] = {}
@@ -457,24 +374,6 @@ class RemindStore:
         if item is None or not item.live:
             return None
         return self._replace(item, state=CANCELLED)
-
-    def adopt_channel(self, person_id: str, channel: str) -> int:
-        """他刚选了 `channel` → 把这个人**还没定方式**的待发提醒一起改成它。
-
-        为什么必须有这一步：他第一次说"8 点提醒我交作业"时那条提醒是**在他答之前**
-        收下的（`channel=""`）。他随后选了"私聊"，那条提醒要是还留着"没定"，
-        到点就会按"他当时说话的地方"（可能是群里）叫他——**与他的选择相反**。
-        返回改了几条。
-        """
-
-        if channel not in CHANNELS:
-            return 0
-        changed = 0
-        for item in self._all().values():
-            if item.person_id == str(person_id) and item.live and not item.channel:
-                self._replace(item, channel=str(channel))
-                changed += 1
-        return changed
 
     def mark_pending(self, key: str, reason: str) -> Reminder | None:
         """这次**没有出口**（对面拒收 / 找不到那个人 / 发送口还没接上）→ 留在待发。
