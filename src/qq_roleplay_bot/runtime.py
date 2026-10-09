@@ -1232,6 +1232,30 @@ class _SeamBinder:
         enable, disable = engine.enable_group, engine.disable_group
         return enable(group_id) if enabled else disable(group_id)
 
+    def ui_set_group_memory(self, group_id: str, enabled: bool) -> bool:
+        """面板「记忆」页那颗**按群开关**：`(group_id, enabled) -> 这次到底改没改`。
+
+        用户 2026-10-09：*"记忆开关肯定要上面板啊，在记忆页"*。**只包一层**：转发到引擎
+        既有的 `enable_group_memory` / `disable_group_memory`（`/super enable memory`
+        那套，落盘与恢复都是现成的）——**不造新状态**，也不给记忆内容或记忆 API。
+        群号校验（数字 + 长度 5..12，与面板 `POST /api/groups` 那条一致）与幂等
+        （本来就是这个状态返回 `False`）都在引擎那两个方法里。
+
+        审计走既有的 `control_audit`：动作名与命令那条**相同**（`memory_group_switch`，
+        这样一次筛选就能看到"这个群的记忆开关被谁动过"），`source="panel"` 区分是谁按的。
+        """
+
+        engine = self._require()
+        enable = getattr(engine, "enable_group_memory", None)
+        disable = getattr(engine, "disable_group_memory", None)
+        if not (callable(enable) and callable(disable)):
+            return False
+        changed = bool(enable(group_id) if enabled else disable(group_id))
+        # 命令那条是"每次调用都记一笔"（见 `_log_memory_switch`），这里保持一致：
+        # 点了没变也留一笔（谁在什么时候按过，本身就是审计要回答的问题）。
+        engine._log_memory_switch(group_id, bool(enabled), source="panel")
+        return changed
+
     def ui_memory_ops(self):
         return getattr(self._require(), "memory_ops", None)
 
@@ -1263,6 +1287,8 @@ class _SeamBinder:
             state_reader=self.ui_state_reader,
             restart=self.ui_restart,
             group_switch=self.ui_group_switch if all(callable(g) for g in groups) else None,
+            # 面板「记忆」页那颗按群开关：引擎既有那一对的**面板面**（见 `ui_set_group_memory`）。
+            set_group_memory=self.ui_set_group_memory,
             session_clear=self.ui_session_clear,
             self_id=self.ui_self_id,
             knowledge=_knowledge_for(engine),

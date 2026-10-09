@@ -435,6 +435,14 @@ class UiSeams:
     state_reader: object = None
     restart: object = None
     group_switch: object = None
+    #: `(group_id, enabled) -> 这次到底改没改`：面板「记忆」页那颗**按群开关**
+    #: （2026-10-09 用户："记忆开关肯定要上面板啊，在记忆页"）。它只是引擎既有那一对
+    #: `enable_group_memory` / `disable_group_memory`（`/super enable memory` 那套，
+    #: 落盘与恢复都是现成的）的**面板面**——**不造新状态**、不给记忆内容、不给记忆 API。
+    #: 参数**只有**"群号 + 布尔"（白名单由 `tests/test_ui_memory_switch_seam.py` 钉住）；
+    #: 群号校验与幂等（本来就是这个状态返回 False）都在引擎那两个方法里，
+    #: 审计走既有的 `control_audit`（动作名与命令那条相同：`memory_group_switch`）。
+    set_group_memory: object = None
     session_clear: object = None
     #: `() -> self_id`：她自己的 QQ 号（面板的群动作要以她为 actor）。
     self_id: object = None

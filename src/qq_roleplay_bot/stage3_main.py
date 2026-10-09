@@ -2479,11 +2479,15 @@ class DialogueEngine:
         self._log_memory_switch(group_id, enabled)
         return text
 
-    def _log_memory_switch(self, group_id: str, enabled: bool) -> None:
+    def _log_memory_switch(self, group_id: str, enabled: bool, *, source: str = "super") -> None:
         """开关动作进 `control_audit`（与面板改配置同一条只增流水）。
 
         这条接缝可能没有（测试、裁掉审计能力的部署）——那是 `NoAudit` 或 `None`，
         两种情况都不该影响命令本身，所以整段兜住。
+
+        `source` 区分**是谁按的**：命令那条是 `"super"`（缺省），面板那条传 `"panel"`
+        （见 `runtime._SeamBinder.ui_set_group_memory`）。动作名两边**相同**，
+        这样"这个群的记忆开关被谁动过"一次筛选就看得全。
         """
 
         audit = getattr(self, "control_audit", None)
@@ -2493,7 +2497,7 @@ class DialogueEngine:
             audit.record("memory_group_switch",
                          detail={"group_id": group_id,
                                  "memory": "1" if enabled else "0"},
-                         result="on" if enabled else "off", source="super")
+                         result="on" if enabled else "off", source=source)
         except Exception:  # noqa: BLE001 - 记账失败不该让命令看起来没生效
             logger.warning("memory_switch_audit_failed group=%s", group_id, exc_info=True)
 
@@ -3980,7 +3984,8 @@ class DialogueEngine:
                      for group_id in known)
 
     def enable_group(self, group_id: str) -> bool:
-        if not group_id.isdigit() or not 5 <= len(group_id) <= 12:
+        # 群号必须是 **ASCII 数字**（`isdigit()` 对全角数字也返回真，而那不是 QQ 号）
+        if not (group_id.isascii() and group_id.isdigit()) or not 5 <= len(group_id) <= 12:
             return False
         before = group_id in self.enabled_group_ids
         self.enabled_group_ids.add(group_id)
@@ -3989,7 +3994,8 @@ class DialogueEngine:
         return not before
 
     def disable_group(self, group_id: str) -> bool:
-        if not group_id.isdigit() or not 5 <= len(group_id) <= 12:
+        # 群号必须是 **ASCII 数字**（`isdigit()` 对全角数字也返回真，而那不是 QQ 号）
+        if not (group_id.isascii() and group_id.isdigit()) or not 5 <= len(group_id) <= 12:
             return False
         was_enabled = group_id in self.enabled_group_ids
         self.enabled_group_ids.discard(group_id)
@@ -4017,7 +4023,8 @@ class DialogueEngine:
         **不碰 `enabled_group_ids`**：回不回是另一张名单。
         """
 
-        if not group_id.isdigit() or not 5 <= len(group_id) <= 12:
+        # 群号必须是 **ASCII 数字**（`isdigit()` 对全角数字也返回真，而那不是 QQ 号）
+        if not (group_id.isascii() and group_id.isdigit()) or not 5 <= len(group_id) <= 12:
             return False
         before = group_id in self.memory_group_ids
         self.memory_group_ids.add(group_id)
@@ -4033,7 +4040,8 @@ class DialogueEngine:
         是两份东西，而且"关掉"只该意味着"不再收新的"。
         """
 
-        if not group_id.isdigit() or not 5 <= len(group_id) <= 12:
+        # 群号必须是 **ASCII 数字**（`isdigit()` 对全角数字也返回真，而那不是 QQ 号）
+        if not (group_id.isascii() and group_id.isdigit()) or not 5 <= len(group_id) <= 12:
             return False
         was_enabled = group_id in self.memory_group_ids
         self.memory_group_ids.discard(group_id)
