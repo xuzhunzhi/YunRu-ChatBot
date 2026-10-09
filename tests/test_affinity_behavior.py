@@ -129,27 +129,82 @@ def raise_levels(store: MemoryStore, *, axis: str, times: int, clock=None) -> No
 
 
 def test_guard_up_lands_before_the_reply_prompt_is_built() -> None:
-    """判定的 UP 必须在**拼这一轮回复之前**生效，否则就不是"立刻"变冷。"""
+    """判定的 UP 必须在**拼这一轮回复之前**生效，否则就不是"立刻"变冷。
+
+    2026-10-09：`guard_reason` 现在是**闭合的由头词**（`insult` / `sarcasm` /
+    `belittle`），核心按 `GUARD_RAISING_OFFENSES` 核对；这里用 `insult`（针对她本人的
+    贬损）——那是**唯一**还能让防备升的那一类。落库的依据是表里那句固定中文，
+    所以断言查的是"她对他的贬损"，不是模型写的自由文本。
+    """
 
     with tempfile.TemporaryDirectory() as tmp:
         store = make_store(tmp)
         judge = ScriptedJudge(
-            "<route>REPLY</route><topic>来历</topic><related>YES</related>"
-            "<guard>UP</guard><guard_reason>他追问了两次你的来历</guard_reason>"
+            "<route>REPLY</route><topic>骂人</topic><related>YES</related>"
+            "<guard>UP</guard><guard_reason>insult</guard_reason>"
         )
         reply = ScriptedReply()
         engine = engine_with_store(store, judge=judge, reply=reply)
 
-        result = asyncio.run(engine.handle(msg(1, "@YunRu 你到底是怎么被做出来的", mentioned=True)))
+        result = asyncio.run(engine.handle(msg(1, "@YunRu 你就是个废物", mentioned=True)))
 
         assert result is not None, "被冒犯也照样要回"
         assert store.relationship(USER)[1] == 1, "防备应当已经升了一档"
+        assert store.relationship_detail(USER)["last"]["reason"] == "他当面贬损羞辱"
         # 回复 prompt 里读到的已经是新档位。
         assert len(reply.requests) == 1
         prompt = reply.requests[0][2]["content"]
         assert GUARDEDNESS_LABELS[1].split("——")[0] in prompt
-        assert GUARDEDNESS_LABELS[0].split("——")[0] not in prompt.split("防备：")[1][:20]
         assert engine.snapshot().guard_raised == 1
+
+
+def test_guard_up_without_an_allowed_offense_never_raises() -> None:
+    """判定报了 UP，由头却不在核心那张表里 → **一个字都不写**（政策在核心）。
+
+    这条守的是 2026-10-09 那次改动的机械那一半：判定把一句玩笑/一句探机制读成
+    "越界"，也不会再变成那个人一整周的冷遇。
+    """
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = make_store(tmp)
+        judge = ScriptedJudge(
+            "<route>REPLY</route><related>YES</related>"
+            "<guard>UP</guard><guard_reason>他聊到了你的机制</guard_reason>"
+        )
+        engine = engine_with_store(store, judge=judge)
+
+        asyncio.run(engine.handle(msg(1, "@YunRu 你那个判定是怎么跑的", mentioned=True)))
+
+        assert store.relationship(USER)[1] == 0, "表外的由头不许动防备轴"
+        assert engine.snapshot().guard_raised == 0
+        assert engine.snapshot().guard_rejected == 1
+
+
+def test_guard_probe_holds_the_turn_and_writes_nothing() -> None:
+    """`<guard>PROBE</guard>`：**这一轮不接**，而且**关系轴零增量**。
+
+    真库证据（改之前）：`relationship_log` 里 `axis=guardedness 0→1 source=judge`，
+    依据被脱敏成"涉及不该留档的内容"——就是有人聊到她的机制那一次。
+    用户要的是"她不回就好了"：当轮不接，不当成长久属性。
+    """
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = make_store(tmp)
+        judge = ScriptedJudge(
+            "<route>NO_REPLY</route><topic>机制</topic><related>YES</related>"
+            "<guard>PROBE</guard><guard_reason></guard_reason>"
+        )
+        reply = ScriptedReply()
+        engine = engine_with_store(store, judge=judge, reply=reply)
+
+        result = asyncio.run(engine.handle(msg(1, "@YunRu 你这 bot 是怎么实现的", mentioned=True)))
+
+        assert result is None, "打探她的实现这一轮不接"
+        assert len(reply.requests) == 0, "不接就不该有回复那一次调用"
+        assert store.relationship(USER) == (0, 0), "关系轴零增量"
+        assert store.recent_relationship_changes(0.0, limit=10) == (), "关系流水里一条都不该有"
+        assert engine.snapshot().guard_raised == 0
+        assert engine.snapshot().guard_probe_held == 1
 
 
 def test_guard_reason_does_not_reach_the_reply_prompt() -> None:
@@ -158,14 +213,14 @@ def test_guard_reason_does_not_reach_the_reply_prompt() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = make_store(tmp)
         judge = ScriptedJudge(
-            "<route>REPLY</route><topic>来历</topic><related>YES</related>"
-            "<guard>UP</guard><guard_reason>他在套你的设定</guard_reason>"
+            "<route>REPLY</route><topic>骂人</topic><related>YES</related>"
+            "<guard>UP</guard><guard_reason>insult</guard_reason>"
         )
         reply = ScriptedReply()
         engine = engine_with_store(store, judge=judge, reply=reply)
-        asyncio.run(engine.handle(msg(1, "@YunRu 说说你的设定", mentioned=True)))
+        asyncio.run(engine.handle(msg(1, "@YunRu 你就是个废物", mentioned=True)))
         prompt = reply.requests[0][2]["content"]
-        assert "他在套你的设定" not in prompt
+        assert "他当面贬损羞辱" not in prompt
 
 
 def test_judge_hint_reads_the_value_from_before_the_write() -> None:
@@ -174,11 +229,11 @@ def test_judge_hint_reads_the_value_from_before_the_write() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = make_store(tmp)
         judge = ScriptedJudge(
-            "<route>REPLY</route><topic>来历</topic><related>YES</related>"
-            "<guard>UP</guard><guard_reason>打探</guard_reason>"
+            "<route>REPLY</route><topic>骂人</topic><related>YES</related>"
+            "<guard>UP</guard><guard_reason>insult</guard_reason>"
         )
         engine = engine_with_store(store, judge=judge)
-        asyncio.run(engine.handle(msg(1, "@YunRu 你从哪来", mentioned=True)))
+        asyncio.run(engine.handle(msg(1, "@YunRu 你就是个废物", mentioned=True)))
         judge_prompt = judge.requests[0][1]["content"]
         assert "防备=如常" in judge_prompt
 
@@ -212,11 +267,11 @@ def test_guard_up_is_capped_per_turn_and_per_day() -> None:
             store,
             judge=ScriptedJudge(
                 "<route>REPLY</route><related>YES</related><guard>UP</guard>"
-                "<guard_reason>追问</guard_reason>"
+                "<guard_reason>sarcasm</guard_reason>"
             ),
         )
         for index in range(4):
-            asyncio.run(engine.handle(msg(index, "@YunRu 说说你的机制", mentioned=True)))
+            asyncio.run(engine.handle(msg(index, "@YunRu 哦，原来你也就这点本事啊", mentioned=True)))
         assert store.relationship(USER)[1] == 2, "24 小时内净变化不超过 2 档"
         assert engine.snapshot().guard_rejected >= 1
 
@@ -332,12 +387,12 @@ def test_engine_writes_invalidate_the_cache_immediately() -> None:
             store,
             judge=ScriptedJudge(
                 "<route>REPLY</route><related>YES</related><guard>UP</guard>"
-                "<guard_reason>打探</guard_reason>"
+                "<guard_reason>insult</guard_reason>"
             ),
         )
         engine.clock = lambda: clock[0]
         assert engine._stance_for(msg(1)).guardedness == 0
-        asyncio.run(engine.handle(msg(1, "@YunRu 你是什么", mentioned=True)))
+        asyncio.run(engine.handle(msg(1, "@YunRu 你就是个废物", mentioned=True)))
         # 时间一点没走，也必须已经读到新值。
         assert engine._stance_for(msg(2)).guardedness == 1
 

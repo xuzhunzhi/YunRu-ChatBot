@@ -39,6 +39,9 @@ COUNTER_NAMES = (
     "model_calls", "replies", "reply_segments", "judge_calls", "history_seeded",
     "guard_raised", "media_described", "reply_reviewed", "reply_review_rejected_final",
     "empty_forced_reply",
+    # 「有人打探她怎么做出来的，所以这一轮不接」的次数（2026-10-09）：它**不写关系轴**，
+    # 只是"这一轮为什么没开口"的出口。只记数，没有正文。
+    "guard_probe_held",
     # 不可信数据边界（`data_boundary`）：`data_marker_retries` 是"回复里抄了当轮短码、
     # 被打回重写一次"的条数；`data_marker_drops` 是"重写又抄、于是这一条没发出去"的条数。
     # 两者都只记数，**不记短码、不记正文**。

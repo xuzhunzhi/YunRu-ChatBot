@@ -60,12 +60,13 @@ def test_judge_prompt_is_much_smaller_than_persona_prompt() -> None:
 
 def test_judge_is_told_not_to_speak() -> None:
     assert "不负责说话" in JUDGE_SYSTEM_PROMPT
-    assert "不要写任何角色台词" in JUDGE_SYSTEM_PROMPT
+    assert "不要写角色台词" in JUDGE_SYSTEM_PROMPT
 
 
 def test_judge_does_not_wake_her_for_talk_about_her_machinery() -> None:
-    """别人在**背后议论**她的实现/机制/频率/是不是机器人时，判定不该让她凑上去；
-    但**直接问她**必须接。
+    """别人在**背后议论**她的实现/机制/频率/是不是机器人时不该让她凑上去；
+    **当面打探她怎么做的**（要她的说法或来历）这一轮不接；但**问她本人**
+    （"你是不是机器人"这类）必须接。
 
     由来一（2026-09-28 实测）：群里那晚 35 条回复里有 3 条在讲自己的机制——
     "你们的判定阈值调得太低了""我的注意力没什么可关的""签到功能的输出逻辑…不会去重吗"。
@@ -75,17 +76,53 @@ def test_judge_does_not_wake_her_for_talk_about_her_machinery() -> None:
     群里有几个 bot 她就这样了"。真机日志：`who="1" at="yunru" mentioned="true"`
     "所以你知道群里有几个bot吗" → `<route>NO_REPLY</route>`，接着"被规则拦了可还行"
     同样 NO_REPLY——**被直接问也不接**。原来的措辞"一律不接"把两种情况一起吃掉了，
-    而且"沉默"在群里读起来就是她坏了。所以规则收窄成"背后议论不凑上去、直接问必须接"。
+    而且"沉默"在群里读起来就是她坏了。所以规则收窄成"背后议论不凑上去、问她本人必须接"。
+
+    由来三（2026-10-09 用户，**改的就是这条**）：*"聊机制她不回不就好了"*——
+    判定从前把"有人聊到她的机制/内部实现"读成越界，写了一条 `guardedness +1`
+    （真库证据：`axis=guardedness 0→1 source=judge`），整个群被她抬起了戒备。
+    现在**探她的实现**走 `guard=PROBE`：这一轮不接（`route` 也填 NO_REPLY），
+    **不写任何关系轴**，说完就过去。所以这里的措辞从"直接问她的时候必须接"改成
+    "问她本人必须接"——被改成"探她怎么做"的那一类"直接问"，现在**明确不接**。
     """
 
-    assert "别人在背后议论她的实现、机制、频率、是不是机器人时不要凑上去" in JUDGE_SYSTEM_PROMPT
-    assert "直接问她的时候必须接" in JUDGE_SYSTEM_PROMPT
+    assert "别人在背后议论她的实现、机制、频率时不要凑上去" in JUDGE_SYSTEM_PROMPT
+    # 议论"她是不是机器人"也归这一支的反面（问她本人要接，见下面那条断言）。
+    assert "别人是不是机器人，是普通话题" in JUDGE_SYSTEM_PROMPT
+    # **探她的实现**这一轮不接，而且是指名道姓写出来的那个信号。
+    assert "有人**直接问她怎么做的**" in JUDGE_SYSTEM_PROMPT
+    assert "这一轮就不接" in JUDGE_SYSTEM_PROMPT
+    assert "guard 填 PROBE" in JUDGE_SYSTEM_PROMPT
+    assert "<guard>UP|HOLD|PROBE</guard>" in JUDGE_SYSTEM_PROMPT
+    # 但"问她本人"仍然必须接：这条线不能划到"一提 bot 就不接"。
+    assert "但**问她本人**" in JUDGE_SYSTEM_PROMPT
+    assert "要按她的性子回一句带过去" in JUDGE_SYSTEM_PROMPT
     # 议论她的性格是可以接的——这条线不能划到"别人一提她就闭嘴"。
     assert "议论她的性格、态度可以按分寸接" in JUDGE_SYSTEM_PROMPT
     # 反过来：不能退回"一提 bot 就不接"
     assert "一律不接" not in JUDGE_SYSTEM_PROMPT
     # 议论别的机器人属于普通话题
     assert "议论**别的**机器人" in JUDGE_SYSTEM_PROMPT
+
+
+def test_guard_only_rises_for_offense_toward_her() -> None:
+    """`guard` 的三个取值写清楚：只有**针对她本人的**贬损/阴阳/嘲弄才 UP。
+
+    2026-10-09 用户原话：*"戒备我认为只有冒犯性的话或者阴阳怪气才会提高"*。
+    提示词这里把那条分界写死，正反例（玩笑、口嗨、追问、跟她无关的话题）与
+    `PROBE` 都点名；行为那条分界由核心的 `GUARD_RAISING_OFFENSES` 机械执行
+    （见 `tests/test_guard_axis_sources.py`）。
+    """
+
+    assert "只有**针对她本人的**才算数" in JUDGE_SYSTEM_PROMPT
+    assert "明确的贬损羞辱或阴阳怪气" in JUDGE_SYSTEM_PROMPT
+    # 探她的实现：说的是"这一轮不接"，不是"抬高戒备"。
+    assert "有人当面打探她是怎么做出来的" in JUDGE_SYSTEM_PROMPT
+    # 反例全在 HOLD 那一支里点名。
+    for negative in ("朋友式的调侃", "追问或质疑她的", "跟她无关的事", "拿不准就 HOLD"):
+        assert negative in JUDGE_SYSTEM_PROMPT, negative
+    # 判定的依据是**固定的词**，核心按同一张表核对。
+    assert "insult / sarcasm / belittle" in JUDGE_SYSTEM_PROMPT
 
 
 def test_judge_gates_the_knowledge_base() -> None:

@@ -39,7 +39,12 @@ from .ask_when_unsure import (
     decide_grounding,
     has_specific_claim,
 )
-from .dialogue_judge import JudgeVerdict, build_judge_messages, parse_judge_output
+from .dialogue_judge import (
+    OFFENSE_CODES,
+    JudgeVerdict,
+    build_judge_messages,
+    parse_judge_output,
+)
 from .dialogue_compaction import (
     build_compaction_messages,
     merge_summary,
@@ -312,6 +317,26 @@ SLANG_LIST_MAX_ROWS = 20
 # 关系缓存的有效期（秒）。写入时我们会主动失效，所以"当轮变冷"不依赖它；
 # TTL 是给维护 agent 那条通道兜底的——它在别的线程改库，引擎并不知情。
 STANCE_CACHE_TTL_SECONDS = 60.0
+# --- 防备轴**只在这几种由头下**才升（2026-10-09 用户改的设计）-----------------
+#
+# 用户原话两句：*"聊机制她不回不就好了"*、*"戒备我认为只有冒犯性的话或者阴阳怪气
+# 才会提高"*。落地时把"算不算越界"拆成两件事：
+#
+# 1. **判定只出一个信号**（`dialogue_judge`）：`<guard>UP|HOLD|PROBE</guard>` +
+#    `UP` 时的 `<guard_reason>`，**只能**填 `insult` / `sarcasm` / `belittle`
+#    这三个词（表在 `dialogue_judge.OFFENSE_CODES`）；
+# 2. **政策留在核心**（这里）：只有表里这几个由头才允许写防备轴。判定报 UP 而由头
+#    不在表里（它把一句玩笑读成越界），核心**一个字都不写**——与"插件不决定政策"
+#    同一条思路。
+#
+# 为什么要有这一层而不是只改提示词：从前"算不算冒犯"是判定一个人说了算，于是它把
+# "有人聊到她的机制/内部实现"也当成信号，写了一条 `guardedness +1`
+# （真库证据：`relationship_log` 里 `axis=guardedness 0→1 source=judge`）——
+# **整个群被她抬起了戒备**，而她要的只是"聊机制这一轮不接"。
+# 这一层是机械的：提示词漂了也拦得住。
+GUARD_RAISING_OFFENSES = frozenset({"insult", "sarcasm", "belittle"})
+#: 没有可用由头时记在日志里的说明（只有这一个字符串，不是判定写的自由文本）。
+GUARD_RAISE_WITHOUT_OFFENSE = "no_allowed_offense"
 # 她写出去的信在她眼前留多久（小时）。刚发出去的那一封必须能想起来 —— 用户
 # 2026-09-28 的现场问题是"她不记得自己邮件发了什么"。过了这个窗口就只在被问到时
 # （LETTER_ASK_RE 命中）才拿出来，且最多回溯 LETTER_RECALL_DAYS 天。
@@ -1342,8 +1367,10 @@ class DialogueEngine:
             # 以及"答应过必须回"的消息里被回复段拒了几条（异常，应当为 0）。
             "focus_queued", "focus_acks", "focus_switches", "focus_queued_replies",
             "focus_declined_promised", "empty_forced_reply",
-            # 关系：判定报了几次"越界"、其中被机械上限拒了几次（应当很少）。
-            "guard_raised", "guard_rejected",
+            # 关系：判定报了几次"这一句越界"、其中被机械上限拒了几次（应当很少）。
+            # `guard_probe_held` 是"有人打探她怎么做出来的，所以这一轮不接"的次数
+            # （2026-10-09 加）：它**不写关系轴**，只是"这一轮没开口"的出口。
+            "guard_raised", "guard_rejected", "guard_probe_held",
             # 风格审核（只判不改）：被打回、要求重写的条数，以及"重写后仍被拒、
             # 照重写的那一版发出"的条数（没配审核时两者恒为 0）。
             "reply_reviewed", "reply_review_rejected_final",
@@ -2005,30 +2032,60 @@ class DialogueEngine:
                         f"别再问一遍。）\n")
         return ""
 
-    def _apply_guard_signal(self, verdict: JudgeVerdict, message: IncomingMessage) -> None:
-        """把判定的 `<guard>UP` 立刻落到防备上——**在拼这一轮回复之前**。
+    def _apply_guard_signal(self, verdict: JudgeVerdict, message: IncomingMessage) -> bool:
+        """把判定的结论落到这一个回合上——**在拼这一轮回复之前**。返回要不要压掉回复。
 
-        这是"被冒犯立刻变冷"的全部实现：判定本来就在每条消息上跑，这里只是把它的
-        结论写进去，然后让缓存失效，于是**同一条回复**就已经按新的分寸在说了。
-
-        只升不降：`may_lower_guard` 不传。降交给维护 agent（7 天最多一档），
+        **它只升不降**：`may_lower_guard` 不传。降交给维护 agent（7 天最多一档），
         免得"他道了个歉"就立刻回暖。
+
+        ## 三种取值，各自的待遇（2026-10-09 用户改的设计）
+
+        * `<guard>PROBE</guard>`（有人当面打探她是怎么做出来的）：**这一轮不接**，
+          返回 `True`，调用方直接结束这一轮；**关系轴一个字都不写**——
+          "探机制"只是当轮不接，说完就过去，不该留成她对这个人的长久态度
+          （用户原话：*"聊机制她不回不就好了"*）。
+        * `<guard>UP</guard>` + `guard_reason` 在 `GUARD_RAISING_OFFENSES` 里
+          （冒犯性言论 / 阴阳怪气）：写防备 +1——**这就是"被冒犯立刻变冷"的全部实现**：
+          同一条回复就已经按新的分寸在说了（缓存失效在这一处）。
+        * `<guard>UP</guard>` 而由头不在表里（判定把玩笑读成了越界）、或者干脆没给由头：
+          **不写**，只加一个计数。**政策留在核心**，提示词漂了也拦得住。
+
+        两者互斥：`PROBE` 先返回，所以探机制既不会压回复又顺手写防备这种事不会发生。
         """
 
-        if not verdict.guard_up:
-            return
         user_id = message.user_id
         store = getattr(self.memory_service, "store", None)
+        if verdict.guard_probe:
+            # **当轮不接**：不写关系、不进回复那一段。缓存不用动（没有任何值变了）。
+            self._stats["guard_probe_held"] += 1
+            logger.info(
+                "Stage 3 guard probe: 这一轮不接（当轮不接，不写关系轴）user=%s", user_id or "-"
+            )
+            return True
+        if not verdict.guard_up:
+            return False
         if not user_id or store is None:
-            return
-        reason = verdict.guard_reason or "他说了些越过分寸的话"
+            return False
+        offense = (verdict.guard_reason or "").strip().casefold()
+        if offense not in GUARD_RAISING_OFFENSES:
+            # **不是表里那几种由头 → 一个字都不写。** 这里从前是直接 +1 的，
+            # 于是"判定把一句玩笑/一句探机制读成越界"会当场变成那个人一周的冷遇。
+            self._stats["guard_rejected"] += 1
+            logger.info(
+                "Stage 3 guard signal 没有可用由头，防备不动: offense=%s user=%s",
+                offense or GUARD_RAISE_WITHOUT_OFFENSE, user_id,
+            )
+            return False
         try:
             rejection = store.apply_affinity(
-                user_id, guardedness=1, reason=reason, source="judge",
+                # 依据写**固定的那句中文**（表在 `dialogue_judge.OFFENSE_CODES`），
+                # 不把判定可能写歪的自由文本原样落库。
+                user_id, guardedness=1, reason=OFFENSE_CODES.get(offense, offense),
+                source="judge",
             )
         except Exception:  # noqa: BLE001 - 写不进去也不能打断这一轮回复
             logger.exception("Stage 3 guard write failed")
-            return
+            return False
         self._stance_cache.pop(user_id, None)
         if rejection:
             self._stats["guard_rejected"] += 1
@@ -2036,6 +2093,7 @@ class DialogueEngine:
         else:
             self._stats["guard_raised"] += 1
             logger.info("Stage 3 guard raised: user=%s", user_id)
+        return False
 
     def stance_delay_for(self, message: IncomingMessage) -> float:
         """这条回复要不要先搁一下（秒）。命令路径不调它。"""
@@ -4825,7 +4883,10 @@ class DialogueEngine:
             )
             # 判定说"这一句越界了" → 先落库 + 让缓存失效，**再**拼回复的 prompt。
             # 顺序就是这条需求本身：让她变冷的那句话，回复当场就是冷的。
-            self._apply_guard_signal(verdict, message)
+            # 它同时回答"这一轮要不要接"：判定报 `PROBE`（有人打探她怎么做出来的）
+            # 时返回 True，这一轮就不接（不写关系轴、也不调回复那一次）。
+            if self._apply_guard_signal(verdict, message):
+                return None
             # 「到点提醒我」（2026-10-08）：**同一次判定的返回**里就带着这个意图，
             # 这里只把它交给插件（没有插件就什么都不做）。放在回复之前：核心那部分
             # 不需要等回复，而且不改变"要不要回、回什么"。
