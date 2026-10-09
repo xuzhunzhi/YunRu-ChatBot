@@ -47,14 +47,56 @@ MAX_REMIND_EMAILS = 256
 #: 状态文件的版本号（照 `state_store.STATE_VERSION` 的做法：读出来对不上就按空的重来）。
 REMIND_EMAILS_VERSION = 1
 
-#: 相对说法的单位：`20分钟后` / `3小时后` / `2天后` / `半小时后`。
+#: 中文数字（日常说法就这些）→ 数值。`两` 当 2（"两个小时"），`十` 参与组合。
+_CN_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+              "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+_CN_CHARS = "".join(_CN_DIGITS) + "十"
+#: 一个"数"的写法：阿拉伯数字，或中文数字（`五` / `两` / `十五` / `二十五`）。
+_NUMBER = rf"(?:\d+|[{_CN_CHARS}]+)"
+#: 光说这些中文钟点**不认**——日常另有所指（"一点儿"、"两点意见"）。
+#: 用户 2026-10-09 实测报的是"五分钟后"认不出，所以中文数字必须认；
+#: 但认的范围只到"日常说法"，不往自然语言解析器上做。
+_BARE_CN_HOURS_REFUSED = {"一", "两", "二"}
+
+
+def _number(raw: str) -> int | None:
+    """把 `五` / `十五` / `二十五` / `5` 这类写法换成整数；认不出返回 None。
+
+    **只认日常写法**：单个中文数字（含 `两`）、`十`、`十X`、`X十`、`X十Y`（一到九十九）。
+    别的（`五五`、`一百`、`廿`…）一律 None——**宁可不认，也不猜**。
+    """
+
+    text = (raw or "").strip()
+    if not text:
+        return None
+    if text.isascii() and text.isdigit():
+        return int(text)
+    if "十" not in text:
+        return _CN_DIGITS.get(text)
+    head, _, tail = text.partition("十")
+    if "十" in tail:
+        return None                      # "十十"、"二十五十" 这种不认
+    tens = 1 if head == "" else _CN_DIGITS.get(head)
+    ones = 0 if tail == "" else _CN_DIGITS.get(tail)
+    if tens is None or ones is None:
+        return None
+    return tens * 10 + ones
+
+
+#: 相对说法的单位：`20分钟后` / `五分钟` / `半小时后` / `两个小时后` / `3天后` / `两周后`。
 #: **只收这些写法**；"一会儿""晚点""待会儿"一律不认（不猜）。
+#: `分钟` / `小时` 的"后"可以省（它们本身就是时长）；`秒` / `天` / `周` 要带"后"
+#: （光说"两天"多数是"两天没睡了"那种意思，不是时限）。
 _RELATIVE_UNITS: tuple[tuple[re.Pattern[str], float], ...] = (
-    (re.compile(r"(\d+)\s*个?\s*分钟?\s*后"), 60.0),
-    (re.compile(r"(\d+)\s*个?\s*小时\s*后"), 3600.0),
-    (re.compile(r"(\d+)\s*天\s*后"), 86400.0),
+    (re.compile(rf"({_NUMBER})\s*秒\s*后"), 1.0),
+    (re.compile(rf"({_NUMBER})\s*个?\s*分钟\s*后?"), 60.0),
+    (re.compile(rf"({_NUMBER})\s*分\s*后"), 60.0),
+    (re.compile(rf"({_NUMBER})\s*个?\s*小时\s*后?"), 3600.0),
+    (re.compile(rf"({_NUMBER})\s*天\s*后"), 86400.0),
+    (re.compile(rf"({_NUMBER})\s*个?\s*周\s*后"), 7 * 86400.0),
 )
-_HALF_HOUR = re.compile(r"半\s*(?:个)?\s*小时\s*后")
+_HALF_HOUR = re.compile(r"半\s*(?:个)?\s*小时\s*后?")
+_ONE_AND_HALF_HOUR = re.compile(r"(?:一|1)\s*个\s*半\s*小时\s*后?")
 
 #: 日子词 → （往后几天，这个词自带的时间段）。先匹配到的算数（长的写在前面）。
 _DAY_WORDS: tuple[tuple[str, int, str], ...] = (
@@ -68,7 +110,11 @@ _DAYPARTS: tuple[tuple[str, int], ...] = (
     ("中午", 12), ("下午", 12), ("傍晚", 12), ("晚上", 12), ("夜里", 12),
 )
 _CLOCK_HM = re.compile(r"(\d{1,2})\s*[:：]\s*(\d{1,2})")
-_CLOCK_HOUR = re.compile(r"(\d{1,2})\s*点\s*(?:(\d{1,2})\s*分?)?")
+#: 钟点：`8点` / `8点30` / `8点半` / `三点` / `下午三点半` / `明天八点二十`。
+#: 数与单位都可以是中文（用户 2026-10-09 实测："五分钟后"那种说法必须认）。
+_CLOCK_HOUR = re.compile(rf"({_NUMBER})\s*点\s*(?:半|(?:({_NUMBER})\s*分?)?)")
+#: "刻"我们不认（三点一刻 ≠ 3:00）——撞上就不填，别猜。
+_CLOCK_QUARTER = re.compile(r"\s*(?:一|两|二|三|四|半)?\s*刻")
 _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
 
 
@@ -278,8 +324,13 @@ class RemindEmailBook:
             logger.warning("remind_emails_write_failed category=%s", type(exc).__name__)
 
 
-def _clock(body: str) -> tuple[int, int] | None:
-    """取出钟点（小时、分钟）；没有就 None。`20:30` 优先于 `8点`。"""
+def _clock(body: str, *, bare_cn_allowed: bool) -> tuple[int, int] | None:
+    """取出钟点（小时、分钟）；没有就 None。`20:30` 优先于 `8点` / `三点`。
+
+    数与单位都认中文（用户 2026-10-09 实测："五分钟后"这类说法必须认）。
+    `bare_cn_allowed=False` 时**不认光说的中文钟点里的一/两/二**
+    （"一点儿""两点意见"日常另有所指）——带"下午/明天"那种就照认。
+    """
 
     hm = _CLOCK_HM.search(body)
     if hm is not None:
@@ -288,9 +339,24 @@ def _clock(body: str) -> tuple[int, int] | None:
     at = _CLOCK_HOUR.search(body)
     if at is None:
         return None
-    hour = int(at.group(1))
-    minute = int(at.group(2)) if at.group(2) else 0
-    if hour > 23 or minute > 59:
+    raw = at.group(1)
+    if _CLOCK_QUARTER.match(body[at.end():]):
+        return None                      # "三点一刻"：刻不认识，不猜
+    if not bare_cn_allowed and not raw.isascii() and raw in _BARE_CN_HOURS_REFUSED:
+        return None
+    hour = _number(raw)
+    if hour is None or hour > 23:
+        return None
+    raw_minute = at.group(2)
+    if "半" in at.group(0):
+        minute = 30
+    elif raw_minute:
+        minute = _number(raw_minute)
+        if minute is None:
+            return None                  # 分钟位认不出（"十点十十"）→ 整条不认
+    else:
+        minute = 0
+    if minute > 59:
         return None
     return hour, minute
 
@@ -338,11 +404,19 @@ def parse_remind_time(text: str, *, now: float | None = None) -> float | None:
 
     认这几类（其余一律 None——**不猜**）：
 
-    * 相对：`20分钟后` / `3小时后` / `半小时后` / `2天后`；
-    * 带日子：`今天20:30` / `明天8点` / `后天下午3点`；
+    * 相对：`20分钟后` / `五分钟` / `3小时后` / `两个小时` / `半小时后` / `一个半小时后` /
+      `2天后` / `两周后` / `30秒后`（`分钟`/`小时` 的"后"可省，"秒"/"天"/"周"要带）；
+    * 带日子：`今天20:30` / `明天8点` / `后天下午3点` / `明天下午三点`；
     * 只有钟点（可带 `早上|上午|中午|下午|傍晚|晚上|夜里|凌晨`）：取**下一次**这个钟点
       ——今天还没到就今天，已经过了就明天；
-    * `今晚8点` / `明晚8点` 这类说法同上（日子词自带时间段）。
+    * `今晚8点` / `明晚8点` / `今晚八点` 这类说法同上（日子词自带时间段）。
+
+    **数与单位都认中文**（`一二三四五六七八九十` / `两` / `十` / `十五` / `二十五`）：
+    这是 2026-10-09 用户实测报的问题——他说"**五分钟后**提醒我给 dsh 反馈插件运行情况"，
+    而那时候只有阿拉伯数字能认。**只认日常说法，不做自然语言解析器**：
+    `五五` / `一百` / `廿` 这种一律 None；光说的中文钟点里 `一点` / `两点` 也不认
+    （"一点儿"、"两点意见"日常另有所指），要说得上"三点"这种或者带上时间段；
+    `三点一刻` 的"刻"不认。
 
     **带日子却已经过去**（例如 21:00 时说"今天20:30"）→ None：那是说不清，不是"改天"。
     **没有钟点**（只说"明天提醒我"）→ None：一整天都算"到点"等于没说。
@@ -357,21 +431,28 @@ def parse_remind_time(text: str, *, now: float | None = None) -> float | None:
     tz = dev_config.local_timezone()
     base = datetime.fromtimestamp(moment, tz=tz)
 
-    # 1) 相对：`20分钟后` 这一类（`半小时后` 先看，免得被 "半" 后面的数字规则抢走）。
+    # 1) 相对：`20分钟后` 这一类（`一个半小时` / `半小时` 先看，
+    #    免得被 "半" 后面的数字规则抢走）。
+    if _ONE_AND_HALF_HOUR.search(body):
+        return moment + 5400.0
     if _HALF_HOUR.search(body):
         return moment + 1800.0
     for pattern, unit in _RELATIVE_UNITS:
         found = pattern.search(body)
-        if found is not None:
-            return moment + float(found.group(1)) * unit
+        if found is None:
+            continue
+        value = _number(found.group(1))
+        if value is None:
+            continue                     # 数认不出（"五五"）→ 当没这条，接着试别的
+        return moment + float(value) * unit
 
     # 2) / 3) 钟点（必须给钟点；只给"明天"不算）。
-    clock = _clock(body)
+    day = _day(body)
+    daypart = _daypart(body, day[1] if day is not None else "")
+    clock = _clock(body, bare_cn_allowed=(day is not None or daypart is not None))
     if clock is None:
         return None
     hour, minute = clock
-    day = _day(body)
-    daypart = _daypart(body, day[1] if day is not None else "")
     hour24 = _hour_24(hour, daypart)
     if hour24 is None:
         return None
