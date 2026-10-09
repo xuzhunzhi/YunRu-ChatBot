@@ -1230,6 +1230,11 @@ class DialogueEngine:
         #: 同一个人**上一次交给插件**是什么时候（墙上钟）——频次兜底用，
         #: 闸门见 `dev_config.remind_min_interval_seconds()`。
         self._remind_last_handover: dict[str, float] = {}
+        #: 同一个人**上一次真正交给插件的收法**（`group`/`private`/`email`）：
+        #: "等渠道"等超时时按他上次用过的那种办（见 `_expire_remind_channel_wait`）。
+        self._remind_last_channel: dict[str, str] = {}
+        #: 一个人**从什么时候开始**在等"怎么收"（墙上钟）：超时兜底用，交出去就清掉。
+        self._remind_ask_since: dict[str, float] = {}
         #: 按人记住的"**以后都这么干**"那种收法（只有他明说过才写，见 `_remember_remind_channel`）。
         #: **普通选一次不写这里**——用户 2026-10-09 的规矩是"每一次都问，除非说以后都这么干"。
         self._remind_channel_pref: dict[str, str] = {}
@@ -1650,6 +1655,14 @@ class DialogueEngine:
                 logger.info("Stage 3 remind: 他要改收法，可没有待发的提醒 session=%s",
                             message.session_id)
                 return
+            if self._remind_asks.get(message.user_id) is not None \
+                    and not self._remind_asks[message.user_id].channel:
+                # **已经在等"怎么收"了**：这一轮别再让她问几点（时间早就有了），
+                # 由 `_remind_ask_note` 那句"必须问清怎么叫他"来说——实测那条链就是断在
+                # "只问一轮"上的（2026-10-09："还是没叫我"）。
+                logger.info("Stage 3 remind: 还在等怎么收，这一句不再当新请求 session=%s",
+                            message.session_id)
+                return
             self._note_remind_blocked(message)
             logger.info("Stage 3 remind: 这一条里没有时间（判定是从老话里翻出来的），不算 session=%s",
                         message.session_id)
@@ -1729,15 +1742,51 @@ class DialogueEngine:
         * **没有待发的提醒** → 返回 False，什么都不做（不报错、不新建）。
         """
 
-        last = self._remind_last_request.get(message.user_id)
-        if last is None or last.channel == chosen:
+        # 要找的是**他最近那一条**：既包括已经交给插件的，也包括**核心自己手里
+        # 还在等收法的那条**（2026-10-09 实测：13:49:10 "他要改收法，可没有待发的提醒"
+        # ——那条正是因为只找插件队列里的，而核心手里那条等渠道的没算进去）。
+        target = (self._remind_asks.get(message.user_id)
+                  or self._remind_last_request.get(message.user_id))
+        if target is None or target.channel == chosen:
             return False
-        updated = replace(last, channel=chosen, forever=False)
+        updated = replace(target, channel=chosen, forever=False)
         self._remind_last_request[message.user_id] = updated
         self._remind_this_time[message.user_id] = (message.message_id, chosen)
         logger.info("Stage 3 remind: 改这一次的收法 → %s session=%s", chosen, message.session_id)
         self._try_hand_over_remind(updated, update=True)
         return True
+
+    def _expire_remind_channel_wait(self, message: IncomingMessage) -> None:
+        """"等他说怎么收"等太久了：**先按他上次用过的收法办，没有就群里 @**。
+
+        由来（2026-10-09 实测"还是没叫我"）：他 13:40 说了"五分钟后提醒我去导员办公室"，
+        而她那一轮没问清收法（她甚至自己默认了群里），这条就一直卡在"等渠道"上、
+        **永远不响**。提醒**迟到总比不到强**：
+
+        * 等过 `dev_config.remind_channel_wait_seconds()`（默认 600 秒），**或者**
+          提醒时刻已经到了（再等就没意义了）→ 就用 `_remind_last_channel` 那种
+          （他上次真用过的），没有就 `"group"`；
+        * **不写进**长期偏好（`_remind_channel_pref`）——下一次照旧每次都问。
+
+        为什么选"上次用过的"而不是一律群里：**群里 @ 会吵到别人**，而他上次自己挑过
+        哪种就说明他更愿意那样收；实在没得挑时才用群里（那也正是他提问的地方，
+        最不容易漏掉——这次的问题就是"一条都没响"）。
+        """
+
+        pending = self._remind_asks.get(message.user_id)
+        if pending is None or pending.channel:
+            return
+        since = self._remind_ask_since.get(message.user_id)
+        if since is None:
+            return
+        now = self.wall_clock()
+        waited = now - since
+        if waited < dev_config.remind_channel_wait_seconds() and now < pending.at:
+            return
+        fallback = self._remind_last_channel.get(message.user_id) or "group"
+        logger.info("Stage 3 remind: 等收法等了 %s 秒还没等到，先按 %s 办 session=%s",
+                    int(waited), fallback, message.session_id)
+        self._try_hand_over_remind(replace(pending, channel=fallback, forever=False))
 
     def _note_remind_blocked(self, message: IncomingMessage) -> None:
         """提醒意图**被闸拦下**时留一句给她（同一轮就用掉，别漏到下一轮）。
@@ -1788,6 +1837,14 @@ class DialogueEngine:
         self._remind_asks[request.person_id] = request
         if len(self._remind_asks) > MAX_REMIND_ASKS:
             self._remind_asks.pop(next(iter(self._remind_asks)), None)
+        # **他最近那一条**在这里也记一份：等收法的那条还没交给插件，"这次群里叫我"
+        # 也得改得到它（2026-10-09 实测那条断链）。
+        self._remind_last_request[request.person_id] = request
+        if len(self._remind_last_request) > MAX_REMIND_ASKS:
+            self._remind_last_request.pop(next(iter(self._remind_last_request)), None)
+        if not request.channel:
+            # 从这一刻起在"等怎么收"——超时兜底按这个时刻算（见 `_expire_remind_channel_wait`）。
+            self._remind_ask_since.setdefault(request.person_id, self.wall_clock())
 
     def _try_hand_over_remind(self, request: RemindRequest, *, update: bool = False) -> None:
         """**值齐了才交给插件**；不齐就留在待办里，由 `_remind_ask_note` 让她自己问。
@@ -1827,7 +1884,12 @@ class DialogueEngine:
         self._remind_last_handover[request.person_id] = now
         if len(self._remind_last_handover) > MAX_REMIND_ASKS:
             self._remind_last_handover.pop(next(iter(self._remind_last_handover)), None)
+        # 真正交出去了：记住**这一次用的收法**（等渠道超时时按它办），并清掉"在等多久"。
+        self._remind_last_channel[request.person_id] = request.channel
+        if len(self._remind_last_channel) > MAX_REMIND_ASKS:
+            self._remind_last_channel.pop(next(iter(self._remind_last_channel)), None)
         self._remind_asks.pop(request.person_id, None)
+        self._remind_ask_since.pop(request.person_id, None)
         self._hand_over_remind(request)
 
     def _hand_over_remind(self, request: RemindRequest) -> None:
@@ -1894,7 +1956,9 @@ class DialogueEngine:
         1. **这一轮的提醒被闸拦下了** → 让她问一句几点，**别自己先许一个时间**
            （2026-10-09 实测：闸拦对了，可没告诉她，于是她照旧答应"一点四十叫你"，
            而 13:40 什么都不会发生——比刷屏更该修）；
-        2. 还没问清怎么收 → 三个选项让她问（**每次都问**，除非他早说过"以后都这么干"）；
+        2. 还没问清怎么收 → 三个选项让她问（**每次都问**、**每一轮都出**，直到问出来；
+           除非他早说过"以后都这么干"）——措辞要"必须问"一点：2026-10-09 实测里
+           她直接跳过这句、自己默认了群里，于是那条**永远不响**（"还是没叫我"）；
         3. 选了邮箱还没有邮箱 → 问邮箱（地址是**一次性**给的，不受"每次都问"那条影响）；
         4. 他刚说**这次**改收法 → 让她应一句"**这次**在群里 @ 他"这种（与"以后都"分开）；
         5. 他刚说**以后都这么干** → 让她应一句"**以后都这么办**"，把话说明白；
@@ -1910,8 +1974,11 @@ class DialogueEngine:
         restate = self._remind_restate.pop(message.user_id, None)
         pending = self._remind_asks.get(message.user_id)
         if pending is not None and not pending.channel:
-            return ("（他刚让你到点提醒他一件事，你还没问清他想怎么收到——在群里 @ 他、"
-                    "私聊他、还是寄到他邮箱？这轮顺口问一句就行。）\n")
+            # **必须问出来**：这句每一轮都会出现，直到他说清怎么收——别跳过去自己定
+            # （2026-10-09 实测：她一跳过，那条提醒就永远不响）。
+            return ("（他要你到点提醒他一件事，**怎么叫他还没问清**——这一轮必须问出来："
+                    "在群里 @ 他、私聊他、还是寄到他邮箱？问清之前先别答应时间、"
+                    "也别自己挑一种。）\n")
         if pending is not None and pending.channel == "email" and not pending.email:
             return "（他刚让你到点提醒他一件事，可你手上还没有他的邮箱——这轮顺口问一句就行。）\n"
         if this_time is not None and this_time[0] == message.message_id:
@@ -4709,6 +4776,9 @@ class DialogueEngine:
         # 他给（上一轮认到提醒但没值），就在这里收下来——记进记忆（按人）+ 补交那条待办。
         # 放在判定之前：他这一句常常就是"我的邮箱是 x@y"，判定很可能判 NO_REPLY。
         self._take_remind_email(message)
+        # "等他说怎么收"等太久了就先按上次那种办（2026-10-09："还是没叫我"——
+        # 那条一直卡在等渠道上、永远不响）。放在拼回复 prompt 之前：这一轮就生效。
+        self._expire_remind_channel_wait(message)
         # 双 agent 结构：先由判定 agent 决定"要不要接"。它的 prompt 与窗口都小得多，
         # 所以这次调用便宜；判定说 NO_REPLY 就直接结束，省掉回复那一次完整调用。
         if self._judge_on(message.session_id):

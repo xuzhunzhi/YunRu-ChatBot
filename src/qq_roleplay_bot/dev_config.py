@@ -374,6 +374,22 @@ def remind_min_interval_seconds() -> int:
     return _int_clamped("QQBOT_REMIND_MIN_INTERVAL_SECONDS", 300, 0, 3600)
 
 
+def remind_channel_wait_seconds() -> int:
+    """"等他说怎么收"最多等多久（`QQBOT_REMIND_CHANNEL_WAIT_SECONDS`，默认 **600**，
+    夹在 60..86400）。
+
+    由来（2026-10-09 实测"还是没叫我"）：他 13:40 说了"五分钟后提醒我去导员办公室"，
+    可她那一轮**没问清收法**（还自己默认了群里），这条就一直卡在"等渠道"上、
+    **永远不响**。提醒**迟到总比不到强**：等过这么久（或者提醒时刻已经到了）就先按
+    **他上次用过的那种收法**办，实在没有就 **群里 @**——而且**不写进**长期偏好，
+    下一次照旧每次都问。
+
+    下限 60 秒：不许配成"永远不等"（那就又变成一条都不响了）。**调用时现读**。
+    """
+
+    return _int_clamped("QQBOT_REMIND_CHANNEL_WAIT_SECONDS", 600, 60, 86400)
+
+
 def groups_cache_seconds() -> int:
     """面板那份**群列表**缓多久（`QQBOT_GROUPS_CACHE_SECONDS`，默认 **600**，夹在 0..86400）。
 
