@@ -248,6 +248,7 @@ confidence=0到1之间的小数
 - **`/super restart` 是固定路径、无参数的重启**：引擎只立一个意图标记（`consume_restart_request`），由 `runtime` 在**回复发出去之后**执行——先落盘、关传输层（8080 得先松开，否则新进程撞端口），再 `os.execv` 换进程。它不接参数、不拼命令、不经过 shell；`-m` 启动的按模块名重启（`restart_argv`），不写死 stage3，两个阶段共用同一套。端到端演练见 `data/dryrun_restart_test.py`（另一个端口、另一个数据目录，不碰线上实例）。
 - 聊天内容会被当作不可信 DATA 放入明确边界中，不能改变 system prompt 或 XML 协议。
 - `sanitize_chat_text` 移除控制字符并限制单条输入；`sanitize_reply_text` 清理协议标签并把出站正文限制为 1000 字符。
+- **出站正文的保守净化**（2026-10-09）：`security.scrub_outbound_tags` 在正文**送出去之前**剥掉"孤立的标签片段"（用户实测一条尾巴上挂着 `</parameter>`——模型吐了半截工具调用那种 XML）。判据是**只剥按名字认得出来的**标签：我们自己的信封（`reply` / `dialogue` / `decision` / `topic` / `guard` / `remind` …，名单见 `security.OUTBOUND_TAG_NAMES`）与模型侧工具调用那一族（`TOOL_CALL_TAG_NAMES`）；名字认不出来就一个字都不动，所以她聊代码写 `<div>`、写数学 `a<b` 都不会被切掉。剥掉时记 `reply_tags_scrubbed`（进 snapshot 与 `/super status`）并打一行 WARNING（只写标签名，不写正文）。
 - 公开命令只有两个，都在任何过滤之前处理、都不调用模型也不读写记忆：健康检查 `/yunru ping`（另一种是 @ 她 + `ping`；**裸 `ping`、`/ping`、`!ping`、`ping?`、`yunru 在吗` 都不再匹配**）与 `/help`。帮助的别名是**闭包式**的（2026-09-28，用户"总记不得要不要加 yunru"）：`/help`、`#help`、`/ yunru`、`/yunru`、`yunru help`、`/yunru help`、`#yunru 帮助`、`YUNRU HELP` 全算，判据是 `HELP_COMMAND_PATTERN`（斜杠与 `yunru` 都可选，但**裸 `help` 不算命令**，否则会把"help me""请帮助我"这类聊天吞掉）。两者都只经过消息去重，因此重复事件不会重复回复。
 - 命令插件同样受会话闸门约束：`/balance` 是插件，但默认只允许超管私聊（`session_allowed` 对未配置的会话一律返回 False，属 fail-closed），也不出现在公开帮助里。
 - 疑似 ping 但未匹配的消息会记 INFO 日志（`ping-like message not matched` / `ignored by session filter`），用于区分"消息没收到"和"收到了但被当成普通聊天"。

@@ -103,6 +103,10 @@ class EngineSnapshot:
     # 于是这一条没发出去"的次数（fail-closed）。只有计数，**不含短码、不含正文**。
     data_marker_retries: int = 0
     data_marker_drops: int = 0
+    # 出站正文里剥掉的**孤立标签片段**个数（2026-10-09）：模型吐了半截协议 XML，
+    # 收尾标签（`</parameter>` 那种）留在正文里，会在送出去之前被剥掉并记在这里。
+    # 只有计数：**不记正文**，日志里也只有标签名。
+    reply_tags_scrubbed: int = 0
     # 当前当值状态：热群、当值多久、排队深度。只有数字与群号，没有正文。
     focus: dict[str, object] | None = None
     memory: dict[str, object] | None = None

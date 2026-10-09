@@ -93,6 +93,9 @@ from .security import (
     # 既有的调用方与测试仍然 `from .stage3_main import privileged_command_level`。
     privileged_command_level,
     sanitize_chat_text,
+    # 出站正文的**保守净化**（2026-10-09）：在正文送出去之前剥掉"孤立的标签片段"。
+    # 定义在 `security.py`：它属于"发出去的那串字"这一层，不属于对话判定。
+    scrub_outbound_tags,
 )
 from .snapshots import EngineSnapshot, SessionSnapshot
 from .metrics import RuntimeMetrics, process_memory_bytes
@@ -1356,6 +1359,10 @@ class DialogueEngine:
             # "重写又抄、于是这一条没发出去"的次数（fail-closed）。
             # 只有计数：**不记短码、不记正文**。
             "data_marker_retries", "data_marker_drops",
+            # 出站正文里剥掉的**孤立标签片段**（2026-10-09 用户实测 `</parameter>`）：
+            # 模型吐了半截协议/工具调用 XML，收尾标签留在正文里被发了出去。
+            # 计的是**剥掉的标签个数**，日志里只写标签名——**不记正文**。
+            "reply_tags_scrubbed",
             # 判定/回复这两条路的模型调用失败（2026-10-08，失败降级审计 1）：失败时
             # **照样沉默**（那是刻意的，测试钉着），但"她突然不说话"必须看得见——
             # 只有计数与"连续几次"，没有正文。
@@ -3517,6 +3524,13 @@ class DialogueEngine:
             )
         if snapshot.empty_forced_reply:
             lines.append(f"异常：判定说要回但回复空手 {snapshot.empty_forced_reply} 次")
+        # 出站正文里剥掉的孤立标签片段（2026-10-09）：她在群里看不见它们了，
+        # 但"模型又开始吐半截协议标签"这件事必须看得见——长期非零说明模型侧在退化。
+        if snapshot.reply_tags_scrubbed:
+            lines.append(
+                f"出站净化：剥掉孤立标签片段 {snapshot.reply_tags_scrubbed} 个"
+                "（正文已经发出去了，只是没有那几个尾巴）"
+            )
         # 一轮超过总预算（2026-10-08 失败降级审计 2）：主循环串行，这条就是
         # "为什么刚才整个 bot 都不理人"的出口——一条消息卡住最长多久有上界了。
         # 历史照留，所以"她不知道发生过"不成立；这里说明的是"这一条没回复"。
@@ -5088,6 +5102,27 @@ class DialogueEngine:
                     "session=%s trigger=%s chars=%s",
                     message.session_id, trigger_kind, len(decision.text))
                 decision = replace(decision, text="")
+        # 「孤立的标签片段」那一关（**最后一道，只动发出去的那串字**）。
+        #
+        # 由来（2026-10-09 用户实测，有原文）：群里收到的一条正文尾巴上挂着
+        # `</parameter>`——模型那一轮吐了半截工具调用那种 XML，解析只取到了前面的
+        # 正文，收尾标签留在了正文里，跟着发了出去（400 条里 1 条，罕见但看得见）。
+        #
+        # 判据刻意保守（`security.scrub_outbound_tags`）：**只剥按名字认得出来的**
+        # 标签——我们自己的信封与模型侧工具调用那一族；名字认不出来就一个字都不动。
+        # 所以她聊代码写 `<div>`、写数学 `a<b>` 都不许被这里切掉。
+        #
+        # 位置：在**任何一次重写之后**、在写历史 / 写记忆 / 分段发送之前——
+        # 于是历史里记的是净化后的正文，模型下一轮不会再看到那半截标签；
+        # 判定要不要说、说什么、引用哪一句，一个都不受影响（只换那一串字）。
+        scrubbed = scrub_outbound_tags(decision.text)
+        if scrubbed.removed:
+            self._stats["reply_tags_scrubbed"] += len(scrubbed.removed)
+            logger.warning(
+                "Stage 3 reply carried protocol tag fragments; stripped before send: "
+                "session=%s trigger=%s tags=%s",
+                message.session_id, trigger_kind, ",".join(scrubbed.removed))
+            decision = replace(decision, text=scrubbed.text)
         self.metrics.record_decision(decision.kind.value)
         logger.info(
             "Stage 3 decision: session=%s trigger=%s kind=%s dialogue=%s reply_length=%s "

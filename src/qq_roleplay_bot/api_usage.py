@@ -43,6 +43,9 @@ COUNTER_NAMES = (
     # 被打回重写一次"的条数；`data_marker_drops` 是"重写又抄、于是这一条没发出去"的条数。
     # 两者都只记数，**不记短码、不记正文**。
     "data_marker_retries", "data_marker_drops",
+    # 出站正文里剥掉的孤立标签片段（`security.scrub_outbound_tags`，2026-10-09）：
+    # 模型吐了半截协议/工具调用 XML，收尾标签本来会跟着正文发到群里。只记数。
+    "reply_tags_scrubbed",
 )
 
 
