@@ -1254,10 +1254,14 @@ class PersonRecordsTests(unittest.TestCase):
         self.assertIsNotNone(picked, "类别那一段找不到")
         self.assertIn("state.last.profileKind = el.dataset.kind", picked.group(1),
                       "点类别没有换挑选项")
-        self.assertIn("profilePaint", picked.group(1), "点类别没有原地重画")
+        # **原地重画优先**：`render()` 只许当"画法装不上"时的退路，而且要排在重画**之后**
+        # （这跟 `rememberPerson` 那条同一条规矩：先重画，装不上才整页）。
+        self.assertIn("profilePaint(state.last.profileKey)", picked.group(1),
+                      "点类别没有原地重画")
         self.assertNotIn("api(", picked.group(1), "点类别去取数了")
-        # `render()` 也是取数路径（整页重来）——跟重画那一段同一条规矩：一起禁掉。
-        self.assertNotIn("render(", picked.group(1), "点类别去整页重画（= 又取数）了")
+        self.assertLess(picked.group(1).index("profilePaint(state.last.profileKey)"),
+                        picked.group(1).index("render();"),
+                        "顺序反了：先整页 render 再重画（那还是刷新）")
 
     def test_long_content_is_clamped_until_you_open_it(self) -> None:
         block = _uncomment(_function_body(self.js, "personBlock"))
