@@ -189,7 +189,8 @@ def test_the_email_is_captured_into_memory_and_then_handed_over() -> None:
 def test_a_later_remind_reuses_the_remembered_email() -> None:
     handed: list[RemindRequest] = []
     engine, _, _, _ = _engine(handed.append)
-    with patch.dict(os.environ, TZ):
+    # 这一条测的是"邮箱复用"，不是频次闸（闸有自己的测试）——把它关掉，别让两件事混在一起。
+    with patch.dict(os.environ, {**TZ, "QQBOT_REMIND_MIN_INTERVAL_SECONDS": "0"}):
         asyncio.run(engine.handle(_message(1, "@YunRu 明天8点提醒我交作业")))
         asyncio.run(engine.handle(_message(2, "lele@example.com")))
         asyncio.run(engine.handle(_message(3, "@YunRu 后天9点提醒我开会")))

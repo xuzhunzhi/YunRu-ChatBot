@@ -359,6 +359,21 @@ def turn_timeout_seconds() -> float:
     return _float_clamped("QQBOT_TURN_TIMEOUT_SECONDS", 90.0, 5.0, 600.0)
 
 
+def remind_min_interval_seconds() -> int:
+    """同一个人**两次提醒投递**之间至少隔多少秒（`QQBOT_REMIND_MIN_INTERVAL_SECONDS`，
+    默认 300，夹在 0..3600）。**0 = 关掉这道闸**。
+
+    这是"她刷屏"那条的最后一道兜底（2026-10-09 用户实测：5 分钟里发了 5 条
+    `@某人 到点了：…`）。前面两条是"归一化去重"与"她自己的发言不算请求"；
+    这一条只管**频次**，所以就算那两条漏了也不会刷屏。
+
+    **调用时现读**（与 `turn_timeout_seconds` / `persona_offset_hours` 同一条纪律）：
+    改配置不必重启；坏值回落默认、越界夹取（照 `memory_config` 的写法）。
+    """
+
+    return _int_clamped("QQBOT_REMIND_MIN_INTERVAL_SECONDS", 300, 0, 3600)
+
+
 # --- 记忆库那张"只增"的关系流水的保留期（2026-10-08 隔离增长审计 [8]）--------
 # `relationship_log`（好感/关系的每一次变动）从前**没有任何保留期**，只增不减。
 # 它同时是**关系数据**，所以清理必须保守：只按时间删**旧行**，近期一行都不动，

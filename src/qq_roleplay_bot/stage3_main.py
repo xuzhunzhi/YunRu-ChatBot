@@ -59,6 +59,7 @@ from .remind import (
     find_email,
     parse_remind_time,
     remind_channel,
+    remind_key,
 )
 from .trigger import IdleTrigger, MessageDeduplicator
 from .stage3_runtime import (
@@ -1215,11 +1216,14 @@ class DialogueEngine:
         #: `RemindRequest`，没有任何读回记忆的口子。
         self._remind_emails: RemindEmailBook = RemindEmailBook()
         self._remind_asks: dict[str, RemindRequest] = {}
-        #: "这件事刚认过"：`(人, 事情)` → 过期时刻（墙上钟）。**同一件事只办一次**——
+        #: "这件事刚认过"：`(人, 归一化的事情)` → 过期时刻（墙上钟）。**同一件事只办一次**——
         #: 判定每轮都读得到窗口里那句老话，于是同一句提醒会被反复认出来
-        #: （2026-10-09 用户实测：连记 5 次待办、插件那边生成了两条提醒）。
+        #: （2026-10-09 实测两次：连记 5 次待办 + 两条提醒；5 分钟里刷 5 条）。
         #: 窗口见 `remind.REMIND_DEDUPE_WINDOW_SECONDS`，上限见 `MAX_REMIND_SEEN`。
         self._remind_seen: dict[tuple[str, str], float] = {}
+        #: 同一个人**上一次交给插件**是什么时候（墙上钟）——频次兜底用，
+        #: 闸门见 `dev_config.remind_min_interval_seconds()`。
+        self._remind_last_handover: dict[str, float] = {}
         # 金句学习学出来的那份**材料**（`quote_learning.QuoteProfile`，可选）。
         # 它只是"读一份本地 JSON 挑几条"，**热路径上一次模型调用都没有**；
         # 关掉开关或没有材料时回复 prompt 与改动前**逐字相同**（有测试钉住）。
@@ -1593,7 +1597,25 @@ class DialogueEngine:
         intent = getattr(verdict, "remind", None)
         if intent is None:
             return
-        at = parse_remind_time(intent.time_text, now=self.wall_clock())
+        # **只认"这一轮真正的用户消息"**（2026-10-09 用户实测，她刷屏那次的主因）：
+        # 她自己发出去的那句"@某人 到点了：给dsh做插件使用反馈"会被 QQ 回显成一条消息，
+        # 而判定读的是整段谈话——于是"有人让你提醒"在她自己的话里又成立了一次，
+        # 又排一条，循环。**判定模型那侧一个字没改**（它照旧读整段、照旧可能报提醒），
+        # 是**核心**在这里不采信"机器人自己说的话"作为提醒请求。
+        if message.is_bot_message:
+            logger.info("Stage 3 remind: 这是她自己发的话，不当作请求 session=%s",
+                        message.session_id)
+            return
+        now = self.wall_clock()
+        # **时间必须出自"他这一条"**（2026-10-09 她刷屏那次加的第二道）：判定读的是整段
+        # 谈话，她发出去的那句"到点了：…"也在里面，于是"有人让你提醒"在**老话**上又成立了一次。
+        # 所以这里要求**当前这条消息自己带一个认得出的时间**——老话里翻出来的不算。
+        # （判定那侧一个字没改：它照旧读整段、照旧可能报提醒；采信与否是核心的事。）
+        if parse_remind_time(message.text or "", now=now) is None:
+            logger.info("Stage 3 remind: 这一条里没有时间（判定是从老话里翻出来的），不算 session=%s",
+                        message.session_id)
+            return
+        at = parse_remind_time(intent.time_text, now=now)
         if at is None:
             logger.info(
                 "Stage 3 remind: 时间说不清，这一句当普通聊天 session=%s", message.session_id)
@@ -1601,23 +1623,23 @@ class DialogueEngine:
         channel = remind_channel(intent.channel)
         email = self._remind_emails.get(message.user_id)
         pending = self._remind_asks.get(message.user_id)
-        now = self.wall_clock()
-        # **同一件事只办一次**（2026-10-09 用户实测：同一句提醒被每一轮重新认出来——
-        # 核心连记 5 次待办、插件那边生成了**两条**提醒）。去重键是 `(人, 事情)`：
-        # 那两条提醒正是"同一个 what、不同的 at"（一次时间不对、一次 +5 分钟），
-        # 所以带绝对时刻的键**拦不住**它；而重复的来源本来就是"窗口里那句老话"。
-        key = (message.user_id, intent.what)
+        # **同一件事只办一次**（2026-10-09 实测两次：第一次是"连记 5 次待办 + 两条提醒"，
+        # 第二次是"她刷屏 5 条"）。键是 `(人, 归一化之后的事情)`——比**原文**比不出来：
+        # 她每次写法都略不同（空格/标点/全角半角），归一化之后才是同一把键。
+        key = (message.user_id, remind_key(intent.what))
         hot = self._remind_seen.get(key, 0.0) > now
-        if hot and not (pending is not None and pending.what == intent.what):
+        same_pending = pending is not None and pending.key == key[1]
+        if hot and not same_pending:
             logger.info("Stage 3 remind: 同一件事已经认过，跳过重复 session=%s",
                         message.session_id)
             return
         if not hot:
             self._remember_remind_seen(key, now)
-        if pending is not None and pending.what == intent.what:
-            # **同一件事**：把这一轮读到的新东西并进去（他可能这一轮才说清怎么收、
-            # 或者时间说法更准了），**不新开一条**——这就是"只记一次待办"。
-            request = replace(pending, at=at, channel=channel or pending.channel, email=email)
+        if same_pending:
+            # **同一件事**：把这一轮读到的新东西并进去（他改了口 = 改时间 / 改事 / 才说清
+            # 怎么收），**不新开一条**——这就是"只记一次待办"，也是"改口就更新那一条"。
+            request = replace(pending, at=at, channel=channel or pending.channel, email=email,
+                              what=intent.what)
             changed = request != pending
         else:
             request = RemindRequest(
@@ -1627,6 +1649,7 @@ class DialogueEngine:
                 at=at,
                 what=intent.what,
                 email=email,
+                key=key[1],
                 channel=channel,
             )
             changed = True
@@ -1637,10 +1660,11 @@ class DialogueEngine:
         self._try_hand_over_remind(request)
 
     def _remember_remind_seen(self, key: tuple[str, str], now: float) -> None:
-        """记下"这件事刚认过"（`(人, 事情)` → 过期时刻），顺手清掉过期的、并加上限。
+        """记下"这件事刚认过"（`(人, 归一化的事情)` → 过期时刻），清过期的、加上限。
 
-        窗口是 `remind.REMIND_DEDUPE_WINDOW_SECONDS`（10 分钟）：够盖住一轮对话里的反复
-        识别，又不会把"过一阵子又提同一件事"挡掉——那种是真新请求。
+        窗口是 `remind.REMIND_DEDUPE_WINDOW_SECONDS`（**60 分钟**，2026-10-09 第二版：
+        她刷屏那次是 5 分钟里发了 5 条，10 分钟不够盖住）。"改口换个时间"不再靠窗口兜——
+        那种由"同一把 key 交过去 = 更新那一条"解决。
         """
 
         expired = [item for item, until in self._remind_seen.items() if until <= now]
@@ -1679,6 +1703,20 @@ class DialogueEngine:
             logger.info("Stage 3 remind: 他想收邮箱、可邮箱还没有，先不交给插件 session=%s",
                         request.session_id)
             return
+        # **频次兜底**（2026-10-09 她刷屏那次加的第三道闸）：同一个人两次交给插件之间
+        # 至少隔 `dev_config.remind_min_interval_seconds()`（默认 300 秒，**调用时现读**；
+        # 0 = 关掉）。前面两道（归一化去重、她自己的发言不算）万有一漏，也不会刷屏。
+        now = self.wall_clock()
+        last = self._remind_last_handover.get(request.person_id, 0.0)
+        floor = dev_config.remind_min_interval_seconds()
+        if floor > 0 and now - last < floor:
+            logger.info(
+                "Stage 3 remind: 距上一条只过了 %s 秒（闸 %s 秒），这一条先不交 session=%s",
+                int(now - last), floor, request.session_id)
+            return
+        self._remind_last_handover[request.person_id] = now
+        if len(self._remind_last_handover) > MAX_REMIND_ASKS:
+            self._remind_last_handover.pop(next(iter(self._remind_last_handover)), None)
         self._remind_asks.pop(request.person_id, None)
         self._hand_over_remind(request)
 

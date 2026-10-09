@@ -32,6 +32,7 @@ import os
 import re
 import tempfile
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -46,14 +47,26 @@ MAX_REMIND_EMAILS = 256
 
 #: "同一件事"在多长时间里**只办一次**（秒）。
 #:
-#: 2026-10-09 用户实测（富哥之家）：同一句提醒请求被**每一轮**重新认出来——核心连记 5 次
-#: 待办、插件那边**生成了两条提醒**（一次时间不对、一次是 +5 分钟）。重复来自"那句话还在
-#: 判定读得到的窗口里"。10 分钟够盖住一轮对话里的反复识别，又不会把"过一阵子又提同一件事"
-#: 挡掉（那才是真新请求）。
-REMIND_DEDUPE_WINDOW_SECONDS = 600
+#: 2026-10-09 用户实测（富哥之家，第一次）：同一句提醒请求被**每一轮**重新认出来——核心
+#: 连记 5 次待办、插件那边**生成了两条提醒**（一次时间不对、一次是 +5 分钟）。重复来自
+#: "那句话还在判定读得到的窗口里"。
+#:
+#: 2026-10-09 **第二版**（她刷屏那次）：她自己的"到点了：…"又被当成新请求，5 分钟里发出
+#: 5 条（`remind_sent` 五次）。那一版的窗口是 10 分钟、而且比的是**原文**——她每次写法
+#: 略不同就比不出来了。现在：比**归一化**之后的键（`remind_key`），窗口放到 **60 分钟**
+#: （"改口换个时间/换件事"由"同一把 key 交过去 = 更新那一条"解决，不再靠窗口兜住）。
+REMIND_DEDUPE_WINDOW_SECONDS = 3600
 
 #: 上面那张"已经认过的同一件事"表最多几行（超出淘汰最旧的一条）。
 MAX_REMIND_SEEN = 256
+
+#: 同一个人**两次交给插件**之间至少隔多少秒（`QQBOT_REMIND_MIN_INTERVAL_SECONDS`，
+#: 默认 300，夹在 0..3600）。**最后一道兜底**：前面两条（归一化去重、她自己的发言不算）
+#: 万一漏了也不刷屏。**0 = 关掉这道闸**。
+#:
+#: 代价说清：同一个人 5 分钟内**两件真正不同的事**（"8点交作业" + "9点开会"）只会办第一条，
+#: 第二条当场丢掉（日志里留一行）。保守值取在"刷屏那次是 60 秒一条"之上。
+REMIND_MIN_INTERVAL_DEFAULT = 300
 
 #: 判定给的"他想怎么收"（1/2/3）→ 核心这边的话。
 #: 词与投递那条 `RemindDelivery.channel` 对齐（`group` / `private`），第三档是邮箱。
@@ -166,6 +179,10 @@ class RemindRequest:
     at: float
     what: str
     email: str = ""
+    #: **这一条的身份**：归一化之后的"事情"（`remind_key`）。插件拿它**按人比对**——
+    #: 同一把 key 再交过来 = 他**改口**了（改时间 / 改事），应当是**更新那一条还没发的**，
+    #: 而不是在队列里再加一条（2026-10-09 用户实测：她刷屏那 5 条就是"新增"堆出来的）。
+    key: str = ""
     #: 他想**怎么收到**这条提醒：`"group"`（群里 @ 他）/ `"private"`（私聊）/ `"email"`（寄邮箱）。
     #: 留空串 = **还没问清**——那种情况下核心**不把请求交给插件**（先让她自己问一句，
     #: 见 `DialogueEngine._try_hand_over_remind`）。2026-10-09 用户实测那条"乱"就是这么来的：
@@ -226,6 +243,20 @@ def remind_channel(raw: str) -> str:
         if word is not None:
             return word
     return ""
+
+
+def remind_key(what: str) -> str:
+    """把"事情"归一化成一把**稳定的键**（去空白与标点、全角转半角、英文小写）。
+
+    为什么需要它（2026-10-09 用户实测，她刷屏那次）：她自己的"到点了：给dsh做插件使用
+    反馈"被每一轮重新当成新请求，而**每次写法都略有不同**（多一个空格、多一个标点、
+    全角半角混着）——比原文就比不出来，于是排了一条又一条。归一化之后它们是同一把键。
+
+    只做"字形归一"，**不做语义**：多一个字/少一个字仍是两把键（那种由窗口与频次兜底）。
+    """
+
+    text = unicodedata.normalize("NFKC", str(what or "")).casefold()
+    return "".join(char for char in text if char.isalnum())
 
 
 def state_persistence_enabled() -> bool:

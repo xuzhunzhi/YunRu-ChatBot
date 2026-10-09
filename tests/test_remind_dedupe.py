@@ -144,6 +144,7 @@ def test_a_different_thing_is_a_new_request() -> None:
     engine, _ = _engine([_tag("明天8点"), _tag("明天9点", what="开会")], handed, clock)
     with patch.dict(os.environ, TZ):
         asyncio.run(engine.handle(_message(1)))
+        clock.now += 3600          # 过掉频次兜底那道闸（它有自己的测试）
         asyncio.run(engine.handle(_message(2)))
 
     assert [item.what for item in handed] == ["交作业", "开会"]

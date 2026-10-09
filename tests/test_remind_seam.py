@@ -35,7 +35,7 @@ TZ = {"QQBOT_LOCAL_TZ_OFFSET_HOURS": "8"}
 
 #: 插件那一侧只允许看到这几个值（白名单，第 5 条判据）。
 ALLOWED_FIELDS = frozenset({"person_id", "session_id", "group_id", "at", "what", "email",
-                            "channel"})
+                            "key", "channel"})
 
 
 class _RemindJudge:
