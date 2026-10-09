@@ -1334,16 +1334,47 @@ class GroupPageLayoutTests(unittest.TestCase):
         body = self._body()
         self.assertIn("dialogue_on", body, "没有标出「对话」那个状态")
         self.assertIn("memory_on", body, "没有标出「记忆」那个状态")
-        self.assertEqual(body.count("group-badge"), 2, "两个状态没做成两枚徽标")
+        # 2026-10-09：对话那个状态**已经是开关**（用户要"真开关"），所以徽标只剩「记忆」这一枚。
+        self.assertEqual(body.count("group-badge"), 1,
+                         "「记忆」那一枚徽标不在（它只读、只有它能是徽标）")
+        self.assertIn("group-switch", body, "对话那个状态没做成开关")
         # 记忆那个**只读**：这一页不许出现写记忆的入口（面板没有按群开关记忆这回事）。
         self.assertNotIn("memory", body.replace("memory_on", ""),
                          "群聊页出现了碰记忆的入口（那个只有只读的份）")
         self.assertRegex(self.css, r"\.group-badge\s*\{", "徽标没有样式")
 
-    def test_the_dialogue_switch_reuses_the_existing_entry(self) -> None:
-        """「对话」沿用**既有的**开关能力（`group-off`），关着的那几个不另造写入口。"""
+    def test_every_row_has_a_dialogue_switch_on_the_existing_post(self) -> None:
+        """用户 2026-10-09：*"光列出来不设置开关啊…非要设置一个输入群号开启吗"*。
+
+        每一行都要有一个**真开关**，写出去用**既有的** `POST /api/groups`
+        （`write()` 会带 `confirm: true`，那口自带 confirm 校验与审计）——
+        **不新增写入口、也不是两套控件**（原来那颗"关闭"并进同一个开关里）。
+        """
 
         body = self._body()
-        self.assertIn('class="group-off"', body, "对话的开关没有沿用既有入口")
+        self.assertIn("group-switch", body, "每一行没有对话开关")
+        self.assertIn('type="checkbox"', body, "开关不是勾选框那套控件")
+        self.assertIn("row.dialogue_on ? 1 : 0", body, "开关没有记住它原来是开还是关")
+        self.assertIn('row.dialogue_on ? " checked" : ""', body, "开着的那几行没打勾")
+        self.assertNotIn("group-off", body, "旧的「关闭」按钮还在（两套控件）")
         handlers = _uncomment(_function_body(self.js, "bind"))
-        self.assertIn('act("group-off"', handlers, "既有的开关入口不见了")
+        self.assertIn("group-switch", handlers, "开关没有接线")
+        changed = re.search(r'addEventListener\("change", async \(event\) => \{(.*?)\n  \}\);',
+                            handlers, re.S)
+        self.assertIsNotNone(changed, "找不到开关那个 change 委托")
+        inner = changed.group(1)
+        self.assertEqual(inner.count('write("/api/groups"'), 1,
+                         "写出去的不是那条既有 POST（或者不止一处）")
+        self.assertIn("enabled: on", inner, "写出去的开关状态不对")
+        # **失败不翻状态**：把滑块放回原来那一格 + 在行里说一句人话。
+        self.assertIn('box.checked = box.dataset.on === "1"', inner,
+                      "写失败也把状态翻过去了（乐观更新）")
+        self.assertIn("sayInRow", inner, "写失败没有在行里说一句")
+        # **成功只重画那一行**：不整页 render、也不重取整张表。
+        self.assertIn("groupRowPaint", inner, "成功之后没有只重画那一行")
+        self.assertNotIn("render();\n", inner.replace(
+            "if (!(groupRowPaint && groupRowPaint(box.dataset.id, on))) render();", ""),
+            "成功之后还去整页 render 了")
+        self.assertNotIn('api("/api/groups"', inner, "成功之后又去取了一遍整张表")
+        self.assertRegex(self.css, r"\.row-switch\s*\{[^}]*min-height: 44px",
+                         "开关那一块点按区太小")

@@ -1105,6 +1105,20 @@ td .hint { margin: 2px 0 0; }
 .cols-profile td:first-child, .cols-profile th:first-child { padding-left: 2px; }
 .cols-profile td:last-child, .cols-profile th:last-child { padding-right: 2px; text-align: right; }
 
+/* 群聊页那一行的「对话」开关：文字 + 滑块是一个整体（点文字也算点它），
+ * 点按区够大（触屏/平板），滑块沿用全局 `input.switch`（49×28 那一套）。 */
+.row-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding-left: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.switch-text { color: var(--text-3); font-size: 13.5px; }
+.row-say { margin: 4px 0 0; color: var(--danger, #b3261e); }
+
 /* 群聊页：群名当主标题、群号次要位（小字 mono、可复制）、两个状态徽标。
  * 观感与人物画像页同一套：无描边、大圆角、行高松、点按区够大。 */
 .pref-title { font-size: 15.5px; line-height: 1.5; }

@@ -1446,21 +1446,34 @@ async function viewGroup() {
   // 只读窄接缝，**不是**"开过对话的群"（那是 `enabled_group_ids`，只列一部分）。
   // 每行：**群名当主标题**、群号放次要位（小字 mono，可复制）、两个状态徽标。
   const groupData = await api("/api/groups");
-  const groups = (groupData.rows || []).map((row) =>
-    prefRow(
-      `<div class="pref-title">${esc(row.name || `群 ${row.id}`)}</div>` +
-      `<div class="pref-summary"><code class="copyable mono">${esc(row.id)}</code>` +
-      `<span class="group-badge${row.dialogue_on ? " on" : ""}">对话${
-        row.dialogue_on ? "开" : "关"}</span>` +
-      // 记忆那个**只读**：面板现在没有按群开关记忆的入口，所以只显示、不给按钮。
-      `<span class="group-badge${row.memory_on ? " on" : ""}">记忆${
-        row.memory_on ? "开" : "关"}</span></div>`,
-      // 对话那个**沿用现有的开关能力**（`group-off` 那条既有入口）；关着的不在这里
-      // 另造一个"开启"按钮——页面上本来就有开启的入口。
-      row.dialogue_on
-        ? `<button class="group-off" data-id="${esc(row.id)}">关闭</button>`
-        : "",
-      { icon: "group" })).join("");
+  const groupRows = groupData.rows || [];
+  // 每一行：**群名当主标题**、群号在次要位（可复制）、「**对话**」一个**真开关**、
+  // 「记忆」只读徽标。开关调的是**既有的** `POST /api/groups`（那口自带 confirm 校验
+  // 与审计），不新增任何写入口。
+  const groupRow = (row) => prefRow(
+    `<div class="pref-title">${esc(row.name || `群 ${row.id}`)}</div>` +
+    `<div class="pref-summary"><code class="copyable mono">${esc(row.id)}</code>` +
+    // 记忆那个**只读**：面板没有按群开关记忆的接缝，所以只显示、不给控件。
+    `<span class="group-badge${row.memory_on ? " on" : ""}">记忆${
+      row.memory_on ? "开" : "关"}</span></div>`,
+    `<label class="row-switch" title="这个群的对话开关">
+       <span class="switch-text">对话</span>
+       <input class="switch group-switch" type="checkbox" data-id="${esc(row.id)}"
+         data-on="${row.dialogue_on ? 1 : 0}"${row.dialogue_on ? " checked" : ""}
+         aria-label="群 ${esc(row.id)} 的对话开关"></label>`,
+    { icon: "group" });
+  const groups = groupRows.map(groupRow).join("");
+  // 成功改完一个开关 → **只重画那一行**（`groupRowPaint`），不整页 `render()`、
+  // 也不重新取整张表（用户 2026-10-09："换人不刷新"那条规矩）。
+  groupRowPaint = (id, on) => {
+    const box = document.querySelector(`.group-switch[data-id="${id}"]`);
+    const holder = box && box.closest(".pref");
+    if (!holder) return false;
+    const known = groupRows.find((item) => item.id === id)
+      || { id, name: "", memory_on: false };
+    holder.outerHTML = groupRow({ ...known, dialogue_on: on });
+    return true;
+  };
   const pendingRows = (pending.rows || []).map((row) =>
     prefRow(
       `<div class="pref-title">${esc(row.nickname || row.user_id)}</div>` +
@@ -1572,6 +1585,19 @@ function rememberPerson(key) {
 }
 
 //: 人员列表里"筛出来的那几个人"（**DOM 就是真相**：不再抄一份筛选逻辑）。
+//: 在某一行里说一句人话（写失败时用）。原来那句常驻提示在页面顶部，
+//: 一页很多行的时候要抬头找——所以失败就落在**那一行**里。
+function sayInRow(row, text) {
+  if (!row) { showError(text); return; }
+  let note = row.querySelector(".row-say");
+  if (!note) {
+    note = document.createElement("p");
+    note.className = "hint row-say";
+    (row.querySelector(".pref-main") || row).appendChild(note);
+  }
+  note.textContent = text;
+}
+
 function personRowsInDom() {
   return [...document.querySelectorAll(".person-row")].map((el) => el.dataset.person);
 }
@@ -1590,11 +1616,9 @@ function bind() {
     // ⑤ 长内容折起来那一下：点一下看全、再点一下收回（只改这一个 span 的 class）。
     const clamped = target.closest(".clamp");
     if (clamped) { clamped.classList.toggle("open"); return; }
-    if (act("group-off", async (el) => {
-      const done = await write("/api/groups", { group_id: el.dataset.id, enabled: false },
-        "关闭群 " + el.dataset.id + " 的对话？");
-      if (done) render();
-    })) return;
+    // 群聊页那一个「对话」开关走**同一颗** `#view` 上的委托，但它是 `change`
+    // （`bind()` 末尾那一个监听）：写出去用**既有的** `POST /api/groups`——
+    // 那口自带 `confirm` 校验与审计，这里不新增任何写入口。
     // --- 从左栏底部搬过来的两样（2026-10-06）--------------------------------
     // 它们的 DOM 长在页面内容里（调参页 / 账号页），所以走委托、不走 `init()`。
     if (target.id === "panel-theme") {
@@ -1811,6 +1835,28 @@ function bind() {
         pane.hidden = pane.dataset.pane !== el.dataset.pane;
       });
     })) return;
+  });
+  // 群聊页的「对话」开关：调**既有的** `POST /api/groups`（`write()` 会带上
+  // `confirm: true`，也正是那口要求的）。三条规矩：
+  // ① **不乐观**：写出去之前只加 `is-pending`（在途的样子），**不先翻状态**；
+  // ② **失败说实话**：写失败/被拒 → 把滑块放回原来那一格，并在**这一行里**说一句人话；
+  // ③ **成功只重画那一行**（`groupRowPaint`），不整页 `render()`、不重取整张表。
+  $("view").addEventListener("change", async (event) => {
+    const box = event.target;
+    if (!(box instanceof HTMLElement) || !box.classList.contains("group-switch")) return;
+    const row = box.closest(".pref");
+    const on = box.checked;
+    box.classList.add("is-pending");
+    const done = await write("/api/groups", { group_id: box.dataset.id, enabled: on },
+      (on ? "开启群 " : "关闭群 ") + box.dataset.id + " 的对话？");
+    box.classList.remove("is-pending");
+    if (!done) {
+      box.checked = box.dataset.on === "1";     // **失败不翻状态**
+      sayInRow(row, "没改成——刚才那一下没成功，还是原来的样子。");
+      return;
+    }
+    box.dataset.on = on ? "1" : "0";
+    if (!(groupRowPaint && groupRowPaint(box.dataset.id, on))) render();
   });
   // 搜索框：**输入即筛**。重画之后把光标放回末尾（不重画的话列表不会跟着变）。
   $("view").addEventListener("input", (event) => {
@@ -2113,6 +2159,10 @@ const PROFILE_LIMIT = 200;
 //: 焦点、列表滚动位置全丢，看起来就像刷新）。现在选人只换 `#person-panel` 的
 //: `innerHTML`，用的还是**已经取到的那份数据**（一处 `api()` 都不会再打）。
 let profilePaint = null;
+
+//: 「群聊」那一页当前那次渲染留下的**单行重画**：改完一个开关**只重画那一行**
+//: （用户 2026-10-09 那条"换人不刷新"的规矩，同样适用于这里——不整页重画、不重取整张表）。
+let groupRowPaint = null;
 
 //: 一条记忆"关于谁"：优先 `subject_user_id`（隔离那一维），退回 `subjects`（关联人）。
 function personKey(row) {
