@@ -53,13 +53,16 @@ from .onebot_ws import OneBotWebSocketTransport
 from .media_segments import replace_media_placeholder
 from .remind import (
     MAX_REMIND_SEEN,
+    REMIND_CHANNEL_PHRASES,
     REMIND_DEDUPE_WINDOW_SECONDS,
     RemindEmailBook,
     RemindRequest,
     find_email,
+    forever_channel,
     parse_remind_time,
     remind_channel,
     remind_key,
+    said_this_time,
 )
 from .trigger import IdleTrigger, MessageDeduplicator
 from .stage3_runtime import (
@@ -1224,6 +1227,23 @@ class DialogueEngine:
         #: 同一个人**上一次交给插件**是什么时候（墙上钟）——频次兜底用，
         #: 闸门见 `dev_config.remind_min_interval_seconds()`。
         self._remind_last_handover: dict[str, float] = {}
+        #: 按人记住的"**以后都这么干**"那种收法（只有他明说过才写，见 `_remember_remind_channel`）。
+        #: **普通选一次不写这里**——用户 2026-10-09 的规矩是"每一次都问，除非说以后都这么干"。
+        self._remind_channel_pref: dict[str, str] = {}
+        #: 这一轮里"他刚说了以后都这么干" → `人 → (消息 id, 收法)`：她那句确认要说清
+        #: "以后都这么办"（别只应一声"行"）。
+        self._remind_forever: dict[str, tuple[str, str]] = {}
+        #: 这一轮里"收法是按他那条约定的" → `人 → (消息 id, 收法)`：让她顺口**复述**一句
+        #: （"还照老规矩"），别重复问。
+        self._remind_restate: dict[str, tuple[str, str]] = {}
+        #: 他**最近一条**提醒（还没发的也算）——"这次群里叫我"要改的就是它。
+        self._remind_last_request: dict[str, RemindRequest] = {}
+        #: 这一轮里"他要改**这一次**的收法" → `人 → (消息 id, 收法)`：她那句确认要说清
+        #: "这次…"（与"以后都这么办"分开）。
+        self._remind_this_time: dict[str, tuple[str, str]] = {}
+        #: 这一轮里提醒意图**被闸拦下**了 → `人 → 消息 id`：要让她知道"没排上"，
+        #: 否则她会照旧答应一个时间（2026-10-09 实测：`一点四十叫你`，而 13:40 什么都不会发生）。
+        self._remind_blocked: dict[str, str] = {}
         # 金句学习学出来的那份**材料**（`quote_learning.QuoteProfile`，可选）。
         # 它只是"读一份本地 JSON 挑几条"，**热路径上一次模型调用都没有**；
         # 关掉开关或没有材料时回复 prompt 与改动前**逐字相同**（有测试钉住）。
@@ -1607,20 +1627,47 @@ class DialogueEngine:
                         message.session_id)
             return
         now = self.wall_clock()
+        chosen = remind_channel(intent.channel)
         # **时间必须出自"他这一条"**（2026-10-09 她刷屏那次加的第二道）：判定读的是整段
         # 谈话，她发出去的那句"到点了：…"也在里面，于是"有人让你提醒"在**老话**上又成立了一次。
         # 所以这里要求**当前这条消息自己带一个认得出的时间**——老话里翻出来的不算。
         # （判定那侧一个字没改：它照旧读整段、照旧可能报提醒；采信与否是核心的事。）
         if parse_remind_time(message.text or "", now=now) is None:
+            # 这一条里没有新时间。两种情况要分开（2026-10-09 用户加的那句
+            # *"然后要可以改，比如说叫云茹这次群里叫我"*）：
+            if chosen:
+                # 他说了收法、只是没给时间 → **改这一次**（改那条最近的、还没发出去的）。
+                if self._remind_change(message, chosen):
+                    return
+                # 没有待发的提醒可改 → 什么都不做（不报错、不新建），让她的正常回复去接。
+                logger.info("Stage 3 remind: 他要改收法，可没有待发的提醒 session=%s",
+                            message.session_id)
+                return
+            self._note_remind_blocked(message)
             logger.info("Stage 3 remind: 这一条里没有时间（判定是从老话里翻出来的），不算 session=%s",
                         message.session_id)
             return
         at = parse_remind_time(intent.time_text, now=now)
         if at is None:
+            self._note_remind_blocked(message)
             logger.info(
                 "Stage 3 remind: 时间说不清，这一句当普通聊天 session=%s", message.session_id)
             return
-        channel = remind_channel(intent.channel)
+        # **每次都问**（2026-10-09 用户改的规矩：*"我要的是每一次都问，除非说以后都这么干"*）：
+        # 他以前选过**不算数**——只有他明说过"以后都这么干"这类意思时，核心才记住这种收法、
+        # 以后不再问。下面的 `forever` 就是这个判断（保守正则，见 `remind.forever_channel`）。
+        forever = forever_channel(message.text or "", chosen)
+        pref = self._remind_channel_pref.get(message.user_id, "")
+        if forever:
+            self._remember_remind_channel(message.user_id, forever)
+            pref = forever
+            self._remind_forever[message.user_id] = (message.message_id, forever)
+        elif chosen and said_this_time(message.text or ""):
+            # "这次群里叫我" + 同时给了一件新事：收法只管**这一次**，确认里要说清。
+            self._remind_this_time[message.user_id] = (message.message_id, chosen)
+        # 他**这一轮**说的收法优先；没有才看他有没有"以后都"那条约定的。
+        reused = not chosen and bool(pref)
+        channel = chosen or pref
         email = self._remind_emails.get(message.user_id)
         pending = self._remind_asks.get(message.user_id)
         # **同一件事只办一次**（2026-10-09 实测两次：第一次是"连记 5 次待办 + 两条提醒"，
@@ -1651,13 +1698,63 @@ class DialogueEngine:
                 email=email,
                 key=key[1],
                 channel=channel,
+                forever=bool(forever) or (reused and bool(pref)),
             )
             changed = True
         self._remember_remind_ask(request)
         if changed:
             logger.info("Stage 3 remind: 记下这一条（怎么收=%s）session=%s",
                         request.channel or "还没说", message.session_id)
+        if reused:
+            # 他这回没说收法、是用了他"以后都这么干"那条约定的 → 让她**复述**一句，别再问。
+            self._remind_restate[message.user_id] = (message.message_id, channel)
         self._try_hand_over_remind(request)
+
+    def _remind_change(self, message: IncomingMessage, chosen: str) -> bool:
+        """**改这一次**：他这一条没有新时间、只说了"这次群里叫我" → 改那条最近的提醒。
+
+        用户 2026-10-09 原话：*"然后要可以改，比如说叫云茹这次群里叫我"*。规矩：
+
+        * 改的是**本会话里他最近一条还没发的**（核心这边记着的那一条；交出去的那条带着
+          同一把 `key`，插件按它更新而不是新增）；
+        * **只改这一次**：`forever=False`、**不动**长期偏好（`_remind_channel_pref`）；
+          这条发完即止，下一次那条回到"每次都问"；
+        * **没有待发的提醒** → 返回 False，什么都不做（不报错、不新建）。
+        """
+
+        last = self._remind_last_request.get(message.user_id)
+        if last is None or last.channel == chosen:
+            return False
+        updated = replace(last, channel=chosen, forever=False)
+        self._remind_last_request[message.user_id] = updated
+        self._remind_this_time[message.user_id] = (message.message_id, chosen)
+        logger.info("Stage 3 remind: 改这一次的收法 → %s session=%s", chosen, message.session_id)
+        self._try_hand_over_remind(updated, update=True)
+        return True
+
+    def _note_remind_blocked(self, message: IncomingMessage) -> None:
+        """提醒意图**被闸拦下**时留一句给她（同一轮就用掉，别漏到下一轮）。
+
+        2026-10-09 用户实测：闸拦得对（"这一条里没有时间…不算"），但**没把"没排上"
+        告诉她**——她于是照旧答应"行，一点四十叫你，414是吧"，而 13:40 什么都不会发生。
+        所以这里留一句（由 `_remind_ask_note` 在**这一轮**的易变段里说出来）：让她自己
+        问一句几点，**别自己先许一个时间**。键是 (消息 id)，所以不会漏到下一轮去。
+        """
+
+        self._remind_blocked[message.user_id] = message.message_id
+        if len(self._remind_blocked) > MAX_REMIND_ASKS:
+            self._remind_blocked.pop(next(iter(self._remind_blocked)), None)
+
+    def _remember_remind_channel(self, person_id: str, channel: str) -> None:
+        """记住**他明说过"以后都这么干"**的那种收法（只有那种才不再问）。
+
+        主叫点只有一处：`_note_remind` 里 `forever_channel(...)` 认到的时候。**普通选一次
+        不写这里**——用户 2026-10-09 的规矩是"每一次都问，除非说以后都这么干"。
+        """
+
+        self._remind_channel_pref[person_id] = channel
+        if len(self._remind_channel_pref) > MAX_REMIND_ASKS:
+            self._remind_channel_pref.pop(next(iter(self._remind_channel_pref)), None)
 
     def _remember_remind_seen(self, key: tuple[str, str], now: float) -> None:
         """记下"这件事刚认过"（`(人, 归一化的事情)` → 过期时刻），清过期的、加上限。
@@ -1685,7 +1782,7 @@ class DialogueEngine:
         if len(self._remind_asks) > MAX_REMIND_ASKS:
             self._remind_asks.pop(next(iter(self._remind_asks)), None)
 
-    def _try_hand_over_remind(self, request: RemindRequest) -> None:
+    def _try_hand_over_remind(self, request: RemindRequest, *, update: bool = False) -> None:
         """**值齐了才交给插件**；不齐就留在待办里，由 `_remind_ask_note` 让她自己问。
 
         2026-10-09 用户实测（富哥之家那一晚）：频道还没定就把请求交给了插件，插件只好
@@ -1703,13 +1800,19 @@ class DialogueEngine:
             logger.info("Stage 3 remind: 他想收邮箱、可邮箱还没有，先不交给插件 session=%s",
                         request.session_id)
             return
+        # **他最近的那一条**（"这次群里叫我"要改的就是它）：**改这一次**时也要刷新，
+        # 所以它放在频次闸**之前**。
+        self._remind_last_request[request.person_id] = request
+        if len(self._remind_last_request) > MAX_REMIND_ASKS:
+            self._remind_last_request.pop(next(iter(self._remind_last_request)), None)
         # **频次兜底**（2026-10-09 她刷屏那次加的第三道闸）：同一个人两次交给插件之间
         # 至少隔 `dev_config.remind_min_interval_seconds()`（默认 300 秒，**调用时现读**；
         # 0 = 关掉）。前面两道（归一化去重、她自己的发言不算）万有一漏，也不会刷屏。
+        # `update=True`（"这次群里叫我"那种**改**）不走这道闸：那是同一条的改法，不是新的一条。
         now = self.wall_clock()
         last = self._remind_last_handover.get(request.person_id, 0.0)
         floor = dev_config.remind_min_interval_seconds()
-        if floor > 0 and now - last < floor:
+        if not update and floor > 0 and now - last < floor:
             logger.info(
                 "Stage 3 remind: 距上一条只过了 %s 秒（闸 %s 秒），这一条先不交 session=%s",
                 int(now - last), floor, request.session_id)
@@ -1772,22 +1875,53 @@ class DialogueEngine:
         self._try_hand_over_remind(updated)
 
     def _remind_ask_note(self, message: IncomingMessage) -> str:
-        """正在等一个答复时（怎么收 / 邮箱），给这一轮易变段加**一句**核心写的话。
+        """给这一轮易变段加**一句**核心写的话（没有就空串）；一轮最多一句。
 
         走的是既有的 `clarify_note` 口子（"一句话进易变段"）——**不是**插件提示词，
         也**不是**"核心直接替她发言"：2026-10-09 用户实测（富哥之家）那条"乱"正是
-        她自己在群里问的同时、插件那条罐头问话也发进了群。这里的做法是**把要问的问法
+        她自己在群里问的同时、插件那条罐头问话也发进了群。这里的做法是**把要说的
         交给她，让她用自己的话说**；群里看到的只有她的话。
+
+        优先级（一轮只说一句）：
+
+        1. **这一轮的提醒被闸拦下了** → 让她问一句几点，**别自己先许一个时间**
+           （2026-10-09 实测：闸拦对了，可没告诉她，于是她照旧答应"一点四十叫你"，
+           而 13:40 什么都不会发生——比刷屏更该修）；
+        2. 还没问清怎么收 → 三个选项让她问（**每次都问**，除非他早说过"以后都这么干"）；
+        3. 选了邮箱还没有邮箱 → 问邮箱（地址是**一次性**给的，不受"每次都问"那条影响）；
+        4. 他刚说**这次**改收法 → 让她应一句"**这次**在群里 @ 他"这种（与"以后都"分开）；
+        5. 他刚说**以后都这么干** → 让她应一句"**以后都这么办**"，把话说明白；
+        6. 收法是按他那条"以后都"的约定用的 → 让她**复述**一句（"还照老规矩"），别再问。
         """
 
+        blocked = self._remind_blocked.pop(message.user_id, None)
+        if blocked == message.message_id:
+            return ("（他这句没说清什么时候——这轮顺口问一句几点，"
+                    "别自己先许一个时间。）\n")
+        this_time = self._remind_this_time.pop(message.user_id, None)
+        forever = self._remind_forever.pop(message.user_id, None)
+        restate = self._remind_restate.pop(message.user_id, None)
         pending = self._remind_asks.get(message.user_id)
-        if pending is None:
-            return ""
-        if not pending.channel:
+        if pending is not None and not pending.channel:
             return ("（他刚让你到点提醒他一件事，你还没问清他想怎么收到——在群里 @ 他、"
                     "私聊他、还是寄到他邮箱？这轮顺口问一句就行。）\n")
-        if pending.channel == "email" and not pending.email:
+        if pending is not None and pending.channel == "email" and not pending.email:
             return "（他刚让你到点提醒他一件事，可你手上还没有他的邮箱——这轮顺口问一句就行。）\n"
+        if this_time is not None and this_time[0] == message.message_id:
+            where = REMIND_CHANNEL_PHRASES.get(this_time[1], "")
+            if where:
+                return (f"（他说这次{where}——顺口应一句「行，这次就这么办」就行，"
+                        f"只有这一次。）\n")
+        if forever is not None and forever[0] == message.message_id:
+            where = REMIND_CHANNEL_PHRASES.get(forever[1], "")
+            if where:
+                return (f"（他刚说以后都{where}——这轮顺口应一句「好，以后都这么办」，"
+                        f"把话说明白。）\n")
+        if restate is not None and restate[0] == message.message_id:
+            where = REMIND_CHANNEL_PHRASES.get(restate[1], "")
+            if where:
+                return (f"（他早说过以后都{where}——顺口应一句「还是照老规矩」就行，"
+                        f"别再问一遍。）\n")
         return ""
 
     def _apply_guard_signal(self, verdict: JudgeVerdict, message: IncomingMessage) -> None:

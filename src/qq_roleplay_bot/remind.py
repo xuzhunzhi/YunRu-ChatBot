@@ -72,6 +72,28 @@ REMIND_MIN_INTERVAL_DEFAULT = 300
 #: 词与投递那条 `RemindDelivery.channel` 对齐（`group` / `private`），第三档是邮箱。
 REMIND_CHANNEL_WORDS = {"1": "group", "2": "private", "3": "email"}
 
+#: 上面那三种收法的**口语说法**（进她那一句话里用的，见 `_remind_ask_note` 的"复述"那句）。
+REMIND_CHANNEL_PHRASES = {"group": "在群里 @ 他", "private": "私聊他", "email": "寄到他邮箱"}
+
+#: 认"**以后都这么干**"那类意思：**必须同时**出现 (1) 一个"长期"的说法
+#: **和** (2) 一个明确的收法。少一样就不认——**宁可不认**（不认就继续每次问；
+#: 乱认的代价是"以后永远不问"了，更糟）。
+#:
+#: 用户 2026-10-09 的原话：*"我要的是每一次都问，除非说以后都这么干"*。
+_FOREVER_MARKERS = ("以后都", "以后一直", "往后都", "以后就", "每次都", "默认都", "默认就",
+                    "以后全", "往后全")
+_FOREVER_CHANNELS: tuple[tuple[str, str], ...] = (
+    ("群里", "group"), ("群聊", "group"), ("群里面", "group"), ("群里边", "group"),
+    ("私聊", "private"), ("私信", "private"), ("单聊", "private"),
+    ("邮箱", "email"), ("邮件", "email"),
+)
+#: 句子里出现这些词就**不认**（"以后都别在群里@我" 这种是反话，认了就永远不问了）。
+_FOREVER_REFUSALS = ("别", "不要", "不用", "不必", "取消", "算了")
+
+#: "**这次**"那类一次性说法（用户 2026-10-09：*"要可以改，比如说叫云茹这次群里叫我"*）。
+#: 它**不是**长期偏好——她那句确认要说清是"这一次"。
+_THIS_TIME_MARKERS = ("这次", "这一次", "这回", "这轮", "仅此一次")
+
 #: 状态文件的版本号（照 `state_store.STATE_VERSION` 的做法：读出来对不上就按空的重来）。
 REMIND_EMAILS_VERSION = 1
 
@@ -187,7 +209,17 @@ class RemindRequest:
     #: 留空串 = **还没问清**——那种情况下核心**不把请求交给插件**（先让她自己问一句，
     #: 见 `DialogueEngine._try_hand_over_remind`）。2026-10-09 用户实测那条"乱"就是这么来的：
     #: 频道没定就把请求交出去，插件只好自己发一条罐头问话，于是同一件事两个声音在群里说。
+    #:
+    #: **每次都问**（2026-10-09 用户改的规矩：*"我要的是每一次都问，除非说以后都这么干"*）：
+    #: 他以前选过也算不了数，除非他明说过"以后都…"——那种才写进下面这个标记。
     channel: str = ""
+    #: **长期偏好的标记**：`True` = 他这次明说了"以后都这么干"这类意思，插件可以把
+    #: `(人, channel)` 记成偏好、以后不必再问。`False`（缺省）= **这一条只是一次性的**。
+    #:
+    #: 为什么要有这个标记：插件那份 `people.jsonl` 里有按老规矩写下的 `channel`（他当时
+    #: 只选过一次）——**那些没有这个标记的旧记录一律视为"不粘"**，别去改用户的数据文件，
+    #: 按标记区分就够了。
+    forever: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,6 +289,45 @@ def remind_key(what: str) -> str:
 
     text = unicodedata.normalize("NFKC", str(what or "")).casefold()
     return "".join(char for char in text if char.isalnum())
+
+
+def forever_channel(text: str, chosen: str = "") -> str:
+    """他这句里有没有"**以后都这么干**"的意思？有就返回那种收法，没有返回空串。
+
+    用户 2026-10-09 定的规矩：*"我要的是每一次都问，除非说以后都这么干"*。所以这个函数
+    只在**同时**满足两件事时才认（保守正则，与 `find_email` 同一路子，**不加模型调用**）：
+
+    1. 一句"长期"的说法（`以后都` / `往后都` / `每次都` / `默认就` …）；
+    2. 一个**明确的收法**（`群里` / `私聊` / `邮箱` …）——或者 `chosen` 给了
+       （判定那一轮从他的原话里读到了收法，例如"以后都这么干"+ 上文已定的那种；
+       它既收判定给的那点东西 `1/2/3`，也收核心已经翻好的说法 `group/private/email`）。
+
+    **宁可不认，别乱认**：少了哪一样都返回空串（那就继续每次问）；句子里出现
+    `别` / `不要` / `不用` / `取消` / `算了` 一律不认（"以后都别在群里 @ 我"是反话，
+    认错了就是以后永远不问）。
+    """
+
+    body = str(text or "")
+    if not body or any(word in body for word in _FOREVER_REFUSALS):
+        return ""
+    if not any(marker in body for marker in _FOREVER_MARKERS):
+        return ""
+    for word, channel in _FOREVER_CHANNELS:
+        if word in body:
+            return channel
+    if chosen:
+        return remind_channel(chosen) or str(chosen)
+    return ""
+
+
+def said_this_time(text: str) -> bool:
+    """他这句里有没有"**这次**"那类一次性说法（有 → 她的确认要说清"只有这一次"）。
+
+    与 `forever_channel` 各管一半：一个决定"以后还问不问"，一个决定"这句确认怎么说"。
+    """
+
+    body = str(text or "")
+    return any(marker in body for marker in _THIS_TIME_MARKERS)
 
 
 def state_persistence_enabled() -> bool:
