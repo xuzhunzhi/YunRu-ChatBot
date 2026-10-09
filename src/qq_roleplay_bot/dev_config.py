@@ -309,6 +309,66 @@ def _int_clamped(name: str, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, value))
 
 
+# --- 采样参数：回复默认带，其余用途配了才发 ------------------------------------
+#
+# 由来：请求体里原来只有 model + messages（加可选的 max_tokens / user_id），
+# 采样参数一个都没发 → 全走服务商默认 → 回复平、没人味。现在给**回复**那一档
+# 发标准三样（不加别的）：temperature / top_p / frequency_penalty——
+#
+#     QQBOT_REPLY_TEMPERATURE=0.85        （夹 0..2）
+#     QQBOT_REPLY_TOP_P=0.9               （夹 0..1）
+#     QQBOT_REPLY_FREQUENCY_PENALTY=0.3   （夹 -2..2）
+#
+# - 回复的默认值**写死在代码里**：不开 .env 就生效；
+# - 其余用途（judge / memory / review / letter / vision）同一套变量名规则，
+#   **默认不发**——.env 里配了哪个键才发哪个键，没配的用途一个键都不多发
+#   （请求体与改动前逐字相同）；
+# - **调用时现读**（与 `turn_timeout_seconds` 同一条纪律）：改配置不必重启；
+#   坏值（不是数）回落默认（回复）/当没配（其余），越界夹进来。
+
+#: 三个采样参数各自的合法范围（OpenAI chat completions 的口径）。
+_SAMPLING_RANGES: dict[str, tuple[float, float]] = {
+    "temperature": (0.0, 2.0),
+    "top_p": (0.0, 1.0),
+    "frequency_penalty": (-2.0, 2.0),
+}
+
+#: 只有 reply 有代码内默认；其余用途没配就不发。
+_SAMPLING_TASK_DEFAULTS: dict[str, dict[str, float]] = {
+    "reply": {"temperature": 0.85, "top_p": 0.9, "frequency_penalty": 0.3},
+}
+
+
+def sampling_params(task: str) -> dict[str, float]:
+    """某个用途（reply / judge / memory / review / letter / vision）的采样参数。
+
+    返回**只含有值的那几个键**：reply 恒有三个（0.85 / 0.9 / 0.3，可被
+    `QQBOT_REPLY_*` 覆盖）；其余用途没配同名变量时返回空字典，调用方
+    "没配就不放键"。**调用时现读环境**：环境改了，下一次请求就跟着变。
+    """
+
+    params: dict[str, float] = {}
+    defaults = _SAMPLING_TASK_DEFAULTS.get(task, {})
+    for key, (minimum, maximum) in _SAMPLING_RANGES.items():
+        default = defaults.get(key)
+        name = f"QQBOT_{task.upper()}_{key.upper()}"
+        raw = get(name, "")
+        if not raw:
+            # 空串一律当"没配"（与 `reply_api_key` 同一条纪律）。
+            if default is not None:
+                params[key] = default
+            continue
+        try:
+            value = float(raw)
+        except ValueError:
+            logger.warning("采样参数 %s 不是数字，已按默认/未配置处理", name)
+            if default is not None:
+                params[key] = default
+            continue
+        params[key] = max(minimum, min(maximum, value))
+    return params
+
+
 # --- 对话背景补全那两个缓存的边界（2026-10-08 隔离增长审计 [6]）--------------
 # `ConversationContextProvider` 里 `_members` 存的是**整群成员表**（一个几百人的群
 # 就是几百条），`_last_refresh` 同样只增不减。两个都按"最后一次刷新/写入"的时间

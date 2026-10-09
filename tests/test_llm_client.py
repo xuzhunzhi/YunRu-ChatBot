@@ -2,6 +2,7 @@
 import asyncio
 import io
 import json
+import os
 import socket
 import urllib.error
 from unittest.mock import patch
@@ -299,3 +300,108 @@ def test_client_rebuilds_the_opener_on_every_request() -> None:
     finally:
         urllib.request.build_opener = real_build
     assert built["count"] == 3
+
+
+# --- 采样参数：回复默认带三样，其余用途配了才发 ---------------------------------
+
+_SAMPLING_KEYS = ("temperature", "top_p", "frequency_penalty")
+#: 六个用途 × 三个参数的全部变量名：测试先把这些从环境里清掉再断言默认行为，
+#: 免得本机 `.env` 里恰好配过哪个，把"默认不发"验成"发了"。
+_SAMPLING_ENV_NAMES = tuple(
+    f"QQBOT_{task.upper()}_{key.upper()}"
+    for task in ("reply", "judge", "memory", "review", "letter", "vision")
+    for key in _SAMPLING_KEYS
+)
+
+
+def _clear_sampling_env() -> None:
+    for name in _SAMPLING_ENV_NAMES:
+        os.environ.pop(name, None)
+
+
+def _role_client(usage_role: str) -> OpenAICompatibleClient:
+    return OpenAICompatibleClient("https://example.invalid/v1", "k", "m",
+                                  timeout=1.0, usage_role=usage_role)
+
+
+def _captured_body(client: OpenAICompatibleClient) -> dict:
+    captured: dict = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured["data"] = json.loads(request.data)
+        return _Response(json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode())
+
+    with patch("qq_roleplay_bot.llm_client._urlopen", side_effect=fake_urlopen):
+        asyncio.run(client.complete(REQUEST))
+    return captured["data"]
+
+
+def test_reply_sends_the_three_default_sampling_params() -> None:
+    """回复那一档默认就发三样（写死在代码里，不开 .env 也生效）。"""
+
+    with patch.dict(os.environ):
+        _clear_sampling_env()
+        body = _captured_body(_role_client("dialogue"))
+    assert body["temperature"] == 0.85
+    assert body["top_p"] == 0.9
+    assert body["frequency_penalty"] == 0.3
+
+
+def test_usages_other_than_reply_send_no_sampling_keys_by_default() -> None:
+    """判定 / 记忆 / 审核 / 写信 / 识图默认一个采样键都不发；不带 usage_role 的
+    client（历史路径）同样不发——没配置的用途保持从前的请求体。"""
+
+    with patch.dict(os.environ):
+        _clear_sampling_env()
+        assert not set(_captured_body(_client())) & set(_SAMPLING_KEYS)
+        for role in ("judge", "memory", "review", "letter", "vision"):
+            body = _captured_body(_role_client(role))
+            assert not set(body) & set(_SAMPLING_KEYS), role
+
+
+def test_env_overrides_are_read_per_request_on_the_same_client() -> None:
+    """环境变量覆盖要**每次请求现读**：改了环境，同一个 client 下一次就跟着变
+    （读了常量/构造期快照的实现在这条上会红）。"""
+
+    client = _role_client("dialogue")
+    with patch.dict(os.environ):
+        _clear_sampling_env()
+        assert _captured_body(client)["temperature"] == 0.85
+        os.environ["QQBOT_REPLY_TEMPERATURE"] = "1.3"
+        os.environ["QQBOT_REPLY_TOP_P"] = "0.5"
+        os.environ["QQBOT_REPLY_FREQUENCY_PENALTY"] = "0.0"
+        body = _captured_body(client)
+    assert body["temperature"] == 1.3
+    assert body["top_p"] == 0.5
+    assert body["frequency_penalty"] == 0.0
+
+
+def test_other_usages_send_sampling_keys_only_when_configured() -> None:
+    """其余用途配了哪个键才发哪个键（judge 配 temperature → 只多这一个键）。"""
+
+    client = _role_client("judge")
+    with patch.dict(os.environ):
+        _clear_sampling_env()
+        assert not set(_captured_body(client)) & set(_SAMPLING_KEYS)
+        os.environ["QQBOT_JUDGE_TEMPERATURE"] = "0.2"
+        body = _captured_body(client)
+    assert body["temperature"] == 0.2
+    assert "top_p" not in body
+    assert "frequency_penalty" not in body
+
+
+def test_bad_sampling_values_fall_back_and_out_of_range_clamp() -> None:
+    with patch.dict(os.environ):
+        _clear_sampling_env()
+        # 回复：坏值回落默认，越界夹进来。
+        os.environ["QQBOT_REPLY_TEMPERATURE"] = "不是数"
+        os.environ["QQBOT_REPLY_TOP_P"] = "9"
+        body = _captured_body(_role_client("dialogue"))
+        assert body["temperature"] == 0.85
+        assert body["top_p"] == 1.0
+        # 其余用途：坏值当没配（那个键不发），越界夹进来。
+        os.environ["QQBOT_JUDGE_TEMPERATURE"] = "不是数"
+        os.environ["QQBOT_JUDGE_FREQUENCY_PENALTY"] = "-9"
+        body = _captured_body(_role_client("judge"))
+        assert "temperature" not in body
+        assert body["frequency_penalty"] == -2.0

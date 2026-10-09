@@ -10,6 +10,8 @@ import urllib.error
 import urllib.request
 import weakref
 
+from .dev_config import sampling_params
+
 logger = logging.getLogger(__name__)
 
 # 只有这些失败值得重试：限流、服务端错误和传输层抖动。
@@ -34,6 +36,20 @@ _USAGE_FIELDS = frozenset({
 # user_id 只允许这些字符（服务端要求），且不超过 512；不合法就直接不带，
 # 而不是带着一个会被服务端拒绝的值去请求。
 _USER_ID_PATTERN = re.compile(r"^[a-zA-Z0-9\-_]{1,512}$")
+
+# 采样参数（temperature / top_p / frequency_penalty）按**用途**读环境，
+# 变量名是 `QQBOT_REPLY_TEMPERATURE` 那一族（解析见 `dev_config.sampling_params`）。
+# client 上的 `usage_role` 是账本的历史名——回复那一档叫 "dialogue"，而配置
+# 变量叫 `QQBOT_REPLY_*`（与 `runtime._TASK_TO_ROLE` 是同一张对照，只有这一条
+# 不同名；其余用途同名，直接用）。两边都有测试钉住这张对照。
+_SAMPLING_ROLE_TO_TASK = {"dialogue": "reply"}
+
+
+def _sampling_params_for(usage_role: str) -> dict[str, float]:
+    """这个 client 的采样参数；没配置的用途返回空字典（一个键都不多发）。"""
+
+    task = _SAMPLING_ROLE_TO_TASK.get(usage_role, usage_role)
+    return sampling_params(task)
 
 
 def _clean_user_id(value: str) -> str:
@@ -284,6 +300,10 @@ class OpenAICompatibleClient:
         if self.user_id:
             # 同一账号下按 agent 隔离 KVCache 与调度；不带则所有请求共享隔离空间。
             body["user_id"] = self.user_id
+        # 采样参数（temperature / top_p / frequency_penalty）：按用途**每次请求现读**
+        # 环境，没配置的用途一个键都不放（请求体形状与从前相同）。
+        for key, value in _sampling_params_for(self.usage_role).items():
+            body[key] = value
         payload = json.dumps(body).encode("utf-8")
         request = urllib.request.Request(
             f"{self.base_url}/chat/completions",
