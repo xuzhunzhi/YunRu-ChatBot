@@ -438,8 +438,10 @@ class PersonProfilePlacementTests(unittest.TestCase):
         self.assertEqual(
             len(re.findall(r"personBlock\(", body)), 1,
             "`viewPersonProfiles()` 里画像块不止一处——同一时刻只许渲染一个人")
-        self.assertIn("personBlock(current", body,
-                      "画像块不是拿**选中的那个人**画的")
+        self.assertIn("personBlock(who, data)", body,
+                      "画像块不是拿**传进来的那个人**画的")
+        self.assertIn("panelFor(current)", body,
+                      "初次渲染没有拿**选中的那个人**去画")
         self.assertNotIn('cards.join("")', body,
                          "又变回「把所有画像拼成一列」的老写法了")
         # 一个人一块里的四样东西，都在 `personBlock()` 里（不在别处拼）
@@ -1112,3 +1114,48 @@ class PersonPickerTests(unittest.TestCase):
                          "载入时没有从地址栏读回来")
         self.assertIn("render()", _function_body(self.js, "rememberPerson"),
                       "选完没有重画（内容不跟着换）")
+
+
+class PersonRepaintTests(unittest.TestCase):
+    """判据（2''）：**换人只重画那一块**（用户 2026-10-09："换人不刷新"）。
+
+    原来的写法是选一个人就整页 `render()` —— 那是**重新取数 + 重建整页**：搜索框里
+    打的字、光标、列表滚动位置全丢，看起来就像刷新。这一组钉住新的写法：
+    页面里留一个 `#person-panel` 容器；`viewPersonProfiles` 装上 `profilePaint`；
+    `rememberPerson` **先原地重画**，只有这一块不在页面上才退回整页。
+    """
+
+    def setUp(self) -> None:
+        self.js = _asset("app.js")
+
+    def test_the_page_has_a_container_that_can_be_repainted_alone(self) -> None:
+        body = _function_body(self.js, "viewPersonProfiles", kind="async")
+        self.assertIn('id="person-panel"', body, "没有可单独重画的容器")
+        self.assertRegex(body, r"profilePaint = \(who\) =>", "没有装上「只重画这一块」的画法")
+
+    def test_the_repaint_path_never_refetches(self) -> None:
+        """重画那一段里**一处 `api()` 都不许有**——有它就是又去取数了（那就是"刷新"）。"""
+
+        body = _function_body(self.js, "viewPersonProfiles", kind="async")
+        paint = re.search(r"profilePaint = \(who\) => \{(.*?)\n  \};", body, re.S)
+        self.assertIsNotNone(paint, "找不到 profilePaint 的实现")
+        self.assertNotIn("api(", paint.group(1), "重画那一段里又去取数了")
+        self.assertIn("innerHTML", paint.group(1), "重画那一段没有换内容")
+
+    def test_the_repaint_keeps_the_search_box_and_the_scroll(self) -> None:
+        body = _function_body(self.js, "viewPersonProfiles", kind="async")
+        paint = re.search(r"profilePaint = \(who\) => \{(.*?)\n  \};", body, re.S).group(1)
+        self.assertIn("person-search", paint, "重画没有顾及搜索框")
+        self.assertIn("focus()", paint, "重画之后焦点没还回去")
+        self.assertIn("scrollTop", paint, "重画把列表滚动位置丢了")
+
+    def test_choosing_a_person_repaints_that_block_first(self) -> None:
+        remember = _function_body(self.js, "rememberPerson")
+        self.assertIn("profilePaint", remember, "选人没有走「只重画这一块」")
+        self.assertIn("render()", remember, "连「画法不在」时的退路都没有")
+        # 退路必须在原地重画**之后**（先试重画，装不上才整页）。
+        self.assertLess(remember.index("if (profilePaint && profilePaint("),
+                        remember.index("\n  render();"),
+                        "顺序反了：先整页 render 再重画")
+        handlers = _uncomment(_function_body(self.js, "bind"))
+        self.assertIn("profilePaint = null", handlers, "换页签时没有把画法清掉")

@@ -1548,6 +1548,10 @@ function rememberPerson(key) {
     history.replaceState(null, "", "#" + state.tab
       + (state.last.profileKey ? "&people=" + encodeURIComponent(state.last.profileKey) : ""));
   } catch (error) { /* 只留在内存里 */ }
+  // **原地重画那一块**（用户 2026-10-09："换人不刷新"）：不重新取数、不重建整页，
+  // 搜索框里打的字、光标位置、列表滚动都留着。只有"这一块不在页面上"（比如换页签
+  // 之后回来、或者画法还没装上）才退回整页 `render()`。
+  if (profilePaint && profilePaint(state.last.profileKey)) return;
   render();
 }
 
@@ -1557,6 +1561,9 @@ function personRowsInDom() {
 }
 
 function bind() {
+  // 人物画像页那一块不在页面上时，那个"只重画这一块"的画法就没用了——清掉它，
+  // 免得下次误用（`profilePaint` 自己也会先查容器在不在，这里是第二道）。
+  $("tabs").addEventListener("click", () => { profilePaint = null; });
   $("view").addEventListener("click", async (event) => {
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
@@ -2060,6 +2067,13 @@ function viewPluginList() {
 //: 一页最多看多少条（面板是本机小工具；再多就该去 `/super profile @某人` 看）。
 const PROFILE_LIMIT = 200;
 
+//: 人物画像页**当前那次渲染**留下的"只重画人员那一块"的画法（`viewPersonProfiles`
+//: 每次渲染时装上、离开这一页就没了）。为什么要有它：用户 2026-10-09 报"换人不刷新"——
+//: 原来选一个人走的是整页 `render()`，那是**重新取数 + 重建整页**（搜索框的输入、
+//: 焦点、列表滚动位置全丢，看起来就像刷新）。现在选人只换 `#person-panel` 的
+//: `innerHTML`，用的还是**已经取到的那份数据**（一处 `api()` 都不会再打）。
+let profilePaint = null;
+
 //: 一条记忆"关于谁"：优先 `subject_user_id`（隔离那一维），退回 `subjects`（关联人）。
 function personKey(row) {
   const direct = String(row.subject_user_id || "").trim();
@@ -2225,24 +2239,44 @@ async function viewPersonProfiles() {
   const haystack = (key) => [personLabel(key, data), key, ...(data.names[key] || [])]
     .join(" ").toLowerCase();
   const shown = ordered.filter((key) => !query || haystack(key).includes(query));
-  const rows = shown.map((key) => {
+  const rowsFor = (who) => shown.map((key) => {
     const label = personLabel(key, data);
-    const on = key === current;
+    const on = key === who;
     return `<button type="button" class="person-row${on ? " on" : ""}"`
       + ` data-person="${esc(key)}" role="option" aria-selected="${on ? "true" : "false"}">`
       + `<span class="person-row-name">${esc(label)}</span>`
       + `<span class="person-row-tail mono">…${esc(personTail(key))}</span></button>`;
   }).join("");
-  const switcher = `<div class="person-picker">
+  // **人员那一块**：搜索框 + 列表 + 这个人的内容（按 `who` 生成，换人就重画这一块）。
+  const panelFor = (who) => `<div class="person-picker">
     <input id="person-search" class="person-search" type="search" autocomplete="off"
       aria-label="搜人" placeholder="搜人：名字 / 名片 / 号"
       value="${esc(state.last.profileQuery || "")}" />
     <div class="person-list" role="listbox" aria-label="选一个人看">${
-      rows || '<p class="hint">没有匹配的人——换个词，或者清空搜索框。</p>'}</div>
+      rowsFor(who) || '<p class="hint">没有匹配的人——换个词，或者清空搜索框。</p>'}</div>
     <p class="hint">共 ${num(ordered.length)} 个人${
       query ? `，筛出 ${num(shown.length)} 个` : ""}——按<b>最近活跃</b>排，
       <b>↑↓ 能走、回车选中</b>。</p>
-  </div>`;
+  </div>${personBlock(who, data)}`;
+
+  // 装上"只重画这一块"的画法：**不重新取数**，搜索框的输入/焦点与列表滚动都留住。
+  profilePaint = (who) => {
+    const holder = $("person-panel");
+    if (!holder) return false;
+    const box = $("person-search");
+    const focused = box && document.activeElement === box ? box.selectionStart : null;
+    const list = holder.querySelector(".person-list");
+    const scrollTop = list ? list.scrollTop : 0;
+    holder.innerHTML = panelFor(who);
+    const nextBox = $("person-search");
+    if (nextBox && focused !== null) {
+      nextBox.focus();
+      nextBox.setSelectionRange(focused, focused);
+    }
+    const nextList = holder.querySelector(".person-list");
+    if (nextList) nextList.scrollTop = scrollTop;
+    return true;
+  };
 
   const head = card("人物画像（记忆这一档）", `
     <p class="hint">这里是<b>一个人一张</b>：她对这个人的整体印象（记忆里 <code>kind=profile</code>
@@ -2253,14 +2287,15 @@ async function viewPersonProfiles() {
     ${profiles.total > PROFILE_LIMIT || records.total > PROFILE_LIMIT
       ? `<p class="hint">这一页每类最多看 ${PROFILE_LIMIT} 条（现在画像 ${num(profiles.total)} 条、
          旧事 ${num(records.total)} 条），超出的没列出来——不是没有。</p>` : ""}
-    ${switcher}`);
+    <div id="person-panel">${panelFor(current)}</div>`);
 
   if (!all.length) {
     return head + card("还没有画像", `<p class="hint">她对这些人的印象还没成形。
       画像由记忆维护 agent 在真的看出"这个人的整体样子"时才写一条，不是每人一条。</p>`);
   }
-  // **只画选中的那一个**（用户："别每个人一个卡片往下翻"）。
-  return head + personBlock(current, data);
+  // **只画选中的那一个**（用户："别每个人一个卡片往下翻"）——它已经在上面的
+  // `#person-panel` 里了，所以这里只返回那张卡。
+  return head;
 }
 
 
