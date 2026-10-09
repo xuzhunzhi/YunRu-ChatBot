@@ -1072,6 +1072,95 @@ td .hint { margin: 2px 0 0; }
  * ⚠️ 面板全局把滚动条藏了（用户 2026-10-01 要求），横滑条上因此看不到滑块——
  * 所以卡里那句提示写明了"上面这条横向可以滑"，别只靠滚动条暗示。
  */
+/* ---------- 人物画像页：头部三样 / 分段 / 说明那个「?」 ----------
+ * 用户 2026-10-09 的口径：说明收进「?」（每节最多一行）；头部三样 = 称呼 + QQ 号 + 群；
+ * 三节**一次只显示一块**；观感照 HyperOS（白卡无描边、大圆角、行高松、点按区够大）。 */
+.note-tip { margin: 0 0 10px; }
+.note-tip > summary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-container-high);
+  color: var(--text-3);
+  font-size: 13px;
+  cursor: pointer;
+  list-style: none;               /* 去掉默认三角 */
+}
+.note-tip > summary::-webkit-details-marker { display: none; }
+.note-tip[open] > summary { background: var(--secondary-container); color: var(--on-surface); }
+.note-tip > .hint { margin: 8px 0 0; }
+
+.person-head { padding: 2px 0 10px; }
+.person-head-name {
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.35;
+  word-break: break-all;          /* 昵称可能很长，别把卡片撑破 */
+}
+.person-head-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 13.5px;
+  color: var(--text-3);
+}
+.person-group {
+  padding: 2px 10px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-container-high);
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+.person-nicks { margin-top: 8px; }
+.person-nicks > summary {
+  min-height: 40px;               /* 触屏够点 */
+  display: flex;
+  align-items: center;
+  color: var(--text-4);
+  font-size: 13px;
+  cursor: pointer;
+}
+.person-nicks > .hint { margin: 0 0 6px; }
+
+.person-tabs {
+  display: flex;
+  gap: 6px;
+  margin: 6px 0 12px;
+  border-bottom: 1px solid var(--divider);
+}
+.person-tab {
+  min-height: 44px;               /* 分段也要够大（平板） */
+  min-width: 0;                   /* 压掉全局 button 的 min-width */
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--radius-tab) var(--radius-tab) 0 0;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 14.5px;
+  position: relative;
+}
+.person-tab.on { color: var(--primary); font-weight: 600; }
+.person-tab.on::after {           /* 选中那条线，跟文字缩进对齐 */
+  content: "";
+  position: absolute;
+  left: 12px; right: 12px; bottom: -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--primary);
+}
+.person-tab-count { margin-left: 4px; color: var(--text-4); font-weight: 400; }
+.pane[hidden] { display: none; }  /* **一次只显示一块** */
+
+.relation { display: flex; flex-wrap: wrap; gap: 10px 24px; align-items: baseline; }
+.relation-axis { display: flex; align-items: baseline; gap: 8px; }
+.relation-label { color: var(--text-3); font-size: 13.5px; }
+.relation-value { font-size: 19px; font-weight: 600; }
+
 /* **搜索框 + 竖排列表**（2026-10-09 用户："**主要是，横向的没法选人啊**"——原来那条
  * 33 人的横向胶囊带在触屏上根本找不到人）。观感照 HyperOS：白卡**无描边**、大圆角、
  * 行高松、分隔线**从文字处缩进**（伪元素只画 `left/right: 14px` 那一段）、

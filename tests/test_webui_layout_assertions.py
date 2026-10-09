@@ -444,9 +444,11 @@ class PersonProfilePlacementTests(unittest.TestCase):
                       "初次渲染没有拿**选中的那个人**去画")
         self.assertNotIn('cards.join("")', body,
                          "又变回「把所有画像拼成一列」的老写法了")
-        # 一个人一块里的四样东西，都在 `personBlock()` 里（不在别处拼）
+        # 一个人一块里的四样东西，都在 `personBlock()` 里（不在别处拼）。
+        # 2026-10-09：这四样改成了**三节**（`关系` 那一节的标题从"关系两轴"简成"关系"，
+        # 判据一个字没变——一个人一块里这四样都得在、且都在这一处拼）。
         block = _uncomment(_function_body(self.js, "personBlock"))
-        for piece in ("整体印象", "关系两轴", "零散记录"):
+        for piece in ("整体印象", "关系", "零散记录"):
             self.assertIn(piece, block, f"画像块里少了「{piece}」")
         self.assertIn("main.revision", block, "整体印象没有带版本号")
         self.assertIn("还没成形像", block,
@@ -1162,3 +1164,64 @@ class PersonRepaintTests(unittest.TestCase):
                         "顺序反了：先整页 render 再重画")
         handlers = _uncomment(_function_body(self.js, "bind"))
         self.assertIn("profilePaint = null", handlers, "换页签时没有把画法清掉")
+
+
+class PersonPageShapeTests(unittest.TestCase):
+    """判据（3）：人物画像页那四条外观（用户 2026-10-09 指着截图点的 ①~④）。
+
+    ① 页面上**不再铺设计说明**——那几段收进一个「?」（`noteTip` / `PROFILE_NOTES`），
+       点开才看得见；
+    ② 头部三样 = **称呼**（她的叫法 / 名片）+ **QQ 号** + **所在群**；昵称那种噪声
+       （「有人转发了！」）放**次要行**、折叠起来，**不许当标题**；
+    ③ **没有读数就整块不出现**（「关系两轴：还没有…」那句斜体占位删掉）；
+    ④ 三节用**分段**，**一次只显示一块**（`.pane[hidden]` + 点一下只换那一节）。
+    """
+
+    def setUp(self) -> None:
+        self.js = _asset("app.js")
+        self.css = _asset("app.css")
+
+    def test_the_design_notes_are_hidden_behind_a_question_mark(self) -> None:
+        body = _uncomment(_function_body(self.js, "viewPersonProfiles", kind="async"))
+        self.assertIn("noteTip(", body, "说明没有收进「?」")
+        self.assertIn("${PROFILE_NOTES}", body, "说明段没有走那份只给「?」用的文案")
+        self.assertNotRegex(body, r'<p class="hint">这里是',
+                            "设计说明又直接铺在页面上了")
+        self.assertIn("const PROFILE_NOTES", self.js, "说明文案没有单独的常量")
+        self.assertRegex(self.css, r"\.note-tip > summary", "「?」没有样式")
+
+    def test_the_head_shows_the_name_the_number_and_the_groups(self) -> None:
+        block = _uncomment(_function_body(self.js, "personBlock"))
+        self.assertIn("person-head-name", block, "头部没有称呼那一行")
+        self.assertIn("esc(label)", block, "标题不是**称呼**（她的叫法 / 名片）")
+        self.assertIn("person-head-meta", block, "头部没有号码与群那一行")
+        self.assertIn('class="mono">${esc(key)}', block, "头部没有 QQ 号")
+        self.assertIn("person-group", block, "头部没有群 chips")
+        self.assertIn("person-nicks", block, "昵称没有折叠的次要行")
+        self.assertLess(block.index("person-head-name"), block.index("nicknames.map(esc)"),
+                        "昵称跑到称呼前面去了（那就等于拿它当标题）")
+        self.assertRegex(self.css, r"\.person-group\s*\{", "群 chips 没有样式")
+
+    def test_a_person_without_a_reading_gets_no_placeholder(self) -> None:
+        block = _uncomment(_function_body(self.js, "personBlock"))
+        self.assertNotIn("还没有关系两轴读数", block, "那句占位又回到了画像块里")
+        self.assertNotIn("还没有关系两轴读数", self.js, "那句占位还留在 app.js 里")
+        self.assertRegex(block, r"if \(relation_\) \{",
+                         "关系那一节没有「有读数才出现」这一道")
+        self.assertIn("panes.push", block, "三节不是同一张表里出来的")
+
+    def test_the_sections_are_tabs_and_only_one_is_visible(self) -> None:
+        block = _uncomment(_function_body(self.js, "personBlock"))
+        self.assertIn("person-tabs", block, "三节没有做成分段")
+        self.assertIn('role="tab"', block, "分段没有 tab 语义")
+        self.assertRegex(block, r'id === showing \? "" : " hidden"',
+                         "没有把不在看的那几节藏起来")
+        self.assertRegex(self.css, r"\.pane\[hidden\]\s*\{\s*display: none;",
+                         "藏起来的那几节没有 display: none")
+        handlers = _uncomment(_function_body(self.js, "bind"))
+        self.assertIn('act("person-tab"', handlers, "分段没有接线")
+        tabs = re.search(r'act\("person-tab", \(el\) => \{(.*?)\}\)\) return;',
+                         handlers, re.S)
+        self.assertIsNotNone(tabs, "分段那一段找不到")
+        self.assertIn("pane.hidden =", tabs.group(1), "点分段没有换显示的那一节")
+        self.assertNotIn("render(", tabs.group(1), "点分段去整页重画了")

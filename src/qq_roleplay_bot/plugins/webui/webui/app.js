@@ -1771,6 +1771,22 @@ function bind() {
     // 要的是"一个卡片里来回切换"，内容必须跟着换）。2026-10-09 换成"搜索框 + 列表"，
     // 选中的那个人同时写进地址栏（可分享、刷新不丢）。
     if (act("person-row", (el) => rememberPerson(el.dataset.person))) return;
+    // 人物画像页的分段：整体印象 / 零散记录 / 关系——**一次只显示一块**。
+    // 只改这一块里的 `hidden`（不重画、不取数），并把"看的哪一节"记进 `state.last`
+    // （这样换个人回来还停在同一节上）。
+    if (act("person-tab", (el) => {
+      state.last.profilePane = el.dataset.pane;
+      const block = el.closest(".person-block");
+      if (!block) return;
+      block.querySelectorAll(".person-tab").forEach((tab) => {
+        const on = tab === el;
+        tab.classList.toggle("on", on);
+        tab.setAttribute("aria-selected", on ? "true" : "false");
+      });
+      block.querySelectorAll(".pane").forEach((pane) => {
+        pane.hidden = pane.dataset.pane !== el.dataset.pane;
+      });
+    })) return;
   });
   // 搜索框：**输入即筛**。重画之后把光标放回末尾（不重画的话列表不会跟着变）。
   $("view").addEventListener("input", (event) => {
@@ -2105,43 +2121,62 @@ function personLabel(key, data) {
   return key;
 }
 
-/* **一个人一块**：这个人是谁 / 她对这人的整体印象（带版本）/ 关系两轴 / 名下的零散记录。
+//: 页面上的**设计说明**都收进这个「?」：点开（或悬停）才出现，默认不占地方
+//: （用户 2026-10-09："删掉页面上的设计说明段"——每节最多留一行必要说明）。
+function noteTip(text) {
+  return `<details class="note-tip"><summary title="说明" aria-label="这一页怎么用">?</summary>
+    <p class="hint">${text}</p></details>`;
+}
+
+//: 人物画像那一页的说明（**只在 `?` 里出现**，不许再铺在页面上）。
+const PROFILE_NOTES = `画像就是记忆里的一类（<code>kind=profile</code>）：<b>一个人一张</b>、
+  跟着人走、不按词检索。它由记忆维护 agent 写——真的看出"这个人的整体样子"时才写一条，
+  不是每人一条。面板对记忆<b>只读</b>：写入只走记忆维护 agent，删除入口在「记忆」页。
+  每类最多看 ${PROFILE_LIMIT} 条，超出的没列出来（不是没有）。`;
+
+/* **一个人一块**：三节——整体印象 / 零散记录 / 关系，**一次只显示一节**。
  *
- * 用户 2026-10-06 的改法：*"应该是一个卡片里来回切换多个人的画像，而不是每个人一个
- * 卡片往下翻"* —— 所以这个函数**每次只画一个人**，由 `viewPersonProfiles()` 用切换条上
- * **选中的那个键**调**一次**。谁要是把它丢进 `map()` 里铺成一列，
+ * 用户 2026-10-09 指着截图改的口径（这一块照它重写）：
+ * ① 设计说明收进 `?`（`noteTip`），页面上不再铺那几段；
+ * ② 头部三样 = **称呼（她的叫法 / 名片）+ QQ 号 + 所在群**；昵称那种噪声
+ *    （"有人转发了！"）放**次要行**、折叠起来，**不许当标题**；
+ * ③ **没有读数就整块不出现**——"关系两轴：还没有…"那句斜体占位删掉（要么有数、要么不出）；
+ * ④ 三节用**分段**（标签页），一次只显示一块，别再全宽堆几张卡。
+ *
+ * 用户 2026-10-06 那两句继续有效：*"应该是一个卡片里来回切换多个人的画像，而不是每个人
+ * 一个卡片往下翻"*——所以这个函数**每次只画一个人**，由 `viewPersonProfiles()` 用选中的
+ * 那个键调**一次**。谁把它丢进 `map()` 里铺成一列，
  * `PersonProfilePlacementTests::test_only_one_profile_block_is_rendered_at_a_time` 当场红。
  */
 function personBlock(key, data) {
   const rows = data.impression.get(key);
   const main = rows ? rows[0] : null;
   const older = (data.superseded.get(key) || []).length;
-  const identity = [];
-  if (key !== "（无归属人）") identity.push(`<span class="mono">${esc(key)}</span>`);
-  if (data.names[key] && data.names[key].length) identity.push(data.names[key].join("、"));
-  if (main && main.scope_key) {
-    identity.push(`群 <span class="mono">${esc(main.scope_key)}</span>`);
-  }
-  const relation_ = data.relation[key];
-  const relationLine = relation_
-    ? `亲近 ${esc(String(relation_.closeness ?? "—"))} · 戒备 ${
-      esc(String(relation_.guardedness ?? "—"))} · 更新于 ${esc(ts(relation_.updated_at))}`
-    : "还没有关系两轴读数（她还没跟这个人来回够多）";
-  // 有记录、但还没成形像的人：内容区**如实写**，不拿旧事冒充印象。
-  const impressionBlock = main
-    ? `<div class="card-inline">
-        <div class="pref-title">她对这人的整体印象${
-          main.revision ? `（r${num(main.revision)}）` : ""}</div>
-        <div class="impression">${esc(main.content || "（空）")}</div>
-        ${older ? `<p class="hint">另有 ${num(older)} 条旧版（被顶替）；按状态筛选能在「记忆」页看到。</p>` : ""}
-      </div>`
-    : `<div class="card-inline">
-        <div class="pref-title">她对这人的整体印象</div>
-        <p class="hint">还没成形像——这个人名下有记录，但记忆维护 agent 还没写过
-          <code>kind=profile</code> 那一条。她在真的看出"这个人的整体样子"时才会写，
-          不是每人一条。</p>
-      </div>`;
   const own = data.mentions.get(key) || [];
+  const relation_ = data.relation[key];
+  const label = personLabel(key, data);
+  const nicknames = data.names[key] || [];
+  const groups = data.groups[key] || [];
+
+  // ② 头部：**称呼**当标题；QQ 号与所在群跟在后面；昵称另起一行、折起来。
+  const head = `<div class="person-head">
+    <div class="person-head-name">${esc(label)}</div>
+    <div class="person-head-meta">${
+      key === "（无归属人）" ? "" : `<span class="mono">${esc(key)}</span>`}${
+      groups.map((id) => `<span class="person-group">群 ${esc(id)}</span>`).join("")}</div>${
+    nicknames.length > 1
+      ? `<details class="person-nicks"><summary>名片 / 昵称 ${num(nicknames.length)} 个</summary>
+          <p class="hint">${nicknames.map(esc).join(" · ")}</p></details>`
+      : ""}
+  </div>`;
+
+  // 整体印象：有就写出来（带版本），没有就一句短的——**不拿旧事冒充印象**。
+  const impression = main
+    ? `<div class="impression">${esc(main.content || "（空）")}</div>${
+        main.revision ? `<p class="hint">第 ${num(main.revision)} 版</p>` : ""}${
+        older ? `<p class="hint">另有 ${num(older)} 条旧版（被顶替）；按状态筛选能在「记忆」页看到。</p>` : ""}`
+    : `<p class="hint">还没成形像——她在真的看出"这个人的整体样子"时才会写，不是每人一条。</p>`;
+
   // 「类别」这一列**不许 nowrap**：类别名有长有短（`alias` / `preference` / `boundary`），
   // 在中等档（内容区只剩 ~575px）里最短的那一列装不下最长的类别名，而 `nowrap`
   // 会让它**溢到旁边「键」那一列下面**、两列的字叠在一起（2026-10-06 截图核对抓到的）。
@@ -2152,12 +2187,34 @@ function personBlock(key, data) {
     { label: "内容", get: (r) => r.content },
     { label: "更新", get: (r) => ts(r.updated_at), nowrap: true },
   ], own, { cols: "cols-profile", widths: ["20%", "20%", "44%", "16%"] });
-  return card(personLabel(key, data), `
-    <p class="pref-summary">${identity.join(" · ") || "名册里还没有这个人的名字"}</p>
-    ${impressionBlock}
-    <p class="pref-summary">关系两轴：${relationLine}</p>
-    <div class="pref-group-title">这个人的零散记录（${num(own.length)} 条）</div>
-    ${own.length ? ownTable : '<p class="hint">这个人名下还没有别的记录。</p>'}`);
+
+  // ④ 三节（**一次只显示一节**）：哪一节在看由 `state.last.profilePane` 记着，
+  //    换人重画之后还停在同一节上。
+  const panes = [
+    ["impression", "整体印象", "", impression],
+    ["records", "零散记录", `(${num(own.length)})`,
+      own.length ? ownTable : '<p class="hint">这个人名下还没有别的记录。</p>'],
+  ];
+  // ③ **没有关系读数就整块不出现**（不留"还没有…"那种占位句）。
+  if (relation_) {
+    panes.push(["relation", "关系", "", `<div class="relation">
+      <div class="relation-axis"><span class="relation-label">亲近</span>
+        <span class="relation-value">${esc(String(relation_.closeness ?? "—"))}</span></div>
+      <div class="relation-axis"><span class="relation-label">戒备</span>
+        <span class="relation-value">${esc(String(relation_.guardedness ?? "—"))}</span></div>
+      <p class="hint">更新于 ${esc(ts(relation_.updated_at))}</p></div>`]);
+  }
+  const wanted = String(state.last.profilePane || "");
+  const showing = panes.some(([id]) => id === wanted) ? wanted : panes[0][0];
+  const tabs = panes.map(([id, name, extra]) => `<button type="button" role="tab"
+      class="person-tab${id === showing ? " on" : ""}" data-pane="${id}"
+      aria-selected="${id === showing ? "true" : "false"}">${esc(name)}${
+      extra ? `<span class="person-tab-count">${extra}</span>` : ""}</button>`).join("");
+  const bodies = panes.map(([id, , , body]) => `<div class="pane" data-pane="${id}"${
+    id === showing ? "" : " hidden"}>${body}</div>`).join("");
+  return `<div class="person-block">${head}
+    <div class="person-tabs" role="tablist" aria-label="看哪一节">${tabs}</div>
+    ${bodies}</div>`;
 }
 
 async function viewPersonProfiles() {
@@ -2218,7 +2275,27 @@ async function viewPersonProfiles() {
     .sort((a, b) => latest(mentions.get(b)) - latest(mentions.get(a)));
   const all = keys.concat(withoutProfile);
 
-  const data = { impression, superseded, mentions, names, relation };
+  // **群 chips**（头部三样之一）：名册里这个人的群，加上他名下记录出现过的群
+  // （`scope_key` 就是那条记忆落在哪个群），去重、按出现顺序。
+  const groups = {};
+  (people.rows || []).forEach((row) => {
+    const uid = String(row.user_id || "").trim();
+    const gid = String(row.group_id || "").trim();
+    if (!uid || !gid) return;
+    const list = (groups[uid] = groups[uid] || []);
+    if (!list.includes(gid)) list.push(gid);
+  });
+  const addGroup = (key, gid) => {
+    const id = String(gid || "").trim();
+    if (!key || !id) return;
+    const list = (groups[key] = groups[key] || []);
+    if (!list.includes(id)) list.push(id);
+  };
+  (profiles.rows || []).forEach((row) => addGroup(personKey(row) || "（无归属人）",
+                                                  row.scope_key));
+  (records.rows || []).forEach((row) => addGroup(personKey(row), row.scope_key));
+
+  const data = { impression, superseded, mentions, names, relation, groups };
   const wanted = String(state.last.profileKey || "");
   // **按最近活跃排**（用户 2026-10-09：默认选最近活跃那个）。"活跃"取这三样的最新一个：
   // 画像那一条的更新时间、他名下任意一条记录的时间、关系两轴的更新时间。
@@ -2278,15 +2355,9 @@ async function viewPersonProfiles() {
     return true;
   };
 
-  const head = card("人物画像（记忆这一档）", `
-    <p class="hint">这里是<b>一个人一张</b>：她对这个人的整体印象（记忆里 <code>kind=profile</code>
-      那一类），加上挂在这个人名下的零散记录（称呼、边界、偏好这类）。
-      画像跟着人走、不跟话题走，所以不按词检索；一批记忆里最多动一条。</p>
-    <p class="hint">面板对记忆只能删、不能改：写入只走记忆维护 agent。
-      删除入口在「记忆」页（问题记忆那张卡），这里只读。</p>
-    ${profiles.total > PROFILE_LIMIT || records.total > PROFILE_LIMIT
-      ? `<p class="hint">这一页每类最多看 ${PROFILE_LIMIT} 条（现在画像 ${num(profiles.total)} 条、
-         旧事 ${num(records.total)} 条），超出的没列出来——不是没有。</p>` : ""}
+  // ① **页面上不再铺设计说明**：全收进那一个「?」（点开才看得见）。
+  const head = card("人物画像", `${noteTip(`${PROFILE_NOTES}
+      这一页现在读到：画像 ${num(profiles.total)} 条、旧事 ${num(records.total)} 条。`)}
     <div id="person-panel">${panelFor(current)}</div>`);
 
   if (!all.length) {
