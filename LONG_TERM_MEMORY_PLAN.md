@@ -136,7 +136,13 @@ MemoryRecord
 - 单条记忆建议不超过 300 个字符；一次写入最多 5 条；
 - `content` 只能是脱敏后的事实或偏好，不允许包含指令格式、XML 协议、密钥和完整日志；
 - 原始聊天正文不进入长期表；若需要审计，只保留来源事件 ID、时间和来源类型；
-- 同一个 `scope_type + scope_key + normalized_key` 只保留一个 active 版本，旧版本标记为 `superseded`，不静默覆盖；
+- 同一个 `scope_type + scope_key + normalized_key` 只保留一个 active 版本，**不静默覆盖**
+  （2026-10-09 改：同一个键再写一次是**就地更新**那一行——刷新 `content` 与 `updated_at`、
+  `revision` 仍 +1；**不再**每写一次就留一条 `superseded` 的旧行，那是"同一个键重复多份"
+  的来源）。旧行标 `superseded` 只发生在**换了键**（UPDATE 改 `normalized_key`）、
+  `MERGE` 的目标、强化搬层（中短期 → 长期）与 `DELETE`；这些路径的链一个字不动。
+  历史遗留的多行**只统计不清理**（清理要用户点头），计数见 `/super status` 与
+  `/super memory` 的"同键多行";
 - 用户删除后标记为 `deleted` 并从正常检索中排除。
 - **删除不销毁内容**：删除时会先把整条记录快照进 `archive` 表（保留 30 天），
   再按原行为清空 `records` 行的 `content`。理由：`tombstones` 只记
@@ -280,7 +286,8 @@ Memory Maintenance Agent 使用单独的固定 system prompt 和结构化输出�
 当用户说“我不喜欢这个称呼了”“别再记住这个”或表达类似纠正/遗忘意图时：
 
 - 先停止继续注入旧记录；
-- 通过 `normalized_key` 找到旧记录并标记 `superseded` 或 `deleted`；
+- 通过 `normalized_key` 找到旧记录：同一个键就**就地刷新**那一行（`revision` +1），
+  换了键或明确遗忘才标 `superseded` / `deleted`；
 - 新值由下一轮 Agent 根据当前表达和历史证据决定是否成为 active；
 - 下一次模型请求只提供新值，不提供已经删除的旧值；
 - 删除操作记录最小审计信息，不记录被删除的敏感原文。

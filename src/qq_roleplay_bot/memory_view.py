@@ -56,6 +56,12 @@ def build_overview(counts: dict[str, int], *, memory_note: str = "") -> MemoryVi
         ("tombstones", "墓碑(已删)"),
         ("archive", "归档(可恢复)"),
         ("receipts", "已处理回执"),
+        # 体检三类（2026-10-09 用户实测："同一个键重复多份""只有键、内容栏空"）：
+        # 面板上看得见脏数据，就该在超管视图里也看得见。定义见
+        # `MemoryStore._hygiene_counts`；历史行**一条不删**（删记忆要用户点头）。
+        ("duplicate_key_groups", "同键多行(组)"),
+        ("empty_content_records", "正文空行(删除残留)"),
+        ("evidence_free_records", "无证据的生效记录"),
     )
     for key, label in labels:
         if key in counts:

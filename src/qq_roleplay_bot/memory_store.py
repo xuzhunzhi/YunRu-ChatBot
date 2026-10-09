@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import sqlite3
 import threading
 import time
@@ -11,11 +10,16 @@ import uuid
 from contextlib import closing, contextmanager
 from pathlib import Path
 
+from . import memory_grounding
 from .memory_filters import system_self_rule
 from . import dev_config
 from .memory_model import (MAX_SUBJECTS, InboxEvent, MemoryBatch, MemoryRecord,
                            MemoryValidationError, parse_operations)
 from .security import sanitize_chat_text
+
+# 词元切分与虚词表**只有一份**（在 `memory_grounding`）：检索按词命中、写入闸门按词
+# 比覆盖率，两边用同一套口径。这里留一个同名别名，`data/` 下那些体检脚本还在用它。
+STOPWORDS = memory_grounding.STOPWORDS
 
 logger = logging.getLogger(__name__)
 
@@ -290,12 +294,7 @@ AFFINITY_DECAY_SECONDS = 30 * DAY
 CLOSENESS_DECAY_FLOOR = 1
 
 # 单字与高频虚词命中没有区分度，只会把不相关记录抬上来。
-STOPWORDS = frozenset({
-    "的", "了", "是", "在", "和", "与", "我", "你", "他", "她", "它", "们",
-    "这", "那", "有", "没", "不", "吗", "呢", "吧", "啊", "呀", "就", "也",
-    "都", "很", "会", "要", "把", "被", "给", "对", "为", "以", "及", "或",
-    "一个", "什么", "怎么", "可以", "自己", "这个", "那个", "我们", "你们",
-})
+# （表本身在 `memory_grounding`：写入闸门与检索共用同一份，见那里的说明。）
 
 
 class MemoryStore:
@@ -313,6 +312,10 @@ class MemoryStore:
         # 保留期清理掉的行数（观测用；只记数，不含内容）。见 `_cleanup`：
         # 关系流水与墓碑这两张"只增"的表按保留期清旧行，清掉的条数要看得见。
         self.pruned: dict[str, int] = {"relationship_log": 0, "tombstones": 0}
+        # 被**依据闸门**拒掉的写入（按拒绝码计数，本次进程累计；只记数，不含内容）。
+        # 见 `memory_grounding`：归属不是他本人说的、没有依据就改正文、正文超出原话、
+        # 空正文，都在这条路径上被逐条拒掉，拒了必须看得见（`/super status`）。
+        self.rejected: dict[str, int] = {}
 
     @contextmanager
     def connection(self):
@@ -699,6 +702,8 @@ class MemoryStore:
             # 只把**真正生效**的操作返回给调用方：被机械兜底拒掉的 ADD 不算数，
             # 否则指标与"哪些证据被引用了"都会被算错。
             applied = []
+            # 依据闸门要按 id 查原话（`op.evidence_event_ids` 里可能有重复），先建一次索引。
+            events = {event.id: event for event in batch.events}
             for index, op in enumerate(operations):
                 key = batch.scope_key(op.scope_type) if op.scope_type else ""
                 # 写入路径上的第一道闸：不许新增/改出"关于这个系统自身"的内容。
@@ -746,51 +751,106 @@ class MemoryStore:
                     evidence_time = max((e.occurred_at for e in batch.events if e.id in op.evidence_event_ids and e.speaker == "user"), default=0)
                     if tomb and evidence_time <= tomb[0]:
                         raise MemoryValidationError("deleted_evidence")
-                    for row in targets:
-                        db.execute(f"UPDATE {TABLES[row['tier']]} SET status='superseded',updated_at=? WHERE id=?",
-                                   (now, row["id"]))
-                        if row["normalized_key"] != op.normalized_key:
-                            self._tombstone(db, row, now)
-                    # 同一个键在两张表里都算占用：否则同一条事实会在两边各长一条。
-                    for tier in TIERS:
-                        existing = db.execute(
-                            f"SELECT 1 FROM {TABLES[tier]} WHERE scope_type=? AND scope_key=? "
-                            "AND normalized_key=? AND status='active'",
-                            (op.scope_type, key, op.normalized_key)).fetchone()
-                        if existing:
-                            raise MemoryValidationError("duplicate_key_use_update")
-                    used = sum(db.execute(
-                        f"SELECT COUNT(*) FROM {TABLES[tier]} WHERE scope_type=? AND scope_key=? "
-                        "AND status='active'", (op.scope_type, key)).fetchone()[0] for tier in TIERS)
-                    if used >= 100:
-                        raise MemoryValidationError("namespace_full")
-                    revision = max((r["revision"] for r in targets), default=0) + 1
-                    # 先定层，再按那一层的窗口算 TTL：长期的窗口比中短期长得多，
-                    # 顺序反了会让刚进长期的记录仍然只活 14 天。
-                    tier = self._target_tier(op, revision)
-                    ttl_days = self._effective_ttl_days(op.kind, op.content, op.ttl_days, tier=tier)
-                    record_id = uuid.uuid4().hex
-                    common = (record_id, op.scope_type, key,
-                              batch.user_id if op.scope_type != "group" else None,
-                              op.kind, op.normalized_key, op.content, op.confidence, now, now,
-                              now + ttl_days * DAY if ttl_days else None, revision,
-                              json.dumps(op.evidence_event_ids), 1 if op.durable else 0)
-                    base = ("id,scope_type,scope_key,subject_user_id,kind,normalized_key,content,"
-                            "confidence,created_at,updated_at,expires_at,revision,source_event_ids,durable")
-                    if tier == "long":
-                        # 长期表多一列 promoted_at；短期表没有它。
-                        db.execute(f"INSERT INTO {TABLES['long']} ({base},promoted_at) "
-                                   "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (*common, now))
-                    else:
-                        db.execute(f"INSERT INTO {TABLES['short']} ({base}) "
-                                   "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", common)
-                    if tier == "long":
-                        # 直接进长期的理由要留痕，方便事后核对"哪些是被强化上来的"。
-                        # 编号加个大偏移：audit 的主键是 (batch_id, operation_index)，
-                        # 和这一条 op 自己那行不能撞。
+                    # 第二道闸（2026-10-09）：这条事实站不站得住。归属必须是**他本人**说的
+                    # 那句话（不是话题里出现的名字、也不是"这一批的会话人"），处境类还得是
+                    # 他在**自述**；数字与型号不许凭空补全，正文不许为空。判据全在
+                    # `memory_grounding`；这里只负责计数、留痕、逐条跳过
+                    # （被拒的证据不算"已引用"，会进一次重放）。
+                    # 排在墓碑后面：**整批拒绝**（`deleted_evidence`）比逐条跳过更硬，优先。
+                    cited = tuple(events[event_id]
+                                  for event_id in dict.fromkeys(op.evidence_event_ids)
+                                  if event_id in events)
+                    # 归属按**规范号**算：换号说话的人（`person_aliases`）仍然是他本人，
+                    # 只有"规范化之后也不是他"的号才算"引用别人的话"。
+                    foreign = tuple(sorted({
+                        str(event.user_id) for event in cited
+                        if event.speaker == "user"
+                        and self.canonical_user(event.user_id, db=db) != batch.user_id
+                    }))
+                    target_contents = tuple(row["content"] or "" for row in targets)
+                    rejection = memory_grounding.grounding_rejection(
+                        op, cited=cited, foreign_speakers=foreign,
+                        ground=" ".join([e.text for e in cited]
+                                        + [e.text for e in batch.events]
+                                        + list(target_contents)),
+                        target_contents=target_contents)
+                    if rejection:
+                        self.rejected[rejection] = self.rejected.get(rejection, 0) + 1
                         db.execute("INSERT INTO audit VALUES (?,?,?,?,?)",
-                                   (batch.id, PROMOTION_AUDIT_OFFSET + index, "promoted_long",
-                                    op.scope_type, now))
+                                   (batch.id, index, rejection, op.scope_type, now))
+                        logger.warning("memory_write_rejected reason=%s scope=%s group=%s",
+                                       rejection, op.scope_type, batch.group_id)
+                        continue
+                    # **同键就地更新**（2026-10-09 用户实测："同一个键重复多份"）。
+                    # 幂等键与两张表上的唯一索引一致：(scope_type, scope_key, normalized_key)。
+                    # 这条事实已经活着 → 刷新那一行（正文 + updated_at + revision），
+                    # 不再"把旧行标 superseded、再插一行新的"——真库里 53 组多行、74 行冗余
+                    # 就是这么来的（同一秒两行 = 旧行的 updated_at 被写成新行的 created_at）。
+                    # **supersede 链本身一个字不动**：改键的 UPDATE、MERGE 的目标、强化搬层、
+                    # DELETE 仍然照旧把旧行标 superseded 并留痕（见 tests 的 MERGE 夹具）。
+                    reusable = self._active_by_key(db, op.scope_type, key, op.normalized_key)
+                    if reusable is not None and op.op != "ADD":
+                        for row in targets:
+                            if row["id"] == reusable["id"]:
+                                continue
+                            db.execute(f"UPDATE {TABLES[row['tier']]} SET status='superseded',updated_at=? WHERE id=?",
+                                       (now, row["id"]))
+                            if row["normalized_key"] != op.normalized_key:
+                                self._tombstone(db, row, now)
+                        revision = max([r["revision"] for r in targets] + [reusable["revision"]]) + 1
+                        # 先定层，再按那一层的窗口算 TTL：顺序反了会让刚进长期的记录仍只活 14 天。
+                        tier = self._target_tier(op, revision)
+                        record_id = reusable["id"]
+                        if self._refresh_record(db, reusable, op, now=now, revision=revision,
+                                                tier=tier):
+                            # 搬层也是"被强化"，与下面插入长期时写同一行审计。
+                            db.execute("INSERT INTO audit VALUES (?,?,?,?,?)",
+                                       (batch.id, PROMOTION_AUDIT_OFFSET + index, "promoted_long",
+                                        op.scope_type, now))
+                    else:
+                        for row in targets:
+                            db.execute(f"UPDATE {TABLES[row['tier']]} SET status='superseded',updated_at=? WHERE id=?",
+                                       (now, row["id"]))
+                            if row["normalized_key"] != op.normalized_key:
+                                self._tombstone(db, row, now)
+                        # 同一个键在两张表里都算占用：否则同一条事实会在两边各长一条。
+                        for tier in TIERS:
+                            existing = db.execute(
+                                f"SELECT 1 FROM {TABLES[tier]} WHERE scope_type=? AND scope_key=? "
+                                "AND normalized_key=? AND status='active'",
+                                (op.scope_type, key, op.normalized_key)).fetchone()
+                            if existing:
+                                raise MemoryValidationError("duplicate_key_use_update")
+                        used = sum(db.execute(
+                            f"SELECT COUNT(*) FROM {TABLES[tier]} WHERE scope_type=? AND scope_key=? "
+                            "AND status='active'", (op.scope_type, key)).fetchone()[0] for tier in TIERS)
+                        if used >= 100:
+                            raise MemoryValidationError("namespace_full")
+                        revision = max((r["revision"] for r in targets), default=0) + 1
+                        tier = self._target_tier(op, revision)
+                        ttl_days = self._effective_ttl_days(op.kind, op.content, op.ttl_days, tier=tier)
+                        record_id = uuid.uuid4().hex
+                        common = (record_id, op.scope_type, key,
+                                  batch.user_id if op.scope_type != "group" else None,
+                                  op.kind, op.normalized_key, op.content, op.confidence, now, now,
+                                  now + ttl_days * DAY if ttl_days else None, revision,
+                                  json.dumps(op.evidence_event_ids), 1 if op.durable else 0)
+                        base = ("id,scope_type,scope_key,subject_user_id,kind,normalized_key,content,"
+                                "confidence,created_at,updated_at,expires_at,revision,source_event_ids,durable")
+                        if tier == "long":
+                            # 长期表多一列 promoted_at；短期表没有它。
+                            db.execute(f"INSERT INTO {TABLES['long']} ({base},promoted_at) "
+                                       "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (*common, now))
+                        else:
+                            db.execute(f"INSERT INTO {TABLES['short']} ({base}) "
+                                       "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", common)
+                        if tier == "long":
+                            # 直接进长期的理由要留痕，方便事后核对"哪些是被强化上来的"。
+                            # 编号加个大偏移：audit 的主键是 (batch_id, operation_index)，
+                            # 和这一条 op 自己那行不能撞。
+                            db.execute("INSERT INTO audit VALUES (?,?,?,?,?)",
+                                       (batch.id, PROMOTION_AUDIT_OFFSET + index, "promoted_long",
+                                        op.scope_type, now))
                     # 关联人行记的是**这条事实是在哪个群学到的**：跨人召回只借本群学到的事，
                     # 所以 user_global 的记录在别的群里不会被别人借走。
                     self._link_subjects(db, batch, op, record_id, batch.group_id)
@@ -1090,7 +1150,64 @@ class MemoryStore:
                     result[table] = db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
                 except sqlite3.OperationalError:
                     result[table] = 0
+            result.update(self._hygiene_counts(db))
             return result
+
+    def rejection_counts(self) -> dict[str, int]:
+        """本次进程里被依据闸门拒掉的写入条数（按拒绝码）。只记数，不含内容。
+
+        与 `pruned` 同一形状：它是"为什么这条没写进去"的出口，所以跟着
+        `/super status` 一起露出来。
+        """
+
+        return {code: int(count) for code, count in self.rejected.items() if count}
+
+    def _hygiene_counts(self, db) -> dict[str, int]:
+        """只读体检：历史脏数据的三类计数（同键多行 / 正文空行 / 无证据的生效记录）。
+
+        由来（2026-10-09 用户实测面板）："同一个键重复多份"与"只有键、内容栏空"
+        都要**能看见**，否则下次还得靠人肉翻库。三类的定义：
+
+        - `duplicate_key_groups` / `duplicate_key_rows`：同一个
+          `(scope_type, scope_key, normalized_key)` 落了好几行（多出来的行数 =
+          `duplicate_key_rows`）。这一版起写入不再产生它们（就地更新），但历史行
+          **一条不删**——删记忆要用户点头（AGENTS §五）。
+        - `empty_content_records`：正文为空的残留行。它们全是 `status='deleted'`：
+          删除路径按 AGENTS §2.1 先归档再清空正文，行要等保留期（默认 7 天）才被
+          `_cleanup` 清掉。**不是**"写入允许空正文"（那条在
+          `memory_model.parse_operations` 与 `memory_grounding` 两道闸上）。
+        - `evidence_free_records`：生效中却**一条证据都没有**的个人记录
+          （`source_event_ids` 为空）。归属查不到依据 = 归属可疑；原话正文不留在库里
+          （inbox 处理完就删），所以只能给出这一个可机械判定的口径。
+        """
+
+        result = {"duplicate_key_groups": 0, "duplicate_key_rows": 0,
+                  "empty_content_records": 0, "evidence_free_records": 0}
+        # 同键多行**跨两张表一起数**：面板的「零散记录」读的是 `records` 视图
+        # （两张表 UNION ALL），同一条事实在短期留一行、长期又有一行，在用户眼里
+        # 就是"同一个键重复多份"。只按单表数会少报（真库实测：单表 53 组 / 跨表 64 组）。
+        union = " UNION ALL ".join(
+            f"SELECT scope_type,scope_key,kind,normalized_key FROM {TABLES[tier]}"
+            for tier in TIERS)
+        for row in db.execute(f"SELECT COUNT(*) AS n FROM ({union}) "
+                              "GROUP BY scope_type,scope_key,kind,normalized_key HAVING n>1"):
+            result["duplicate_key_groups"] += 1
+            result["duplicate_key_rows"] += int(row["n"]) - 1
+        for tier in TIERS:
+            table = TABLES[tier]
+            result["empty_content_records"] += int(db.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE content IS NULL OR TRIM(content)=''"
+            ).fetchone()[0])
+            result["evidence_free_records"] += int(db.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE status='active' AND scope_type!='group' "
+                "AND (source_event_ids IS NULL OR source_event_ids IN ('', '[]'))").fetchone()[0])
+        return result
+
+    def hygiene_counts(self) -> dict[str, int]:
+        """`_hygiene_counts` 的只读入口（给 `/super status` 与面板快照用）。"""
+
+        with self.connection() as db:
+            return self._hygiene_counts(db)
 
     def list_records(self, *, limit: int = 40, status: str | None = None) -> tuple[list[dict], int]:
         """按更新时间倒序列出记忆（两层混排，带 `tier` 字段）。返回 (本页记录, 总数)。只读。"""
@@ -1344,6 +1461,74 @@ class MemoryStore:
                 data["tier"] = tier
                 return data
         return None
+
+    def _active_by_key(self, db, scope_type: str, scope_key: str, normalized_key: str):
+        """这个键当前**活着**的那一行（两张表都找，附 `tier` 键）；没有返回 None。
+
+        `(scope_type, scope_key, normalized_key)` 就是两张表上唯一索引的口径，也是
+        "同一件事在同一个 scope 里只允许存在一条"的判据（见维护 prompt），
+        所以它同时是"就地更新"要找的那一行。
+        """
+
+        for tier in TIERS:
+            row = db.execute(
+                f"SELECT * FROM {TABLES[tier]} WHERE scope_type=? AND scope_key=? "
+                "AND normalized_key=? AND status='active'",
+                (scope_type, scope_key, normalized_key)).fetchone()
+            if row is not None:
+                data = dict(row)
+                data["tier"] = tier
+                return data
+        return None
+
+    def _refresh_record(self, db, row, op, *, now: float, revision: int, tier: str) -> bool:
+        """同键就地更新：刷新正文与时间戳，**不新增行**。返回是否搬了层。
+
+        保留的东西：`id`、`created_at`、`visibility`、`origin`、以及
+        `source_event_ids`（新旧证据取并集——这条事实被哪些原话确认过，只增不减）、
+        `durable`（一旦标成长期就不再降级：`durable` 是"值得长期留"的承诺）。
+        刷新的东西：正文、kind、置信度、`updated_at`、`expires_at`、`revision`。
+
+        `revision` 仍然每次 +1：它既是"被后来的证据再确认过一次"的强化判据
+        （`_target_tier`），也是并发写时的乐观锁（`_find_record` 对不上就 stale_revision）。
+        搬层（中短期 → 长期）沿用 `_promote` 的形状：同 id 写进目标表，原行标
+        `superseded`（历史不丢，两张表的唯一索引也不会撞）。
+        """
+
+        ttl_days = self._effective_ttl_days(op.kind, op.content, op.ttl_days, tier=tier)
+        expires_at = now + ttl_days * DAY if ttl_days else None
+        evidence = list(json.loads(row["source_event_ids"] or "[]"))
+        for event_id in op.evidence_event_ids:
+            if event_id not in evidence:
+                evidence.append(event_id)
+        source_event_ids = json.dumps(evidence[:40])
+        durable = max(int(row["durable"] or 0), 1 if op.durable else 0)
+        moved = tier != row["tier"]
+        if not moved:
+            db.execute(
+                f"UPDATE {TABLES[row['tier']]} SET kind=?,content=?,confidence=?,updated_at=?,"
+                "expires_at=?,revision=?,source_event_ids=?,durable=? WHERE id=?",
+                (op.kind, op.content, op.confidence, now, expires_at, revision,
+                 source_event_ids, durable, row["id"]))
+            return False
+        db.execute(
+            f"UPDATE {TABLES[row['tier']]} SET status='superseded',updated_at=? WHERE id=?",
+            (now, row["id"]))
+        columns = ("id,scope_type,scope_key,subject_user_id,kind,normalized_key,content,"
+                   "confidence,created_at,updated_at,expires_at,revision,visibility,status,"
+                   "last_used_at,last_reviewed_at,origin,source_event_ids,durable,reminded_at")
+        values = (row["id"], row["scope_type"], row["scope_key"], row["subject_user_id"], op.kind,
+                  op.normalized_key, op.content, op.confidence, row["created_at"], now, expires_at,
+                  revision, row["visibility"], "active", row["last_used_at"],
+                  row["last_reviewed_at"], row["origin"], source_event_ids, durable,
+                  row["reminded_at"])
+        if tier == "long":
+            db.execute(f"INSERT INTO {TABLES['long']} ({columns},promoted_at) "
+                       "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (*values, now))
+        else:
+            db.execute(f"INSERT INTO {TABLES['short']} ({columns}) "
+                       "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", values)
+        return True
 
     @staticmethod
     def _target_tier(op, revision: int) -> str:
@@ -1891,18 +2076,11 @@ class MemoryStore:
 
     @staticmethod
     def _query_terms(query: str) -> frozenset[str]:
-        """把检索词切成可用于子串命中的词元；忽略单字噪声与常见虚词。"""
+        """把检索词切成可用于子串命中的词元；忽略单字噪声与常见虚词。
 
-        text = query.casefold()[:1000]
-        terms = {
-            token
-            for token in re.findall(r"[a-z0-9_]+", text)
-            if len(token) >= 2
-        }
-        for run in re.findall(r"[\u4e00-\u9fff]+", text):
-            if len(run) == 1:
-                continue
-            terms.update(run[index:index + 2] for index in range(len(run) - 1))
-            terms.add(run)
-        return frozenset(term for term in terms if term not in STOPWORDS)
+        实现只有一份，在 `memory_grounding.query_terms`：检索按词命中、写入闸门按词
+        比覆盖率与"照抄"，两边口径必须一致（抄两份一定会漂移）。
+        """
+
+        return memory_grounding.query_terms(query)
 

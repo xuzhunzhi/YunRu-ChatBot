@@ -345,7 +345,13 @@ class MemoryStoreTests(unittest.TestCase):
         batch = self.batch(text="以后叫我大明")
         self.store.commit(batch, output(operation(batch, op="UPDATE", targets=(old,), content="用户希望被称作大明"),
                                         operation(batch, key="likes_tea", kind="preference", content="用户喜欢茶")))
-        self.assertNotIn(old.id, [r.id for r in self.store.retrieve(GROUP, "100", "")])
+        # **同键就地更新**（2026-10-09）：同一条事实还是**那一行**（id 不变），
+        # 端出去的正文换成了新的那一版；旧正文一个字都不该再被端出去。
+        # （这一条从前断言的是"旧 id 消失"——那是"标 superseded + 插一行新的"的实现
+        #   细节，也正是"同一个键重复多份"的来源；判据改成断言**旧正文不再被端出去**。）
+        served = {r.id: r.content for r in self.store.retrieve(GROUP, "100", "")}
+        self.assertEqual(served.get(old.id), "用户希望被称作大明")
+        self.assertNotIn("用户希望被称作小明", served.values())
         batch = self.batch()
         self.store.commit(batch, output(operation(batch, op="MERGE", targets=batch.records,
                                                   key="profile", kind="topic_summary", content="用户称大明，喜欢茶")))

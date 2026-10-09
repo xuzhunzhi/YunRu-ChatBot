@@ -164,7 +164,22 @@ class MemoryService:
                 # 保留期清理掉的条数（2026-10-08 隔离增长审计 [8][9]）：关系流水与墓碑
                 # 都只增不减，清掉的条数要能在 `/super status` 上看见。只记数，不含内容。
                 "pruned": dict(getattr(self.store, "pruned", {}) or {}),
+                # 被依据闸门拒掉的写入（2026-10-09）：按拒绝码计数，"为什么这条没写进去"
+                # 得看得见。只记数，不含内容。
+                "rejected": self.store.rejection_counts(),
+                # 库里三类历史脏数据的计数（同键多行 / 正文空行 / 无证据的生效记录）。
+                # 读库失败不该影响 `/super status` 这一行。
+                "hygiene": self._hygiene(),
                 **asdict(self.metrics)}
+
+    def _hygiene(self) -> dict[str, int]:
+        """库内体检计数；读不到就报空（`/super status` 不能因为读库失败整行消失）。"""
+
+        try:
+            return dict(self.store.hygiene_counts())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("memory_hygiene_failed category=%s", type(exc).__name__)
+            return {}
 
     async def close(self):
         if not self._tasks:

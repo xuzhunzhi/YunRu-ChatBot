@@ -3592,6 +3592,21 @@ class DialogueEngine:
             if pruned.get("relationship_log") or pruned.get("tombstones"):
                 line += (f"   已清过期关系流水 {pruned.get('relationship_log', 0)} 条"
                          f" / 墓碑 {pruned.get('tombstones', 0)} 条")
+            # 库内体检（2026-10-09 用户实测："同一个键重复多份""只有键、内容栏空"）：
+            # 三类历史脏数据的条数**照配置永远印出来**（0 也是信息——0 表示库里干净）。
+            # 定义见 `MemoryStore._hygiene_counts`；历史行一条不删，清理要用户点头。
+            hygiene = memory.get("hygiene") or {}
+            if hygiene:
+                line += (f"   库里：同键多行 {hygiene.get('duplicate_key_groups', 0)} 组"
+                         f"（多 {hygiene.get('duplicate_key_rows', 0)} 行）"
+                         f"   正文空行 {hygiene.get('empty_content_records', 0)} 条"
+                         f"   无证据 {hygiene.get('evidence_free_records', 0)} 条")
+            # 被依据闸门拒掉的写入（2026-10-09）：非零才印，省得常态刷屏。
+            rejected = memory.get("rejected") or {}
+            if rejected:
+                detail = " / ".join(f"{code.replace('rejected_', '')} {count}"
+                                    for code, count in sorted(rejected.items()))
+                line += f"   本次拒写 {sum(rejected.values())} 条（{detail}）"
             lines.append(line)
         # 金句学习（2026-10-06）：**把学出来的东西露在概览里**——用户要的就是
         # "要能被操作者看到与纠正"。原文与逐条方向在 `/super quote`，这里只报计数
