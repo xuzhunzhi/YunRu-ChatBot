@@ -464,20 +464,37 @@ def _parse_remind(raw: str) -> RemindIntent | None:
     **事情里带 `|` 怎么办**（2026-10-08 定的老规矩：只切第一个 `|`）：只有第三段真的
     认得出是个收法时才把它当第三段，否则整段并回"事情"里（`交作业|顺手带伞` 照旧是
     一件事）。
+
+    **分隔符残留要丢掉**（2026-10-09 用户实测："到点了：给dsh发插件反馈|" —— 事情尾巴上
+    多一个 `|`）：第三段空着时模型会写成 `时间|事情|`，照老写法那个 `|` 就漏进 `what`，
+    再原样发到群里。规矩是**逐段 trim、丢掉尾部空段**，`what` 末尾的分隔符也剥掉——
+    只有**末尾**那些算残留；中间的 `|` 是他原话里真有的，保留。
     """
 
     body = sanitize_chat_text(raw or "", max_length=200).strip()
     if not body:
         return None
     parts = body.split("|", 2)
-    time_text = parts[0].strip()
+    # 头部空段也是残留（`|5分钟后|事情|`）：先丢掉。
+    while parts and not parts[0].strip():
+        parts.pop(0)
+    if not parts:
+        return None
+    time_text = parts[0]
     rest = parts[1:]
+    # 尾部空段 = 分隔符残留（`时间|事情|`）：也丢掉。
+    while rest and not rest[-1].strip():
+        rest.pop()
     channel = ""
     if len(rest) == 2:
         maybe = _remind_channel_digit(rest[1])
         if maybe:
             channel, rest = maybe, rest[:1]
     what = "|".join(rest).strip()
+    # `事情||` 这种末尾残留也剥掉（中间的 `|` 保留）。
+    while what.endswith("|"):
+        what = what[:-1].strip()
+    time_text = time_text.strip().strip("|").strip()
     if not time_text or not what:
         return None
     return RemindIntent(time_text=time_text, what=what, channel=channel)
