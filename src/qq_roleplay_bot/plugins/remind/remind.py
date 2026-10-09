@@ -236,10 +236,20 @@ class RemindCapability:
         # 2026-10-09 的契约：核心已经在她自己的话里问过"怎么收"，交过来的永远是"值齐了"
         # 的那一条。插件**不再发罐头问话**（再问就是同一件事两个声音）。
         channel = channel_of(request, session_id)
+        # `forever`：**只有它为真才许粘成长期偏好**（用户 2026-10-09 改的规矩：每次都问，
+        # 除非他说"以后都这么干"）。字段缺失 / 老请求 / False → **一律不粘**，下次照问。
+        forever = bool(_field(request, "forever", False))
+        # "**这次群里叫我**"那条路：核心是把**同一条请求换个 channel 再递一次**
+        # （`stage3_main` 里 `replace(last, channel=…)`，`at`/`what`/会话都没动）。
+        # 所以这里什么都不用特判——`add()` 的主键是 `人|会话|时刻|事情`，同一条会被
+        # **就地改掉**（不新增），正是"只改这一条、不动偏好"。
         self._store.remember_person(person, email=email)
+        if forever:
+            self._store.remember_person(person, channel=channel, sticky=True)
         self._store.add(person_id=person, session_id=session_id, group_id=group_id,
                         at=at, what=what, channel=channel)
-        logger.info("remind_accepted person=%s channel=%s", person, channel)
+        logger.info("remind_accepted person=%s channel=%s forever=%s",
+                    person, channel, forever)
 
     @property
     def can_mail(self) -> bool:

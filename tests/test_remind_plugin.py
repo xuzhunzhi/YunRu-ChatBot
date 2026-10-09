@@ -70,7 +70,7 @@ class _WatchedRequest:
 
     #: 与真的 `RemindRequest` 一致（`tests/test_remind_seam.py` 把那张白名单钉在核心侧）。
     ALLOWED = ("person_id", "session_id", "group_id", "at", "what", "email",
-               "channel")
+               "channel", "forever")
 
     def __init__(self, **fields: object) -> None:
         unknown = sorted(set(fields) - set(self.ALLOWED))
@@ -767,3 +767,81 @@ def test_the_request_object_is_the_whole_world_it_gets() -> None:
         for forbidden in ("engine", "transport", "memory", "registry",
                           "admin_user_ids", "super_admin_user_ids"):
             assert not hasattr(capability, forbidden), forbidden
+
+
+def test_only_forever_makes_the_channel_stick() -> None:
+    """用户 2026-10-09 改的规矩：**每次都问**；只有他说"以后都这么干"
+    （核心给 `RemindRequest.forever=True`）才记成长期偏好。"""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        capability = _capability(tmp, core=_core([]))
+        store = capability._store
+        capability(_request(channel="private"))
+        assert store.preference(PERSON).sticky is False, "没给 forever 也粘住了"
+        assert store.preference(PERSON).channel == ""
+
+        capability(_request(channel="private", forever=True))
+        person = store.preference(PERSON)
+        assert person.sticky is True and person.channel == S.CHANNEL_PRIVATE, person
+
+        # 老请求（**字段缺失**）同样不许粘。
+        capability(RemindRequest(person_id=PERSON, session_id=GROUP_SESSION, group_id=GROUP,
+                                 at=NOW + 60.0, what="交作业", email="",
+                                 channel="email"))  # type: ignore[arg-type]
+        assert store.preference(PERSON).channel == S.CHANNEL_PRIVATE, "字段缺失也改了偏好"
+
+
+def test_a_one_off_pick_does_not_touch_the_long_term_preference() -> None:
+    """`"这次群里叫我"` 只改**那一条**，不动"以后都怎么叫我"。"""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        capability = _capability(tmp, core=_core([]))
+        store = capability._store
+        capability(_request(what="以后都私聊", channel="private", forever=True))
+        capability(_request(what="这次群里叫", channel="group"))
+        person = store.preference(PERSON)
+        assert person.sticky is True and person.channel == S.CHANNEL_PRIVATE, person
+        got = {item.what: item.channel for item in store.list_for(PERSON, now=NOW)}
+        assert got["这次群里叫"] == S.CHANNEL_GROUP, got
+
+
+def test_an_old_record_without_the_sticky_marker_is_never_sticky() -> None:
+    """`people.jsonl` 里 2026-10-09 之前的行只有 `channel`、没有 `sticky`——
+    那是"选过一次就记住"那套旧语义，读的时候**一律不认**（**不清洗数据**）。"""
+
+    import json
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        store = S.RemindStore(root)
+        (root / S.PEOPLE_LOG).write_text(
+            json.dumps({"key": PERSON, "at": NOW, "channel": "private", "email": ""},
+                       ensure_ascii=False) + "\n", encoding="utf-8")
+        person = store.preference(PERSON)
+        assert person.channel == "", "老记录被当成粘的了"
+        assert person.sticky is False, person
+
+
+
+def test_changing_the_channel_reuses_the_same_reminder() -> None:
+    """**"这次群里叫我"只改这一条、不新增**——核心的做法是把**同一条请求**换个
+    `channel` 再递一次（`stage3_main` 里 `replace(last, channel=…)`，`at`/`what`
+    一个字没动）。所以判据落在主键上：同一条请求递两次 → **还是一条**，渠道是新的那个。
+    """
+
+    with tempfile.TemporaryDirectory() as tmp:
+        capability = _capability(tmp, core=_core([]))
+        store = capability._store
+        capability(_request(what="交作业", at=NOW + 600.0, channel="group"))
+        assert len(store.list_for(PERSON, now=NOW)) == 1
+
+        # 换渠道：同一份请求，只把 channel 换掉再递一次（`forever` 仍然是假）。
+        capability(_request(what="交作业", at=NOW + 600.0, channel="private"))
+
+        kept = store.list_for(PERSON, now=NOW)
+        assert len(kept) == 1, f"改渠道新增了一条：{[item.what for item in kept]}"
+        assert kept[0].channel == S.CHANNEL_PRIVATE, kept[0]
+
+        # 换渠道**不动**长期偏好（他没说"以后都这么干"）。
+        assert store.preference(PERSON).sticky is False
+        assert store.preference(PERSON).channel == ""

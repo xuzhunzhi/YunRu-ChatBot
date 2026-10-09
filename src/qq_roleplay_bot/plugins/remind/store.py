@@ -106,12 +106,13 @@ class Preference:
 
     person_id: str
     email: str = ""
-    #: 那句问话**确定送失败**了几次（"没有出口"不算——同 `MAX_TRIES` 的规矩）。
-    #: 没有它，"问一句怎么叫他"那条路失败时会每 30 秒重发、永不封顶
-    #: （2026-10-09 独立审查实测：四种失败各送出去 4 次）。
-    #: **已经跟他说过"私聊得你先来私聊我一次"了**。
-    #: 2026-10-09 审查：原来这个记号记在**每一条提醒**上，于是三条同时到点且都被拒 →
-    #: 他在群里收到**三遍**同一句人话。改成**按人**记：同一句只说一次。
+    #: **长期偏好**（只有他说"以后都这么干"才有）：核心给 `forever=True` 时才写。
+    #: 用户 2026-10-09 改的规矩是"**每次都问**"——"这次群里叫我"只改那一条提醒，
+    #: 不动偏好；只有 `forever` 才粘。所以 `channel` 与 `sticky` 是一对：
+    #: **`sticky` 不为真时 `channel` 一律不作数**。
+    channel: str = ""
+    sticky: bool = False
+    #: **已经跟他说过"私聊得你先来私聊我一次"了**（按人记：同一句只说一次）。
     told_rejected: bool = False
     #: **已经跟他说过"那条提醒我没寄出去"了**（同上：按人，别刷屏）。
     told_mail_failed: bool = False
@@ -125,8 +126,8 @@ class Preference:
 class Reminder:
     """一条到点提醒。`at` 是**核心算好的绝对时刻**（epoch 秒）——插件不做时间推算。
 
-    `channel == ""` = 收下时他还没答"怎么叫你"；到点仍没答，就按**他当时说话的地方**
-    叫他（群里说的就群里 @、私聊说的就私聊），并把这次的选择记下来。
+    `channel` **由核心给**（`RemindRequest.channel`：他这次要哪一种）。到点就按它发；
+    要发到群里却没拿到群号、或者人号不是纯数字时，那一条**不出**（留待发，见 `remind.py`）。
     """
 
     key: str
@@ -235,8 +236,14 @@ class RemindStore:
         event = self._people.replay().get(str(person_id))
         if event is None:
             return None
+        # **`sticky` 不为真就当没有偏好**：2026-10-09 之前写的行里只有 `channel`、
+        # 没有这个键，那是"选过一次就记住"那套旧语义——读的时候一律不认
+        # （**不清洗数据**，只是不当数）。
+        sticky = bool(event.get("sticky") or False)
         return Preference(person_id=str(person_id),
                           email=str(event.get("email") or ""),
+                          channel=str(event.get("channel") or "") if sticky else "",
+                          sticky=sticky,
                           told_rejected=bool(event.get("told_rejected") or False),
                           told_mail_failed=bool(event.get("told_mail_failed") or False))
 
@@ -254,24 +261,37 @@ class RemindStore:
         current = self.preference(person_id) or Preference(person_id=str(person_id))
         event: dict = {"key": str(person_id), "at": self._clock(),
                        "email": current.email,
+                       "channel": current.channel, "sticky": current.sticky,
                        "told_rejected": current.told_rejected,
                        "told_mail_failed": current.told_mail_failed}
         event.update(changes)
         self._people.append(event)
         return self.preference(person_id)  # type: ignore[return-value]
 
-    def remember_person(self, person_id: str, *, email: str | None = None) -> Preference:
-        """记下/刷新这个人的方式与地址；**没给的那几项保持原样**。
+    def remember_person(self, person_id: str, *, email: str | None = None,
+                        channel: str | None = None,
+                        sticky: bool = False) -> Preference:
+        """记下/刷新这个人的地址；**长期偏好只有 `sticky=True` 时才写**。
 
-        地址是核心递过来的那一份（见模块头）；`email=""` 表示"这次核心没给"，
-        不等于"他没有邮箱"，所以不覆盖。`channel=""` 同理（那是"还没答"）。
+        地址是核心递过来的那一份（见模块头）：`email=""` 表示"这次核心没给"，不等于
+        "他没有邮箱"，所以不覆盖。
+
+        `channel` 是"以后都按这个来"那一档——**只有核心给了 `forever=True`**
+        （= 调用方传 `sticky=True`）才写下去。`sticky=False`（或者干脆没给 channel）时
+        **连旧的偏好也不动**：用户 2026-10-09 的规矩是"这次群里叫我"只改那一条提醒。
         """
 
         current = self.preference(person_id)
         keep = current if current is not None else Preference(person_id=str(person_id))
-        if not email:
+        changes: dict = {}
+        if email:
+            changes["email"] = str(email)
+        if channel and sticky:
+            changes["channel"] = str(channel)
+            changes["sticky"] = True
+        if not changes:
             return keep
-        return self._write_person(person_id, email=str(email))
+        return self._write_person(person_id, **changes)
 
     def mark_told(self, person_id: str, flag: str) -> Preference | None:
         """记下"这句人话已经跟他说过了"（`TOLD_FLAGS` 里那两个之一，**按人**）。
@@ -408,6 +428,7 @@ class RemindStore:
 
     def _replace(self, item: Reminder, **changes: object) -> Reminder:
         return self._write(replace(item, **changes))
+
 
     def due(self, now: float, *, max_tries: int = MAX_TRIES) -> tuple[Reminder, ...]:
         """**现在该发的**（早的先发）；试够次数的与取消掉的不在里面。"""
