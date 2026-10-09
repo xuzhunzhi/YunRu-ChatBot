@@ -34,8 +34,10 @@ from qq_roleplay_bot.model_config import (
 #:
 #: `(用途, provider, base_url, 模型名, key 变量名)`
 EXPECTED: tuple[tuple[str, str, str, str, str], ...] = (
-    ("reply", "mimo", "https://api.xiaomimimo.com/v1", "mimo-v2.6-flash",
-     "QQBOT_REPLY_API_KEY"),
+    # 2026-10-09 用户拍板换回 ds：reply 不再用 reply 那条（mimo），改跟 **judge
+    # 那条 key**（deepseek / deepseek-flash）走，`QQBOT_REPLY_API_KEY` 因此闲置。
+    ("reply", "deepseek", "https://api.deepseek.com", "deepseek-flash",
+     "QQBOT_JUDGE_API_KEY"),
     ("letter", "mimo", "https://api.xiaomimimo.com/v1", "mimo-v2.6-pro",
      "QQBOT_LETTER_API_KEY"),
     ("judge", "deepseek", "https://api.deepseek.com", "deepseek-flash",
@@ -255,7 +257,8 @@ def test_a_completely_unconfigured_machine_still_runs_the_old_way() -> None:
     """**一个变量都没有**（连 `.env` 那份也没有）时：地址取这一条的代码默认那家。
 
     那时没有任何凭据，所以自检里每个用途都报 `**缺**`；地址取这一条的代码默认那家
-    （reply / letter = mimo，其余 = deepseek）。
+    （letter = mimo，其余 = deepseek——reply 自 2026-10-09 用户拍板换回 ds 起
+    跟 judge 那条走，没配时连它报的 key 变量名也是 `QQBOT_JUDGE_API_KEY`）。
     """
 
     with _env(env_file_key=""):
@@ -456,7 +459,11 @@ def test_an_unknown_purpose_is_rejected_loudly() -> None:
 
 
 def test_the_self_check_prints_names_not_values() -> None:
-    """自检那一行：provider 名 / 模型名 / key 变量名（有值没有）——**绝不打值**。"""
+    """自检那一行：provider 名 / 模型名 / key 变量名（有值没有）——**绝不打值**。
+
+    reply 那一行的期望值跟着 `EXPECTED` 表走：2026-10-09 用户拍板换回 ds，
+    它打印的是 `provider=deepseek` / `deepseek-flash` / `QQBOT_JUDGE_API_KEY`。
+    """
 
     with _env(**_all_fake_keys()):
         lines = model_config.self_check_lines()

@@ -94,8 +94,12 @@ PROVIDERS: dict[str, dict[str, str]] = {
 #:
 #: 模型名写**真名**，不写随时会没的别名：实测 deepseek 侧现在只有
 #: `deepseek-flash` 与 `deepseek-v4-pro`（`deepseek-chat` 是别名，已全部换掉）。
+#: reply 的钥匙从 2026-10-09 起用 judge 那条（deepseek）：mimo-v2.6-flash 自 10-05 起
+#: 同样提示词中位 10 秒（ds 1.1 秒），用户拍板换回。地址跟着钥匙走（judge → deepseek），
+#: `QQBOT_REPLY_API_KEY`（mimo 那把）因此闲置、原值保留在 .env 里。要换回 mimo：
+#: 把这一行改回 {"key": "reply", "model": "mimo-v2.6-flash"} 即可，其余不动。
 TASKS: dict[str, dict[str, str]] = {
-    "reply": {"key": "reply", "model": "mimo-v2.6-flash"},
+    "reply": {"key": "judge", "model": "deepseek-flash"},
     "letter": {"key": "letter", "model": "mimo-v2.6-pro"},
     "judge": {"key": "judge", "model": "deepseek-flash"},
     "memory": {"key": "memory", "model": "deepseek-flash"},
