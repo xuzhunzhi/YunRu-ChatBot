@@ -1,5 +1,7 @@
 import asyncio
+import os
 import time
+from unittest.mock import patch
 
 import qq_roleplay_bot.stage3_main as stage3_main
 from qq_roleplay_bot.stage3_main import DialogueEngine
@@ -176,33 +178,43 @@ def test_engine_runs_one_call_per_eligible_event_and_updates_state() -> None:
 
     try:
         client = FakeClient()
-        engine = DialogueEngine(client)
-        replies = []
-        for index in range(1, 21):
-            result = asyncio.run(engine.handle(message(str(index), f"消息{index}")))
+        # 判定采样（2026-10-10）对这条用例保持透明：它把 23 条消息在毫秒级连发，
+        # 真实群里那就是刷屏，采样闸会按速率攒批判——而这条例子钉的是
+        # "符合条件的消息各判一次"（阈值 / 活跃 / @ 那套触发机器），采样自身的
+        # 行为在 tests/test_judge_sampling.py 另有判据。把三档阈值抬到夹取上限
+        # （100 / 200 / 400）：23 条永远够不到档 1，闸全程放行，期望值一个不改。
+        with patch.dict(os.environ, {
+            "QQBOT_JUDGE_RATE_TIER1": "100",
+            "QQBOT_JUDGE_RATE_TIER2": "200",
+            "QQBOT_JUDGE_RATE_TIER3": "400",
+        }):
+            engine = DialogueEngine(client)
+            replies = []
+            for index in range(1, 21):
+                result = asyncio.run(engine.handle(message(str(index), f"消息{index}")))
+                if result:
+                    replies.append(result.text)
+
+            for index in range(21, 24):
+                result = asyncio.run(engine.handle(message(str(index), f"对话{index}")))
+                if result:
+                    replies.append(result.text)
+
+            result = asyncio.run(engine.handle(message("24", "重新叫我", mentioned=True)))
             if result:
                 replies.append(result.text)
+            duplicate = asyncio.run(engine.handle(message("24", "重复消息", mentioned=True)))
 
-        for index in range(21, 24):
-            result = asyncio.run(engine.handle(message(str(index), f"对话{index}")))
-            if result:
-                replies.append(result.text)
-
-        result = asyncio.run(engine.handle(message("24", "重新叫我", mentioned=True)))
-        if result:
-            replies.append(result.text)
-        duplicate = asyncio.run(engine.handle(message("24", "重复消息", mentioned=True)))
-
-        assert replies == ["我在。", "继续说。", "嗯？"]
-        assert duplicate is None
-        assert len(client.calls) == 5
-        # 触发原因现在以交谈视角的自然语言进 prompt，内部名字（threshold /
-        # active_message）不再直接递给模型——否则她会顺着讲自己的机制。
-        # threshold 的措辞刻意写成"你一直在旁边听着"而不是"插句话看看"：
-        # 后者读起来像在邀请她开口，正是"硬插一句"的来源。
-        assert "你一直在旁边听着" in volatile_content(client.calls[0])
-        assert all("正在交谈的人又说话了" in volatile_content(client.calls[i]) for i in (1, 2, 3))
-        assert "有人 @ 了你" in volatile_content(client.calls[4])
+            assert replies == ["我在。", "继续说。", "嗯？"]
+            assert duplicate is None
+            assert len(client.calls) == 5
+            # 触发原因现在以交谈视角的自然语言进 prompt，内部名字（threshold /
+            # active_message）不再直接递给模型——否则她会顺着讲自己的机制。
+            # threshold 的措辞刻意写成"你一直在旁边听着"而不是"插句话看看"：
+            # 后者读起来像在邀请她开口，正是"硬插一句"的来源。
+            assert "你一直在旁边听着" in volatile_content(client.calls[0])
+            assert all("正在交谈的人又说话了" in volatile_content(client.calls[i]) for i in (1, 2, 3))
+            assert "有人 @ 了你" in volatile_content(client.calls[4])
     finally:
         stage3_main.COOLDOWN_SECONDS = original_cooldown
 

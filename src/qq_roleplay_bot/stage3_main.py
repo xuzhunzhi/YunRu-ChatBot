@@ -27,6 +27,7 @@ from .dev_config import (    BATCH_SIZE,
 from .llm_client import LLMError, OpenAICompatibleClient
 from .attention import address_reason, is_addressed_to_bot, mentions_name
 from .focus import FocusController
+from .judge_sampling import JudgeSampler
 from .builtin_commands import (
     HELP_COMMAND_PATTERN,
     build_command_registry,
@@ -1332,6 +1333,10 @@ class DialogueEngine:
             # 2026-10-08 隔离增长审计 [7]：从前 `deque()` 没有 maxlen。
             queue_limit=dev_config.FOCUS_QUEUE_LIMIT,
         )
+        # 判定采样（2026-10-10 用户："消息来得太快时攒几条再判"）：群消息速率高了
+        # 就攒 5/10/20 条再让判定 agent 看一眼；被 @ 的不等攒满；私聊不进来。
+        # 只拦"这条消息要不要触发判定调用"，别的（排队/调度/出站）一概不碰。
+        self.judge_sampling = JudgeSampler()
         self.metrics = RuntimeMetrics()
         # 按功能分开的输入输出日志（判定 / 回复 / 记忆 / 规则拦截放行），
         # 每个功能各留最近 1000 次。正文只在文件里，内存里只有计数与预览。
@@ -2146,6 +2151,8 @@ class DialogueEngine:
 
         self._session_clients.pop(session_id, None)
         self._session_judges.pop(session_id, None)
+        # 判定采样的按会话计数同批清掉（LRU 淘汰时 `leave_session` 不会走这条路）。
+        self.judge_sampling.forget_session(session_id)
 
     def _judge_for(self, session_id: str):
         """这个会话该用哪个判定 client；退回单 agent 时返回 None。
@@ -2358,6 +2365,7 @@ class DialogueEngine:
             memory_peak_bytes=memory_peak,
             persistence_enabled=self.state_store is not None,
             focus=self.focus_stats(),
+            judge_sampling=self.judge_sampling.stats(self.clock()),
             review_calls=int(review.get("calls", 0)),
             review_blocked=int(review.get("blocked", 0)),
             review_unrecognized=int(review.get("unrecognized", 0)),
@@ -3575,6 +3583,17 @@ class DialogueEngine:
                 # 队列满时丢的是**最旧**的（单群上限见 `FOCUS_QUEUE_LIMIT`）。
                 + (f"   已丢最旧 {focus['queued_dropped']} 条" if focus.get("queued_dropped") else "")
             )
+        # 判定采样（2026-10-10）：消息来得太快时攒几条再判。有采样活动的会话各印
+        # 一行（档位 / 攒批 / 本群攒了几条 / 跳过几次），最后是累计跳过——
+        # "累计 0"本身就是信息：那说明这套闸还没拦过任何判定调用。
+        sampling = snapshot.judge_sampling or {}
+        for session_id, info in sorted((sampling.get("sessions") or {}).items()):
+            lines.append(
+                f"判定采样：{session_id} 当前档 {info['tier']}"
+                f"（攒满 {info['batch']} 条判一次）"
+                f" / 本群攒了 {info['pending']} 条 / 跳过 {info['skipped']} 次"
+            )
+        lines.append(f"判定采样：累计跳过判定 {sampling.get('skipped_total', 0)} 次")
         if snapshot.guard_raised:
             lines.append(
                 f"关系：本次升防 {snapshot.guard_raised} 次"
@@ -3969,6 +3988,9 @@ class DialogueEngine:
         existed = session_id in self.sessions.states or session_id in self.sessions.triggers
         self.sessions.leave(session_id)
         self._drop_pending_segments(session_id)
+        # 判定采样的那份按会话计数一起走（口径与 `_drop_session_clients` 相同）：
+        # 会话都没了，窗口与积攒再留着只是僵状态。
+        self.judge_sampling.forget_session(session_id)
         return existed
 
     def _drop_pending_segments(self, session_id: str) -> None:
@@ -4708,6 +4730,9 @@ class DialogueEngine:
                     # 做法一：消息**到达即进该群历史**（只作背景、不调模型），
                     # 所以她轮到这个群时能看见"她不在的时候群里聊了什么"。
                     state.add(message, now, refresh_activity=False)
+                    # 判定采样：这条也是"最近 30 秒这个群来了多少消息"的一部分——
+                    # 速率高了她才需要攒批，被排队的消息不能不算数。
+                    self.judge_sampling.note_message(message.session_id, now)
                     if addressed:
                         queued = self.focus.enqueue(message.session_id, message)
                         # 标记为"已记过历史、且已过去重"：轮到它时 handle() 要跳过那两步。
@@ -4743,6 +4768,9 @@ class DialogueEngine:
         ):
             # 私聊场景下仍不让第三方插话抢走焦点，也不因无关消息刷新活跃超时。
             state.add(message, now, refresh_activity=False)
+            if group_chat:
+                # 判定采样：同上——这条也进"最近窗口来了多少消息"的账（只记群）。
+                self.judge_sampling.note_message(message.session_id, now)
             self._stats["deferred_messages"] += 1
             logger.debug(
                 "Stage 3 deferred other participant: session=%s active_user=%s message_user=%s",
@@ -4757,6 +4785,10 @@ class DialogueEngine:
         resumed = message.message_id in self._resumed_ids
         if not resumed:
             state.add(message, now, refresh_activity=refreshes)
+            if group_chat:
+                # 判定采样：消息从这里进历史，也从这里进"最近窗口来了多少条"的账；
+                # 被焦点排队过的（resumed）到达时已经记过，不再重复计。
+                self.judge_sampling.note_message(message.session_id, now)
         if active:
             mode = ConversationMode.ACTIVE
             trigger = "active_message"
@@ -4782,6 +4814,22 @@ class DialogueEngine:
                 trigger = address_reason(message, state.recent())
             else:
                 trigger = "threshold"
+
+        # --- 判定采样闸：群消息来得太快时攒几条再判（judge_sampling.py）----------
+        # 只回答"这条消息要不要**现在**触发判定调用"这一个问题：不放行的消息
+        # 上面已经进了历史，判定下一次照看得到，一条不丢。私聊不走采样（一对一
+        # 不需要）；被焦点排队过、轮到这个群的消息（resumed）对闸免疫——她答应过
+        # "稍等"就必须给结果；被 @ 的消息不等攒满（豁免在闸里，见 admit）。
+        # 阈值档位（< 8 每条都判 / >= 8 攒 5 / >= 16 攒 10 / >= 30 攒 20）全部
+        # `QQBOT_JUDGE_RATE_*` 现读，改配置不必重启。
+        if group_chat:
+            if resumed:
+                self.judge_sampling.note_evaluation(message.session_id)
+            elif not self.judge_sampling.admit(
+                message.session_id, now, mentioned=message.is_bot_mentioned
+            ):
+                self._stats["deferred_messages"] += 1
+                return None
 
         # 脱敏观测指标：把触发原因收敛成固定类别，不携带任何聊天内容。
         trigger_kind = self._trigger_kind(trigger)

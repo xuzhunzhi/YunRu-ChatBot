@@ -112,6 +112,9 @@ class EngineSnapshot:
     reply_tags_scrubbed: int = 0
     # 当前当值状态：热群、当值多久、排队深度。只有数字与群号，没有正文。
     focus: dict[str, object] | None = None
+    # 判定采样（2026-10-10）的观测面：各会话当前档位 / 攒批条数 / 攒了几条 /
+    # 跳过几次，加上全部会话累计跳过的总次数。只有数字与会话 id，没有正文。
+    judge_sampling: dict[str, object] | None = None
     memory: dict[str, object] | None = None
     # 脱敏运行指标：固定类别的计数与耗时分布，不含正文、QQ 号或凭据。
     metrics: dict[str, object] | None = None

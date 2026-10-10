@@ -800,6 +800,64 @@ FOCUS_ACK_COOLDOWN_SECONDS = _float("QQBOT_FOCUS_ACK_COOLDOWN_SECONDS", 120.0)
 FOCUS_QUEUE_LIMIT = _int("QQBOT_FOCUS_QUEUE_LIMIT", 50)
 
 
+# --- 判定采样（2026-10-10 用户："消息来得太快时攒几条再判"）--------------------
+# 群消息速率高了就降低判定 agent 的采样密度：< 8 条/窗口 → 每条各判（现状）；
+# >= 8 → 攒 5 条判一次；>= 16 → 攒 10 条；>= 30 → 攒 20 条。攒的只是**判定调用**，
+# 消息照进历史、判定看得到全部；被 @ 的消息不等攒满。状态机在 `judge_sampling.py`，
+# 这里只有参数。**全部调用时现读**（与 `turn_timeout_seconds` 同一条纪律）：
+# 改配置不必重启；坏值回落默认、越界夹取（照 `memory_config` 的写法）。
+
+def judge_rate_window_seconds() -> float:
+    """滚动窗口多长算"最近"（`QQBOT_JUDGE_RATE_WINDOW_SECONDS`，默认 30，夹 5..300）。
+
+    窗口按**入站时间戳**滚动（单调钟）：消息量回落时旧时间戳滑出窗口，
+    档位自然回落——不需要显式的"降档"动作。
+    """
+
+    return _float_clamped("QQBOT_JUDGE_RATE_WINDOW_SECONDS", 30.0, 5.0, 300.0)
+
+
+def judge_rate_tier1() -> int:
+    """第一档阈值：窗口内入站 >= 8 条 → 攒 5 条判一次（`QQBOT_JUDGE_RATE_TIER1`，
+    默认 8，夹 2..100）。"""
+
+    return _int_clamped("QQBOT_JUDGE_RATE_TIER1", 8, 2, 100)
+
+
+def judge_rate_tier2() -> int:
+    """第二档阈值：>= 16 条 → 攒 10 条判一次（`QQBOT_JUDGE_RATE_TIER2`，
+    默认 16，夹 4..200）。"""
+
+    return _int_clamped("QQBOT_JUDGE_RATE_TIER2", 16, 4, 200)
+
+
+def judge_rate_tier3() -> int:
+    """第三档阈值：>= 30 条 → 攒 20 条判一次（`QQBOT_JUDGE_RATE_TIER3`，
+    默认 30，夹 6..400）。"""
+
+    return _int_clamped("QQBOT_JUDGE_RATE_TIER3", 30, 6, 400)
+
+
+def judge_rate_batch_sizes() -> tuple[int, ...]:
+    """三档各自攒几条判一次（`QQBOT_JUDGE_RATE_BATCH_SIZES`，逗号分隔，
+    默认 "5,10,20"，对应三档）。
+
+    每个值夹到 >= 1（攒 0 条等于没有采样）；写成不是数的条目跳过，
+    全都写坏时回落默认三元组。档位超出条目数时用最后一档的条数兜住。
+    """
+
+    values: list[int] = []
+    for part in get("QQBOT_JUDGE_RATE_BATCH_SIZES", "5,10,20").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            values.append(max(1, int(part)))
+        except ValueError:
+            continue
+    return tuple(values) or (5, 10, 20)
+
+
 # --- 对话日志（**实际收发**，与模型日志分开）---------------------------------
 # 2026-10-05 用户定的边界："对话日志和模型日志分开"。实现见 `chat_log.py`：
 # 它挂在**传输层**（`onebot_ws.py` 的收发边界），所以群里真正收到的每一条、
