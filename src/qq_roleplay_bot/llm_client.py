@@ -300,10 +300,14 @@ class OpenAICompatibleClient:
         if self.user_id:
             # 同一账号下按 agent 隔离 KVCache 与调度；不带则所有请求共享隔离空间。
             body["user_id"] = self.user_id
-        # 采样参数（temperature / top_p / frequency_penalty）：按用途**每次请求现读**
-        # 环境，没配置的用途一个键都不放（请求体形状与从前相同）。
+        # 采样参数（temperature / top_p）：按用途**每次请求现读**环境，
+        # 没配置的用途一个键都不放。frequency_penalty 已被 DeepSeek API 废弃（删了）。
         for key, value in _sampling_params_for(self.usage_role).items():
             body[key] = value
+        # reasoning_effort：控制 DeepSeek v4 系列的思考深度（默认 high → 改 low ✓ 快很多）。
+        # 2026-10-10 用户拍板。API 文档：none=关闭思考 / low / high / max。
+        from .dev_config import reasoning_effort
+        body["reasoning_effort"] = reasoning_effort(self.usage_role)
         payload = json.dumps(body).encode("utf-8")
         request = urllib.request.Request(
             f"{self.base_url}/chat/completions",

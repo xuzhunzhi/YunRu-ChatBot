@@ -336,15 +336,18 @@ def _captured_body(client: OpenAICompatibleClient) -> dict:
     return captured["data"]
 
 
-def test_reply_sends_the_three_default_sampling_params() -> None:
-    """回复那一档默认就发三样（写死在代码里，不开 .env 也生效）。"""
+def test_reply_sends_the_default_sampling_params() -> None:
+    """回复那一档默认就发两样（temperature + top_p，写死在代码里，不开 .env 也生效）
+    外加 reasoning_effort=low（2026-10-10 用户拍板）。frequency_penalty 已被
+    DeepSeek API 废弃（发了不生效），已删。"""
 
     with patch.dict(os.environ):
         _clear_sampling_env()
         body = _captured_body(_role_client("dialogue"))
     assert body["temperature"] == 0.85
     assert body["top_p"] == 0.9
-    assert body["frequency_penalty"] == 0.3
+    assert body["reasoning_effort"] == "low"
+    assert "frequency_penalty" not in body
 
 
 def test_usages_other_than_reply_send_no_sampling_keys_by_default() -> None:

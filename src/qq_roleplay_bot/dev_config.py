@@ -334,9 +334,32 @@ _SAMPLING_RANGES: dict[str, tuple[float, float]] = {
 }
 
 #: 只有 reply 有代码内默认；其余用途没配就不发。
+#: 2026-10-10 更正：`frequency_penalty` 已被 DeepSeek API **废弃**（发了不生效），删掉。
+#: `temperature` 在 thinking 模式下**没有效果**（DeepSeek 官方文档），但我们留着——
+#: 万一以后切到非 thinking 模式或别家，它就该生效了。
 _SAMPLING_TASK_DEFAULTS: dict[str, dict[str, float]] = {
-    "reply": {"temperature": 0.85, "top_p": 0.9, "frequency_penalty": 0.3},
+    "reply": {"temperature": 0.85, "top_p": 0.9},
 }
+
+
+#: **reasoning_effort**（DeepSeek v4 系列）：控制思考深度。默认是 `high`（深思考 ✗ 慢 ✗）。
+#: `low` = 浅思考 ✓ 快很多 ✓ 适合判定/审查这类分类任务 ✓ 回复也可以浅一点 ✓。
+#: 可选值：`none`（关闭思考）/ `low` / `high` / `max`。**调用时现读** ✗ 不许 import 期常量 ✗。
+#: 2026-10-10 用户拍板：全用途默认 `low`。
+_REASONING_EFFORT_VALUES = {"none", "low", "high", "max"}
+
+
+def reasoning_effort(task: str) -> str:
+    """某个用途的思考深度。读 `QQBOT_<用途>_REASONING_EFFORT`；不配走 `low`。"""
+    raw = get(f"QQBOT_{task.upper()}_REASONING_EFFORT", "low").strip().lower()
+    if raw in ("minimal",):
+        raw = "low"
+    elif raw in ("medium", "xhigh"):
+        raw = "high"
+    if raw not in _REASONING_EFFORT_VALUES:
+        logger.warning("reasoning_effort %s 不在可选值里（none/low/high/max），按 low 处理", raw)
+        return "low"
+    return raw
 
 
 #: 每个用途的 **API 调用超时**（秒）。读 `QQBOT_<用途>_TIMEOUT`；不配走 `default`。
