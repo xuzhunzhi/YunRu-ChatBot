@@ -1731,6 +1731,8 @@ def _dialogue_client_factory(session_id: str) -> OpenAICompatibleClient:
         user_id=dev_config.session_user_id(dev_config.DIALOGUE_USER_ID, session_id),
         usage_store=_USAGE_STORE,
         usage_role="dialogue",
+        # 2026-10-10 用户拍板：回复 12 秒超时（原默认 60s，deepseek-flash 长尾会拖垮队列）。
+        timeout=dev_config.api_timeout("reply", default=12.0),
     )
 
 
@@ -1743,6 +1745,8 @@ def _judge_client_factory(session_id: str) -> OpenAICompatibleClient:
         user_id=dev_config.session_user_id(dev_config.JUDGE_USER_ID, session_id),
         usage_store=_USAGE_STORE,
         usage_role="judge",
+        # 2026-10-10 用户拍板：判定 3 秒超时（原默认 60s；deepseek-flash 长尾 65s 会卡死整条流水线）。
+        timeout=dev_config.api_timeout("judge", default=3.0),
     )
 
 

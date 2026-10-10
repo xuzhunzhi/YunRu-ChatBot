@@ -339,6 +339,19 @@ _SAMPLING_TASK_DEFAULTS: dict[str, dict[str, float]] = {
 }
 
 
+#: 每个用途的 **API 调用超时**（秒）。读 `QQBOT_<用途>_TIMEOUT`；不配走 `default`。
+#: 2026-10-10 用户拍板加的：deepseek-flash 有长尾（判定最大实测 65.9s），60s 默认超时
+#: 会把整条串行流水线卡死。现在各用途有自己的短闸，撞长尾就跳过这轮，不拖队列。
+def api_timeout(purpose: str, *, default: float) -> float:
+    """某个用途的 API 调用超时（秒），夹在 1..120。"""
+    raw = get(f"QQBOT_{purpose.upper()}_TIMEOUT", "")
+    try:
+        value = float(raw) if raw else default
+    except ValueError:
+        value = default
+    return max(1.0, min(value, 120.0))
+
+
 def sampling_params(task: str) -> dict[str, float]:
     """某个用途（reply / judge / memory / review / letter / vision）的采样参数。
 

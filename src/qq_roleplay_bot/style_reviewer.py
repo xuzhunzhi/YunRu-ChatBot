@@ -88,7 +88,9 @@ import re
 logger = logging.getLogger(__name__)
 
 # 审核是"多发一条消息之前"的最后一道，不能拖：超时就按通过处理（原稿直发）。
-REVIEW_TIMEOUT_SECONDS = 8.0
+# 2026-10-10 从 8s 收到 3s（用户拍板）：deepseek-flash 有长尾，8s 等满纯属浪费——
+# 超时本来就放行 ✓ 等得越短越好 ✓。
+REVIEW_TIMEOUT_SECONDS = 3.0
 # 理由的长度上限：它是给回复 agent 看的一句话，不是一篇分析。
 MAX_REASON_CHARS = 200
 # 审核输出里常见的"包装"：引号、代码块。
