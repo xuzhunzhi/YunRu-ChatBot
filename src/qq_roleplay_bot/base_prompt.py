@@ -245,20 +245,18 @@ def _load_base_prompt() -> str:
         found = re.search(r'BASE_PROMPT\s*=\s*"""(.*?)"""', text, re.S)
         if found and found.group(1).strip():
             body = found.group(1)
-            # **加载时也扫一遍机制词**（2026-10-08 安全与时间口径审计 A-04）：人格文件
-            # 是"手改 / 从备份恢复 / 换 `QQBOT_BASE_PROMPT_FILE`"都能进来的入口，而它进的
-            # 是**可信 system 前缀**。保存路径有护栏（`PromptLibrary.save`），加载路径从
-            # 前一个词都不扫——坏文本不该上桌：命中就跳过这个候选（试下一个），
-            # 全都不行就走下面的"回落到模板"并**明确说出是因为机制词**。
+            # **加载时也扫机制词**（A-04）——2026-10-11 修正：从"拦截"改为"提醒"。
+            # 之前"命中就拒整个文件"把用户人格里的**禁令**（"不许提协议"✓ 词在禁令里 ✓）
+            # 误杀成违规 ✗ 整个人格回落到模板 ✗ 她跑了两天没人格 ✗✗✗。
+            # 真正的拦截在保存路径（PromptLibrary.save ✓ 有测试 ✓）；加载侧只需提醒。
             hits = scan_persona_text(body)
             if hits:
-                rejected.append(f"{path}（命中：{'、'.join(hits)}）")
                 logging.getLogger(__name__).warning(
-                    "人格文件含机制词，不用它：file=%s words=%s"
-                    "（改掉这些词再启动；否则她会开始讲自己的机制）",
+                    "人格文件含机制词（提醒，不拦截）：file=%s words=%s"
+                    "——若这些词出现在禁令里（'不许提协议'这类）属正常；"
+                    "若是角色自己会说的，改掉再启动。",
                     path, "、".join(hits),
                 )
-                continue
             return body
     if rejected:
         logging.getLogger(__name__).warning(

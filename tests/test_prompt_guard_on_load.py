@@ -114,19 +114,19 @@ def test_the_agent_prompts_use_their_own_word_list() -> None:
 # --- 2. 人格文件：坏正文不许生效 ---------------------------------------------
 
 
-def test_a_persona_file_with_mechanism_words_is_not_used() -> None:
+def test_a_persona_file_with_mechanism_words_warns_but_still_loads() -> None:
+    """2026-10-11 修正：从"拦截"改为"提醒"。之前把用户人格里的禁令（'不许提协议'✓
+    词在禁令里 ✓）误杀成违规 ✗ 整个人格回落到模板 ✗ 她跑了两天没人格 ✗✗✗。
+    现在加载侧只记 WARNING 不拦截 ✓；真正的拦截在保存路径（PromptLibrary.save）。"""
     with tempfile.TemporaryDirectory() as tmp:
         path = _write_persona(Path(tmp) / "persona.py", BAD_PERSONA)
         with patch.dict(os.environ, {"QQBOT_BASE_PROMPT_FILE": str(path)}):
             with _warnings("qq_roleplay_bot.base_prompt") as records:
                 body = base_prompt._load_base_prompt()
 
-    assert BAD_PERSONA not in body, "坏人格正文上桌了"
-    assert any("含机制词" in record.getMessage() for record in records), "命中了却不报警"
-    # 本机没有真人格文件时，必须**回落到模板**（不是在坏文本与模板之间含糊过去）。
-    local = Path(base_prompt.__file__).resolve().parents[2] / "data/private_docs/base_prompt.REAL.py"
-    if not local.exists():
-        assert body == base_prompt._BASE_PROMPT_TEMPLATE
+    # 坏人格正文**照常上桌**（只是被提醒了）——因为"坏"可能是误判（禁令里的词 ✓）
+    assert BAD_PERSONA in body, "人格正文被拒了——2026-10-11 已改为只提醒不拦截"
+    assert any("含机制词" in record.getMessage() for record in records), "命中了却不提醒"
 
 
 def test_a_clean_persona_file_is_used() -> None:
