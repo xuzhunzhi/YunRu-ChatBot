@@ -49,11 +49,19 @@ FLAG_NOTES: dict[str, str] = {
                            "伪造记号**，**DATA 段**与改动前逐字相同；system 里那**两条**"
                            "常量规则（短码那条、时间那条）照旧在——所以是整个请求里"
                            "只有 DATA 段回到从前。",
+    "data_marker_cache_friendly": "边界记号的**档位**（2026-10-11 用户定案的两档）。"
+                                  "**开（默认）＝缓存友好型**：记号是一组全角生僻符号、"
+                                  "**每次压缩**才换一次，于是带记号的材料落进前缀缓存、"
+                                  "同一季里逐轮一字不差；"
+                                  "**关＝增强型**：每轮一个随机短码，防注入最强（漏一次也"
+                                  "只废这一轮），代价是记号每轮都变、它包住的内容每轮断一次。"
+                                  "两档共用同一套形状判据与入站中和——切档不会留下绕过。"
+                                  "（`data_marker_enabled` 仍是总闸门：关掉就不取记号。）",
 }
 
 
 class RuntimeFlags:
-    """十个开关的可变容器。线程安全够用（面板线程写、asyncio 线程读）。"""
+    """十二个开关的可变容器。线程安全够用（面板线程写、asyncio 线程读）。"""
 
     __slots__ = ("_values", "_lock")
 
@@ -124,6 +132,12 @@ class RuntimeFlags:
     def data_marker_enabled(self) -> bool:
         return self.get("data_marker_enabled")
 
+    @property
+    def data_marker_cache_friendly(self) -> bool:
+        """边界记号的档位：True = 缓存友好型（一季一个生僻符号组），False = 增强型（每轮短码）。"""
+
+        return self.get("data_marker_cache_friendly")
+
 
 def _truthy(value: object) -> bool:
     return str(value).strip().casefold() in _TRUE_WORDS
@@ -160,6 +174,37 @@ def _env_flag(name: str, default: bool) -> bool:
     return default
 
 
+#: `QQBOT_DATA_MARKER_MODE` 认得的两档写法。**两档都认**（`season`/`turn` 是主写法，
+#: 其余是"改成大白话也不至于静默退回默认"的同义词）；认不出 / 空 / 没设 → **默认那档**
+#: （缓存友好型，与 `_env_flag` 同一条 fail-safe 纪律）。返回 True = 缓存友好型。
+_MODE_SEASON_WORDS = frozenset(
+    {"season", "cache", "cache_friendly", "cache-friendly", "friendly", "缓存", "缓存友好", "缓存友好型"})
+_MODE_TURN_WORDS = frozenset(
+    {"turn", "enhanced", "strong", "每次", "每轮", "增强", "增强型"})
+
+
+def _env_mode(name: str, default: bool) -> bool:
+    """读一个**两档**环境变量，`True` = 缓存友好型（`QQBOT_DATA_MARKER_MODE=turn|season`）。
+
+    与 `_env_flag` 同一纪律：**调用时现读**、没配/空串/认不出都回默认。
+    为什么要有它而不是复用 `_env_flag`：那一份只认真假词（`1/true/on`），
+    而这里的两档是**名字**（`turn`/`season`）——用布尔词给"档位"下配置的写法
+    读起来像"要不要开某个功能"，实际问的是"哪一档"，两者混在一起最容易配错。
+    """
+
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    text = str(raw).strip().casefold()
+    if not text:
+        return default
+    if text in _MODE_SEASON_WORDS:
+        return True
+    if text in _MODE_TURN_WORDS:
+        return False
+    return default
+
+
 def build_flags(config=None) -> RuntimeFlags:
     """按当前配置造一份。`config` 给了就先套覆盖层（`operator_config.OperatorConfig`）。
 
@@ -192,6 +237,9 @@ def build_flags(config=None) -> RuntimeFlags:
         # 不可信数据的边界记号：默认开（`QQBOT_DATA_MARKERS=0` 关）。
         # 关掉时不取短码、不包裹、不中和——请求与改动前逐字相同。
         "data_marker_enabled": bool(_cfg.DATA_MARKERS_ENABLED),
+        # 边界记号的**档位**：默认缓存友好型（`QQBOT_DATA_MARKER_MODE=turn` 切增强型）。
+        # 这一项**从环境变量现读**（与 `compaction_enabled` 同一理由：面板要能拉动它）。
+        "data_marker_cache_friendly": _env_mode("QQBOT_DATA_MARKER_MODE", True),
     }
     if config is not None:
         stored = getattr(config, "values", {}) or {}

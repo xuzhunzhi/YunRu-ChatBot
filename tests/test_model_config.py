@@ -60,6 +60,8 @@ ALL_VARS: tuple[str, ...] = (
     "QQBOT_MEMORY_API_KEY", "QQBOT_MEMORY_API_BASE_URL", "QQBOT_MEMORY_MODEL",
     "QQBOT_REVIEW_API_KEY", "QQBOT_REVIEW_API_BASE_URL", "QQBOT_REVIEW_MODEL",
     "QQBOT_VISION_API_KEY", "QQBOT_VISION_API_BASE_URL", "QQBOT_VISION_MODEL",
+    # 兜底那条 key（主家余额耗尽时切过去的那一路，见 `FALLBACK_KEY`）。
+    "QQBOT_FALLBACK_API_KEY",
 )
 
 #: 只给某一用途的假 key（**每个用途一把，互不相同**，这样"拿错 key"会当场看出来）。

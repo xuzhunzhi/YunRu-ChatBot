@@ -927,6 +927,21 @@ QUOTE_LEARN_MAX = _int("QQBOT_QUOTE_LEARN_MAX", 5)
 QUOTE_LEARN_INTERVAL = _float("QQBOT_QUOTE_LEARN_INTERVAL", 86400.0)
 QUOTE_PROFILE_FILE = get("QQBOT_QUOTE_PROFILE", "data/quote/profile.json")
 
+# --- 表情的名字表（2026-10-11，用户第六批）-------------------------------------
+# 用户原话：*"你好歹去查询表情的名字给丢到提示词里吧"*。
+#
+# `group_msg_emoji_like` 给的是**一串数字**（`76`、`12951`），学习 agent 只能猜；
+# 这张表把数字翻成 QQ 自己的名字（`赞`、`太好笑`、`问号`、`㊗`），再进样本。
+# 实现只有一份：`face_names.py`（读本地那份 JSON + 三栏索引），
+# 接口用的是仓库里早登记好的只读动作 `fetch_sys_faces`（`capabilities.py` 白名单，
+# 契约在 `data/snowluma_actions.json:2399`）。
+#
+# - `QQBOT_FACE_NAMES`：那份 JSON 的位置。默认 `<项目根>/data/faces.json`
+#   （`data/` 已 gitignored）。删掉它 = 回落成"没有名字"，别的一律不变。
+# - **热路径零网络**：回复路径只读这个文件；只有金句学习那条定期节拍会去拉一次
+#   （一天一次级别，失败保留旧表）。
+FACE_NAMES_FILE = get("QQBOT_FACE_NAMES", "data/faces.json")
+
 # --- 黑话词条（2026-10-06，用户口径："还有**黑话**"）--------------------------
 # 设计稿在 `docs/STAGE3_PENDING_DESIGNS.md` §②；实现只有一份：
 # `slang_learning.py`（判解释句 / 词条库 / 被动观察者）。

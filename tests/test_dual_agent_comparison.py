@@ -7,18 +7,20 @@
 2. **上下文不断**：旧对话不丢，而是压成摘要一直带着。
 3. **窗口有界**：活窗口在 `[COMPACT_KEEP, LIVE_TARGET]` 之间循环，不会无限增长。
 
-**2026-10-08 的口径修正**（不可信数据的边界短码，`data_boundary`）：回复段的每个
-不可信块现在都带一个**每轮重新生成**的短码（用户拍板的安全要求），所以 prompt
-逐字比对时**每轮都会断一次**——断的不是窗口滑动，是那个记号。下面这四条测试
-比的是 `_without_markers()` 之后的内容：**记号之外**的部分仍然必须"逐轮追加、
-只在压缩那一刻断裂"，这才是它们要守的性质。
+**2026-10-08 / 2026-10-11 的口径修正**（不可信数据的边界记号，`data_boundary`）：回复段的
+每个不可信块现在都带一个记号（用户拍板的安全要求）。2026-10-11 起记号分两档：
+**缓存友好型**（默认）＝一季 3 个生僻符号，只在压缩那轮换；**增强型**＝每轮重新生成的
+7 位短码。增强型档位下 prompt 逐字比对**每轮都会断一次**——断的不是窗口滑动，是那个
+记号。下面这四条测试比的是 `_without_markers()` 之后的内容：**记号之外**的部分仍然必须
+"逐轮追加、只在压缩那一刻断裂"，这才是它们要守的性质。
 
-代价如实记在这里：稳定段的第一行就是短码，所以**回复段这一截的前缀复用没有了**
-（system 那一截照旧逐字稳定）。这是"边界可见 + 可自动检测"换来的，用户已拍板。
+代价如实记在这里：记号会让"从 system 起算"的公共前缀在它出现的地方断掉——增强型档位
+每轮都断（回复段这一截的前缀复用没有了），缓存友好型档位只在换季那一轮断。
+system 那一截照旧逐字稳定。这是"边界可见 + 可自动检测"换来的，用户已拍板。
 """
 import asyncio
 
-from qq_roleplay_bot.data_boundary import MARKER_SHAPE_PATTERN
+from qq_roleplay_bot.data_boundary import MARKER_SHAPE_PATTERNS
 from qq_roleplay_bot.stage3_main import COMPACT_KEEP, LIVE_TARGET, DialogueEngine
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 
@@ -29,9 +31,12 @@ SUMMARY_MARK = "【摘要】"
 
 
 def _without_markers(text: str) -> str:
-    """去掉每轮那个随机短码，留下它之外的内容（见模块说明）。"""
+    """去掉那个记号，留下它之外的内容（两档形状都洗，见模块说明）。"""
 
-    return MARKER_SHAPE_PATTERN.sub("\u2039mark\u203a", text or "")
+    text = text or ""
+    for pattern in MARKER_SHAPE_PATTERNS:
+        text = pattern.sub("\u2039mark\u203a", text)
+    return text
 
 # 跨过一次压缩所需的最小轮数：每条消息都会得到一条回复，所以历史每轮涨 2 条。
 CYCLE_TURNS = LIVE_TARGET // 2 + 20

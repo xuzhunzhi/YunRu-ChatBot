@@ -7,8 +7,13 @@
 
 所以这一份只做**第一步**：把"她的话 + 谁给它点了什么 + 当时在聊什么"整理成一条条
 **样本**，交给学习 agent（`quote_learning.py`）去读。**这里一个字都不判断金句/不判断
-正负**——正负由 agent 从语境里推（见那个模块），硬编码一张"赞=正、祝=负"的表正是
-用户否掉的那种做法。
+正负**——正负由 agent 从语境里推（见那个模块）。
+
+样本里那个表情**叫什么名字**照抄 QQ 自己的（`face_names.py`：`76` → `赞`、`12951` → `㊗`），
+**名字只是线索、不是方向**：`赞` 在有些群里是真心捧、在有些群里是阴阳，仍然由 agent 按
+语境判。这条路上**唯一的先验**是用户 2026-10-11 点名写死的那一个（`㊗` = 不赞同，
+见 `quote_learning.KNOWN_EMOJI_SENSES`）——原来那句"代码里不许有'赞=正、祝=负'的表"
+在这一点上已经**按用户的要求改了**，别再把这段读成"一个先验都没有"。
 
 ## 判据（都是现成的数据，不新拉接口、不花钱）
 
@@ -68,8 +73,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from . import face_names
 
 logger = logging.getLogger(__name__)
 
@@ -119,8 +127,35 @@ class QuoteReaction:
     count: int = 0
     sub_type: str = ""
 
-    def as_data(self) -> dict[str, object]:
-        data: dict[str, object] = {"emoji_id": self.emoji_id, "by": self.user_id}
+    #: 给**学习 agent**看的那一份里，表情只用名字（`西瓜`），不带那串数字。
+    #: 名字是代码查出来的（`face_names`，纯规则），模型不该跟编号打交道；
+    #: 查不到名字、或者**这一批里两个编号重名**时，才退回带 `emoji_id`。
+    LEARNING_KEY = "表情"
+
+    def as_data(self, *, for_learning: bool = False, names: "BatchNames | None" = None,
+                ) -> dict[str, object]:
+        """`for_learning=False`（默认，面板证据用）：`emoji_id` + 有名字就带 `名字`。
+
+        `for_learning=True`：**只给名字**（`"表情": "西瓜"`）。规则能定的那一步
+        （编号 → 名字）由代码做完，不留给模型去猜；确实没有名字（例如 `234`）时
+        才把编号给它——那时编号是唯一能指认它的东西。
+        """
+
+        data: dict[str, object] = {}
+        # `names` 没给（面板证据那条路）就现查本地那份名字表；给了就用 caller 那一份
+        # ——学习那条路必须用**这一批的**对照（重名的要靠它区分）。
+        if names is None:
+            name = face_names.shared().label_for(self.emoji_id)
+            ambiguous: frozenset[str] = frozenset()
+        else:
+            name, ambiguous = names.name_of(self.emoji_id), names.ambiguous
+        if for_learning and name and name not in ambiguous:
+            data[self.LEARNING_KEY] = name
+        else:
+            data["emoji_id"] = self.emoji_id
+            if name and not for_learning:
+                data["名字"] = name
+        data["by"] = self.user_id
         if self.count:
             data["count"] = self.count
         if self.sub_type:
@@ -161,14 +196,16 @@ class QuoteSample:
     CONTEXT_BEFORE_KEY = "她开口之前群里在说"
     CONTEXT_AFTER_KEY = "她说完之后群里接的"
 
-    def as_data(self) -> dict[str, object]:
+    def as_data(self, *, for_learning: bool = False, names: "BatchNames | None" = None,
+                ) -> dict[str, object]:
         """给学习 agent 看的那一份（DATA，不是指令）。"""
 
         data: dict[str, object] = {
             "sample_id": self.sample_id,
             "group_id": self.group_id,
             "她说的": _clip(self.body),
-            "被点了": [r.as_data() for r in self.reactions],
+            "被点了": [r.as_data(for_learning=for_learning, names=names)
+                       for r in self.reactions],
         }
         if self.topic:
             data[self.TOPIC_KEY] = self.topic
@@ -586,6 +623,54 @@ def fingerprint_of(sample: QuoteSample) -> str:
     return f"{sample.sample_id}|{reactions}"
 
 
+def batch_emoji_names(samples) -> "BatchNames":
+    """这一批样本里**名字 ↔ 编号**的对照（含"在这一批里重名"的那些名字）。
+
+    为什么要按"这一批"算而不是查整份目录：整份目录里 404 条有 24 个名字是重的
+    （`西瓜` 同时是编号 `89` 和那个 🍉，实测），而**日志里出现过的 38 个编号一个都不撞**
+    （同一份实测）。所以"这一批里唯一"就足够精确，重名的那几个退回带编号——**不靠猜**。
+
+    模型只看得见名字、回话时也只报名字，所以这里两个方向都要：拼样本要"编号 → 名字"，
+    解析它回的话要"名字 → 编号"。
+    """
+
+    by_id: dict[str, str] = {}
+    ids_of: dict[str, set[str]] = {}
+    for sample in samples:
+        for reaction in sample.reactions:
+            name = face_names.shared().label_for(reaction.emoji_id)
+            if not name:
+                continue
+            by_id.setdefault(reaction.emoji_id, name)
+            ids_of.setdefault(name, set()).add(reaction.emoji_id)
+    ambiguous = frozenset(name for name, ids in ids_of.items() if len(ids) > 1)
+    by_name = {name: next(iter(ids)) for name, ids in ids_of.items()
+               if name not in ambiguous}
+    return BatchNames(by_id=by_id, by_name=by_name, ambiguous=ambiguous)
+
+
+@dataclass(frozen=True, slots=True)
+class BatchNames:
+    """一批样本的"名字 ↔ 编号"对照（模型只看见名字；代码两边都要用）。"""
+
+    #: 编号 → 名字（拼样本时用）。
+    by_id: dict[str, str]
+    #: 名字 → 编号（解析模型回话时用；**只收这一批里唯一的那些**）。
+    by_name: dict[str, str]
+    #: 这一批里重名的那些名字（它们退回用编号，避免"猜是哪一个"）。
+    ambiguous: frozenset[str] = frozenset()
+
+    def name_of(self, emoji_id: object) -> str:
+        """这个编号在这一批里叫什么（查不到就是空串）。"""
+
+        return self.by_id.get(str(emoji_id), "")
+
+    def resolve(self, label: object) -> str:
+        """模型报的名字翻回编号；**翻不出来就是空串**（它编的名字不该变成一个乱标的编号）。"""
+
+        return self.by_name.get(str(label if label is not None else ""), "")
+
+
 def counts_by_emoji(selection: SampleSelection) -> dict[str, dict[str, int]]:
     """按群、按 emoji 数一遍（给操作者看的那张表用：**证据够不够数**一眼看得出）。"""
 
@@ -770,3 +855,152 @@ def default_paths() -> tuple[Path, Path]:
 
     chat_log = Path(chat_log_directory()) / CHAT_LOG_FILE
     return chat_log, chat_log.parent / "reply.jsonl"
+
+
+# --- "刚才有人给她贴了什么"：回复路径上的读口（2026-10-11，用户选了"甲"）---------
+#
+# 由来：金句学习学出来的**表情含义**（"㊗ 在这个群是嫌她"）当时只出现在面板与
+# `/super quote` 上，**进不了她的回复**（`quote_learning.emoji_notes_for` 写好了却没有
+# 调用点，表情回应事件本身也不进核心队列）。用户 2026-10-11 拍了"甲"：
+#
+#     回话前扫一眼对话日志**最近几分钟**的表情回应，只挑**点在她自己消息上**的那些，
+#     把对应的材料塞进同一块（纯本地、零模型调用、不动对话判定）。
+#
+# 三条纪律与这条路上别的东西一致：
+#
+# 1. **有界**：只读日志**末尾**若干行（`read_tail_rows`）——`chat.jsonl` 实测 3.4 MB /
+#    12950 行，整份读+解析是每一轮都白花的钱；
+# 2. **她那条消息与表情必须都在尾巴里**才算数（配对只认 `message_id`，与学习那边同一套
+#    判据）。配对不上就**当没有**：宁可不提，也不能把"别人被贴的表情"说成是在嫌她；
+# 3. **一条只提一次**：同一（哪条消息 + 哪个表情）在她那儿只出现一次，免得同一个
+#    ㊗ 在十分钟里每轮都念一遍。
+#: "刚才"的窗口（秒）。只取最近这么久的表情回应。
+DEFAULT_REACTION_WINDOW = 900.0
+#: 只读日志末尾多少行（够把她那条消息与紧随其后的表情一起框进来）。
+DEFAULT_TAIL_LINES = 1200
+#: 读尾巴时最多读多少字节（防一行特别长的正文把内存吃掉）。
+MAX_TAIL_BYTES = 512 * 1024
+#: 一次最多给几个表情的材料（材料块总上限是 5 条，别让表情把笔记挤光）。
+MAX_REACTION_MATERIALS = 2
+#: "已经提过的"最多记多少条（防它无限长大）。
+MAX_SHOWN_REACTIONS = 200
+
+
+def read_tail_rows(path: Path | str, *, max_lines: int = DEFAULT_TAIL_LINES,
+                   max_bytes: int = MAX_TAIL_BYTES) -> list[dict]:
+    """只读日志**末尾**若干行（从文件尾往前读块，凑够行数或读满字节就停）。
+
+    与 `read_rows`（整份读，给离线学习用）是两回事：这一份在**回复路径**上被调用，
+    所以有界。坏行跳过；文件不在 / 读不开就返回空（调用方据此什么都不做）。
+    """
+
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            chunk = b""
+            position = size
+            while position > 0 and (size - position) < max_bytes \
+                    and chunk.count(b"\n") <= max_lines:
+                step = min(65536, position, max_bytes - (size - position))
+                if step <= 0:
+                    break
+                position -= step
+                handle.seek(position)
+                chunk = handle.read(step) + chunk
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        logger.warning("quote_tail_read_failed category=%s", type(exc).__name__)
+        return []
+
+    lines = [line for line in chunk.split(b"\n") if line.strip()]
+    if position > 0 and lines:
+        # 从文件中间切下去的，第一行多半是半截 → 丢掉（宁可少一行，不要一个假样本）。
+        lines = lines[1:]
+    rows: list[dict] = []
+    for raw in lines[-max_lines:]:
+        text = raw.decode("utf-8", "replace").strip()
+        try:
+            row = json.loads(text)
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+class ReactionFeed:
+    """回复路径上"**刚才**有人给她贴了什么"的读口。**任何异常都当没有**。"""
+
+    def __init__(self, path: Path | str, *, clock=time.time,
+                 window: float = DEFAULT_REACTION_WINDOW,
+                 max_lines: int = DEFAULT_TAIL_LINES,
+                 max_materials: int = MAX_REACTION_MATERIALS) -> None:
+        self.path = Path(path)
+        self.clock = clock
+        self.window = max(0.0, float(window))
+        self.max_lines = max(1, int(max_lines))
+        self.max_materials = max(0, int(max_materials))
+        #: 已经提过的（`message_id:emoji_id`）→ 第一次提的时刻。有界（见 MAX_SHOWN_REACTIONS）。
+        self.shown: dict[str, float] = {}
+
+    def recent_emoji_ids(self, group_id: str, *, session_id: str = "",
+                         now: float | None = None) -> tuple[str, ...]:
+        """最近几分钟、**点在她自己消息上**、**还没提过**的表情编号（新的在前，最多几个）。
+
+        判据三条，都要满足：同一会话、时间在窗口内、而且被点的那条消息**确实是她说的**
+        （她那条也必须在读到的尾巴里，否则宁可当没有）。
+        """
+
+        if not self.max_materials:
+            return ()
+        moment = self.clock() if now is None else float(now)
+        wanted = str(session_id or (f"group:{group_id}" if group_id else ""))
+        if not wanted:
+            return ()
+        rows = read_tail_rows(self.path, max_lines=self.max_lines)
+        if not rows:
+            return ()
+        hers = {
+            _clean_id(row.get("message_id"))
+            for row in rows
+            if _is_her_message(row) and _session_of(row) == wanted
+        }
+        hers.discard("")
+        seen: list[str] = []
+        keys: list[str] = []
+        for row in reversed(rows):
+            if not _is_reaction(row) or _session_of(row) != wanted:
+                continue
+            at = _float(row.get("at"))
+            if self.window and at and (moment - at) > self.window:
+                continue
+            emoji_id = _clean_id(row.get("emoji_id"))
+            message_id = _clean_id(row.get("message_id"))
+            if not emoji_id or message_id not in hers:
+                continue
+            key = f"{wanted}:{message_id}:{emoji_id}"
+            if key in self.shown or emoji_id in seen:
+                continue
+            seen.append(emoji_id)
+            keys.append(key)
+            if len(seen) >= self.max_materials:
+                break
+        # **返回即记账**：同一个表情在这条消息上只提一次。代价是"这一轮后来没回成"
+        # 会白丢一次提示——那比每轮都念一遍同一句 ㊗ 轻得多。
+        for key in keys:
+            self.shown[key] = moment
+        self._trim()
+        return tuple(seen)
+
+    def _trim(self) -> None:
+        if len(self.shown) <= MAX_SHOWN_REACTIONS:
+            return
+        for key, _ in sorted(self.shown.items(), key=lambda item: item[1])[
+                :len(self.shown) - MAX_SHOWN_REACTIONS]:
+            self.shown.pop(key, None)
+
+    def snapshot(self) -> dict[str, object]:
+        return {"path": str(self.path), "window": self.window,
+                "max_materials": self.max_materials, "shown": len(self.shown)}

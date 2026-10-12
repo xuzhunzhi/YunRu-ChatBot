@@ -279,12 +279,13 @@ def test_the_core_runs_with_no_seam_injected() -> None:
 def test_the_slang_entries_are_not_injected_into_her_reply_this_round() -> None:
     """**本次不做检索/注入**：有词条与没词条，她的请求**逐字相同**。
 
-    2026-10-08：请求里现在有一个**每轮重新生成**的短码（不可信数据的边界，
-    `data_boundary`）——两次请求的短码不同是设计使然，与本条判据无关。
-    所以比之前先把短码归一化掉：比的是**短码之外**的每一个字。
+    2026-10-08：请求里现在有一个**边界记号**（不可信数据的边界，`data_boundary`）
+    ——两次请求的记号不同是设计使然，与本条判据无关。
+    2026-10-11：记号分两档（增强型＝每轮 7 位短码，缓存友好型＝一季 3 个生僻符号），
+    两个替身引擎各自开一季，所以**两种形状都要归一化**，比的才是"记号之外"的每一个字。
     """
 
-    from qq_roleplay_bot.data_boundary import MARKER_SHAPE_PATTERN
+    from qq_roleplay_bot.data_boundary import MARKER_SHAPE_PATTERNS
 
     def request_with(entries: dict[str, str]) -> str:
         with tempfile.TemporaryDirectory() as tmp:
@@ -296,8 +297,10 @@ def test_the_slang_entries_are_not_injected_into_her_reply_this_round() -> None:
                                     enabled_group_ids=frozenset({GROUP}), typing_sim=False,
                                     slang_library=store)
             asyncio.run(engine.handle(_message()))
-            return MARKER_SHAPE_PATTERN.sub(
-                "\u2039mark\u203a", json.dumps(reply.requests[0], ensure_ascii=False))
+            text = json.dumps(reply.requests[0], ensure_ascii=False)
+            for pattern in MARKER_SHAPE_PATTERNS:
+                text = pattern.sub("\u2039mark\u203a", text)
+            return text
 
     baseline = request_with({})
     with_entries = request_with({"电赛": "电子设计竞赛", "综测": "综合测评"})

@@ -23,6 +23,7 @@ from pathlib import Path
 from . import dev_config
 from . import operator_config
 from . import prompt_library
+from . import provider_failover
 from . import runtime_flags
 from ._host_adapters import FileAuditSink, LocalMachineProbe, build_host_services
 from .api_usage import ApiUsageStore
@@ -298,6 +299,12 @@ def apply_overrides(engine, payload: dict[str, object], *,
                                    "detail": "自定义地址：请同时填 api_base_url"}
         else:
             applied["provider"] = {"applied": "rejected", "detail": "不认识的供应商"}
+    # 面板改完配置之后，**已经存在**的那些 client 要按"当值模式"重新指一遍：
+    # 余额兜底期间（fallback）面板写任何一项，都不能把它们悄悄拉回主家。
+    # primary 模式下这是空操作——`reapply()` 故意一个都不动、也不打日志。
+    moved = provider_failover.reapply()
+    if moved:
+        logger.info("余额兜底期间面板改了配置：已按兜底那一家的端点重指 %s 个 client", moved)
     config.save()
     if audit is not None:
         audit.record("settings", detail={k: v for k, v in payload.items()},
@@ -560,6 +567,9 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
     _log_model_config_self_check()
     client = OpenAICompatibleClient(
         *_reply_endpoint(),
+        # 请求体里发不发 DeepSeek 专有字段（`user_id` / `reasoning_effort`）由它决定；
+        # 余额兜底切到 mimo 之后这里会跟着变成 "mimo"。
+        provider=_endpoint_of("reply").provider,
         # 按 agent 隔离 KVCache 与调度（同一账号下生效，与 API Key 无关）。
         user_id=dev_config.DIALOGUE_USER_ID,
         usage_store=usage_store,
@@ -1401,6 +1411,9 @@ class _SeamBinder:
                 "when": _exact_text(item.get("when")),
                 "note": _exact_text(item.get("note")),
                 "enabled": not store.note_disabled(key),
+                # 反面材料（"她那次这么说被嫌了"）：面板上要看得出来，免得
+                # 操作者把它当成"她的老习惯"去核对。
+                "avoid": bool(item.get("avoid")),
             })
         return {"group_id": group, "meanings": meanings, "notes": notes,
                 "path": str(store.path)}
@@ -1748,49 +1761,62 @@ def _reply_endpoint() -> tuple[str, str, str]:
 
 
 def _endpoint_of(task: str):
-    """某个用途解析出来的"一个客户端"（缺 key 时 `MissingCredential` 明确抛出）。
+    """某个用途**当值**解析出来的"一个客户端"（缺 key 时 `MissingCredential` 明确抛出）。
 
     这是**唯一**允许构造模型客户端来源的地方：地址、key、模型名由
     `model_config` 从同一条 key 条目解析出来，所以"用 A 家 key 打 B 家地址"
     在这里没有落点。
+
+    2026-10-13 起它多了一层：主家余额耗尽（HTTP 402）时 `provider_failover`
+    会把**所有用途**改指到兜底那一家（mimo）。但那一层只是"换一条同样成对的
+    来源"——地址与 key 仍然由上一条 key 条目一起给出，`model_config` 那条
+    不变式一个字都没松。**primary 模式下它与 `model_config.require(task)`
+    逐字相同**（`tests/test_provider_failover.py` 钉着这条）。
     """
 
-    from .model_config import require as _require
-
-    return _require(task)
+    return provider_failover.endpoint_for(task)
 
 
 def _dialogue_client_factory(session_id: str) -> OpenAICompatibleClient:
-    base_url, api_key, model = _endpoint_of("reply").triple()
-    return OpenAICompatibleClient(
-        base_url,
-        api_key,
-        model,
+    reply_timeout = dev_config.api_timeout("reply", default=12.0)
+    endpoint = _endpoint_of("reply")
+    client = OpenAICompatibleClient(
+        *endpoint.triple(),
+        provider=endpoint.provider,
         user_id=dev_config.session_user_id(dev_config.DIALOGUE_USER_ID, session_id),
         usage_store=_USAGE_STORE,
         usage_role="dialogue",
         # 2026-10-10 用户拍板：回复 12 秒超时（原默认 60s，deepseek-flash 长尾会拖垮队列）。
-        timeout=dev_config.api_timeout("reply", default=12.0),
+        # 余额兜底那一档更宽（mimo 慢一个量级），由 `provider_failover` 集中决定；
+        # primary 模式下这里**逐字**还是 12.0。
+        timeout=provider_failover.effective_timeout("reply", reply_timeout),
     )
+    # 切回主家时要把这道闸还回原值（兜底那一档是临时放宽的）。
+    provider_failover.remember_primary_timeout(client, reply_timeout)
+    return client
 
 
 def _judge_client_factory(session_id: str) -> OpenAICompatibleClient:
-    base_url, api_key, model = _endpoint_of("judge").triple()
-    return OpenAICompatibleClient(
-        base_url,
-        api_key,
-        model,
+    judge_timeout = dev_config.api_timeout("judge", default=5.0)
+    endpoint = _endpoint_of("judge")
+    client = OpenAICompatibleClient(
+        *endpoint.triple(),
+        provider=endpoint.provider,
         user_id=dev_config.session_user_id(dev_config.JUDGE_USER_ID, session_id),
         usage_store=_USAGE_STORE,
         usage_role="judge",
-        # 2026-10-12 用户拍板：判定放宽到 5 秒（原 3 秒，2026-10-10 定的）。依据：那天
-        # 218 次**成功**判定的 `elapsed` 中位 2.92s、均值 4.21s，3 秒正好切在分布正中间
-        # ——那天 7 次被 @ 里有 5 次就是撞这个闸被丢的（失败行 `elapsed` 记 0.0，只有成功
-        # 行看得出这条闸压掉了多少）。仍远小于原来的 60s 默认值：deepseek-flash 长尾实测
-        # 65.9s 会把串行流水线卡死，不能回到那个值。兜底那一档若切到 mimo 要单独放宽
-        # （那边判定实测中位 36.8s），不是这个数。
-        timeout=dev_config.api_timeout("judge", default=5.0),
+        # 2026-10-12 用户拍板：判定放宽到 5 秒（原 3 秒）。放宽是有实测依据的：
+        # 2026-10-12 那天 218 次**成功**判定的 `elapsed` 中位数 2.92s、均值 4.21s，
+        # 3 秒正好切在分布正中间——那天 7 次被 @ 里有 5 次就是撞这个闸被丢的
+        # （失败行 `elapsed` 记 0.0，所以只有成功行能看出这条闸压掉了多少）。
+        # 仍远小于原来的 60s 默认值：deepseek-flash 长尾实测 65.9s，会把整条串行
+        # 流水线卡死，绝不能回到那个值。
+        # 兜底那一档单独放宽（mimo 上判定实测中位 36.8s），同样由
+        # `provider_failover` 集中决定；primary 模式下到这里**逐字**还是 5.0。
+        timeout=provider_failover.effective_timeout("judge", judge_timeout),
     )
+    provider_failover.remember_primary_timeout(client, judge_timeout)
+    return client
 
 
 def _build_judge_client(usage_store=None):
@@ -1801,14 +1827,13 @@ def _build_judge_client(usage_store=None):
     from .model_config import MissingCredential
 
     try:
-        base_url, api_key, model = _endpoint_of("judge").triple()
+        endpoint = _endpoint_of("judge")
     except MissingCredential as exc:
         logger.warning("判定 agent 缺少凭据，本次不启用：%s", exc)
         return None
     return OpenAICompatibleClient(
-        base_url,
-        api_key,
-        model,
+        *endpoint.triple(),
+        provider=endpoint.provider,
         user_id=dev_config.JUDGE_USER_ID,
         usage_store=usage_store if usage_store is not None else _USAGE_STORE,
         usage_role="judge",
@@ -1839,19 +1864,18 @@ def _build_style_reviewer(usage_store=None):
     from .model_config import MissingCredential
 
     try:
-        base_url, key, model = _endpoint_of("review").triple()
+        endpoint = _endpoint_of("review")
     except MissingCredential as exc:
         logger.warning("风格审核已开启但没有任何可用 key，本次不启用：%s", exc)
         return None
-    if not key:
+    if not endpoint.api_key:
         logger.warning("风格审核已开启但没有任何可用 key，本次不启用")
         return None
     logger.info("风格审核已启用：每条回复发送前看一眼（只判不改，判不过就重写一次）")
     return StyleReviewer(
         OpenAICompatibleClient(
-            base_url,
-            key,
-            model,
+            *endpoint.triple(),
+            provider=endpoint.provider,
             user_id=dev_config.REVIEW_USER_ID,
             usage_store=usage_store if usage_store is not None else _USAGE_STORE,
             usage_role="review",
@@ -1872,11 +1896,10 @@ def _build_letter_client() -> OpenAICompatibleClient:
     （`_USAGE_STORE`）里记一笔，那是核心状态。
     """
 
-    base_url, api_key, model = _endpoint_of("letter").triple()
+    endpoint = _endpoint_of("letter")
     return OpenAICompatibleClient(
-        base_url,
-        api_key,
-        model,
+        *endpoint.triple(),
+        provider=endpoint.provider,
         user_id=dev_config.MAIL_USER_ID,
         usage_store=_USAGE_STORE,
         usage_role="letter",
@@ -2110,11 +2133,11 @@ def _start_memory(engine: DialogueEngine, client) -> MemoryService | None:
     if endpoint is None:
         return None
     settings = MemorySettings.from_environment()
-    base_url, api_key, model = endpoint.triple()
     maintenance_client = OpenAICompatibleClient(
-        base_url,
-        api_key,
-        model,
+        *endpoint.triple(),
+        # 记忆维护是**后台任务**，本来就不吃回复/判定那两道短闸（它的闸由
+        # `settings.model_timeout` 给），所以这里只跟着换来源，不动闸。
+        provider=endpoint.provider,
         timeout=settings.model_timeout - 1,
         max_tokens=4096,
         user_id=dev_config.MEMORY_USER_ID,
@@ -2180,12 +2203,26 @@ def _start_quote_learning(engine: DialogueEngine, *, allowed_groups):
     from .quote_learning import QuoteProfile, QuoteStore, build_quote_agent
 
     client = getattr(engine, "memory_client", None) or getattr(engine, "client", None)
-    agent = build_quote_agent(client, allowed_groups=allowed_groups)
+    # 表情的名字表要从本机 SnowLuma 的只读接口拉（`fetch_sys_faces`，动作名与契约在
+    # `data/snowluma_actions.json` 里，`capabilities.py` 的白名单里也有）。没配地址就是
+    # `None`：那样照旧学，只是样本里少一个名字字段。
+    snowluma = None
+    if dev_config.SNOWLUMA_HTTP_BASE_URL:
+        snowluma = SnowLumaHttpClient(
+            dev_config.SNOWLUMA_HTTP_BASE_URL, dev_config.SNOWLUMA_ACCESS_TOKEN)
+    agent = build_quote_agent(client, allowed_groups=allowed_groups, snowluma=snowluma)
     # **无论装没装上，读侧都要接上**：开关关掉时它照样存在，只是 `quote_enabled`
     # 让 `DialogueEngine._style_material` 每次返回空串——"关掉＝与改动前逐字相同"
     # 这条由**开关**守（有测试），不由装配守（那会让"关掉"变成另一种代码路径）。
     store = agent.store if agent is not None else QuoteStore()
     engine.quote_profile = QuoteProfile(store)
+    # **"刚才有人给她贴了什么"的读口**（2026-10-11，用户选的"甲"）：回复路径上只读
+    # 对话日志的**尾巴**（有界、纯本地、零模型调用），把"刚才有人贴 ㊗"变成材料。
+    # 它不依赖学习那条节拍跑没跑过：含义表读的是同一份 JSON（`quote_profile`）。
+    from .quote_samples import ReactionFeed, default_paths
+
+    chat_log = agent.chat_log_path if agent is not None else default_paths()[0]
+    engine.quote_reactions = ReactionFeed(chat_log)
     if agent is None:
         logger.info("金句学习未启用（QQBOT_QUOTE_LEARN=0 或没有可用的模型 client）")
         return None, None
@@ -2264,6 +2301,14 @@ async def serve(transport: QQTransport, *, stage_label: str = "Stage 3") -> None
         asyncio.create_task(run_background_plugin(plugin), name=f"plugin-{plugin.name}")
         for plugin in background if plugin_enabled(plugin)
     ]
+    # 余额探针：**核心自己的**一条后台节拍，不是插件（它不依赖 `plugins/` 目录）。
+    # 它只在"已经切到兜底那一家的模式"下才真的发那次请求；primary 模式下
+    # `poll_once()` 立刻返回，一次网络都不打。走既有节拍循环，不新起 `while True`。
+    balance_probe = provider_failover.BalanceProbe()
+    background_tasks.append(
+        asyncio.create_task(run_background_plugin(balance_probe),
+                            name=f"plugin-{balance_probe.name}")
+    )
     # 金句学习：**独立的一条节拍**（一天一次级别），不在插件那条循环里。
     # 它是 Stage 3 的事（学的是"她怎么说、什么场合说什么"，直接进回复 prompt 的 DATA 段），
     # 所以不按 Stage 4 插件包装；装配与降级见 `_start_quote_learning`。

@@ -7,16 +7,23 @@
 
 ## 这一份干三件事
 
-1. **判方向（从语境推，不许硬编码）**。拿到一条样本（她的话 + 谁点了什么 + 前后语境）
+1. **判方向（从语境推；只有一个先验）**。拿到一条样本（她的话 + 谁点了什么 + 前后语境）
    之后，由**模型**判断每个 emoji 在这个群里是什么意思：赞成 / 取笑 / 不赞成 / 看热闹。
-   判断依据写在 system prompt 里：谁点的、她说了什么、**贴完之后群里怎么接的**。
-   **代码里没有任何"赞=正、祝=负"的字面表**——那张表是模型从语境里推出来的**产物**，
-   按群存下来，操作者看得见、改得动（见下面"操作者能改"）。
+   判断依据写在 system prompt 里：谁点的、她说了什么、**贴完之后群里怎么接的**，
+   外加 QQ 自己给这个表情起的**名字**（`76` → `赞`、`12951` → `㊗`，见 `face_names.py`），
+   方向按群存下来，操作者看得见、改得动（见下面"操作者能改"）。
+   **唯一的先验是用户点名的那一条**：`㊗`（`emoji_id` 12951）= 不赞同 / 她回得不合适
+   （`KNOWN_EMOJI_SENSES`）。用户 2026-10-11 原话：*"注意贴表情不是所有都是金句，比如
+   贴**祝（猪的谐音）就是不赞同或者 bot 回复不恰当**"*——他后来明确要求把这一条
+   **写进去**，别再让模型猜。**除它以外一个字面表都没有**（原来的"赞=正"那种仍然不许有）。
 2. **产出两份笔记**：`style_notes`（她怎么说）与 `context_notes`（什么场合说什么）。
    每条笔记**短、可复用、用她自己的说法**，**不是原句堆砌**，也**不是分析报告腔**。
+   **被贴了不赞同表情的那条样本要"反着标"**（用户 2026-10-11 原话：*"被嫌的是**避免**
+   不是**不学**"*）：那条照样写笔记，但写成"她那次这么说被嫌了、别照这么做"，
+   由 `parse_learning_output` 打上 `avoid` 标记，注入时进"她踩过的坑"那一节。
 3. **落到回复里去**（`select_notes` + `inject_block`）：只把**跟眼前这句相关**的几条
    当**材料**塞进 DATA 段（≤5 条、有字符预算），**绝不当指令**（措辞一律是
-   "她以前遇到这种时候"）。
+   "她以前遇到这种时候"）。表情含义那一路还会把名字用上（"群里贴 ㊗ 是在说这话不对路"）。
 
 ## 硬要求与护栏（代码里守，不靠模型自觉）
 
@@ -61,9 +68,15 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import dev_config, prompt_guard, quote_samples
+from . import dev_config, face_names, prompt_guard, quote_samples
 from .feature_log import RollingJsonlFile, logs_directory
-from .quote_samples import QuoteSample, SampleSelection, collect_samples
+from .quote_samples import (
+    BatchNames,
+    QuoteReaction,
+    QuoteSample,
+    SampleSelection,
+    collect_samples,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +143,23 @@ SENSE_LABELS = {
 #: （见 `select_notes`），因为笔记本身是模型写的。
 IMPERATIVE_WORDS = ("必须", "务必", "一定要", "立刻", "马上", "你应该", "你要", "记得要")
 
+#: **用户点名写死的表情方向**（2026-10-11）。这是整份代码里**唯一**一个表情含义先验。
+#:
+#: 为什么只有一条、为什么是它：用户两次说到同一个东西——
+#: 2026-10-06 *"注意贴表情不是所有都是金句，比如贴**祝（猪的谐音）就是不赞同或者
+#: bot 回复不恰当**"*；2026-10-11 *"把用户早已说过的'贴祝（猪的谐音）= 不赞同 /
+#: bot 回复不恰当'硬编码进学习 prompt"*。
+#:
+#: `12951` 是**实测出来的那个 id**：日志里它出现 56 次（第 4 多），
+#: `chr(12951) == "㊗"`（`U+3297`，QQ 目录里没有这个表情，所以它是按**码点**报的 id
+#: ——这条规律有 5 个 `q_cid` 命中当证据，见 `face_names.py`）。
+#:
+#: 取值是 `(sense, 说明)`；**操作者的覆盖仍然压过它**（`effective_sense` 的次序是
+#: 人工覆盖 → 这一条 → 模型判的），所以他哪天改口，一条命令就能改掉。
+KNOWN_EMOJI_SENSES: dict[str, tuple[str, str]] = {
+    "12951": (SENSE_NEGATIVE, "㊗（祝）——不赞同，或者她这句回得不合适"),
+}
+
 #: `meaning["quote"]` 里**连着这么多字**与某条笔记的 `when` / `note` 重合，
 #: 就算"它落到了这条笔记上"（见 `note_for_quote`）。
 #:
@@ -144,18 +174,36 @@ LEARNING_SYSTEM_PROMPT = """你是 YunRu 的 Quote Learning Agent。你不跟她
 **谁给它贴了什么表情**、她开口之前群里在说什么、她说完之后群里接了什么。
 被贴表情不等于好句子——表情只是**线索**，方向要你从语境里推。
 
+每条被点的表情写着 `表情`：**QQ 给这个表情起的名字**（`赞`、`太好笑`、`问号`、`㊗`）。
+名字是**代码替你查好的**，你不需要跟编号打交道；偶尔你会看到 `emoji_id` 那种一串数字
+（那是我查不到名字、或者这一批里两个表情重名时才会出现）。
+**名字是线索，不是判据**：`赞` 在有些群是真心的、在有些群是阴阳，`太好笑` 也可能是
+在笑她。方向仍然按下面那三样推。
+
+## 有一条是**已经说定的**，不用你判，也不许你判成别的
+
+`㊗`（名字就是它，`emoji_id` 是 `12951`）在这个项目的口径里**就是不赞同，
+或者她这句回得不合适**。见到它：
+- `sense` 一律写 `negative`——**不许写 `unclear`，也不许写 `other`**；
+- 那条样本**照样要写笔记**，但写的是"**别再这么做**"那一类（见下面第 2 条），
+  不是"她的老习惯"。被嫌的是"避免"，不是"不学"。
+这条不是让你猜的，是**用户点名说定的**，写在这里就是为了不让它再被丢成"看不出来"。
+
 ## 你要输出两样东西
 
 ### 1. reaction_meanings：每个群、每个表情**在这个群里是什么意思**
 逐个判断，依据只有三样：**谁贴的**（是不是刚被她回过的当事人）、**她说的那句**、
-**贴完之后群里怎么接的**（跟着起哄 / 换个话题 / 有人反驳 / 她自己圆场）。
+**贴完之后群里怎么接的**（跟着起哄 / 换个话题 / 有人反驳 / 她自己圆场）；
+名字可以拿来核对"这个表情本身是什么情绪"，但**不能只看名字就定方向**。
 `sense` 四选一：
 - `positive`：赞成、捧场、觉得这话说得漂亮；
 - `negative`：不赞成、嫌她说得不对或**回得不合适**（例如谐音取笑那类表情）；
 - `other`：取笑、看热闹、说不清是夸还是贬；
 - `unclear`：样本里看不出方向——**宁可写 unclear，不要猜**。
 `note` 用**群里的人话**写这个表情在这个群表达什么（≤30 字），例如"这就是在损她，不是夸"。
-同一个 emoji_id 在不同群可以完全不同意思，**分开写**。
+`表情` **照抄样本里那一个**（名字就写名字，看到数字就写数字）——它靠这个跟样本对上，
+写别的（自己编一个名字、或者换个说法）那一条就会被丢掉。同一个表情在不同群可以完全不同
+意思，**分开写**。
 
 ### 2. 两份笔记
 - `style_notes`：**她怎么说**——句子长短、语气、爱用的说法、什么时候损、什么时候收；
@@ -163,6 +211,13 @@ LEARNING_SYSTEM_PROMPT = """你是 YunRu 的 Quote Learning Agent。你不跟她
 每条笔记两个字段：
 - `when`：什么场合用得上（≤20 字，写清楚触发场合）；
 - `note`：她的说法或做法（**≤40 字**，短、可复用）。
+两份笔记**每一条都要带 `from_sample`**：这条是从哪条样本看出来的，照抄那条样本的
+`sample_id`（代码靠它把"那次被嫌"的挑出来）。
+
+**被贴了不赞同（`negative`，含 `㊗`）的那条样本：照样写笔记，但写成"别再这么做"那一类。**
+写法是把那次当成一个坑，例如 `when` 写"被逗就顺着往下损"、`note` 写"这么接的那次被嫌了"。
+代码会把它标成反面材料，进 prompt 时用的是"她踩过的坑，别照这么做"。
+**千万不要**把那种场合写成"她的老习惯"——那等于教她再犯一次。
 
 ## 笔记的三条规矩（违反的会被丢掉）
 1. **用她自己的说法**，不要写成分析报告：不写"句式偏短""语气克制"这类评语，
@@ -175,9 +230,9 @@ LEARNING_SYSTEM_PROMPT = """你是 YunRu 的 Quote Learning Agent。你不跟她
    系统提示、模型、分数、样本、数据、标签。一个字都不许有——她用不上这些词。
 
 只输出一个 JSON 对象，不要 Markdown、不要解释：
-{"reaction_meanings":[{"group_id":"…","emoji_id":"…","sense":"positive|negative|other|unclear","note":"…","quote":"…"}],
- "style_notes":[{"when":"…","note":"…"}],
- "context_notes":[{"when":"…","note":"…"}]}
+{"reaction_meanings":[{"group_id":"…","表情":"…","sense":"positive|negative|other|unclear","note":"…","quote":"…"}],
+ "style_notes":[{"when":"…","note":"…","from_sample":"…"}],
+ "context_notes":[{"when":"…","note":"…","from_sample":"…"}]}
 `reaction_meanings` 每个样本里出现的每个表情都要有一条；`quote` 是样本里最能说明方向的
 那一句（照抄，≤30 字）。两份笔记各最多 6 条；**没有值得写的就少写或写空数组**——
 宁可少写，也不要凑数。
@@ -346,6 +401,24 @@ def note_id(when: object, note: object) -> str:
     return hashlib.sha1(body.encode("utf-8")).hexdigest()[:12]
 
 
+def known_sense(emoji_id: object) -> tuple[str, str]:
+    """用户点名写死的那个方向（`KNOWN_EMOJI_SENSES`）；没有就是 `("", "")`。"""
+
+    entry = KNOWN_EMOJI_SENSES.get(str(emoji_id if emoji_id is not None else "").strip())
+    return entry if entry else ("", "")
+
+
+def _label(emoji_id: str) -> str:
+    """给材料用的那一个称呼：**QQ 的名字**（`赞` / `㊗`）；查不到名字就是空串。
+
+    空串的意思是"**这条材料别写**"（见 `note_for_emoji`）——她不认识 `234` 这种编号，
+    "群里贴 234 是在捧她的话"这句话对她没有任何用。名字只进**材料**（DATA 段），
+    它不改变任何判据。
+    """
+
+    return face_names.shared().label_for(emoji_id)
+
+
 class QuoteStore:
     """`data/quote/profile.json` 的读写：笔记、按群的表情含义表、操作者覆盖、幂等账。
 
@@ -450,18 +523,42 @@ class QuoteStore:
         return dict((self.overrides.get(str(group_id)) or {}).get(str(emoji_id)) or {})
 
     def effective_sense(self, group_id: str, emoji_id: str) -> str:
-        """**最终生效的方向**：操作者覆盖压过模型判的（"改一个字就生效"）。"""
+        """**最终生效的方向**，次序是硬的：
+
+        1. **操作者覆盖**（`/super quote <emoji> 不赞成` / 面板）——压过一切；
+        2. `KNOWN_EMOJI_SENSES` 里**用户点名写死的那一条**（目前只有 `㊗` = 不赞同）。
+           放在这里而不是只写在 prompt 里，是为了**已经把这条判成 `other`/`unclear`
+           的旧数据立刻改过来**（不用重跑、不用改文件）；
+        3. 模型判的（`learned_sense`）。
+        """
 
         forced = self.override(group_id, emoji_id).get("sense")
         if forced:
             return forced
+        known = known_sense(emoji_id)[0]
+        if known:
+            return known
         return self.learned_sense(group_id, emoji_id)[0]
 
     def effective_note(self, group_id: str, emoji_id: str) -> str:
+        """那条说明。次序同 `effective_sense`（人工 > 写死的 > 模型判的）。"""
+
         forced = self.override(group_id, emoji_id).get("note")
         if forced:
             return forced
+        known = known_sense(emoji_id)[1]
+        if known:
+            return known
         return self.learned_sense(group_id, emoji_id)[1]
+
+    def sense_source(self, group_id: str, emoji_id: str) -> str:
+        """这个方向是谁定的：`人工` / `写死` / `学来的` / `还不知道`（给人看的）。"""
+
+        if self.override(group_id, emoji_id).get("sense"):
+            return "人工"
+        if known_sense(emoji_id)[0]:
+            return "写死"
+        return "学来的" if self.learned_sense(group_id, emoji_id)[0] != SENSE_UNCLEAR else "还不知道"
 
     def note_for_quote(self, quote: object) -> tuple[str, str]:
         """这条表情含义**落到了哪条笔记上**——返回 `(笔记 id, 笔记原文)`。
@@ -489,19 +586,28 @@ class QuoteStore:
                 return note_id(item.get("when"), item.get("note")), note
         return "", ""
 
-    def note_for_emoji(self, group_id: str, emoji_id: str) -> str:
+    def note_for_emoji(self, group_id: str, emoji_id: str, *, just_now: bool = False) -> str:
         """这个表情**在眼前这句话的场景里**能用的一句话材料（没有就空串）。
 
-        只有方向是明确的（赞成 / 不赞成）才写材料：`other`/`unclear` 写出去只会误导她。
+        三个条件全都要满足才写：方向是明确的（赞成 / 不赞成，`other`/`unclear` 写出去
+        只会误导她）、**而且这个表情有名字**（查不到名字就没法跟她说"群里贴的是什么"，
+        写一串编号等于没说）。
+
+        `just_now=True` 是**回复路径**那条：刚才有人给她那句话贴了这个表情（见
+        `quote_samples.ReactionFeed`），措辞要写成"刚才"——她这轮接的是刚发生的事。
         """
 
         sense = self.effective_sense(group_id, emoji_id)
         if sense not in {SENSE_POSITIVE, SENSE_NEGATIVE}:
             return ""
+        shown = _label(str(emoji_id))
+        if not shown:
+            return ""
         detail = self.effective_note(group_id, emoji_id)
+        prefix = "刚才有人在群里贴" if just_now else "群里贴"
         if sense == SENSE_POSITIVE:
-            return f"群里贴 {emoji_id} 是在捧她的话" + (f"（{detail}）" if detail else "")
-        return f"群里贴 {emoji_id} 是在说这话不对路" + (f"（{detail}）" if detail else "")
+            return f"{prefix} {shown} 是在捧她的话" + (f"（{detail}）" if detail else "")
+        return f"{prefix} {shown} 是在说这话不对路" + (f"（{detail}）" if detail else "")
 
     # --- 写 ---------------------------------------------------------------
 
@@ -638,37 +744,49 @@ class QuoteProfile:
             return []
         disabled = set(self.store.disabled_notes)
         query = f"{text} {topic}".strip()
-        candidates: list[tuple[str, str]] = []
+        #: 每个候选是 `(when, note, avoid)`；`avoid` 是"这是她踩过的坑"（见 `parse_learning_output`）。
+        candidates: list[tuple[str, str, bool]] = []
         for item in self.store.notes:
             note = _clean_note(item.get("note"))
             when = _clean_when(item.get("when"))
             # **停用判据按原文算 id**（与视图/命令/面板同一个 `note_id`），
             # 不能用清洗后的值——那样两处会得到两个 id，停用静默失效。
             if note and when and note_id(item.get("when"), item.get("note")) not in disabled:
-                candidates.append((when, note))
-        picked = [(when, note, _overlap(when, query)) for when, note in candidates]
-        picked = [row for row in picked if row[2] >= NOTE_BIGRAM_MIN]
+                candidates.append((when, note, bool(item.get("avoid"))))
+        picked = [(when, note, avoid, _overlap(when, query))
+                  for when, note, avoid in candidates]
+        picked = [row for row in picked if row[3] >= NOTE_BIGRAM_MIN]
         fallback = not picked
         if fallback:
-            picked = [(when, note, _char_overlap(when, query)) for when, note in candidates]
-            picked = [row for row in picked if row[2] >= NOTE_CHAR_MIN]
+            picked = [(when, note, avoid, _char_overlap(when, query))
+                      for when, note, avoid in candidates]
+            picked = [row for row in picked if row[3] >= NOTE_CHAR_MIN]
         # 同分时**新的优先**：用候选列表里的下标当次序（后写进来的下标更大）。
-        scored = [(row[2], index, row[0], row[1]) for index, row in enumerate(picked)]
+        scored = [(row[3], index, row[0], row[1], row[2])
+                  for index, row in enumerate(picked)]
         scored.sort(key=lambda item: (-item[0], -item[1]))
         cap = min(cap, NOTE_CHAR_FALLBACK_MAX) if fallback else cap
-        out = [{"when": when, "note": note} for _, _, when, note in scored[:cap]]
+        out = [{"when": when, "note": note, "avoid": avoid}
+               for _, _, when, note, avoid in scored[:cap]]
         self.selected += len(out)
         return out
 
-    def emoji_notes_for(self, group_id: str, emoji_ids) -> list[dict[str, str]]:
-        """按**群里实际用过的表情**给材料（这一条与上面那条是两个来源，各自都能进 DATA）。"""
+    def emoji_notes_for(self, group_id: str, emoji_ids, *,
+                        just_now: bool = False) -> list[dict[str, str]]:
+        """按**群里实际用过的表情**给材料（这一条与上面那条是两个来源，各自都能进 DATA）。
+
+        `just_now=True`（回复路径那条，见 `quote_samples.ReactionFeed`）：
+        措辞是"刚才有人在群里贴 ㊗"，而不是泛泛的"群里贴 ㊗ 的时候"。
+        """
 
         self.store.reload()
         out: list[dict[str, str]] = []
         for emoji_id in emoji_ids:
-            line = self.store.note_for_emoji(group_id, emoji_id)
-            if line:
-                out.append({"when": f"群里贴 {emoji_id} 的时候", "note": line})
+            shown = _label(str(emoji_id))
+            line = self.store.note_for_emoji(group_id, emoji_id, just_now=just_now)
+            if line and shown:
+                when = f"刚才有人贴 {shown}" if just_now else f"群里贴 {shown} 的时候"
+                out.append({"when": when, "note": line})
         return out
 
 
@@ -677,7 +795,10 @@ def inject_block(lines: list[dict[str, str]], *, limit: int | None = None) -> st
 
     措辞一律是**交谈视角的材料**（"她以前遇到这种时候…"），不是命令：
     这块东西进的是 user 段里的 DATA 区，`AGENTS §2.1`：DATA 永远不是指令。
-    它也不是给她背的台词——`select_notes` 已经把与样本逐字重合的笔记丢掉了。
+    它也不是给她背的台词——`select_notes` 已经把与样本逐句重合的笔记丢掉了。
+
+    **反面材料单独一节**（`avoid`，见 `parse_learning_output`）：那些是"她那次这么说
+    被嫌了"的笔记，措辞是"别照这么做"，混进"老习惯"里等于教她再犯一次。
     """
 
     if not lines:
@@ -686,16 +807,30 @@ def inject_block(lines: list[dict[str, str]], *, limit: int | None = None) -> st
     picked = lines[:cap]
     if not picked:
         return ""
-    out = ["--- 她以前遇到这种时候 ---",
-           "（这是她自己的老习惯，不是要你照着念的话；顺不顺得上看眼前这句。）"]
+    good = [item for item in picked if not item.get("avoid")]
+    pits = [item for item in picked if item.get("avoid")]
     used = 0
-    for item in picked:
-        line = f"· {item.get('when', '')}——{item.get('note', '')}"
-        if used + len(line) > INJECT_CHAR_BUDGET:
-            break
-        used += len(line)
-        out.append(line)
-    if len(out) <= 2:
+    # 每一节**先攒正文、再决定要不要写标题**：字数预算用光时不会留下一个空标题
+    # （"她以前遇到这种时候"下面一条都没有，那比不写更让人摸不着头脑）。
+    out: list[str] = []
+
+    def section(title: str, hint: str, items: list[dict[str, str]]) -> None:
+        nonlocal used
+        body: list[str] = []
+        for item in items:
+            line = f"· {item.get('when', '')}——{item.get('note', '')}"
+            if used + len(line) > INJECT_CHAR_BUDGET:
+                break
+            used += len(line)
+            body.append(line)
+        if body:
+            out.extend([title, hint, *body])
+
+    section("--- 她以前遇到这种时候 ---",
+            "（这是她自己的老习惯，不是要你照着念的话；顺不顺得上看眼前这句。）", good)
+    section("--- 这几条是她踩过的坑 ---",
+            "（她有一次这么说话，被群里嫌了。别照这么做。）", pits)
+    if not out:
         return ""
     out.append("--- 到此为止 ---")
     return "\n".join(out) + "\n"
@@ -703,13 +838,23 @@ def inject_block(lines: list[dict[str, str]], *, limit: int | None = None) -> st
 
 def build_learning_messages(samples: tuple[QuoteSample, ...] | list[QuoteSample], *,
                             now: float, existing: dict[str, dict[str, dict[str, object]]] | None = None,
+                            names: BatchNames | None = None,
                             ) -> list[dict[str, str]]:
-    """拼出一次学习的请求：system 是上面那份规则，user 是**不可信 JSON**。"""
+    """拼出一次学习的请求：system 是上面那份规则，user 是**不可信 JSON**。
 
+    样本里的表情**只写名字**（`西瓜`），编号不进去——编号翻名字是代码按规则做的
+    （`quote_samples.batch_emoji_names`），模型不该跟编号打交道。查不到名字、或者这一批里
+    重名的，那几条仍然带编号（那时它是唯一能指认的东西）。
+    """
+
+    batch = list(samples)
+    if names is None:
+        names = quote_samples.batch_emoji_names(batch)
     data = {
         "now": round(float(now), 3),
-        "samples": [sample.as_data() for sample in samples],
-        "existing_meanings": existing or {},
+        "samples": [sample.as_data(for_learning=True, names=names) for sample in batch],
+        # 已经学过的方向也**按名字**给它（它回话时报的也是名字）。
+        "existing_meanings": _meanings_by_name(existing or {}, names),
     }
     return [
         {"role": "system", "content": learning_system_prompt()},
@@ -718,23 +863,61 @@ def build_learning_messages(samples: tuple[QuoteSample, ...] | list[QuoteSample]
     ]
 
 
+def _meanings_by_name(existing: dict[str, dict[str, dict[str, object]]],
+                      names: BatchNames,
+                      ) -> dict[str, dict[str, dict[str, object]]]:
+    """把"按编号存的那份含义表"翻成"按名字给模型看的那一份"。
+
+    翻不出来的（没名字 / 这一批里重名）**留在编号上**——宁可它看到一串数字，
+    也不要让它以为"这个表情没学过"而重判一遍。
+    """
+
+    out: dict[str, dict[str, dict[str, object]]] = {}
+    for group, table in existing.items():
+        target: dict[str, dict[str, object]] = {}
+        for emoji_id, entry in table.items():
+            name = names.name_of(emoji_id)
+            key = name if name and name not in names.ambiguous else str(emoji_id)
+            target[key] = dict(entry)
+        out[str(group)] = target
+    return out
+
+
 def learning_system_prompt() -> str:
     """现取（面板将来要能改的话，走 `prompt_library` 那一套；这里先直取常量）。"""
 
     return LEARNING_SYSTEM_PROMPT
 
 
-def parse_learning_output(raw: object, *, source_text: str = "") -> dict[str, object]:
+def parse_learning_output(raw: object, *, source_text: str = "",
+                          negative_samples: frozenset[str] | set[str] = frozenset(),
+                          name_map: BatchNames | None = None,
+                          ) -> dict[str, object]:
     """解析模型输出 → 过护栏 → 返回可落盘的那一份。
 
     `source_text` 是这一批样本的原文（拼起来）：笔记与它**逐字重合**的会被丢掉，
     这样"不是原句堆砌"这条由代码兜住，而不只是写在 prompt 里求模型自觉。
 
-    返回 `{"notes":[…], "meanings":{…}, "dropped":{…}, "error":""}`。
-    解析不出来只记 `error`，**不抛**。
+    `negative_samples` 是**这一轮里方向判成"不赞同"的那些样本 id**（`sample_id`）。
+    标了 `from_sample` 落在里面的笔记**不丢**（用户 2026-10-11：*"被嫌的是**避免**
+    不是**不学**"*），而是打上 `avoid` 标记：
+
+    - 落盘时那条笔记多一个 `"avoid": True`；
+    - 注入时它进"**她踩过的坑**"那一节（"别照这么做"），而不是"她自己的老习惯"。
+
+    `name_map` 是**这一批的"名字 ↔ 编号"对照**（`quote_samples.batch_emoji_names`）：
+    模型报的是名字（`表情`），这里用 `name_map.resolve` 翻回编号。**翻不出来就丢掉那一条**
+    并计数（`meaning_unresolved`）——它编的名字不该变成一个乱标的编号。
+
+    没标 `from_sample` 的照旧收下、只计数（`unlabeled`）——"它到底照不照做"在日志里
+    看得见，而不是靠猜。
+
+    返回 `{"notes":[…], "meanings":{…}, "dropped":{…}, "marked_avoid":N,
+    "unlabeled":N, "error":""}`。解析不出来只记 `error`，**不抛**。
     """
 
-    result: dict[str, object] = {"notes": [], "meanings": {}, "dropped": {}, "error": ""}
+    result: dict[str, object] = {"notes": [], "meanings": {}, "dropped": {},
+                                 "marked_avoid": 0, "unlabeled": 0, "error": ""}
     if not isinstance(raw, str) or not raw.strip():
         result["error"] = "empty"
         return result
@@ -744,7 +927,9 @@ def parse_learning_output(raw: object, *, source_text: str = "") -> dict[str, ob
         return result
 
     dropped = {"note_long": 0, "note_word": 0, "note_verbatim": 0, "note_empty": 0,
-               "sense_unknown": 0, "meaning_empty": 0}
+               "sense_unknown": 0, "meaning_empty": 0, "meaning_unresolved": 0}
+    marked_avoid = 0
+    unlabeled = 0
 
     notes: list[dict[str, object]] = []
     for kind, key in (("style", "style_notes"), ("context", "context_notes")):
@@ -766,14 +951,31 @@ def parse_learning_output(raw: object, *, source_text: str = "") -> dict[str, ob
                 else:
                     dropped["note_verbatim"] += 1
                 continue
-            notes.append({"kind": kind, "when": when, "note": note})
+            written: dict[str, object] = {"kind": kind, "when": when, "note": note}
+            source = _text(item.get("from_sample"))
+            if source and source in negative_samples:
+                # **反着标**：这条留着，但进的是"别再这么做"那一节。
+                written["avoid"] = True
+                marked_avoid += 1
+            elif not source:
+                unlabeled += 1
+            notes.append(written)
 
     meanings: dict[str, dict[str, dict[str, object]]] = {}
     for item in _as_list(data.get("reaction_meanings")):
         if not isinstance(item, dict):
             continue
         group = _text(item.get("group_id"))
+        # 模型报的是**名字**（`表情`）；代码把它翻回编号。名字对不上就**丢掉这一条**
+        # （它编的名字 / 这一批里没有的）——绝不硬凑一个编号。
         emoji = _text(item.get("emoji_id"))
+        label = _text(item.get(QuoteReaction.LEARNING_KEY))
+        if not emoji and label:
+            emoji = name_map.resolve(label) if name_map else ""
+            if not emoji:
+                # 名字翻不回编号：**这一条整个丢掉**（不再往 `meaning_empty` 里重复计一遍）。
+                dropped["meaning_unresolved"] += 1
+                continue
         if not group or not emoji:
             dropped["meaning_empty"] += 1
             continue
@@ -796,11 +998,28 @@ def parse_learning_output(raw: object, *, source_text: str = "") -> dict[str, ob
     result["notes"] = notes[:MAX_NOTES]
     result["meanings"] = meanings
     result["dropped"] = dropped
+    result["marked_avoid"] = marked_avoid
+    result["unlabeled"] = unlabeled
     return result
 
 
 def _as_list(value: object) -> list:
     return list(value) if isinstance(value, (list, tuple)) else []
+
+
+def judged_meanings(raw: object, *, name_map: BatchNames | None = None,
+                    ) -> dict[str, dict[str, dict[str, object]]]:
+    """只把这一轮**判出来的方向**取出来（给"哪些样本被嫌"用）。
+
+    为什么单独一个口子：`parse_learning_output` 得先知道"哪些样本是不赞同的"才能把
+    它们**标成反面材料**（`avoid`），而那个集合要先读到方向才算得出来。解析是纯本地的
+    字符活，走两趟不花一分钱、也不写任何东西。
+
+    `name_map` 必须与拼请求时用的是**同一份**（名字 ↔ 编号），否则这里翻出来的编号
+    与那边对不上，方向会被算到别的表情头上。
+    """
+
+    return dict(parse_learning_output(raw, name_map=name_map).get("meanings") or {})
 
 
 def _load_json_object(raw: str) -> dict | None:
@@ -829,7 +1048,8 @@ class QuoteLearningAgent:
     def __init__(self, client, store: QuoteStore, *, chat_log_path: Path | str,
                  reply_log_path: Path | str | None = None, allowed_groups=(),
                  timeout: float = DEFAULT_TIMEOUT_SECONDS, clock=time.time,
-                 log_path: Path | str | None = None, enabled: bool = True) -> None:
+                 log_path: Path | str | None = None, enabled: bool = True,
+                 snowluma=None) -> None:
         self.client = client
         self.store = store
         self.chat_log_path = Path(chat_log_path)
@@ -838,12 +1058,20 @@ class QuoteLearningAgent:
         self.timeout = float(timeout)
         self.clock = clock
         self.enabled = bool(enabled)
+        #: 拉表情名字表用的那个只读客户端（`SnowLumaHttpClient`）。为 `None` 时跳过刷新，
+        #: 样本里就少一个名字字段——**别的什么都不变**。
+        #:
+        #: 表本身**只有进程里那一份**（`face_names.shared()`）：刷新写它、样本读它，
+        #: 两处必须是同一个对象，否则会出现"刷新成功了、样本里还是数字"这种查不出来的怪事。
+        self.snowluma = snowluma
         self.runs = 0
         self.failures = 0
         self.samples = 0
         self.notes_written = 0
         self.last_run_at = 0.0
         self.last_result = ""
+        #: 上一次刷新名字表写进来几条（0 = 没刷 / 没变化 / 失败）。
+        self.face_names_written = 0
         self._lock = asyncio.Lock()
         self._file = RollingJsonlFile(log_path or quote_log_path(), capacity=200, label="quote")
 
@@ -864,6 +1092,8 @@ class QuoteLearningAgent:
             "file": str(self.store.path),
             "log": str(self._file.path),
             "write_failures": self._file.write_failures,
+            "face_names": face_names.shared().snapshot(),
+            "face_names_written": self.face_names_written,
         }
 
     def status_lines(self, *, limit: int = 6) -> list[str]:
@@ -871,6 +1101,13 @@ class QuoteLearningAgent:
 
         self.store.reload()
         lines: list[str] = []
+        # 先报一句**表情名字表**在不在：材料里那个"群里贴 ㊗"的称呼就是它给的，
+        # 表不在的时候含义表里全是数字——这一行让操作者一眼看出是哪一种。
+        snapshot = face_names.shared().snapshot()
+        if snapshot["count"]:
+            lines.append(f"表情名字表：{snapshot['count']} 条（{snapshot['path']}）")
+        else:
+            lines.append("表情名字表：还没有（材料里只能用数字，如 12951）")
         if not self.store.meanings and not self.store.notes:
             lines.append("金句学习：还没有学过（样本不够或还没跑）")
             return lines
@@ -882,16 +1119,24 @@ class QuoteLearningAgent:
             for emoji in sorted(table, key=lambda key: (len(key), key)):
                 sense = self.store.effective_sense(group, emoji)
                 note = self.store.effective_note(group, emoji)
-                mark = "（人工改的）" if self.store.override(group, emoji).get("sense") else ""
-                lines.append(f"· {emoji} → {SENSE_LABELS.get(sense, sense)}"
+                source = self.store.sense_source(group, emoji)
+                mark = {"人工": "（人工改的）", "写死": "（写死的）"}.get(source, "")
+                name = face_names.shared().label_for(emoji)
+                shown = f"{emoji}（{name}）" if name else emoji
+                lines.append(f"· {shown} → {SENSE_LABELS.get(sense, sense)}"
                              f"{mark}" + (f"：{note}" if note else ""))
         if self.store.notes:
             lines.append("她自己的老习惯：")
             for item in self.store.notes[:limit]:
                 when = str(item.get("when") or "")
                 note = str(item.get("note") or "")
-                mark = "（已停用）" if self.store.note_disabled(
-                    note_id(item.get("when"), item.get("note"))) else ""
+                # 反面材料要看得出来：它是"别再这么做"，不是"她的老习惯"。
+                marks = []
+                if item.get("avoid"):
+                    marks.append("反面：那次被嫌")
+                if self.store.note_disabled(note_id(item.get("when"), item.get("note"))):
+                    marks.append("已停用")
+                mark = "（" + "、".join(marks) + "）" if marks else ""
                 lines.append(f"· {when}——{note}{mark}")
             if len(self.store.notes) > limit:
                 lines.append(f"… 还有 {len(self.store.notes) - limit} 条（文件：{self.store.path}）")
@@ -946,18 +1191,71 @@ class QuoteLearningAgent:
         # 一批里只送前 N 条；剩下的下一轮再来（每轮都是"学一点"，不是一次吃光）。
         return list(fresh)
 
+    async def _refresh_face_names(self) -> None:
+        """拉一次表情名字表（一天一次级别）。**失败只记一笔，什么都不影响**。
+
+        只在**目录旧了**（`stale()`，见 `face_names`）或者**还没有表**时才真的发请求；
+        已经有表、没到点，这里是纯本地判断（`stale()` 不联网）。
+        调用点在 `_learn_batch` 开头——**没有样本就没有这次调用**。
+        """
+
+        if self.snowluma is None:
+            return
+        try:
+            self.face_names_written = await face_names.refresh(
+                self.snowluma, face_names.shared(), timeout=DEFAULT_TIMEOUT_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - 名字表出任何事都不该影响学习，更不该影响对话
+            logger.warning("quote_learning_face_names_failed", exc_info=True)
+
+    def _negative_samples(self, batch: list[QuoteSample],
+                          meanings: dict | None = None) -> frozenset[str]:
+        """这一批里**方向是不赞同**的那些样本 id（用来把它们的"说话风格"挡在外面）。
+
+        方向按 `effective_sense` 的同一套次序算：**人工覆盖 → 写死的那条 → 这一轮判的 →
+        上次存下来的**。所以"被 ㊗ 了的发言"从第一轮起就进这个集合（不依赖模型判得对）。
+        """
+
+        negative: set[str] = set()
+        for sample in batch:
+            for emoji_id in sample.emoji_ids():
+                sense = self.store.override(sample.group_id, emoji_id).get("sense")
+                if not sense:
+                    sense = known_sense(emoji_id)[0]
+                if not sense and meanings:
+                    entry = (meanings.get(sample.group_id) or {}).get(emoji_id) or {}
+                    sense = str(entry.get("sense") or "")
+                if not sense:
+                    sense = self.store.learned_sense(sample.group_id, emoji_id)[0]
+                if sense == SENSE_NEGATIVE:
+                    negative.add(sample.sample_id)
+                    break
+        return frozenset(negative)
+
     async def _learn_batch(self, batch: list[QuoteSample]) -> int:
+        # 名字表在**真的有样本要送模型之前**才刷新：没有新样本就不该去打那个接口
+        # （也正因如此，这条网络调用不会在"她什么都没被贴表情"的那些天上发生）。
+        await self._refresh_face_names()
+        # **这一批的"名字 ↔ 编号"对照**：拼请求与解析输出必须用同一份，
+        # 否则模型报回来的名字会被翻到别的编号上。
+        names = quote_samples.batch_emoji_names(batch)
         request = build_learning_messages(
             batch, now=self.clock(),
             existing={group: table for group, table in self.store.meanings.items()},
+            names=names,
         )
         raw = await asyncio.wait_for(self.client.complete(request), self.timeout)
         source_text = " ".join(sample.body for sample in batch)
-        parsed = parse_learning_output(raw, source_text=source_text)
+        # 两趟都走同一个解析器：**第一趟只取方向**（算出哪些样本被嫌），第二趟带
+        # `negative_samples` 真正过护栏。解析是纯本地的字符活，两趟不花一分钱、不写盘。
+        negative = self._negative_samples(batch, judged_meanings(raw, name_map=names))
+        parsed = parse_learning_output(raw, source_text=source_text,
+                                       negative_samples=negative, name_map=names)
         notes = list(parsed.get("notes") or [])
         meanings = dict(parsed.get("meanings") or {})
         seen = [quote_samples.fingerprint_of(sample) for sample in batch]
-        self._log_io(request, str(raw), batch=batch, parsed=parsed)
+        self._log_io(request, str(raw), batch=batch, parsed=parsed, negative=len(negative))
         if not notes and not meanings:
             # 模型什么都没产出：**照样记账**（否则同一批会被反复送去烧钱），
             # 但不动已有的笔记与含义表（`apply_run` 只在真有产出时调）。
@@ -966,11 +1264,13 @@ class QuoteLearningAgent:
             return 0
         self.store.apply_run(notes=notes, meanings=meanings, seen=seen)
         self.notes_written = len(self.store.notes)
-        logger.info("quote_learning_wrote notes=%s groups=%s batch=%s",
-                    len(notes), len(meanings), len(batch))
+        logger.info("quote_learning_wrote notes=%s groups=%s batch=%s negative=%s avoid=%s "
+                    "unlabeled=%s",
+                    len(notes), len(meanings), len(batch), len(negative),
+                    parsed.get("marked_avoid") or 0, parsed.get("unlabeled") or 0)
         return len(notes)
 
-    def _log_io(self, request, output: str, *, batch, parsed: dict) -> None:
+    def _log_io(self, request, output: str, *, batch, parsed: dict, negative: int = 0) -> None:
         """落一份输入输出（与其它模型日志同一套轮转；正文只在 `data/` 下）。"""
 
         from .feature_log import request_parts
@@ -983,6 +1283,9 @@ class QuoteLearningAgent:
             "groups": sorted({sample.group_id for sample in batch}),
             "notes": len(parsed.get("notes") or []),
             "meanings": sum(len(table) for table in (parsed.get("meanings") or {}).values()),
+            "negative_samples": negative,
+            "marked_avoid": parsed.get("marked_avoid") or 0,
+            "unlabeled": parsed.get("unlabeled") or 0,
             "dropped": parsed.get("dropped") or {},
             "error": parsed.get("error") or "",
             "system": system,
@@ -1010,8 +1313,13 @@ class QuoteLearningAgent:
 
 
 def build_quote_agent(client, *, data_dir: Path | str | None = None, allowed_groups=(),
-                      timeout: float = DEFAULT_TIMEOUT_SECONDS, clock=time.time):
-    """装配一个金句学习 agent（`runtime` 用）。**没配 key / 关掉开关都返回 None**。"""
+                      timeout: float = DEFAULT_TIMEOUT_SECONDS, clock=time.time,
+                      snowluma=None):
+    """装配一个金句学习 agent（`runtime` 用）。**没配 key / 关掉开关都返回 None**。
+
+    `snowluma` 是可选的只读 HTTP 客户端（`SnowLumaHttpClient`）：有它才会去拉
+    **表情的名字表**（`fetch_sys_faces`）。没有它照旧学，只是样本里少一个名字字段。
+    """
 
     if client is None or not learning_enabled():
         return None
@@ -1021,6 +1329,7 @@ def build_quote_agent(client, *, data_dir: Path | str | None = None, allowed_gro
     return QuoteLearningAgent(
         client, store, chat_log_path=chat_log, reply_log_path=reply_log,
         allowed_groups=allowed_groups, timeout=timeout, clock=clock,
+        snowluma=snowluma,
     )
 
 

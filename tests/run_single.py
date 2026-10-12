@@ -29,6 +29,9 @@ os.environ.setdefault("QQBOT_DEBUG_MODEL_IO", "0")
 os.environ.setdefault("QQBOT_FEATURE_LOG", "0")
 os.environ.setdefault("QQBOT_CHAT_LOG", "0")
 os.environ.setdefault("QQBOT_RAW_EVENTS", "0")
+# 表情名字表的落点也挪开（与 `run_offline.py` 同一条理由）：默认是 `<项目根>/data/`，
+# 单文件跑的时候同样不该往真 `data/` 里写一份从 SnowLuma 拉来的目录。
+os.environ.setdefault("QQBOT_FACE_NAMES", str(ROOT / ".tmp_test_run" / "faces.json"))
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(HERE))
 

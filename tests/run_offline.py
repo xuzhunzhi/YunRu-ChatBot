@@ -41,6 +41,10 @@ os.environ["QQBOT_CHAT_LOG_DIR"] = str(root / ".tmp_test_run" / "logs")
 # `enabled=True` + 自己的临时目录（见 tests/test_raw_events.py），不靠这个开关。
 os.environ["QQBOT_RAW_EVENTS"] = "0"
 os.environ["QQBOT_RAW_EVENTS_DIR"] = str(root / ".tmp_test_run" / "logs")
+# 同理把**表情名字表**（`data/faces.json`，金句学习那条节拍从 SnowLuma 拉的目录）
+# 指到临时目录：它的默认落点是 `<项目根>/data/`，而套件里会有后台节拍跑起来
+# （2026-10-11 实测：`dev/data/faces.json` 被一个没被取消的节拍任务写出来了）。
+os.environ["QQBOT_FACE_NAMES"] = str(root / ".tmp_test_run" / "faces.json")
 
 sys.path.insert(0, str(root / "src"))
 sys.path.insert(0, str(root / "archive"))

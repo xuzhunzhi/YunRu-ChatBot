@@ -35,6 +35,7 @@ from qq_roleplay_bot.quote_learning import (
     IMPERATIVE_WORDS,
     MAX_NOTE_CHARS,
     SENSE_NEGATIVE,
+    SENSE_OTHER,
     SENSE_POSITIVE,
     SENSE_UNCLEAR,
     QuoteLearningAgent,
@@ -333,15 +334,31 @@ def test_the_operator_override_wins_over_what_the_agent_learned() -> None:
 
 
 def test_an_overridden_emoji_changes_the_material_that_goes_into_the_prompt() -> None:
-    """覆盖**真的改到材料**：同一个 emoji，改前/改后给的那句话不一样。"""
+    """覆盖**真的改到材料**：同一个 emoji，改前/改后给的那句话不一样。
+
+    材料里那个称呼是**名字**（`汪汪`），所以这条要先给一份名字表——查不到名字的表情
+    现在**不给材料**（"群里贴 277"对她没有任何用，见 `note_for_emoji`）。
+    """
+
+    from qq_roleplay_bot import face_names
+
+    catalog = {"packs": [{"pack_name": "小黄脸表情", "emojis": [
+        {"q_sid": NEGATIVE_EMOJI, "q_des": "/汪汪", "q_cid": None, "em_code": "10277"}]}]}
 
     with tempfile.TemporaryDirectory() as tmp:
         store = QuoteStore(Path(tmp) / "profile.json")
         store.apply_run(notes=[], meanings={GROUP: {
             NEGATIVE_EMOJI: {"sense": "positive", "note": "它以为是夸"}}}, seen=[])
-        assert "捧" in store.note_for_emoji(GROUP, NEGATIVE_EMOJI)
-        store.override_sense(GROUP, NEGATIVE_EMOJI, "不赞成", "在损她")
-        assert "不对路" in store.note_for_emoji(GROUP, NEGATIVE_EMOJI)
+        table = face_names.FaceNames(Path(tmp) / "faces.json")
+        assert table.save(face_names.flatten(catalog))
+        face_names.install(table)
+        try:
+            assert "汪汪" in store.note_for_emoji(GROUP, NEGATIVE_EMOJI)
+            assert "捧" in store.note_for_emoji(GROUP, NEGATIVE_EMOJI)
+            store.override_sense(GROUP, NEGATIVE_EMOJI, "不赞成", "在损她")
+            assert "不对路" in store.note_for_emoji(GROUP, NEGATIVE_EMOJI)
+        finally:
+            face_names.install(None)
 
 
 def test_an_unclear_meaning_produces_no_material() -> None:
@@ -470,21 +487,238 @@ def test_over_long_and_imperative_notes_are_dropped() -> None:
     assert parsed["dropped"]["note_word"] >= 1
 
 
-def test_the_request_carries_the_guard_rules_and_never_a_hardcoded_emoji_table() -> None:
-    """system 那一份里**没有**任何"哪个表情是正、哪个是负"的表（方向必须从语境推）。
+def test_the_prompt_has_exactly_one_written_in_emoji_and_no_other_table() -> None:
+    """system 那一份里**只有用户点名的那一条**写死的方向，别的一个字面表都没有。
 
-    判据是**真实的 emoji_id 一个都不在**：代码里只要出现 `"277" → negative` 这种字面映射，
-    这条就红。方向词本身（`positive` / `negative`）必须有——那是**要它去填的取值**，
-    不是替它填好的结论。
+    2026-10-11 用户要求把"贴**祝（猪的谐音）就是不赞同或者 bot 回复不恰当**"写进去
+    （他 2026-10-06 就说过这句话，但当时只由模型从语境推，结果被丢成 `other`）。
+    所以这条测试的判据从"一个 id 都不许出现"改成"**只有 12951 那一个**"：
+
+    * `12951`（`chr(12951) == "㊗"`）**必须**在，而且必须写着"不许写成 unclear"；
+    * 别的真实 emoji_id（`277` / `76` / `387` / `476` / `424` / `128516` …）**一个都不许在**
+      ——那还是"替它填结论"，用户没让写。
     """
 
     from qq_roleplay_bot.quote_learning import LEARNING_SYSTEM_PROMPT
 
-    for emoji_id in ("277", "76", "387", "128516", "49", "476", "424"):
-        assert emoji_id not in LEARNING_SYSTEM_PROMPT, f"不许硬编码表情含义：{emoji_id}"
+    assert "12951" in LEARNING_SYSTEM_PROMPT, "用户点名的那一条必须在 prompt 里"
+    assert "㊗" in LEARNING_SYSTEM_PROMPT
+    assert "不许写 `unclear`" in LEARNING_SYSTEM_PROMPT
+    for emoji_id in ("277", "76", "387", "128516", "49", "476", "424", "10068", "234"):
+        assert emoji_id not in LEARNING_SYSTEM_PROMPT, f"这条没被点名，不许硬编码：{emoji_id}"
     assert "positive" in LEARNING_SYSTEM_PROMPT and "negative" in LEARNING_SYSTEM_PROMPT
     # 它必须点明"要结合谁贴的、她说了什么、贴完群里怎么接"。
     assert "谁贴的" in LEARNING_SYSTEM_PROMPT and "群里怎么接" in LEARNING_SYSTEM_PROMPT
+    # 名字是线索、不是判据（名字进去了，方向仍然从语境推）。
+    assert "名字是线索，不是判据" in LEARNING_SYSTEM_PROMPT
+
+
+def test_a_note_from_a_disliked_sample_is_marked_as_a_pit_not_learned_as_a_habit() -> None:
+    """**被嫌的是避免，不是不学**（用户 2026-10-11 原话）。
+
+    那条笔记**留着**，但要打上 `avoid`：进 prompt 时它归"她踩过的坑"（"别照这么做"），
+    不是"她自己的老习惯"。标了别人的样本不受影响；没标的照收但计数。
+    """
+
+    output = json.dumps({
+        "reaction_meanings": [],
+        "style_notes": [
+            {"when": "被逗的时候", "note": "顺着往下损一句", "from_sample": "g:-1"},
+            {"when": "被夸的时候", "note": "少来，别贫", "from_sample": "g:-2"},
+            {"when": "冷场的时候", "note": "就当没看见", "from_sample": ""},
+        ],
+        "context_notes": [{"when": "被贴了不赞同", "note": "还是正经一点", "from_sample": "g:-1"}],
+    }, ensure_ascii=False)
+
+    parsed = parse_learning_output(output, negative_samples={"g:-1"})
+    notes = {item["note"]: item for item in parsed["notes"]}
+    assert set(notes) == {"顺着往下损一句", "少来，别贫", "就当没看见", "还是正经一点"}, \
+        "一条都不许丢——被嫌的是避免，不是不学"
+    assert notes["顺着往下损一句"]["avoid"] is True
+    assert notes["还是正经一点"]["avoid"] is True
+    assert "avoid" not in notes["少来，别贫"], "别的样本不能被连坐"
+    assert "avoid" not in notes["就当没看见"], "没标来源的照旧收下（只计数）"
+    assert parsed["marked_avoid"] == 2
+    assert parsed["unlabeled"] == 1
+
+
+def test_the_pit_section_is_rendered_apart_from_her_old_habits() -> None:
+    """注入时**分开两节**：老习惯在上、"她踩过的坑"在下，措辞是"别照这么做"。"""
+
+    block = inject_block([
+        {"when": "被夸的时候", "note": "少来，别贫"},
+        {"when": "被逗的时候", "note": "顺着往下损一句", "avoid": True},
+    ])
+    assert "--- 她以前遇到这种时候 ---" in block
+    assert "--- 这几条是她踩过的坑 ---" in block
+    assert "别照这么做" in block
+    assert block.index("少来，别贫") < block.index("--- 这几条是她踩过的坑 ---")
+    assert block.index("顺着往下损一句") > block.index("--- 这几条是她踩过的坑 ---")
+    # 只有反面材料时也要能出去（标题顺序反过来了）。
+    only_pits = inject_block([{"when": "被逗", "note": "顺着往下损一句", "avoid": True}])
+    assert "她以前遇到这种时候" not in only_pits
+    assert "--- 这几条是她踩过的坑 ---" in only_pits
+    # 没有材料 → 一个字节都不写。
+    assert inject_block([]) == ""
+
+
+def test_the_status_lines_show_the_name_table_the_source_and_the_pit_marks() -> None:
+    """`/super quote` 与 `/super status` 要看得到三件事（不然操作者没法判它对不对）：
+
+    名字表在不在（`表情名字表` 那一行）、这条方向是谁定的（`（写死的）`）、
+    哪几条是反面材料（`反面：那次被嫌`）——而且**数字 id 也留着**（命令是按它改的）。
+    """
+
+    from qq_roleplay_bot import face_names
+
+    with tempfile.TemporaryDirectory() as tmp:
+        agent = _agent(tmp, ScriptedLearner("{}"))
+        face_names.install(face_names.FaceNames(Path(tmp) / "faces.json"))
+        try:
+            assert agent.snapshot()["face_names"]["count"] == 0
+            assert any("表情名字表" in line for line in agent.status_lines()), "表在不在要报一句"
+            agent.store.apply_run(
+                notes=[{"kind": "style", "when": "被逗的时候", "note": "顺着往下损一句",
+                        "avoid": True}],
+                meanings={GROUP: {"12951": {"sense": "other", "note": "说不清是夸还是逗"}}},
+                seen=[])
+            text = "\n".join(agent.status_lines())
+        finally:
+            face_names.install(None)
+        assert "㊗" in text, "名字要显示出来"
+        assert "12951" in text, "id 也要留着（/super quote 是按它改的）"
+        assert "写死的" in text, "方向是谁定的要看得出来"
+        assert "反面：那次被嫌" in text, "反面材料不能混成'她的老习惯'"
+
+
+def test_a_sample_marked_with_the_written_in_emoji_is_learned_as_a_pit() -> None:
+    """端到端：样本被贴 `㊗` → 它写出来的笔记**进文件、但带着反面标记**。
+
+    这一条**不依赖模型判得对**：`㊗` 的方向是写死的（`KNOWN_EMOJI_SENSES`），
+    所以哪怕模型把它写成 `positive`、还兴冲冲地学了一条风格，代码也照标。
+    """
+
+    emoji_id = "12951"
+    output = json.dumps({
+        "reaction_meanings": [{"group_id": GROUP, "emoji_id": emoji_id,
+                               "sense": "positive", "note": "它以为是捧"}],
+        "style_notes": [{"when": "被回一句", "note": "接着皮一句回去",
+                         "from_sample": f"{GROUP}:{HER_MESSAGE_ID}"}],
+        "context_notes": [],
+    }, ensure_ascii=False)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        agent = _agent(tmp, ScriptedLearner(output))
+        _write_log(Path(tmp) / "chat.jsonl", _quote_rows(emoji_id=emoji_id))
+        assert asyncio.run(agent.run_once()) == 1
+        assert [item["note"] for item in agent.store.notes] == ["接着皮一句回去"]
+        assert agent.store.notes[0]["avoid"] is True, "被 ㊗ 的那条要标成坑"
+        # 方向按写死的那条算（不是它写的 positive）。
+        assert agent.store.effective_sense(GROUP, emoji_id) == SENSE_NEGATIVE
+        assert agent.store.sense_source(GROUP, emoji_id) == "写死"
+        # 进 prompt 时它在"坑"那一节里。
+        profile = QuoteProfile(agent.store)
+        picked = profile.notes_for(GROUP, "被回一句", "被回一句")
+        assert picked and picked[0]["avoid"] is True
+        assert "--- 这几条是她踩过的坑 ---" in inject_block(picked)
+
+
+def test_the_learning_request_carries_the_emoji_name_instead_of_the_number() -> None:
+    """样本里给的是 **QQ 的名字**（`赞`），**不是那串编号**（规则那步由代码做完）。
+
+    判据看的是**那次请求的 user 段**（样本那一份 DATA），不是整条请求的字符串——
+    system 里本来就印着 `赞` 当例子（那不算样本带名字）。
+    """
+
+    from qq_roleplay_bot import face_names
+
+    def sample_text(agent) -> str:
+        request = agent.client.requests[0]
+        return [item["content"] for item in request if item["role"] == "user"][-1]
+
+    catalog = {"packs": [{"pack_name": "小黄脸表情", "emojis": [
+        {"q_sid": "76", "q_des": "/赞", "q_cid": None, "em_code": "179"}]}]}
+    output = json.dumps({"reaction_meanings": [], "style_notes": [],
+                         "context_notes": [{"when": "被夸", "note": "少来，别贫"}]},
+                        ensure_ascii=False)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # 没有名字表：样本里只能是编号（与改动前逐字相同）。
+        face_names.install(face_names.FaceNames(Path(tmp) / "faces.json"))
+        try:
+            agent = _agent(tmp, ScriptedLearner(output))
+            _write_log(Path(tmp) / "chat.jsonl", _quote_rows(emoji_id="76"))
+            asyncio.run(agent.run_once())
+            assert '"emoji_id": "76"' in sample_text(agent)
+        finally:
+            face_names.install(None)
+
+    # 有名字表：样本里**只有名字**，编号一个字都不出现。**另开一个临时目录**——
+    # 同一份 `profile.json` 里已经记着"这条学过了"，复用会让第二轮连模型都不调。
+    with tempfile.TemporaryDirectory() as tmp:
+        table = face_names.FaceNames(Path(tmp) / "table.json")
+        assert table.save(face_names.flatten(catalog))
+        face_names.install(table)
+        try:
+            agent = _agent(tmp, ScriptedLearner(output))
+            _write_log(Path(tmp) / "chat.jsonl", _quote_rows(emoji_id="76"))
+            asyncio.run(agent.run_once())
+            text = sample_text(agent)
+            assert '"表情": "赞"' in text, "样本里要写名字"
+            assert '"emoji_id"' not in text, "编号不该再喂给模型"
+        finally:
+            face_names.install(None)
+
+
+def test_a_name_reported_by_the_model_is_resolved_back_to_the_number() -> None:
+    """模型报的是名字（`表情`），代码把它翻回编号再落盘——**照群、照编号**存。
+
+    还要钉住两条边界：它编了个这一批里没有的名字 → 那条**丢掉**（不硬凑一个编号）；
+    它写不出表情 → 也丢掉，都计数。
+    """
+
+    from qq_roleplay_bot.quote_samples import batch_emoji_names, build_samples
+
+    names = batch_emoji_names(build_samples(_quote_rows(emoji_id="12951"),
+                                            group_ids=(GROUP,)).samples)
+    assert names.by_name == {"㊗": "12951"} and names.ambiguous == frozenset()
+    assert names.name_of("12951") == "㊗" and names.name_of("234") == ""
+    parsed = parse_learning_output(json.dumps({
+        "reaction_meanings": [
+            {"group_id": GROUP, "表情": "㊗", "sense": "other", "note": "说不清"},
+            {"group_id": GROUP, "表情": "它编的名字", "sense": "positive", "note": "瞎编"},
+            {"group_id": GROUP, "表情": "", "sense": "positive"},
+        ],
+        "style_notes": [], "context_notes": [],
+    }, ensure_ascii=False), name_map=names)
+    assert list(parsed["meanings"][GROUP]) == ["12951"], "只留下翻得回编号的那一条"
+    assert parsed["dropped"]["meaning_unresolved"] == 1
+    assert parsed["dropped"]["meaning_empty"] == 1
+    # 落盘之后按**编号**存（面板、命令、注入三处都是按编号查的）。
+    with tempfile.TemporaryDirectory() as tmp:
+        store = QuoteStore(Path(tmp) / "profile.json")
+        store.apply_run(notes=[], meanings=parsed["meanings"], seen=[])
+        assert store.learned_sense(GROUP, "12951")[0] == SENSE_OTHER
+
+
+def test_the_material_never_shows_a_bare_number() -> None:
+    """给她看的材料**只出现名字**；查不到名字的表情**不给材料**（写一串编号等于没说）。"""
+
+    from qq_roleplay_bot import face_names
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = QuoteStore(Path(tmp) / "profile.json")
+        store.apply_run(notes=[], meanings={GROUP: {
+            "12951": {"sense": "negative", "note": "在损她"},
+            "234": {"sense": "negative", "note": "在损她"},
+        }}, seen=[])
+        face_names.install(face_names.FaceNames(Path(tmp) / "faces.json"))
+        try:
+            assert "㊗" in store.note_for_emoji(GROUP, "12951"), "有名字（码点算出来的）就给材料"
+            assert store.note_for_emoji(GROUP, "234") == "", "查不到名字就不给材料"
+            assert QuoteProfile(store).emoji_notes_for(GROUP, ["234"]) == []
+        finally:
+            face_names.install(None)
 
 
 # --- 4. 注入 ----------------------------------------------------------------
@@ -627,40 +861,56 @@ def test_turning_the_switch_off_makes_the_request_byte_for_byte_identical() -> N
 
 
 def test_the_engine_injects_the_material_into_the_data_section_only() -> None:
-    """材料进的是 **user 段的 DATA 区**：system 前缀一个字都不动（§2.1）。"""
+    """材料进的是 **user 段的 DATA 区**：system 前缀一个字都不动（§2.1）。
 
-    with tempfile.TemporaryDirectory() as tmp:
-        store = QuoteStore(Path(tmp) / "profile.json")
-        store.apply_run(notes=[{"kind": "context", "when": "有人在说字幕翻译的事",
-                                "note": "先给结论，再补一句为什么"}], meanings={}, seen=[])
-        profile = QuoteProfile(store)
-        reply = ScriptedReply("识别和翻译是两套。")
-        judge = ScriptedJudge("<route>REPLY</route><topic>字幕翻译</topic>")
-        engine = DialogueEngine(reply, judge_client=judge, group_listen=True,
-                                enabled_group_ids=frozenset({GROUP}),
-                                quote_profile=profile)
-        from qq_roleplay_bot import runtime_flags
+    位置跟档位走（2026-10-11 用户定案"位置跟档位走"）：**缓存友好型**（默认）→ 带一季
+    不变的记号进**稳定段**（`<history>` 之前）；**增强型** → 留在**易变段**、每轮包码。
+    两档共同的那条硬边界就是这条测试钉的：材料**只许进 user 段**，system 一个字不许多。
+    """
 
-        flags = runtime_flags.shared()
-        runtime_flags.install(runtime_flags.RuntimeFlags(quote_enabled=True))
-        try:
-            result = asyncio.run(engine.handle(msg(1, "这个字幕只能识别不能翻译，是吗")))
-        finally:
-            # 同上：`flags` 为 None 时也照实还回 None。
-            runtime_flags.install(flags)
-        assert result is not None
-        request = reply.requests[0]
+    from qq_roleplay_bot import runtime_flags
+
+    def request_for(*, cache_friendly: bool):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = QuoteStore(Path(tmp) / "profile.json")
+            store.apply_run(notes=[{"kind": "context", "when": "有人在说字幕翻译的事",
+                                    "note": "先给结论，再补一句为什么"}], meanings={}, seen=[])
+            reply = ScriptedReply("识别和翻译是两套。")
+            judge = ScriptedJudge("<route>REPLY</route><topic>字幕翻译</topic>")
+            engine = DialogueEngine(reply, judge_client=judge, group_listen=True,
+                                    enabled_group_ids=frozenset({GROUP}),
+                                    quote_profile=QuoteProfile(store))
+            flags = runtime_flags.shared()
+            runtime_flags.install(runtime_flags.RuntimeFlags(
+                quote_enabled=True, data_marker_cache_friendly=cache_friendly))
+            try:
+                result = asyncio.run(engine.handle(msg(1, "这个字幕只能识别不能翻译，是吗")))
+            finally:
+                # `flags` 为 None 时也照实还回 None（见下面那条测试的说明）。
+                runtime_flags.install(flags)
+            assert result is not None
+            return reply.requests[0]
+
+    for friendly in (True, False):
+        request = request_for(cache_friendly=friendly)
         system = request[0]
         assert system["role"] == "system"
         assert "先给结论" not in system["content"], "材料绝不许进 system"
         assert "她以前遇到这种时候" not in system["content"]
-        # 它在一个 user 段里，而且在那一段的 DATA 区（"你记得的旧事"之后）。
         users = [item for item in request if item["role"] == "user"]
         assert len(users) >= 2
-        volatile = users[-1]["content"]
-        assert "她以前遇到这种时候" in volatile
-        assert volatile.index("你记得的旧事 结束") < volatile.index("她以前遇到这种时候")
-        assert volatile.index("她以前遇到这种时候") < volatile.index("<current_event>")
+        # `users` 是**筛过的**列表：`[0]` 才是稳定段那一份，`[-1]` 是易变段那一份。
+        stable, volatile = users[0]["content"], users[-1]["content"]
+        here = stable if friendly else volatile
+        there = volatile if friendly else stable
+        assert "她以前遇到这种时候" in here, f"cache_friendly={friendly}：材料不在该在的那一段"
+        assert "她以前遇到这种时候" not in there, f"cache_friendly={friendly}：材料两处都写了"
+        assert "--- UNTRUSTED CHAT DATA BEGIN ---" in stable, "材料必须仍在 DATA 区里"
+        if friendly:
+            assert stable.index("她以前遇到这种时候") < stable.index("<history>"), \
+                "缓存友好型档位下材料要在 `<history>` 之前（前缀才复用得上）"
+        else:
+            assert volatile.index("她以前遇到这种时候") < volatile.index("<current_event>")
 
 
 def test_a_broken_material_file_never_affects_the_reply() -> None:
@@ -680,6 +930,220 @@ def test_a_broken_material_file_never_affects_the_reply() -> None:
         assert result is not None and result.text == "识别和翻译是两套。"
         assert len(reply.requests) == 1
         assert "她以前遇到这种时候" not in json.dumps(reply.requests[0], ensure_ascii=False)
+
+
+# --- 4b. "刚才有人给她贴了什么"（用户 2026-10-11 选的"甲"）------------------------
+
+
+def _reaction_row(*, at: float, message_id: str, emoji_id: str, group: str = GROUP) -> dict:
+    return {"at": at, "direction": "in", "kind": "reaction", "session_id": f"group:{group}",
+            "group_id": group, "user_id": "7", "operator_id": "7",
+            "message_id": message_id, "emoji_id": emoji_id, "count": 1, "sub_type": "add"}
+
+
+def _her_row(*, at: float, message_id: str, group: str = GROUP, body: str = "她说的") -> dict:
+    return {"at": at, "direction": "out", "kind": "text", "session_id": f"group:{group}",
+            "group_id": group, "message_id": message_id, "body": body, "part": 1, "total": 1}
+
+
+def test_the_tail_reader_stays_bounded_and_never_returns_a_half_line() -> None:
+    """读日志尾巴：只要末尾几行，**不从文件中间切出半行**，文件不在就是空。"""
+
+    from qq_roleplay_bot.quote_samples import read_tail_rows
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "chat.jsonl"
+        path.write_text("".join(json.dumps({"at": float(i), "body": "x" * 200},
+                                           ensure_ascii=False) + "\n" for i in range(50)),
+                         encoding="utf-8")
+        rows = read_tail_rows(path, max_lines=5)
+        assert [row["at"] for row in rows] == [45.0, 46.0, 47.0, 48.0, 49.0]
+        # 只给很少的字节：行数**如实变少**，但每一行都是完整的 JSON（没有半行垃圾）。
+        tiny = read_tail_rows(path, max_lines=50, max_bytes=600)
+        assert 0 < len(tiny) < 50
+        assert all(isinstance(row.get("body"), str) for row in tiny)
+        assert read_tail_rows(Path(tmp) / "没有这份文件.jsonl") == []
+
+
+def test_the_reaction_feed_only_reports_reactions_on_her_own_recent_messages() -> None:
+    """四条判据：同一会话、在她自己的消息上、在"刚才"那个窗口里、**同一条只提一次**。"""
+
+    from qq_roleplay_bot.quote_samples import ReactionFeed
+
+    now = 2000.0
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "chat.jsonl"
+        _write_log(path, [
+            _her_row(at=now - 60, message_id="-1"),
+            # 别人说的那条（她**没说过**这个 id）
+            {"at": now - 50, "direction": "in", "kind": "text", "session_id": f"group:{GROUP}",
+             "group_id": GROUP, "message_id": "-99", "body": "别人说的"},
+            _reaction_row(at=now - 40, message_id="-1", emoji_id="12951"),
+            _reaction_row(at=now - 30, message_id="-99", emoji_id="76"),          # 点别人 → 不算
+            _reaction_row(at=now - 20, message_id="-1", emoji_id="387", group=OTHER_GROUP),
+            _reaction_row(at=now - 99999, message_id="-1", emoji_id="277"),       # 太老 → 不算
+        ])
+        feed = ReactionFeed(path, clock=lambda: now, window=900.0)
+        assert feed.recent_emoji_ids(GROUP, session_id=f"group:{GROUP}") == ("12951",)
+        assert feed.recent_emoji_ids(GROUP, session_id=f"group:{GROUP}") == (), \
+            "同一条消息上的同一个表情只提一次"
+        assert feed.recent_emoji_ids(OTHER_GROUP, session_id=f"group:{OTHER_GROUP}") == ()
+        assert feed.snapshot()["shown"] == 1
+
+
+def test_the_feed_takes_at_most_a_couple_of_emoji() -> None:
+    """一次最多给几个（`MAX_REACTION_MATERIALS`）：材料块一共就 5 条，别让表情挤光笔记。"""
+
+    from qq_roleplay_bot.quote_samples import MAX_REACTION_MATERIALS, ReactionFeed
+
+    now = 3000.0
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "chat.jsonl"
+        _write_log(path, [_her_row(at=now - 10, message_id="-1")] + [
+            _reaction_row(at=now - index, message_id="-1", emoji_id=str(100 + index))
+            for index in range(1, 6)
+        ])
+        feed = ReactionFeed(path, clock=lambda: now)
+        assert len(feed.recent_emoji_ids(GROUP, session_id=f"group:{GROUP}")) \
+            == MAX_REACTION_MATERIALS
+
+
+def test_the_just_now_reaction_reaches_the_reply_as_its_own_per_turn_block() -> None:
+    """端到端：**刚才**被贴的 ㊗ 变成一块**逐轮**的材料，措辞是"刚才"，而且只提一次。
+
+    它与那块稳定材料分开走：稳定那块缓存在会话状态上（跨轮逐字不变，为了前缀缓存），
+    这一块每轮现算——"有人刚给她那句话贴了 ㊗"是眼前这件事，不能跟着冻几个小时。
+    """
+
+    from qq_roleplay_bot import face_names
+    from qq_roleplay_bot.quote_samples import ReactionFeed
+
+    now = 4000.0
+    with tempfile.TemporaryDirectory() as tmp:
+        chat = Path(tmp) / "chat.jsonl"
+        _write_log(chat, [
+            _her_row(at=now - 30, message_id="-1", body="被回一句"),
+            _reaction_row(at=now - 10, message_id="-1", emoji_id="12951"),
+        ])
+        store = QuoteStore(Path(tmp) / "profile.json")
+        store.apply_run(
+            notes=[{"kind": "style", "when": "被回一句", "note": "笔记0"}],
+            meanings={GROUP: {"12951": {"sense": "negative", "note": "在损她"}}}, seen=[])
+        reply = ScriptedReply("哦。")
+        judge = ScriptedJudge("<route>REPLY</route><topic>被回一句</topic>")
+        engine = DialogueEngine(reply, judge_client=judge, group_listen=True,
+                                enabled_group_ids=frozenset({GROUP}),
+                                quote_profile=QuoteProfile(store))
+        engine.quote_reactions = ReactionFeed(chat, clock=lambda: now)
+        face_names.install(face_names.FaceNames(Path(tmp) / "faces.json"))
+        try:
+            material = engine._reaction_material(msg(1, "被回一句"))
+        finally:
+            face_names.install(None)
+        assert "刚才有人在群里贴 ㊗" in material
+        assert "不对路" in material
+        # `㊗` 的说明是**用户点名写死**的那一条（`KNOWN_EMOJI_SENSES`），不是学来的那句。
+        assert "㊗（祝）" in material
+        # 提过一次之后：这一轮不该再念一遍。
+        assert engine._reaction_material(msg(2, "被回一句")) == ""
+
+
+def test_the_stable_material_is_computed_once_and_reused_byte_for_byte() -> None:
+    """**用户 2026-10-11 的口径**：那块材料丢在易变区开头、只在压缩时（或几小时后）重算。
+
+    判据四条（用户 2026-10-11 的更正：*"到了 3 小时也得等压缩，只有同时达到 3 小时和
+    压缩过后才会变"*——**两个条件同时满足才变**）：
+
+    1. 连着两轮（眼前这句话**不同**）拿到的材料**逐字相同** → 前缀能接着复用；
+    2. **只压缩、没到 3 小时** → 还是原来那一份（缺一个条件就不动）；
+    3. **只过了 3 小时、没压过** → 还是原来那一份；
+    4. 两个都满足（压缩过 **并且** 已过 3 小时）→ 才重算。
+    """
+
+    from qq_roleplay_bot import stage3_main
+    from qq_roleplay_bot.stage3_runtime import ConversationState
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = QuoteStore(Path(tmp) / "profile.json")
+        store.apply_run(notes=[{"kind": "style", "when": "被回一句", "note": "笔记甲"},
+                               {"kind": "style", "when": "被夸", "note": "笔记乙"}],
+                        meanings={}, seen=[])
+        reply = ScriptedReply("哦。")
+        judge = ScriptedJudge("<route>REPLY</route><topic>闲聊</topic>")
+        engine = DialogueEngine(reply, judge_client=judge, group_listen=True,
+                                enabled_group_ids=frozenset({GROUP}),
+                                quote_profile=QuoteProfile(store))
+        state = ConversationState()
+        first = engine._style_material(msg(1, "被回一句"), state)
+        assert "笔记甲" in first and state.style_material == first
+
+        # (1) 换一句话、同一个会话 → **还是那一份**（这正是"前缀逐轮不变"要的）。
+        assert engine._style_material(msg(2, "被夸"), state) == first
+
+        # (2) 压缩了，但没到 3 小时 → 不动。
+        state.mark_compacted(state.dropped)
+        assert engine._style_material(msg(3, "被夸"), state) == first, "只压缩还不够，得等 3 小时"
+
+        # (3) 过了 3 小时，但**那之后没压过**（把压缩计数对齐成"就是算它那一次"）→ 不动。
+        state.style_material_at -= stage3_main.STYLE_MATERIAL_TTL_SECONDS + 1
+        state.style_material_compactions = state.compactions
+        assert engine._style_material(msg(4, "被夸"), state) == first, "只到 3 小时也不够，得压过"
+
+        # (4) 两个都满足 → 才重算（这次眼前这句是"被夸"，挑出来的是另一条）。
+        state.mark_compacted(state.dropped)
+        fourth = engine._style_material(msg(5, "被夸"), state)
+        assert fourth != first and "笔记乙" in fourth
+        assert state.style_material == fourth
+        # 重算之后又是"逐字不变"的一轮。
+        assert engine._style_material(msg(6, "被回一句"), state) == fourth
+
+
+def test_an_empty_material_is_never_cached() -> None:
+    """没挑到笔记时**不缓存**：空串不占字节、不破坏前缀，但"空着冻几个小时"是真的坏。"""
+
+    from qq_roleplay_bot.stage3_runtime import ConversationState
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = QuoteStore(Path(tmp) / "profile.json")
+        store.apply_run(notes=[{"kind": "style", "when": "别的话题", "note": "笔记"}],
+                        meanings={}, seen=[])
+        reply = ScriptedReply("哦。")
+        judge = ScriptedJudge("<route>REPLY</route><topic>闲聊</topic>")
+        engine = DialogueEngine(reply, judge_client=judge, group_listen=True,
+                                enabled_group_ids=frozenset({GROUP}),
+                                quote_profile=QuoteProfile(store))
+        state = ConversationState()
+        assert engine._style_material(msg(1, "今天天气不错"), state) == ""
+        assert state.style_material_at == 0.0, "空材料不许记账"
+        # 下一轮换个沾边的说法就挑得到了（说明它真的又算了一次）。
+        assert "笔记" in engine._style_material(msg(2, "别的话题"), state)
+
+
+def test_a_broken_log_never_takes_the_reply_down() -> None:
+    """日志读不开 / 名字表不在 → 只是少一条材料，**回复照旧**。"""
+
+    from qq_roleplay_bot import face_names
+    from qq_roleplay_bot.quote_samples import ReactionFeed
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # 用目录占住文件名：读会 OSError。
+        (Path(tmp) / "chat.jsonl").mkdir()
+        store = QuoteStore(Path(tmp) / "profile.json")
+        store.apply_run(notes=[{"kind": "style", "when": "闲聊", "note": "随便说"}],
+                        meanings={GROUP: {"12951": {"sense": "negative", "note": "在损她"}}},
+                        seen=[])
+        reply = ScriptedReply("在。")
+        judge = ScriptedJudge("<route>REPLY</route><topic>闲聊</topic>")
+        engine = DialogueEngine(reply, judge_client=judge, group_listen=True,
+                                enabled_group_ids=frozenset({GROUP}),
+                                quote_profile=QuoteProfile(store))
+        engine.quote_reactions = ReactionFeed(Path(tmp) / "chat.jsonl")
+        face_names.install(face_names.FaceNames(Path(tmp) / "faces.json"))
+        try:
+            result = asyncio.run(engine.handle(msg(1, "在吗")))
+        finally:
+            face_names.install(None)
+        assert result is not None and result.text == "在。"
 
 
 # --- 5. 定期任务：失败不影响对话，也不重复烧钱 --------------------------------
@@ -815,13 +1279,16 @@ def test_the_engine_replies_normally_when_there_is_no_material_at_all() -> None:
     assert "她以前遇到这种时候" not in system_text
 
 
-def test_the_material_is_wired_into_the_volatile_section_in_the_source() -> None:
-    """**源码顺序**也算判据：`style_material` 只能出现在易变段（user 段）里。
+def test_the_material_location_follows_the_marker_mode_in_the_source() -> None:
+    """**源码判据**：材料的位置**按档位分两支**——缓存友好型进稳定段、增强型留易变段。
 
     与 `tests/test_quote_injection_shape.py` 那组是**互补**的：那组在干净进程里验
     "组装出来的请求长什么样"（所以"改成进 system 段"那种突变它会红）；
-    这一条直接在源码上量一次顺序——同一个进程里改不了已加载的常量，
-    但源码那一步永远读得到（改错了这一条也会红）。
+    这一条直接在源码上量两支都在（同一个进程里改不了已加载的函数，但源码永远读得到）。
+
+    2026-10-11 两档开关之后，这块材料**不是**"永远不带记号"了：缓存友好型档位下它带
+    **一季不变**的记号进稳定段（记号只在压缩那轮换，所以那一块仍逐轮逐字相同）；
+    增强型档位下它留在易变段、照旧包每轮那个码。逐轮的"刚才"那一块**永远**包码。
     """
 
     import inspect
@@ -829,17 +1296,25 @@ def test_the_material_is_wired_into_the_volatile_section_in_the_source() -> None
     from qq_roleplay_bot import stage3_runtime
 
     source = inspect.getsource(stage3_runtime.build_dialogue_messages)
-    # 2026-10-08：材料现在经 `data_boundary.render(...)` 包上边界短码，所以拼的写法
-    # 从 `+ style_material` 变成 `render(style_material, mark)`——这里改成量**最后
-    # 一次**出现（函数签名与说明里也各出现一次，那两处不算）。
-    material_at = source.rindex("style_material")
-    assert "render(style_material" in source, "材料没有被短码包住"
+    # 稳定段那一支：**只有** `style_material_stable` 为真时才把它放进稳定段。
+    assert "if style_material_stable and style_material else" in source, \
+        "稳定段那一支不见了（缓存友好型档位的材料位置）"
+    # 易变段那一支：`not style_material_stable` 时留在易变段（照旧包记号）。
+    assert "if style_material and not style_material_stable else" in source, \
+        "易变段那一支不见了（增强型档位的材料位置）"
+    assert "render(reaction_material" in source, "逐轮的'刚才'那一块照旧包记号"
+    stable_at = source.index("stable_content = (")
     volatile_at = source.index("volatile_content = (")
     system_at = source.index('{"role": "system"')
-    assert volatile_at < material_at < source.index("return [", material_at)
-    assert material_at < system_at, "材料必须写在易变段里，不能进 system 那一份"
-    assert "style_material" in inspect.signature(
-        stage3_runtime.build_dialogue_messages).parameters
+    # 稳定段那一支要在 `<history>` **之前**（它前面那一段才是稳定前缀）。
+    # 找的是代码里那一行 `+ "<history>\n"`——docstring 里也出现过 `<history>` 这个词，
+    # 直接 `index("<history>")` 会落在文档注释上（实测踩过一次）。
+    assert stable_at < source.index("style_material_stable and style_material") \
+        < source.index('+ "<history>') < volatile_at < system_at
+    parameters = inspect.signature(stage3_runtime.build_dialogue_messages).parameters
+    assert "style_material" in parameters
+    assert "style_material_stable" in parameters
+    assert "reaction_material" in parameters
 
 
 # --- 与真实日志的对照（只读，不改任何东西）-----------------------------------

@@ -46,11 +46,12 @@ def _message() -> IncomingMessage:
     )
 
 
-def _build(style_material: str):
+def _build(style_material: str, *, marker: str = ""):
     current = _message()
     return build_dialogue_messages(
         [current], current=current, mode=ConversationMode.ACTIVE, trigger="threshold",
         context=ContextState(topic="字幕翻译"), style_material=style_material,
+        session_marker=marker,
     )
 
 
@@ -78,11 +79,39 @@ class QuoteInjectionShape(unittest.TestCase):
         self.assertGreaterEqual(len(users), 2)
         volatile = users[-1]["content"]
         self.assertIn("她以前遇到这种时候", volatile)
-        # 在 DATA 区里（"你记得的旧事"之后、当前这条之前）。
-        self.assertLess(volatile.index("你记得的旧事 结束"),
-                        volatile.index("她以前遇到这种时候"))
+        # **在易变段的最前面**（2026-10-11 用户："我要丢到易变区开头……这样命中率更高"）：
+        # 它前面一个字都没有，后面才是"现在是什么时候"、状态、记忆、当前这条。
+        self.assertTrue(volatile.startswith("--- 她以前遇到这种时候 ---"),
+                        "材料必须是易变段的第一块")
+        self.assertLess(volatile.index("她以前遇到这种时候"),
+                        volatile.index("你记得的旧事 开始"))
         self.assertLess(volatile.index("她以前遇到这种时候"),
                         volatile.index("<current_event>"))
+
+    def test_the_material_is_not_wrapped_in_the_per_turn_short_code(self) -> None:
+        """那块材料**不带短码**：短码每轮都不一样，包上它就等于每轮都变、缓存全废。
+
+        判据：两轮（不同短码）里那一段**逐字相同**，而且材料块内部没有短码。
+        """
+
+        body = MATERIAL.strip()
+
+        def material_slice(text: str) -> str:
+            start = text.index("--- 她以前遇到这种时候 ---")
+            end = text.index("--- 到此为止 ---", start) + len("--- 到此为止 ---")
+            return text[start:end]
+
+        with patch("qq_roleplay_bot.stage3_runtime.resolve_system_prompt",
+                   lambda **kwargs: "人格"):
+            one = [item for item in _build(MATERIAL, marker="AAAAAA")
+                   if item["role"] == "user"][-1]["content"]
+            two = [item for item in _build(MATERIAL, marker="BBBBBB")
+                   if item["role"] == "user"][-1]["content"]
+        self.assertEqual(material_slice(one), body.rstrip())
+        self.assertEqual(material_slice(two), body.rstrip())
+        self.assertEqual(material_slice(one), material_slice(two))
+        self.assertNotIn("AAAAAA", material_slice(one))
+        self.assertNotIn("BBBBBB", material_slice(two))
 
     def test_the_material_says_what_it_is_and_is_not(self) -> None:
         """材料必须**自己说清**它是"老习惯"、不是"要照着念的话"（这与措辞是一件事）。"""
