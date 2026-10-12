@@ -16,7 +16,11 @@ SCOPES = {"user_global", "user_group", "group"}
 # `profile` 是 2026-09-29 加的第七类：**人物画像**——她对某个人整体的印象
 # （怎么称呼、在意什么、怎么跟他相处）。它不参与普通检索（每次都由说话人触发渲染），
 # 一个人只有一条（normalized_key 固定 `profile`），只允许挂在 user_global 上。
-KINDS = {"name", "preference", "boundary", "group_fact", "topic_summary", "status", "profile"}
+# `intention` 是 2026-10-11 加的第八类：**她自己应下的一件小事**（"回头问他那个接口
+# 好没"）。它不是别人的事实，而是**她自己的备忘**——依据是她说出口的那句话
+# （`speaker=yunru`），正文照抄她那半句；只活在短期层，办完（或她自己不提了）就删。
+KINDS = {"name", "preference", "boundary", "group_fact", "topic_summary", "status",
+         "profile", "intention"}
 OPS = {"ADD", "UPDATE", "MERGE", "DELETE", "IGNORE", "AFFINITY"}
 # 每批最多几条好感度 op。它不占 MAX_OPERATIONS 的名额，但也不能让一批里
 # 十几个人都改一遍——那样"变化要慢"这条就形同虚设。
@@ -213,7 +217,14 @@ def parse_operations(raw: str, batch: MemoryBatch) -> tuple[MemoryOperation, ...
         if any(not isinstance(e, str) or e not in events for e in evidence):
             fail()
         # Bot statements can provide context, but cannot establish user facts.
-        if evidence and not any(events[e].speaker == "user" for e in evidence):
+        # 2026-10-11「惦记事」：`intention`（她自己应下的那件事）方向**相反**——它的依据
+        # 就是她自己发过的那句原话（`speaker="yunru"`），"别人说的"反倒不能当依据。
+        # 少了这一支，维护 agent 照 prompt 交上来的 intention 会被这里整条打回。
+        kind_hint = item.get("kind") if op != "DELETE" else None
+        if kind_hint == "intention":
+            if evidence and any(events[e].speaker != "yunru" for e in evidence):
+                fail()
+        elif evidence and not any(events[e].speaker == "user" for e in evidence):
             fail()
         targets = item["targets"]
         if not isinstance(targets, list) or len(targets) > 5:

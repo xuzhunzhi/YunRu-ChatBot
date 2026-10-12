@@ -1566,3 +1566,82 @@ class MemoryFilterTests(unittest.TestCase):
                          "筛选胶囊点按区太小")
         self.assertRegex(self.css, r"\.filter-input\s*\{[^}]*min-height: 44px",
                          "筛选输入框太小")
+
+
+class PluginPanelPageLayoutTests(unittest.TestCase):
+    """插件 tab 上那张「自报界面」在前端怎么画（2026-10-11 那处接缝的第 4 条边界）。
+
+    面板这一侧**只认封闭的 kind 词表**（`action_form` / `join_queue`）：插件里 kind 写错、
+    或者装了个比面板新的插件，页面要**如实说"不认识"**，不能静默空着——静默空着与
+    "这个插件没做界面"长得一模一样，用户会去翻文档找一个根本不存在的东西。
+    """
+
+    def setUp(self) -> None:
+        self.js = _asset("app.js")
+
+    def _block(self) -> str:
+        return _uncomment(_function_body(self.js, "renderPluginBlock"))
+
+    def _plugin_page(self) -> str:
+        return _uncomment(_function_body(self.js, "viewPlugin", kind="async"))
+
+    def test_the_renderer_is_a_closed_vocabulary(self) -> None:
+        body = self._block()
+        self.assertEqual(sorted(re.findall(r'kind === "([a-z_]+)"', body)),
+                         ["action_form", "join_queue"],
+                         "面板认的块多了或者少了——这是**封闭词表**：加一种得先加渲染器")
+        self.assertIn("这个面板不认识这种块（kind）", body,
+                      "不认识的块必须如实说；静默丢掉会让这一页看着像空的")
+        self.assertIn("不认识", body[body.rindex("return "):],
+                      "那句人话必须是最后的兜底分支（放在前面就会被某个 kind 抢走）")
+
+    def test_the_renderer_keeps_the_handles_bind_delegates_to(self) -> None:
+        """`bind()` 靠事件委托抓这些类名与 `data-*`；搬进渲染器时改一个就静默点不动。"""
+
+        body = self._block()
+        for piece in ("join-approve", "join-reject", "data-flag", "data-group",
+                      "do-action", "data-kind", "data-needs-target", "data-needs-message",
+                      "a-target", "a-text", "a-msg", "a-group", "cols-actions",
+                      "pref-title", "pref-summary", "pref-list", "join_approve"):
+            self.assertIn(piece, body, f"渲染器里少了 {piece}——按钮会点不动或者整块画不出来")
+
+    def test_the_page_no_longer_reads_the_two_removed_routes(self) -> None:
+        code = _uncomment(self.js)
+        for gone in ('"/api/approvals/pending"', '"/api/actions/preview"'):
+            self.assertNotIn(gone, code,
+                             "那两条读路由已经删了（目录搬进插件自己报的描述符）；"
+                             "前端还留着就是一条必死的请求")
+
+    def test_the_plugin_page_asks_the_generic_read_route(self) -> None:
+        body = self._plugin_page()
+        self.assertIn('api("/api/plugin/" + encodeURIComponent(name))', body,
+                      "插件页没有走那条通用读路由（名字要编码，插件名不是标识符）")
+        self.assertIn("await loadPlugins()", body,
+                      "直接开插件页时清单还没读——这里要自己补一次，不然标题没有中文名")
+        self.assertIn("renderPluginBlock", body, "拿到的块没交给渲染器")
+        self.assertIn("esc(panel.note)", body, "插件给的说明没转义（那段是 innerHTML）")
+        self.assertIn("esc(readError)", body, "读失败的原因没转义")
+
+    def test_every_kind_of_missing_says_which_it_is(self) -> None:
+        body = self._plugin_page()
+        for reason in ("no_seam", "unknown", "no_panel"):
+            self.assertIn(f"{reason}:", body, f"少了 {reason} 这一种「没有」的说法")
+        self.assertIn("原因面板不认识", body, "没见过的原因要有兜底，不能一言不发")
+        self.assertIn("它自己的界面这次没读到", body,
+                      "读失败与『它没做界面』是两回事，不许糊成一句")
+
+    def test_the_group_tab_points_at_the_plugin_tabs(self) -> None:
+        """群页把两样东西交出去了，副标题得说实话——不然用户以为功能没了。"""
+
+        code = _uncomment(self.js)
+        self.assertIn("群管理动作与入群申请在各自的插件 tab 里", code,
+                      "群页的副标题还写着已经搬走的东西")
+        self.assertIn("插件：每个插件一个 tab，它自己的界面由它自己声明", code,
+                      "插件页的副标题没说明白界面是谁交的")
+        # 这两句走 `textContent` 渲染，markdown 记号会**原样显示**出来。
+        for key in ("group", "plugins"):
+            match = re.search(rf'(?m)^[ \t]+{key}: "([^"]+)",$', code)
+            self.assertIsNotNone(match, f"TAB_NOTES 里少了 {key}")
+            for mark in ("*", "`", "**"):
+                self.assertNotIn(mark, match.group(1),
+                                 f"{key} 的副标题里出现了 markdown 记号（会原样显示）")

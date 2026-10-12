@@ -7,7 +7,8 @@
 - **拿不到 `transport`、拿不到 `engine`**。它手上只有装配点注入的一串闭包：
   `state_reader` / `apply_overrides` / `execute_action` / `memory_ops` / `prompt_library`
   / `knowledge` / `learned`（她学来的金句 / 黑话，见 `UiSeams.learned`）
-  / `control_audit` / `self_id`。权限判定（token / 口令）在 `webui_access`，
+  / `control_audit` / `self_id` / `panel_spec` + `panel_names`（插件**自报**的那一页，
+  见 `GET /api/plugin/<名字>`）。权限判定（token / 口令）在 `webui_access`，
   动作执行在核心——插件只做"把 HTTP 翻译成闭包调用"。
 - **HTTP 服务跑在线程里**（标准库的阻塞式 `ThreadingHTTPServer`），异步的节拍只负责
   "看好它、崩了拉起来、退出时收干净"。这样不占事件循环，也不用把每个请求都塞进 asyncio。
@@ -32,7 +33,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from . import webui_data
 from .webui_access import AccessDecision, WebAccess
@@ -376,6 +377,13 @@ class Panel:
                     return json_response(_envelope({"plugins": list(lister()), "available": True}))
                 except Exception as exc:          # noqa: BLE001 - 坏插件不许把面板带崩
                     return failure("plugin_list_failed", detail=type(exc).__name__, status=500)
+            if path.startswith("/api/plugin/"):
+                # **插件自报的那一页**（只读）：`/api/plugin/<插件名>`。
+                # 名字是插件自己在 `register()` 里报的，面板不认识任何具体插件名。
+                plugin_name = unquote(path[len("/api/plugin/"):])
+                if not plugin_name:
+                    return failure("not_found", status=404)
+                return self._plugin_panel(plugin_name)
             if path == "/api/usage":
                 return json_response(_envelope(webui_data.read_usage(root)))
             if path == "/api/session/messages":
@@ -454,12 +462,6 @@ class Panel:
             if path == "/api/knowledge/slang":
                 return json_response(_envelope(
                     self._slang_view(str(query.get("group_id") or ""))))
-            if path == "/api/approvals/pending":
-                return self._pending_approvals()
-            if path == "/api/actions/preview":
-                return json_response(_envelope({"note": "写动作都要 confirm=true；"
-                                                        "这里只回可用的动作清单",
-                                                "actions": _ACTION_CATALOG}))
             if path == "/api/history":
                 audit = self._seam("control_audit")
                 rows = audit.tail(limit) if audit is not None else []
@@ -542,7 +544,13 @@ class Panel:
             # "群管理动作的 actor 为云茹"，那她的身份就是前提，不能拿别人顶替）。
             return failure("self_id_unavailable",
                            detail="查不到云茹自己的 QQ 号，本次不动手", status=503)
-        group = str(payload.get("group") or "group_admin")
+        # 动作分组名**只由请求给**：面板不认识任何具体插件，所以这里没有默认值——
+        # 缺了就说缺了（400）。原来写死 `or "group_admin"`：那是"面板必须知道群管理
+        # 分组的名字"，而且一旦前端漏传，一个"删掉动作分组"的请求会**静默**变成
+        # 群管理动作。
+        group = str(payload.get("group") or "")
+        if not group:
+            return failure("bad_request", detail="没有说明是哪个动作分组", status=400)
         kind = str(payload.get("kind") or "")
         from ...command_plugins import ActionRequest
 
@@ -585,25 +593,45 @@ class Panel:
         self._audit("approval", payload, text, source)
         return json_response(_envelope({"ok": True, "message": text}))
 
-    def _pending_approvals(self) -> Response:
-        call_action = self._seam("call_action")
-        if call_action is None:
-            return json_response(_envelope({"available": False, "rows": []}))
-        try:
-            data = _call(call_action, "get_group_system_msg", {})
-        except Exception:  # noqa: BLE001 - 拿不到就当没有待处理
-            return json_response(_envelope({"available": False, "rows": []}))
-        rows: list[dict[str, object]] = []
-        if isinstance(data, dict):
-            from ..join_approval.join_approval import JOIN_SUB_TYPE, parse_pending
+    def _plugin_panel(self, name: str) -> Response:
+        """**插件自报的那一页**（只读）：`GET /api/plugin/<名字>`。
 
-            for item in parse_pending(data):
-                if getattr(item, "sub_type", JOIN_SUB_TYPE) != JOIN_SUB_TYPE:
-                    continue
-                rows.append({"flag": item.flag, "group_id": item.group_id,
-                             "user_id": item.user_id, "nickname": item.nickname,
-                             "comment": item.comment})
-        return json_response(_envelope({"available": True, "rows": rows}))
+        插件在 `register()` 里交一份纯数据描述符（`registry.provide_panel`），
+        面板按**封闭的 kind 词表**画（今天两种：`action_form` / `join_queue`）。
+        面板这边**不认识任何具体插件名**——这个方法里没有一处 `if name == ...`，
+        加一个插件就多一个 tab。
+
+        取不到时**如实说，不许 500**；三种原因各给前端一句人话：
+
+        | `reason` | 什么情况 |
+        | --- | --- |
+        | `no_seam` | 装配点没把 `panel_spec` / `panel_names` 递进来 |
+        | `unknown` | 这个名字不在 `panel_names()` 里（没启用，或者名字写错） |
+        | `no_panel` | 插件在，但它这一轮没自报界面 |
+        """
+
+        spec_fn = self._seam("panel_spec")
+        names_fn = self._seam("panel_names")
+        if not callable(spec_fn) or not callable(names_fn):
+            return json_response(_envelope({"available": False, "reason": "no_seam",
+                                            "blocks": []}))
+        try:
+            names = {str(item) for item in names_fn()}
+        except Exception as exc:                      # noqa: BLE001 - 坏插件不许把面板带崩
+            logger.warning("panel_names_failed error=%s", type(exc).__name__)
+            names = set()
+        if name not in names:
+            return json_response(_envelope({"available": False, "reason": "unknown",
+                                            "blocks": []}))
+        try:
+            spec = spec_fn(name)
+        except Exception as exc:                      # noqa: BLE001
+            logger.warning("panel_spec_failed name=%s error=%s", name, type(exc).__name__)
+            spec = None
+        if not isinstance(spec, dict):
+            return json_response(_envelope({"available": False, "reason": "no_panel",
+                                            "blocks": []}))
+        return json_response(_envelope(_panel_view(name, spec)))
 
     def _groups(self, payload: dict[str, object], source: str) -> Response:
         set_group = self._seam("group_switch")
@@ -1284,29 +1312,63 @@ def _call(func, *args, **kwargs):
     return _ASYNC_RUNNER(result)
 
 
-#: 给 `/api/actions/preview` 的动作清单（面板渲染表单用）。
-_ACTION_CATALOG: list[dict[str, object]] = [
-    {"group": "group_admin", "kind": "kick", "label": "移出群聊", "needs_target": True},
-    {"group": "group_admin", "kind": "ban", "label": "禁言", "needs_target": True,
-     "needs_text": "分钟数"},
-    {"group": "group_admin", "kind": "unban", "label": "解除禁言", "needs_target": True},
-    {"group": "group_admin", "kind": "mute", "label": "全员禁言", "needs_target": False},
-    {"group": "group_admin", "kind": "unmute", "label": "解除全员禁言", "needs_target": False},
-    {"group": "group_admin", "kind": "recall", "label": "撤回一条消息", "needs_target": False,
-     "needs_message": True},
-    {"group": "group_owner", "kind": "qqadmin", "label": "设为 QQ 群管理员",
-     "needs_target": True},
-    {"group": "group_owner", "kind": "unqqadmin", "label": "取消 QQ 群管理员",
-     "needs_target": True},
-    {"group": "group_owner", "kind": "card", "label": "改群名片", "needs_target": True,
-     "needs_text": "新名片（留空=清除）"},
-    {"group": "group_owner", "kind": "groupname", "label": "改群名", "needs_target": False,
-     "needs_text": "新群名"},
-    {"group": "group_owner", "kind": "title", "label": "设群头衔", "needs_target": True,
-     "needs_text": "头衔"},
-    {"group": "group_owner", "kind": "notice", "label": "发群公告", "needs_target": False,
-     "needs_text": "公告正文"},
-]
+def _panel_block(raw: object) -> dict[str, object]:
+    """把一个插件自报的块过一遍**键白名单**：只留 `kind` / `title` / `rows` / `error`。
+
+    白名单不是洁癖，是这处接缝的安全要点（2026-10-11 用户点名）：描述符里一旦能带
+    `route` / `url` / `method` / `html` 这类键，任何插件（含放进 `data/plugins/` 的
+    第三方）都能借面板去调 `/api/memory/purge`、或者往页面塞脚本——面板是同源的，
+    token 就在浏览器里。所以这里**逐个键挑**（不是"删掉几个危险键"），其余一律丢；
+    `read` 只执行、不外传（它不在白名单里）。
+
+    `read` 取数失败**如实说**：回 `error`（异常类名）与空 `rows`，不抛、不 500。
+    取数闭包只许**只读**——写动作一律走既有的、已鉴权且已审计的
+    `POST /api/action` / `POST /api/approval`，这道口一个写路由都不新开。
+    """
+
+    if not isinstance(raw, dict):
+        return {"kind": "", "title": "", "rows": []}
+    rows: object = raw.get("rows")
+    reader = raw.get("read")
+    error = ""
+    if callable(reader):
+        try:
+            # 经 `_call()` 跑：插件给的取数闭包可能是协程（核心那条 `call_action`
+            # 就是异步的），同步的照直调——与面板其它接缝同一条路。
+            rows = _call(reader)
+        except Exception as exc:                      # noqa: BLE001 - 坏插件不许把面板带崩
+            logger.warning("panel_read_failed error=%s", type(exc).__name__)
+            rows, error = [], type(exc).__name__
+    if not isinstance(rows, (list, tuple)):
+        rows = []
+    block: dict[str, object] = {
+        "kind": str(raw.get("kind") or ""),
+        "title": str(raw.get("title") or ""),
+        "rows": [row for row in rows if isinstance(row, dict)],
+    }
+    if error:
+        block["error"] = error
+    return block
+
+
+def _panel_view(name: str, spec: dict[str, object]) -> dict[str, object]:
+    """插件自报的描述符 → 回给浏览器的那一份。
+
+    **顶层键白名单就是下面这三行 `spec.get`**：`title` / `note` / `blocks` 之外的键
+    （`route` / `url` / `method` / `html` / `js` / `css`，以及将来任何新键）
+    一个都到不了页面——想进来必须先在这里写一行、走评审。
+    """
+
+    raw_blocks = spec.get("blocks")
+    blocks = ([_panel_block(item) for item in raw_blocks]
+              if isinstance(raw_blocks, (list, tuple)) else [])
+    return {
+        "available": True,
+        "name": name,
+        "title": str(spec.get("title") or ""),
+        "note": str(spec.get("note") or ""),
+        "blocks": blocks,
+    }
 
 
 class _Handler(BaseHTTPRequestHandler):

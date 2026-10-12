@@ -870,6 +870,14 @@ class ScriptedReviewer:
         index = min(len(self.calls) - 1, len(self.results) - 1)
         return self.results[index]
 
+    async def review_verdict(self, draft, *, context=""):
+        # 同 test_ask_when_unsure 里的替身：引擎调 `review_verdict`（要拿 NOTE），
+        # 这个替身只把 `(passed, reason)` 包成 `ReviewVerdict`。
+        from qq_roleplay_bot.style_reviewer import ReviewVerdict
+
+        passed, reason = await self.review(draft, context=context)
+        return ReviewVerdict(passed, reason)
+
     def snapshot(self) -> dict[str, int]:
         return {"calls": len(self.calls)}
 

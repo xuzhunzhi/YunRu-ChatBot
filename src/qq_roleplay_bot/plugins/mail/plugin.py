@@ -17,6 +17,9 @@ from __future__ import annotations
 from .background import DailyReportPlugin, MailChannelPlugin
 from . import wire
 
+#: 面板上的显示名（`plugins.inventory()` 读它）。
+TITLE = "邮件"
+
 
 def register(registry) -> None:
     # **渠道自己声明**"我说的话可以算主人"（2026-10-06）：核心原来在 `runtime.py` 里

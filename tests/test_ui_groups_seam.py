@@ -132,6 +132,44 @@ def test_zero_disables_the_cache() -> None:
     assert transport.calls.count("get_group_list") == 2, "0 = 不缓存（给排查用）"
 
 
+def test_flipping_a_switch_shows_up_on_the_next_read() -> None:
+    """翻开关之后**立刻**再读就是新状态（2026-10-11 用户报"记忆开关不生效"）。
+
+    开关本身一直是对的（消费侧每次现读闭包）；坏的是这一列状态：`memory_on` 是
+    **填缓存那一刻**算出来的，而缓存最长 600 秒。生产审计里那颗开关 71.5 秒内被
+    点了两次——"关完切页回来又显示开着，于是再关一次"，就是这条。名单一变缓存
+    就得作废（突变自检：删掉 `_forget_groups_cache()` 那两处调用，这条必红）。
+    """
+
+    transport = _GroupsTransport()
+    engine = _engine(transport)
+    with patch.dict(os.environ, {"QQBOT_GROUPS_CACHE_SECONDS": "600"}):
+        before = {row["id"]: row for row in _rows(engine)}
+        assert before[GROUP_B]["memory_on"] is True
+        assert before[GROUP_A]["dialogue_on"] is True
+
+        assert engine.disable_group_memory(GROUP_B) is True
+        assert engine.disable_group(GROUP_A) is True
+
+        after = {row["id"]: row for row in _rows(engine)}
+
+    assert after[GROUP_B]["memory_on"] is False, "关掉之后列表里必须已经是关"
+    assert after[GROUP_A]["dialogue_on"] is False, "关对话那颗同理"
+    assert set(after[GROUP_B]) == EXPECTED
+
+
+def test_a_no_op_flip_keeps_the_cache() -> None:
+    """已经开着的再"开"一次不算变了，缓存不必白作废（省一次 OneBot）。"""
+
+    transport = _GroupsTransport()
+    engine = _engine(transport)
+    with patch.dict(os.environ, {"QQBOT_GROUPS_CACHE_SECONDS": "600"}):
+        _rows(engine)
+        assert engine.enable_group_memory(GROUP_B) is False, "本来就开着"
+        _rows(engine)
+    assert transport.calls.count("get_group_list") == 1
+
+
 def test_a_failure_falls_back_to_the_last_known_list() -> None:
     """对面抖一下：**不抛异常**，把上一次拿到的列表原样给出去。"""
 

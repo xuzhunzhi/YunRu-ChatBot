@@ -91,7 +91,7 @@ subjects, durable。
 - 只在事实确实涉及多个人时才填（"两人约好一起…""他和她都在场"），最多 4 个；
 - **个人偏好、边界永远单人**——把别人的私事挂成多人条目是最坏的一种错；
 - scope_type=group 的条目可以不填：本群公共事实本来就人人都看得到。
-scope_type 只能 user_global/user_group/group；kind 只能 name/preference/boundary/status/group_fact/topic_summary/profile。
+scope_type 只能 user_global/user_group/group；kind 只能 name/preference/boundary/status/group_fact/topic_summary/profile/intention。
 **kind 的语义要按下面用，用错等于写错东西**：
 - name / preference：本人的称呼、稳定偏好与习惯。**称呼的证据要求见上面那一段**：
   他自己明确说、或别人当面叫他，才算；句子里提到的名字不算，一句玩笑式的“我是X”只算弱证据。
@@ -102,6 +102,11 @@ scope_type 只能 user_global/user_group/group；kind 只能 name/preference/bou
   写清是谁、什么事、什么时候说的。这类事实**只留在中短期**（默认 7 天，最多 14 天），
   永远不会进长期；它存在的唯一理由是"过一两天她还能自然地问一句"。
   不要把一次性情绪、心情、玩笑写成 status。
+- intention：**你自己刚应下的一件小事**（"回头问他那个接口好没""明天再看看"）。这是你自己的
+  备忘，不是关于他的事实：scope_type 用 user_group、正文**照抄你那半句原话**（别改写、别加
+  时间、别替他补全），证据只能是**你自己发过的那条事件**，durable=false、ttl_days=null
+  （服务端固定 7 天、最多 14 天，永远不会进长期）。一批里至多写一条，没有就 IGNORE。
+  那条事后来由他说起已经办了、或者你明显已经不打算再提 → 找到那条 intention，用 DELETE 划掉。
 - group_fact：这个群真实发生过的公共事实（例如群里某种互动可用了）。
 - profile：**人物画像**——你对**这一个人**整体的印象。一个人只有一条：scope_type 只能是
   user_global、normalized_key 固定写 `profile`、durable=true、ttl_days=null、subjects=[]。
@@ -138,9 +143,9 @@ confidence 为0到1的数；ttl_days 为1到3650的整数或null（长期稳定�
 只能给 1 到 30 天，绝不能按长期事实处理；长期稳定的偏好、称呼、边界才可以给 null。
 服务端会按 kind 夹上限（preference ≤365 天、group_fact ≤180 天，处境类一律 ≤30 天），
 但别指望它替你想清楚——把三个月前的一次宵夜写成 365 天，她就会当成今晚的事讲出来。
-evidence_event_ids 只引用本批事件 ID，至少一个证据来自 user；没有新事件的整理可用空数组和已有 targets。
+evidence_event_ids 只引用本批事件 ID，至少一个证据来自 user（**intention 反过来：它的证据必须是你自己发过的那条事件**）；没有新事件的整理可用空数组和已有 targets。
 targets 是 [{"id":"已有记忆ID","revision":1}]；只使用 DATA 中给出的 ID 和 revision。
-ADD: targets=[]，必须有用户事件证据。UPDATE: targets恰好1条。MERGE: targets为同范围的2到5条。
+ADD: targets=[]，必须有用户事件证据（intention 用你自己那条事件当证据）。UPDATE: targets恰好1条。MERGE: targets为同范围的2到5条。
 DELETE 必须且只能包含 op,scope_type,evidence_event_ids,targets，targets恰好1条。
 每条旧记忆每轮最多操作一次，同一范围和 normalized_key 每轮最多产生一个新值。
 未选择为操作的事件视为已读，不会反复送回。**没有值得记的就老实 IGNORE，宁缺毋滥**：

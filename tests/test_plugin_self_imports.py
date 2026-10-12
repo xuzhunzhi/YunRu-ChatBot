@@ -69,21 +69,14 @@ from qq_roleplay_bot import plugins as plugins_module  # noqa: E402
 #: 这些包名属于"核心"，不是"另一个插件"。插件 import 核心是**允许**的方向。
 PLUGIN_PACKAGE = "qq_roleplay_bot.plugins"
 
-#: **已知的、故意留着的**跨插件 import（"插件/文件 目标" → 为什么）。只允许**这一条**：
-#: 它是本次改动**之前就在**的，审查要求"有就报，别自己修"（见汇报），所以这里把它写死，
-#: 一条不多、一条不少——这一条将来被撤掉，`assertEqual` 也会红（提醒把这里删掉）。
-#:
-#: ⚠️ 键里**不带行号**（2026-10-07 改）：判据是"哪个文件 import 了别的插件的什么"，
-#: 行号不是判据、而且会随任何改动漂移——面板侧那天加了几十行，这一条就因为
-#: `webui_panel.py:561` → `:583` 红了，而事实一个字都没变。清单的强度没变：
-#: 文件名 + 目标模块 + 名字全都要对上，仍然"一条不多、一条不少"。
-ALLOWED_CROSS_PLUGIN_IMPORTS: dict[str, str] = {
-    "webui/webui_panel.py from ..join_approval.join_approval import JOIN_SUB_TYPE, parse_pending": (
-        "面板的「入群请求」那一页要用 `join_approval` 的解析函数（`JOIN_SUB_TYPE` / "
-        "`parse_pending`）。**这是报告项**（2026-10-06 外部审查：'插件 import 别的插件'"
-        "那条禁令照旧）——要不要改成走接缝由人定，测试不替它决定，但也不许多出第二条。"
-    ),
-}
+#: **已知的、故意留着的**跨插件 import（"插件/文件 目标" → 为什么）。现在是**空的**：
+#: 原来那唯一一条（`webui/webui_panel.py from ..join_approval.join_approval import
+#: JOIN_SUB_TYPE, parse_pending`）在 2026-10-12 被**撤掉**了——「入群申请」那一页改成
+#: "谁的数据谁解析"：插件自己在 `register()` 里用 `registry.provide_panel(name, spec)`
+#: 报界面，解析与取数留在插件里（`plugins/join_approval/plugin.py` 的 `_pending_reader`），
+#: 面板一条兄弟插件的 import 都不剩。清单照旧**一条不多、一条不少**：以后谁再引入
+#: 跨插件 import，这里会红（上面那条注释说的"撤掉时这里也要跟着删"就是这次）。
+ALLOWED_CROSS_PLUGIN_IMPORTS: dict[str, str] = {}
 
 
 def _without_line(entry: str) -> str:

@@ -23,6 +23,51 @@ from .builtin_group_commands import GroupManageCommand, GroupOwnerCommand, Title
 from .group_admin import execute as _execute_group_admin
 from .group_owner import execute as _execute_group_owner
 
+#: 面板上的显示名（`plugins.inventory()` 读它）。
+TITLE = "群管理"
+
+#: 「群管理动作」那一页的动作清单（面板画那张表单用）。
+#:
+#: **从面板原样搬过来**（2026-10-11 用户点名的那处接缝）：它原来在
+#: `plugins/webui/webui_panel.py` 里叫 `_ACTION_CATALOG`——那意味着"面板必须知道
+#: 群管理有哪些动作"。现在反过来：**插件自己报**（`registry.provide_panel`），
+#: 面板只按封闭的 kind 词表把它画出来。12 行文案一字未改。
+PANEL_ACTIONS: list[dict[str, object]] = [
+    {"group": "group_admin", "kind": "kick", "label": "移出群聊", "needs_target": True},
+    {"group": "group_admin", "kind": "ban", "label": "禁言", "needs_target": True,
+     "needs_text": "分钟数"},
+    {"group": "group_admin", "kind": "unban", "label": "解除禁言", "needs_target": True},
+    {"group": "group_admin", "kind": "mute", "label": "全员禁言", "needs_target": False},
+    {"group": "group_admin", "kind": "unmute", "label": "解除全员禁言", "needs_target": False},
+    {"group": "group_admin", "kind": "recall", "label": "撤回一条消息", "needs_target": False,
+     "needs_message": True},
+    {"group": "group_owner", "kind": "qqadmin", "label": "设为 QQ 群管理员",
+     "needs_target": True},
+    {"group": "group_owner", "kind": "unqqadmin", "label": "取消 QQ 群管理员",
+     "needs_target": True},
+    {"group": "group_owner", "kind": "card", "label": "改群名片", "needs_target": True,
+     "needs_text": "新名片（留空=清除）"},
+    {"group": "group_owner", "kind": "groupname", "label": "改群名", "needs_target": False,
+     "needs_text": "新群名"},
+    {"group": "group_owner", "kind": "title", "label": "设群头衔", "needs_target": True,
+     "needs_text": "头衔"},
+    {"group": "group_owner", "kind": "notice", "label": "发群公告", "needs_target": False,
+     "needs_text": "公告正文"},
+]
+
+#: 本插件的界面描述符（`registry.provide_panel("group_admin", PANEL)`）。
+#:
+#: **纯数据**，顶层只有 `title` / `note` / `blocks`；这一块是 `action_form`——
+#: 面板见它只画那张表单，提交仍走既有的 `POST /api/action`（已鉴权、已审计）。
+#: 描述符里**不许出现任何 URL / 路径 / method / HTML 键**：面板是同源的、token 就在
+#: 浏览器里，那类键等于让插件借面板去调别的写接口（键白名单在
+#: `webui_panel._panel_view` / `_panel_block`，并有测试钉住）。
+PANEL: dict[str, object] = {
+    "title": "群管理动作",
+    "note": "以云茹自己的名义执行；全部动作都要二次确认，结果会进操作记录。",
+    "blocks": [{"kind": "action_form", "title": "群管理动作", "rows": list(PANEL_ACTIONS)}],
+}
+
 
 def build_group_admin(usage_store=None):
     """把群管理动作的执行函数交给核心（**工厂**，形状同 `registry.vision`）。
@@ -58,6 +103,9 @@ def register(registry) -> None:
 
     registry.provide_group_action("group_admin", build_group_admin)
     registry.provide_group_action("group_owner", build_group_owner)
+    # 本插件自己报那一页（2026-10-11 的界面接缝）：面板按 `action_form` 画表单，
+    # 它**不认识本插件叫什么**，也不认识这 12 个动作分别是什么。
+    registry.provide_panel("group_admin", PANEL)
     registry.command(GroupManageCommand())
     registry.command(GroupOwnerCommand())
     registry.command(TitleCommand())

@@ -158,8 +158,30 @@ class InventoryShapeTests(unittest.TestCase):
         # `plugins/roles/` 整个文件夹已删除）。清单里剩下的必须一个不少。
         names = {row["name"] for row in plugins.inventory()}
         self.assertLessEqual(
-            {"group_admin", "join_approval", "mail", "outage_notice", "vision", "webui"},
+            {"group_admin", "join_approval", "mail", "outage_notice", "timeout_alert",
+             "vision", "webui"},
             names)
+
+    def test_every_shipped_plugin_has_a_chinese_display_name(self) -> None:
+        """2026-10-12 用户：*"插件名要映射到中文，现在用函数名太丑了"*。
+
+        显示名由插件**自己声明**（`plugin.py` 里的 `TITLE`，`inventory()` 在
+        `plugins/__init__.py` 里读它），面板 `app.js::labelOf` 对 `plugin:<名字>`
+        取的就是这一份——所以"面板不认识任何具体插件名"那条纪律没有被破：
+        加一个插件就多一个中文 tab，面板源码一个字不用改。
+        突变自检：把任一插件的 `TITLE` 删掉 → 这一条必红（回落成模块名）。
+        """
+        checked = 0
+        for row in plugins.inventory():
+            if str(row["note"]).startswith("导入失败"):
+                continue  # 导入失败的行只能回落到名字，不是这条要管的
+            title = str(row["title"])
+            self.assertTrue(title.strip(), f"{row['name']} 没有显示名")
+            self.assertNotEqual(
+                title, row["name"],
+                f"{row['name']} 显示的是模块名（用函数名当插件名太丑）")
+            checked += 1
+        self.assertGreaterEqual(checked, 6, "这条断言必须真的扫到预装插件")
 
     def test_in_tree_plugins_count_as_preinstalled(self) -> None:
         # "预装"的定义：**在 plugins/ 目录里**（随代码发布）。

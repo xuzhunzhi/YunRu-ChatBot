@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from html import escape
 
 from .security import sanitize_chat_text
 from .remind import RemindIntent
@@ -270,6 +271,11 @@ def build_judge_messages(
     must_reply: bool = False,
     stance=None,
     identity: str = "",
+    # 「她自己记着的事」（2026-10-11 用户口径）：她在回复里说下"回头去问他那个接口好没"这一类，
+    # 记下来，下次**那个人**说话时回到眼前。判定拿它只是多知道一件事——现在可能正是她
+    # 把这件事提出来的时候；要不要接照旧由它判，提不提、怎么提是回复那一侧的事。
+    # 每项形如 `{"id", "content", "age_days"}`，正文是她当时那句话（不是别人说的）。
+    own_notes: tuple[dict, ...] = (),
     aliases: dict[str, int] | None = None,
     lookup: list[IncomingMessage] | None = None,
     now: float | None = None,
@@ -343,6 +349,12 @@ def build_judge_messages(
         + (stance.as_judge_hint() if stance is not None else "")
         # 最小记忆（称呼/边界）走 DATA 段：不撑大判定 prompt，也要照样当不可信资料读。
         + (f"这个人的称呼与边界：{identity}\n" if identity else "")
+        # 她自己记着的事（2026-10-11）：同样是 DATA 段里的资料，但她自己写的、未必还想提；
+        # 只在她惦记的那个人说话时才有值（取用侧按人筛）。
+        + ("她记着的事（她自己写的，未必还想提）："
+           + "；".join(escape(str(note.get("content", "")), quote=False) for note in own_notes)
+           + "\n"
+           if own_notes else "")
         + "<current_message>\n"
         + _judge_line(current, seq_of, alias_of, show_who=True, aliases=aliases,
                       quoted=quote_label(current)) + "\n"

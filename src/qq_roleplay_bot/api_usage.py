@@ -38,6 +38,9 @@ COUNTER_NAMES = (
     "accepted_messages", "ignored_messages", "blocked_messages", "deferred_messages",
     "model_calls", "replies", "reply_segments", "judge_calls", "history_seeded",
     "guard_raised", "media_described", "reply_reviewed", "reply_review_rejected_final",
+    # 风格审核打回后，她把原来那句**原样写回来**的次数（= 她说"这句我不改"，照第一版发，
+    # 2026-10-11）。只有风格那一趟会有；只记数，没有正文。
+    "reply_review_rewrite_declined",
     "empty_forced_reply",
     # 「有人打探她怎么做出来的，所以这一轮不接」的次数（2026-10-09）：它**不写关系轴**，
     # 只是"这一轮为什么没开口"的出口。只记数，没有正文。

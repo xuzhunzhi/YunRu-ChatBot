@@ -12,6 +12,9 @@
 4. **失败一律抛 `MailError`（带类别）**，不让 `CalledProcessError` 之类漏出去——
    调用方要按类别决定"这轮还说不说话、要不要重试"。
 5. 输出**截断**：CLI 的返回可能有很长的正文，日志里不该出现整封信。
+   失败时把 CLI 的**原文**（`error.message` 等，压成一行、抹掉像凭据的片段、截断到
+   `MAX_ERROR_CHARS`）记进日志——2026-10-11 那次查了一整天的故障，就是因为只记了
+   `action_kind`，看不出那句原文。**记的是原文，不是把 CLI 的输出整段倒出来。**
 
 真实观测（2026-09-27，v1.0.18）：
 - 成功是 `{"ok": true, "data": {...}}`，后面还会跟一行 `tip: ...`——所以解析要
@@ -44,6 +47,9 @@ MAX_SUBJECT_CHARS = 200
 MAX_BODY_CHARS = 10000
 # 输出截断：CLI 的返回可能带很长的正文，别让它进日志。
 MAX_OUTPUT_CHARS = 8000
+# 失败时**原文**的截断长度（2026-10-11 加）。够看清"钥匙串锁不上"还是"令牌过期了"，
+# 又不会把整封信或一整段输出带进日志。
+MAX_ERROR_CHARS = 300
 
 # 只有这些子命令能被调用。**这是白名单，不是"拼接模板"**。
 _ALLOWED = ("+me", "message +send", "message +list", "message +read")
@@ -63,6 +69,40 @@ _SECRET = re.compile(
     r"\s*[:=]\s*\S{6,}|(?:密码|密钥|私钥|口令)\s*[:：=]\s*\S{4,}",
     re.IGNORECASE,
 )
+
+
+def _clip(text: object) -> str:
+    """压成一行、抹掉像凭据的片段、截断。外部程序说的话要经这一道才准进日志。"""
+
+    line = " ".join(str(text or "").split())
+    line = _SECRET.sub("[已隐去]", line)
+    if len(line) > MAX_ERROR_CHARS:
+        line = line[:MAX_ERROR_CHARS] + "…（后略）"
+    return line
+
+
+def describe_error(error: object, *, returncode: object = None) -> str:
+    """把 CLI 失败时的**原文**压成一行，供日志使用。
+
+    为什么必须记（2026-10-11 的教训）：那天日志里只有 `action_kind=credential_lock_unavailable
+    code=None`，看不出到底是"钥匙串被别的进程占着"还是"令牌过期续不上"——CLI 的 `message`
+    里写着原因，我们却把它丢掉了，于是同一件事查了一整天。现在把原文留下来（仍截断+脱敏）。
+    """
+
+    parts: list[str] = []
+    if isinstance(error, dict):
+        for key in ("message", "hint", "request_id"):
+            value = error.get(key)
+            if value is None or value == "":
+                continue
+            text = " ".join(str(value).split())
+            if text:
+                parts.append(f"{key}={text}")
+        if not parts and error:
+            parts.append("error=" + json.dumps(error, ensure_ascii=False, sort_keys=True))
+    if returncode is not None and str(returncode) not in ("0", "None"):
+        parts.append(f"returncode={returncode}")
+    return _clip(" ".join(parts))
 
 
 class MailError(RuntimeError):
@@ -206,7 +246,7 @@ class MailClient:
         self._check_argv(argv)
         self.calls += 1
         try:
-            return await asyncio.to_thread(self._run_sync, argv)
+            return await asyncio.to_thread(self._run_sync, argv, action)
         except Exception as exc:  # noqa: BLE001
             self.failures += 1
             if isinstance(exc, MailError):
@@ -242,7 +282,7 @@ class MailClient:
         self._executable_path = found
         return found
 
-    def _run_sync(self, argv: list[str]) -> dict:
+    def _run_sync(self, argv: list[str], action: str = "") -> dict:
         executable = self._resolve_executable()
         try:
             # cwd 必须存在：指向不存在的目录时 CreateProcess 会报 WinError 2
@@ -271,16 +311,26 @@ class MailClient:
 
         stdout = str(getattr(result, "stdout", "") or "")
         stderr = str(getattr(result, "stderr", "") or "")
+        returncode = getattr(result, "returncode", None)
         payload = self._parse(stdout) or self._parse(stderr)
         if payload is None:
+            # 连 JSON 都没有：把两段输出的开头留下（截断+脱敏）。这类失败原来一个字都不记，
+            # 出了事只能靠"再手工跑一遍 CLI"去猜。
+            logger.warning(
+                "mail_command_unparsable action=%s returncode=%s detail=%s",
+                action, returncode, _clip(f"{stdout} {stderr}"),
+            )
             raise MailError("邮箱工具没有返回可解析的结果", kind="unparsable")
-        if payload.get("ok") is False or getattr(result, "returncode", 0) != 0:
+        if payload.get("ok") is False or returncode not in (0, None):
             error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
             kind = str(error.get("type") or "command_failed")
             code = error.get("code")
-            # 只记类别与错误码：CLI 的 message 字段可能带正文片段。
+            # 类别 + 错误码 + **CLI 的原文**（截断+脱敏）。原文是查故障的唯一线索：
+            # credential_lock_unavailable 既可能是"锁被占"，也可能是"写不了令牌存储"，
+            # 两者只有 CLI 那句话能分开。
             logger.warning(
-                "mail_command_failed action_kind=%s code=%s", kind, code,
+                "mail_command_failed action=%s action_kind=%s code=%s detail=%s",
+                action, kind, code, describe_error(error, returncode=returncode),
             )
             raise MailError(
                 f"邮箱操作失败（{kind}）",

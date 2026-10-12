@@ -10,7 +10,12 @@ import time
 from pathlib import Path
 
 from qq_roleplay_bot.memory_model import InboxEvent
-from qq_roleplay_bot.memory_store import STATUS_KIND, MemoryStore
+from qq_roleplay_bot.memory_store import (
+    INTENTION_KIND,
+    INTENTION_REPEAT_HOURS,
+    STATUS_KIND,
+    MemoryStore,
+)
 
 GROUP = "717151356"
 USER = "1001"
@@ -23,8 +28,12 @@ def make_store(tmp: str, **kwargs) -> MemoryStore:
 
 def add_fact(store: MemoryStore, *, key: str, content: str, kind: str = "preference",
              scope: str = "user_group", user: str = USER, ttl: str = "null",
-             durable: bool = False, evidence: str = "e1", targets=()) -> list:
-    store.append(InboxEvent(evidence, GROUP, user, "user", content, time.time()))
+             durable: bool = False, evidence: str = "e1", targets=(),
+             speaker: str = "user", when: float | None = None) -> list:
+    # `when`：假时钟的用例必须让事件时刻跟着那个时钟走——差得太远会被
+    # "这一刻没有可认领的材料"直接跳过（认领有保留窗口）。
+    store.append(InboxEvent(evidence, GROUP, user, speaker, content,
+                            time.time() if when is None else when))
     batch = store.claim({GROUP}, lease_seconds=60)
     assert batch is not None
     target_json = ",".join('{"id":"%s","revision":%d}' % (r["id"], r["revision"]) for r in targets)
@@ -169,3 +178,67 @@ def test_care_note_text_reaches_the_reply_prompt() -> None:
     # 不能进稳定前缀（那会让缓存按人分叉）
     assert "顺带一提" not in request[1]["content"]
     assert "顺带一提" not in request[0]["content"]
+
+
+# --- 4. 「惦记事」：她自己记着的事（2026-10-11） -------------------------------
+
+
+def test_an_own_note_keeps_coming_back_after_the_cooldown() -> None:
+    """她自己的备忘**可以提不止一次**——隔 `INTENTION_REPEAT_HOURS` 小时又是一条新的提醒。
+
+    这里正是它与"别人的处境"（`status`，提过一次就够）的分界：她的事没办完就还得记着。
+    没提过的（`reminded_at IS NULL`）总是 Eligible，所以第一条断言不用先推进时钟。
+    """
+
+    with tempfile.TemporaryDirectory() as tmp:
+        now = [1_800_000_000.0]
+        store = make_store(tmp, clock=lambda: now[0])
+        add_fact(store, key="ask_api", content="回头问他那个接口好没",
+                 kind=INTENTION_KIND, speaker="yunru", when=now[0])
+
+        notes = store.retrieve_own_notes(GROUP, USER)
+        assert [note["content"] for note in notes] == ["回头问他那个接口好没"], notes
+
+        store.mark_reminded(notes[0]["id"])
+        now[0] += INTENTION_REPEAT_HOURS * 3600 - 1
+        assert store.retrieve_own_notes(GROUP, USER) == (), "冷却期没过不该再拿出来"
+
+        now[0] += 2
+        assert [note["content"] for note in store.retrieve_own_notes(GROUP, USER)] == \
+            ["回头问他那个接口好没"], "过了冷却期她的事还在，得能再说一次"
+
+
+def test_own_notes_come_back_oldest_first_and_capped() -> None:
+    """先提**搁得最久**的那条，一次最多 `limit` 条（她自己的备忘一口气念一长串像清单）。"""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        now = [1_800_000_000.0]
+        store = make_store(tmp, clock=lambda: now[0])
+        add_fact(store, key="older", content="回头问他接口的事", kind=INTENTION_KIND,
+                 speaker="yunru", evidence="e1", when=now[0])
+        now[0] += 60
+        add_fact(store, key="newer", content="明天再看看日志", kind=INTENTION_KIND,
+                 speaker="yunru", evidence="e2", when=now[0])
+
+        assert [note["content"] for note in store.retrieve_own_notes(GROUP, USER, limit=1)] == \
+            ["回头问他接口的事"]
+        assert [note["content"] for note in store.retrieve_own_notes(GROUP, USER, limit=2)] == \
+            ["回头问他接口的事", "明天再看看日志"]
+
+
+def test_intention_never_reaches_long_term() -> None:
+    """她自己的备忘与状态类同一个位置：**永远只留在中短期**。
+
+    反复说起（`revision` 高）、维护 agent 标 durable、索性给到最长 TTL，都不行——
+    长期记忆每轮都会被检索回来，这类"她刚说过的一句小事"进去就是复读。
+    """
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = make_store(tmp)
+        add_fact(store, key="ask_api", content="回头问他那个接口好没", kind=INTENTION_KIND,
+                 speaker="yunru", ttl="14", durable=True)
+        with store.connection() as db:
+            db.execute("UPDATE memory_short SET revision=5 WHERE normalized_key='ask_api'")
+
+        assert store.promote_reconfirmed() == 0, "intention 不该被搬进长期"
+        assert tier_of(store, "ask_api") == "short"

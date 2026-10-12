@@ -10,6 +10,9 @@ from __future__ import annotations
 
 from .wire import build_web_panel
 
+#: 面板上的显示名（`plugins.inventory()` 读它）。
+TITLE = "控制面板"
+
 
 def register(registry) -> None:
     plugin = build_web_panel(registry)

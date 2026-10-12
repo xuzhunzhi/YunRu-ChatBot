@@ -29,6 +29,7 @@ plugins/
 装进来的插件**可以**声明下面三个（都不是必需的，老插件一个字不改照样装）：
 
     VERSION = "1.2.3"   # 插件版本（面板展示；以后安装时用它比对身份）
+    TITLE = "邮件"       # 面板上的**显示名**（`inventory()` 读它；不写就显示模块名 = 那个丑的）
     HOST_API = 1        # 宿主接口版本：不声明就放行；声明了必须等于 `API_VERSION`，否则拒绝加载
     # SOURCE 不用自己写——它由加载根算出来（`plugin_source()`）
 
@@ -49,6 +50,7 @@ plugins/
     registry.provide_prompt(name, t)  # 某套 prompt 的**内置原稿**（识图那套走这里）
     registry.provide_group_action(g, f)  # 群管理动作的**执行函数**（见下）
     registry.provide_owner_channel(c)  # 渠道声明"可以声明这条来自主人"（见下）
+    registry.provide_panel(name, spec)  # 插件自报界面：纯数据描述符（+最多一个只读取数闭包）
     registry.vision = factory         # 一个"看一眼图"的工厂（`(usage_store) -> 识图器`）
 
 **这里没有 `engine`**（2026-10-01 改）：引擎上有 `transport` 与三份权限名单，
@@ -372,7 +374,7 @@ def _one_address(address: object) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ReportSeams:
-    """写日报 / 写信要的东西。**实测出来的五项**，一项不多给。
+    """写日报 / 写信要的东西。**实测出来的六项**，一项不多给。
 
     `plugins/mail/daily_report.py` 用引擎的地方只有这些（量出来的，不是估的）：
 
@@ -383,8 +385,9 @@ class ReportSeams:
     | `log_model_io(...)` | 把这次模型 I/O 记进按功能分的日志（`data/logs/`） |
     | `note_letter(letter)` | 发完记一笔"她写过这封信" |
     | `memory_service` | 信里要提到最近的记忆 |
+    | `window_facts(since)` | 这一段窗口里**有多少条、多少回、多少人来叫**（只读、只数） |
 
-    **五项里没有一样是权限名单**。所以这里给的是五个具体东西，而不是引擎——
+    **六项里没有一样是权限名单**。所以这里给的是六个具体东西，而不是引擎——
     插件拿不到 `transport`，也就发不出绕过闸门的消息。
 
     全部可缺省：缺省时快照为空、没有 client（写信判为不可用）、其余是空操作。
@@ -395,6 +398,16 @@ class ReportSeams:
     log_model_io: object = None
     note_letter: object = None
     memory_service: object = None
+    #: `(since) -> ChatWindowFacts | None`：**只读、只数**的窗口聚合。
+    #:
+    #: 用户 2026-10-11 授权的例外（原话：*"读取为啥不给读取，只读又不影响"*）：
+    #: 日报可以按聊天日志数出"这段时间有多少人来过话、她回了多少次、有多少次
+    #: 专门叫她、几条带图或表情、哪些群最热闹、哪些人说得最多"。
+    #: 范围就是这些**计数**——没有正文、没有原话，不碰记忆库、不碰知识库。
+    #: 为什么要它：引擎那份计数是进程内的，一重启就归零，她因此连着几天的信里
+    #: 都写着"两个群里没人开口"。字段清单由 `tests/test_mail_report_window.py`
+    #: 逐个钉住（含"聚合对象里不许出现正文"那条）。
+    facts: object = None
     #: `() -> client`：**写信 agent 自己那把模型通道**。
     #:
     #: 为什么要单独有一个（2026-09-30 用户要求"写信 agent 用独立的 client 与 user_id"）：
@@ -456,6 +469,22 @@ class ReportSeams:
             self.note_letter(letter)
         except Exception:  # noqa: BLE001
             logger.warning("plugin_report_note_failed", exc_info=True)
+
+    def window_facts(self, since: float) -> object | None:
+        """取一份窗口聚合；没有接缝、或数不出来，就是 `None`。
+
+        **返回 None 时调用方不许拿引擎计数补位**——那正是重启归零、逼她写
+        "没人开口"的那份数。宁可素材里写"我记不清了"。
+        """
+
+        taker = self.facts
+        if not callable(taker):
+            return None
+        try:
+            return taker(since)
+        except Exception:  # noqa: BLE001 - 数不出来就不报数字，别让日报炸
+            logger.warning("plugin_report_window_facts_failed", exc_info=True)
+            return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -791,7 +820,8 @@ class PluginRegistry:
                  "commands",
                  "backgrounds",
                  "_shared_roles", "_commands", "_prompts", "_prompt_defaults",
-                 "_group_actions", "_owner_channels", "_disconnect_receivers", "loaded")
+                 "_group_actions", "_panels", "_owner_channels", "_disconnect_receivers",
+                 "loaded")
 
     def __init__(self, *, call_action=None, notify=None, roles=None,
                  loop=None, chat: ChatSeams | None = None,
@@ -904,6 +934,12 @@ class PluginRegistry:
         #: 核心因此**不认识任何插件模块名**——把 `plugins/group_admin/` 改名不会让功能
         #: 静默消失，只会变成"这次部署没有群管理能力"（fail-closed，那句话本身是对的）。
         self._group_actions: dict[str, object] = {}
+        #: **插件自报的界面描述符**：`{插件名: 描述符}`，由插件经 `provide_panel()` 登记，
+        #: 面板按 `/api/plugin/<名字>` 取（装配点在 `plugins/webui/wire.py` 把
+        #: `panel_spec` / `provided_panel_names` 递进面板的 seams）。
+        #: 与 `_group_actions` 同一套形状（一个名字一份、后到者覆盖先到者）：
+        #: **面板因此不认识任何具体插件名**——加一个插件就多一个 tab，面板源码不用改。
+        self._panels: dict[str, object] = {}
         #: **哪些渠道声明了"可以声明主人"**（`provide_owner_channel()` 往这里放）。
         #:
         #: 为什么是声明而不是核心写死一张表：核心原来有一个
@@ -1077,6 +1113,60 @@ class PluginRegistry:
         """
 
         return tuple(sorted(self._group_actions))
+
+    def provide_panel(self, name: str, panel: object) -> None:
+        """登记**某个插件自己那一页的界面描述符**：`{插件名: 描述符}`，面板照它画那张 tab。
+
+        形状照 `provide_group_action`：一个名字一份、**同名后到者覆盖先到者**；
+        `panel` 为 `None` 时忽略（这一轮不声明界面就是没声明，不是错）。
+
+        描述符是**纯数据 + 最多一个只读取数闭包**，顶层只有三个键：
+
+        | 键 | 是什么 |
+        | --- | --- |
+        | `title` | 这一页的标题（字符串） |
+        | `note` | 这一页下面那句话（字符串） |
+        | `blocks` | 这一页的块，每块 `kind` / `title` / `rows` / `read` |
+
+        `read` 是**可选的一个可调用对象**（`() -> [行, …]`）：面板每次打开这一页时调它
+        取数。取数闭包由插件自己写——数据在哪只有它知道，面板不认识任何插件的
+        `call_action` 用法。
+
+        **三条边界**（2026-10-11 用户点名的这处接缝）：
+
+        1. 只放**描述符与只读取数闭包**，面板只负责调它、把回的东西画出来。
+        2. **不放路由、不放 HTML/JS/CSS。** 描述符里出现 `route` / `url` / `method` /
+           `html` / `js` / `css` 这类键，面板**一个都不认**（键白名单，见
+           `webui_panel._panel_block`）。理由：面板同源、token 在浏览器里、写接口只认
+           token + `confirm`——一旦描述符能指名路由或塞脚本，任何插件（含第三方放进
+           `data/plugins/` 的）都能借面板去调 `/api/memory/purge`。
+           写动作一律复用既有的、已鉴权且已审计的两条路由（`/api/action`、`/api/approval`），
+           **不为这处接缝新开任何写路由**。
+        3. **面板不认识具体插件名**：面板按一张封闭的 `kind` 词表渲染，认不出就如实说
+           "这个面板不认识这种块"。加一种 `kind` 是面板侧的一次改动（走评审），
+           插件无法自己封一个新权限。
+        """
+
+        if panel is not None:
+            self._panels[str(name)] = panel
+
+    def panel_spec(self, name: str) -> object | None:
+        """取某个插件自报的界面描述符；没人登记就返回 `None`。
+
+        调用方拿到 `None` 时**必须 fail-closed**：面板不编一份界面出来，
+        只如实回 `available: false` 与原因（同 `group_action` 那句口径）。
+        """
+
+        return self._panels.get(str(name))
+
+    def provided_panel_names(self) -> tuple[str, ...]:
+        """已经自报了界面的插件名（按名字排序）。
+
+        与 `provided_group_actions()` 同一个理由：**"到底有哪些页"必须是可读的事实**，
+        而不是靠面板里 `if name == "某个插件"` 去猜——那种写法正是这处接缝要拆掉的。
+        """
+
+        return tuple(sorted(self._panels))
 
     def provide_owner_channel(self, channel: str) -> None:
         """**渠道自己声明**："我这个渠道比过发件人是谁，可以声明这条来自主人。"

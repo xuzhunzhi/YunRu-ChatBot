@@ -28,6 +28,9 @@ MAX_SEND_RECORDS = 50
 MAX_LETTERS = 5
 # 单封信在状态文件里最多留多少字（正文上限本来就更小，这里是二次兜底）。
 MAX_LETTER_CHARS = 4000
+# 写好了没发出去的信最多等这么久（3 天）。再久就是"三天前的见闻今天才送到"，
+# 那不如重新写一封当下的（2026-10-11 用户原话："第二天就重发那封没发出去的"）。
+PENDING_REPORT_MAX_AGE = 3 * 86400.0
 # 处理过的来信 id 留最近这些条（2026-09-30 读信回信用）：幂等靠它，重启也不会重复回。
 MAX_PROCESSED_MAIL = 100
 
@@ -48,6 +51,11 @@ class MailState:
     sends: list[dict] = field(default_factory=list)
     # 发出去的信（最近在后）：{"at", "to", "subject", "body"}。给"她还记得自己写了什么"用。
     letters: list[dict] = field(default_factory=list)
+    # **写好了、没发出去**的那封信：{"day", "at", "subject", "body"}（空表示没有）。
+    # 为什么留着：2026-10-11 用户原话——"如果当天没发成，那第二天就重发那封没发出去的，
+    # 不要再写一封"。重写一封会让同一段日子被她写两遍，第二封还多半更差（素材更少、
+    # 刚失败过一次）。**只留一封**，新的覆盖旧的；超过 `PENDING_REPORT_MAX_AGE` 就丢掉。
+    pending_report: dict = field(default_factory=dict)
     # 处理过的来信 id（最近在后）：读信回信的幂等标记。**只存 id，不存正文**。
     processed_mail: list[str] = field(default_factory=list)
     # 回信计数（用来卡"一天最多回几封"）：{"day": "YYYY-MM-DD", "count": n}
@@ -93,6 +101,23 @@ class MailState:
             return False
         return float(state.last_report_at or 0.0) < target
 
+    @classmethod
+    def fresh_pending(cls, state: "MailState", now: float) -> dict:
+        """那封**写好了没发出去**的信：还值得发就返回它，否则返回空字典。
+
+        只有两条判据——正文不是空的、而且写出来还没超过 `PENDING_REPORT_MAX_AGE`
+        （邮件发不出去常见于令牌过期或断网，隔天修好了就该把这封送出去；
+        但拖过三天，那封信写的日子已经过去了，不如重写）。
+        """
+
+        pending = dict(getattr(state, "pending_report", {}) or {})
+        if not str(pending.get("body") or "").strip():
+            return {}
+        at = float(pending.get("at") or 0.0)
+        if at and now - at > PENDING_REPORT_MAX_AGE:
+            return {}
+        return pending
+
 
 class MailStateStore:
     """读写 `data/mail_state.json`；失败只记日志，绝不抛给调用方。"""
@@ -123,6 +148,15 @@ class MailStateStore:
         sends = data.get("sends")
         letters = data.get("letters")
         processed = data.get("processed_mail")
+        pending = data.get("pending_report")
+        pending_report: dict = {}
+        if isinstance(pending, dict) and str(pending.get("body") or "").strip():
+            pending_report = {
+                "day": str(pending.get("day") or ""),
+                "at": float(pending.get("at") or 0.0),
+                "subject": str(pending.get("subject") or "")[:200],
+                "body": str(pending.get("body") or "")[:MAX_LETTER_CHARS],
+            }
         return MailState(
             last_report_at=float(data.get("last_report_at") or 0.0),
             attempts_day=str(data.get("attempts_day") or ""),
@@ -136,6 +170,7 @@ class MailStateStore:
                 [str(item) for item in processed if str(item).strip()]
                 if isinstance(processed, list) else []
             ),
+            pending_report=pending_report,
             reply_day=str(data.get("reply_day") or ""),
             replies=int(data.get("replies") or 0),
             sender_day=str(data.get("sender_day") or ""),
@@ -157,6 +192,7 @@ class MailStateStore:
             "attempts": int(state.attempts),
             "sends": state.sends[-MAX_SEND_RECORDS:],
             "letters": state.letters[-MAX_LETTERS:],
+            "pending_report": dict(state.pending_report or {}),
             "processed_mail": state.processed_mail[-MAX_PROCESSED_MAIL:],
             "reply_day": state.reply_day,
             "replies": int(state.replies),
@@ -206,6 +242,8 @@ class MailStateStore:
         current.sends = current.sends[-MAX_SEND_RECORDS:]
         if ok and kind == "report":
             current.last_report_at = now
+            # 送出去了，待发那份就没用了（甲：状态里只留"没发成"的那封）。
+            current.pending_report = {}
         today = time.strftime("%Y-%m-%d", time.localtime(now))
         if current.attempts_day != today:
             current.attempts_day = today
@@ -242,6 +280,42 @@ class MailStateStore:
         })
         current.letters = current.letters[-MAX_LETTERS:]
         self.save(current)
+        return current
+
+    def save_pending_report(
+        self,
+        *,
+        day: str,
+        subject: str,
+        body: str,
+        now: float | None = None,
+        state: MailState | None = None,
+    ) -> MailState:
+        """把"写好了、没发出去"的信暂存起来：下次**只重发，不再重写一封**。
+
+        2026-10-11 用户原话（"甲"）：*"如果当天没发成，那第二天就重发那封没发出去的，
+        不要再写一封。"* 重写一封会让同一段日子被她写两遍。
+        **只留一封**：真有新的覆盖旧的（要发的是最近写好的那封）。
+        """
+
+        current = state or self.load()
+        stamp = self.clock() if now is None else float(now)
+        current.pending_report = {
+            "day": str(day),
+            "at": round(stamp, 3),
+            "subject": str(subject).strip()[:200],
+            "body": str(body).strip()[:MAX_LETTER_CHARS],
+        }
+        self.save(current)
+        return current
+
+    def clear_pending_report(self, *, state: MailState | None = None) -> MailState:
+        """丢掉那封待发的信。**过期时也走这里**，免得它一直躺在状态文件里。"""
+
+        current = state or self.load()
+        if current.pending_report:
+            current.pending_report = {}
+            self.save(current)
         return current
 
     @staticmethod

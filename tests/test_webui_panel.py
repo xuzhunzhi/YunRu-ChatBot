@@ -66,8 +66,15 @@ READ_PATHS = (
     # 接缝少了 `quote_evidence` 时也要回 200 + 如实说读不到。
     "/api/knowledge/quotes/evidence?group_id=717151356",
     "/api/knowledge/slang",
-    "/api/approvals/pending",
-    "/api/actions/preview",
+    # 插件自报界面（2026-10-11 的那处接缝）：每条这一页的取数都走同一个读路由。
+    # 原来这两行钉的是 `/api/approvals/pending` 与 `/api/actions/preview`——那是
+    # "面板替两个兄弟插件做的两页"；现在**谁的数据谁解析**（`registry.provide_panel`），
+    # 面板只剩这一条通用读路由，所以清单也跟着换成它。三个名字都要回 200：
+    # 前两个是预装插件自己声明的，第三个**没声明过**——那是"面板不认识它"那条，
+    # 同样是如实回话，不是 500。
+    "/api/plugin/group_admin",
+    "/api/plugin/join_approval",
+    "/api/plugin/this-plugin-does-not-exist",
     "/api/history",
     "/api/logs?feature=judge",
     "/api/memory/overview",
@@ -1121,3 +1128,357 @@ class RecordsShapeForGroupChipsTests(_PanelCase):
         scopes = sorted((str(row["scope_type"]), str(row["scope_key"])) for row in data["rows"])
         self.assertEqual(scopes, [("user_global", "1001"), ("user_group", "800000001:1001")],
                          "接口没把 scope 原样给出来（前端就没法区分群与人）")
+
+
+#: 兄弟插件的目录名（`webui/` 自己不算）。**面板不许认识它们**——这是这处接缝的要点：
+#: 加一个插件就多一个 tab，面板侧一个字都不用改。
+_SIBLING_PLUGINS = ("group_admin", "join_approval", "mail", "outage_notice",
+                    "remind", "roles", "timeout_alert", "vision")
+
+#: 面板侧**按插件名做身份判断**的那两个文件（第三条判据只管这两个，理由见类 docstring）。
+_PANEL_IDENTITY_FILES = ("webui_panel.py", "wire.py")
+
+
+def _webui_sources() -> list[tuple[str, str, ast.Module]]:
+    """`plugins/webui/**/*.py` 的 `(相对路径, 原文, 语法树)`。"""
+
+    here = pathlib.Path(__file__).resolve().parents[1]
+    root = here / "src" / "qq_roleplay_bot" / "plugins" / "webui"
+    sources: list[tuple[str, str, ast.Module]] = []
+    for path in sorted(root.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        sources.append((path.relative_to(root).as_posix(), text, ast.parse(text)))
+    return sources
+
+
+def _docstring_nodes(tree: ast.Module) -> set[int]:
+    """每个 docstring 那个常量节点的 `id()`（注释不在 AST 里，只剩这一种要排掉）。"""
+
+    marked: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                 ast.AsyncFunctionDef)):
+            continue
+        body = node.body
+        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+                and isinstance(body[0].value.value, str):
+            marked.add(id(body[0].value))
+    return marked
+
+
+class PanelDoesNotKnowPluginsTests(unittest.TestCase):
+    """面板**不认识任何具体插件名**（2026-10-11 那处接缝的第 3 条边界）。
+
+    拆之前面板知道两个：`_pending_approvals()` 里
+    `from ..join_approval.join_approval import JOIN_SUB_TYPE, parse_pending`，
+    以及 `_ACTION_CATALOG` 里写死的 `"group_admin"` / `"group_owner"`。
+    所以判据三条：**不 import 兄弟插件**、**不拿插件名做比较**、面板侧按身份用名的两个文件
+    里**连字面量都不许有**（`payload.get("group") or "group_admin"` 那种兜底值就是这么藏的）。
+
+    ⚠️ 第三条只点 `webui_panel.py` / `wire.py`：`webui_data.py` 不碰注册表，它里面的
+    `"mail"`（日志功能名）与 `"roles"`（配置键名）是**数据词表**、不是插件身份；
+    写成"这几个词一个都不许出现"会当场误伤它们，测试一加就红。
+    """
+
+    def test_no_webui_module_imports_a_sibling_plugin(self) -> None:
+        bad: list[str] = []
+        for relative, _text, tree in _webui_sources():
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    parts = [part for part in ("." * int(node.level or 0)
+                                               + (node.module or "")).split(".") if part]
+                elif isinstance(node, ast.Import):
+                    parts = [part for alias in node.names
+                             for part in alias.name.split(".") if part]
+                else:
+                    continue
+                hit = [part for part in parts if part in _SIBLING_PLUGINS]
+                if hit:
+                    bad.append(f"{relative}:{node.lineno} {'/'.join(parts)} → {hit[0]}")
+        self.assertEqual(bad, [], "面板（或它同目录的模块）import 了兄弟插件——"
+                                  "那正是 2026-10-11 拆掉的那处耦合，依赖要走接缝")
+
+    def test_nothing_compares_against_a_plugin_name(self) -> None:
+        bad: list[str] = []
+        for relative, _text, tree in _webui_sources():
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Compare):
+                    continue
+                sides = [node.left, *node.comparators]
+                if any(isinstance(side, ast.Constant) and side.value in _SIBLING_PLUGINS
+                       for side in sides):
+                    bad.append(f"{relative}:{node.lineno} {ast.unparse(node)}")
+        self.assertEqual(bad, [], "面板按插件名分支了——加一个插件就得改面板，接缝白做")
+
+    def test_the_identity_files_carry_no_plugin_name_literal(self) -> None:
+        bad: list[str] = []
+        for relative, _text, tree in _webui_sources():
+            if relative not in _PANEL_IDENTITY_FILES:
+                continue
+            docstrings = _docstring_nodes(tree)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                        and id(node) not in docstrings and node.value in _SIBLING_PLUGINS:
+                    bad.append(f"{relative}:{node.lineno} {node.value!r}")
+        self.assertEqual(bad, [], "面板侧出现了插件名的字面量（例如某个动作分组的兜底值）"
+                                  "——它该由请求或插件自己报的描述符给")
+
+
+class ProvidedPanelSeamTests(unittest.TestCase):
+    """「插件自报界面」的**注册表那一半**（`plugins/__init__.py` 三个方法）。
+
+    判据三句：谁交的谁才在名单里、没交过的名字回 `None`（fail-closed）、同名**后到者覆盖**
+    （`discover()` 的名字序就是装配序，与 `provide_group_action` 同一条口径）。
+    """
+
+    @staticmethod
+    def _registry():
+        from qq_roleplay_bot.plugins import PluginRegistry
+
+        return PluginRegistry()
+
+    def test_only_what_a_plugin_declares_is_visible(self) -> None:
+        registry = self._registry()
+        registry.provide_panel("b_plugin", {"title": "乙"})
+        registry.provide_panel("a_plugin", {"title": "甲"})
+        self.assertEqual(registry.provided_panel_names(), ("a_plugin", "b_plugin"))
+        self.assertEqual(registry.panel_spec("a_plugin"), {"title": "甲"})
+        self.assertIsNone(registry.panel_spec("没人声明过"),
+                          "取不到必须是 None——面板照 fail-closed 走，不编一份界面出来")
+
+    def test_a_later_declaration_wins(self) -> None:
+        registry = self._registry()
+        registry.provide_panel("same", {"title": "先"})
+        registry.provide_panel("same", {"title": "后"})
+        self.assertEqual(registry.panel_spec("same"), {"title": "后"})
+        self.assertEqual(registry.provided_panel_names(), ("same",))
+
+    def test_none_means_this_round_it_has_no_page(self) -> None:
+        registry = self._registry()
+        registry.provide_panel("quiet", None)
+        self.assertEqual(registry.provided_panel_names(), ())
+        self.assertIsNone(registry.panel_spec("quiet"))
+
+    def test_the_shipped_group_admin_plugin_declares_all_twelve_rows(self) -> None:
+        from qq_roleplay_bot.plugins.group_admin import plugin as group_admin
+
+        registry = self._registry()
+        registry.provide_panel("group_admin", group_admin.PANEL)
+        spec = registry.panel_spec("group_admin")
+        self.assertEqual(registry.provided_panel_names(), ("group_admin",),
+                         "它没自报界面，面板那张 tab 就白摆着")
+        self.assertEqual(spec["title"], "群管理动作")
+        self.assertEqual(spec["blocks"][0]["kind"], "action_form")
+        self.assertEqual(len(spec["blocks"][0]["rows"]), 12,
+                         "面板那张表原来是 12 行，搬过来一行都不能少")
+
+    def test_the_join_plugin_hands_its_page_over_in_register(self) -> None:
+        """它的描述符在 `register()` 函数体内造（取数闭包要用 `registry.call_action`）。"""
+
+        from qq_roleplay_bot.plugins.join_approval import plugin as join_approval
+
+        class _FakeRegistry:
+            """只够 `register()` 用：背景节拍、共享位、两个接缝。"""
+
+            def __init__(self) -> None:
+                self.panels: dict[str, object] = {}
+
+            call_action = staticmethod(lambda *args, **kwargs: None)
+            notify = staticmethod(lambda *args, **kwargs: None)
+
+            def background(self, plugin: object) -> None:
+                return None
+
+            def shared_roles(self) -> object | None:
+                return None
+
+            def provide_panel(self, name: str, panel: object) -> None:
+                self.panels[name] = panel
+
+        registry = _FakeRegistry()
+        join_approval.register(registry)
+        spec = registry.panels["join_approval"]
+        self.assertEqual(sorted(spec), ["blocks", "note", "title"],
+                         "描述符顶层只许这三个键（多了就是往面板递别的东西）")
+        self.assertEqual(spec["title"], "入群申请")
+        queue = spec["blocks"][0]
+        self.assertEqual(queue["kind"], "join_queue")
+        self.assertTrue(callable(queue["read"]), "这一页的取数闭包没交上来")
+
+    def test_the_join_queue_reader_parses_inside_the_plugin(self) -> None:
+        """⚠️ **形状必须是核心真回的那种**：`parse_pending` 认的是**列表**。
+
+        这一条是行为核对抓到的坑：按"对面回 dict"判的话，真机上这一页**永远说没有申请**，
+        而且一个字都不报错（`JoinApprovalPoller.tick` 就是拿到列表直接交给 `parse_pending`）。
+        """
+
+        import asyncio
+
+        from qq_roleplay_bot.plugins.join_approval import plugin as join_approval
+
+        raw = [
+            {"flag": "f1", "group_id": "800000001", "requester_uin": "1001",
+             "requester_nick": "乐乐", "message": "想进群"},
+            {"flag": "f2", "group_id": "800000001", "requester_uin": "1002",
+             "sub_type": "invite"},
+            {"flag": "", "group_id": "800000001", "requester_uin": "1003"},
+            {"flag": "f3", "group_id": "800000001", "requester_uin": "1004", "checked": True},
+        ]
+        asked: list[str] = []
+
+        async def call_action(action, params):
+            asked.append(action)
+            return raw
+
+        rows = asyncio.run(join_approval._pending_reader(call_action)())
+        self.assertEqual(asked, ["get_group_system_msg"], "只许问这一条只读动作")
+        self.assertEqual([row["user_id"] for row in rows], ["1001"],
+                         "只留真正的入群申请：邀请、没 flag、已处理的都不算")
+        self.assertEqual((rows[0]["flag"], rows[0]["nickname"]), ("f1", "乐乐"))
+
+    def test_a_non_list_answer_reads_as_an_empty_queue(self) -> None:
+        import asyncio
+
+        from qq_roleplay_bot.plugins.join_approval import plugin as join_approval
+
+        async def call_action(action, params):
+            return {"JoinRequest": [{"flag": "f1"}]}
+
+        self.assertEqual(asyncio.run(join_approval._pending_reader(call_action)()), [],
+                         "对面回的形状不对时如实空表，不抛、也不 500")
+
+
+class SelfReportedPanelTests(_PanelCase):
+    """面板那一半：`GET /api/plugin/<名字>` 只按**封闭的 kind 词表**画，而且**永不 500**。
+
+    描述符是**插件写的**（含放进 `data/plugins/` 的第三方），所以这里逐条钉"它进不了面板的
+    权限"：顶层与块都过键白名单、取数闭包抛异常如实回 `error`、三种"没有"各回各的原因。
+    """
+
+    def _page(self, panel: Panel, name: str = "mine") -> dict[str, object]:
+        self.panel = panel
+        response = self.request("GET", f"/api/plugin/{name}")
+        self.assertEqual(response.status, 200, "自报界面这条读路由不许 5xx")
+        return self.payload(response)["data"]
+
+    def _with_seams(self, spec: object, names: object = ("mine",), name: str = "mine",
+                    **extra: object) -> dict[str, object]:
+        # 装配点递下来的是**绑定方法**（`registry.panel_spec` / `provided_panel_names`），
+        # 所以这里也照"两个可调对象"给；名字表用元组只是为了写得短。
+        seams: dict[str, object] = {
+            "data_root": str(self.root),
+            "panel_spec": spec,
+            "panel_names": names if callable(names) else (lambda: tuple(names)),
+        }
+        seams.update(extra)
+        return self._page(Panel(seams, WebAccess(mode=LOCAL, token=TOKEN)), name=name)
+
+    def test_only_three_top_level_keys_and_four_block_keys_get_through(self) -> None:
+        spec = {
+            "title": "我的页", "note": "说明",
+            "route": "/api/memory/purge", "url": "http://127.0.0.1/x",
+            "method": "POST", "html": "<script>alert(1)</script>",
+            "js": "1+1", "css": "body{}",
+            "blocks": [{"kind": "join_queue", "title": "队列", "rows": [],
+                        "route": "/api/memory/purge", "html": "<b>x</b>",
+                        "method": "POST", "url": "/api/approval"}],
+        }
+        data = self._with_seams(lambda name: spec)
+        self.assertEqual(sorted(data), ["available", "blocks", "name", "note", "title"],
+                         "顶层只许面板自己那三个 + title / note / blocks")
+        self.assertEqual(sorted(data["blocks"][0]), ["kind", "rows", "title"],
+                         "块只许 kind / title / rows / error")
+        body = json.dumps(data, ensure_ascii=False)
+        for forbidden in ("purge", "alert", "127.0.0.1", "POST"):
+            self.assertNotIn(forbidden, body, "描述符里的危险键漏到页面上了")
+
+    def test_a_read_that_throws_says_so_instead_of_taking_the_page_down(self) -> None:
+        def boom():
+            raise RuntimeError("对面没回")
+
+        spec = {"blocks": [{"kind": "join_queue", "title": "入群申请", "read": boom}]}
+        block = self._with_seams(lambda name: spec)["blocks"][0]
+        self.assertEqual(block["rows"], [])
+        self.assertEqual(block["error"], "RuntimeError",
+                         "取数失败要如实说，不是 500、也不是拿空表糊过去")
+
+    def test_an_async_read_runs_through_the_existing_runner(self) -> None:
+        """插件的取数闭包可能是协程（核心那条 `call_action` 就是异步的）。"""
+
+        import asyncio
+
+        from qq_roleplay_bot.plugins.webui import webui_panel
+
+        async def read():
+            return [{"flag": "f1", "group_id": "800000001", "user_id": "1001"}]
+
+        with mock.patch.object(webui_panel, "_ASYNC_RUNNER", asyncio.run):
+            block = self._with_seams(
+                lambda name: {"blocks": [{"kind": "join_queue", "read": read}]})["blocks"][0]
+        self.assertEqual([row["user_id"] for row in block["rows"]], ["1001"])
+        self.assertNotIn("error", block)
+
+    def test_rows_that_are_not_rows_are_dropped(self) -> None:
+        spec = {"blocks": [{"kind": "join_queue", "read": lambda: "不是列表"},
+                           {"kind": "join_queue", "rows": [{"flag": "f1"}, "坏行", 3, None]}]}
+        blocks = self._with_seams(lambda name: spec)["blocks"]
+        self.assertEqual(blocks[0]["rows"], [], "回的不是列表就照空表算")
+        self.assertEqual(blocks[1]["rows"], [{"flag": "f1"}], "行只留字典")
+
+    def test_each_kind_of_missing_says_which_it_is(self) -> None:
+        no_seam = self._page(Panel({"data_root": str(self.root)},
+                                   WebAccess(mode=LOCAL, token=TOKEN)))
+        self.assertEqual((no_seam["available"], no_seam["reason"], no_seam["blocks"]),
+                         (False, "no_seam", []), "装配点没给接缝 → 如实说，不 500")
+
+        unknown = self._with_seams(lambda name: {"title": "甲"}, names=("别人",))
+        self.assertEqual((unknown["available"], unknown["reason"]), (False, "unknown"),
+                         "名字不在清单里 → 如实说（停用 / 写错名字都走这条）")
+
+        no_panel = self._with_seams(lambda name: None)
+        self.assertEqual((no_panel["available"], no_panel["reason"]), (False, "no_panel"))
+
+        not_a_spec = self._with_seams(lambda name: "坏东西")
+        self.assertEqual((not_a_spec["available"], not_a_spec["reason"]), (False, "no_panel"),
+                         "描述符不是字典也照『没自报』算，不编界面")
+
+    def test_a_broken_plugin_cannot_take_the_page_down(self) -> None:
+        def boom():
+            raise RuntimeError("坏插件")
+
+        data = self._with_seams(lambda name: {"title": "甲"}, names=boom)
+        self.assertEqual((data["available"], data["reason"]), (False, "unknown"),
+                         "清单读崩了就当没有它——不 500、不把异常抛给浏览器")
+
+    def test_the_shipped_group_admin_page_has_the_same_twelve_rows(self) -> None:
+        from qq_roleplay_bot.plugins.group_admin import plugin as group_admin
+
+        data = self._with_seams(lambda name: group_admin.PANEL, names=("group_admin",),
+                                name="group_admin")
+        self.assertTrue(data["available"])
+        self.assertEqual(data["title"], "群管理动作")
+        self.assertEqual([block["kind"] for block in data["blocks"]], ["action_form"])
+        rows = data["blocks"][0]["rows"]
+        self.assertEqual(len(rows), 12)
+        self.assertEqual([row["kind"] for row in rows][:2], ["kick", "ban"])
+        self.assertEqual([row["group"] for row in rows][:6], ["group_admin"] * 6)
+        self.assertEqual([row["group"] for row in rows][6:], ["group_owner"] * 6,
+                         "后 6 行是群主动作族——图省事糊成一族就会被核心挡回来")
+
+    def test_the_shipped_join_queue_page_reads_through_the_plugin_closure(self) -> None:
+        import asyncio
+
+        from qq_roleplay_bot.plugins.join_approval import plugin as join_approval
+        from qq_roleplay_bot.plugins.webui import webui_panel
+
+        async def call_action(action, params):
+            return [{"flag": "f1", "group_id": "800000001", "requester_uin": "1001",
+                     "requester_nick": "乐乐", "message": "想进群"}]
+
+        spec = {"title": "入群申请",
+                "blocks": [{"kind": "join_queue", "title": "入群申请",
+                            "read": join_approval._pending_reader(call_action)}]}
+        with mock.patch.object(webui_panel, "_ASYNC_RUNNER", asyncio.run):
+            data = self._with_seams(lambda name: spec)
+        self.assertEqual([row["user_id"] for row in data["blocks"][0]["rows"]], ["1001"])
+        self.assertNotIn("error", data["blocks"][0])

@@ -229,6 +229,11 @@ def build_web_panel(registry):
     install_async_runner(_runner)
 
     seams = _panel_seams(registry.ui, registry.call_action)
+    # 插件**自报**的界面（只读）：`/api/plugin/<名字>` 就靠这两条闭包取。
+    # 面板因此不认识任何具体插件名——加一个插件就多一个 tab，这边一个字不用改。
+    # 缺这两条时面板如实回 `available: false`（fail-closed，不编一份界面出来）。
+    seams["panel_names"] = getattr(registry, "provided_panel_names", None)
+    seams["panel_spec"] = getattr(registry, "panel_spec", None)
     panel = Panel(seams, access)
     server = PanelServer(panel, host=dev_config.WEBUI_HOST, port=dev_config.WEBUI_PORT)
     seams["restart_gate"] = _restart_gate

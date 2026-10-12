@@ -39,6 +39,9 @@ from __future__ import annotations
 
 import logging
 
+#: 面板上的显示名（`plugins.inventory()` 读它）。
+TITLE = "识图"
+
 # 同目录那个模块用**相对 import**取（与 `group_admin/plugin.py` 同一写法）：
 # 本文件永远以 `qq_roleplay_bot.plugins.vision.plugin` 这个身份被执行
 # （`discover()` 走 `importlib.import_module`，测试走

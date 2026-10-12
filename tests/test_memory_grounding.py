@@ -42,8 +42,14 @@ from dataclasses import replace
 
 from qq_roleplay_bot import memory_grounding
 from qq_roleplay_bot.memory_maintenance_agent import MEMORY_SYSTEM_PROMPT
-from qq_roleplay_bot.memory_model import InboxEvent, MemoryBatch, MemoryOperation
-from qq_roleplay_bot.memory_store import MemoryStore
+from qq_roleplay_bot.memory_model import (
+    InboxEvent,
+    MemoryBatch,
+    MemoryOperation,
+    MemoryValidationError,
+    parse_operations,
+)
+from qq_roleplay_bot.memory_store import INTENTION_KIND, MemoryStore
 
 GROUP = "1084401296"
 OWNER = "2639157559"
@@ -565,3 +571,157 @@ def test_the_gate_module_documents_the_measured_thresholds() -> None:
     doc = _inspect.getdoc(memory_grounding) or ""
     assert "89%" in doc and "47%" in doc, "别把量过的判据删掉"
     assert memory_grounding.QUOTE_RATIO == 0.6
+
+
+# --- 5. 「惦记事」：她自己应下的那件事（2026-10-11） ---------------------------
+
+
+class IntentionEvidenceTests(_Base):
+    """`intention` 的依据方向与普通事实**相反**，而且两层判据都得认她自己的原话。
+
+    普通事实的规矩是"依据必须是他本人说的"（`speaker="user"`）——别人的玩笑、
+    别人的吩咐都不算他的事。她自己的备忘反过来：依据得是**她发出去过的那句原话**
+    （`speaker="yunru"`）。少任何一层，维护 agent 照 prompt 交上来的 `intention`
+    都会被整条打回，这条路根本落不了地：
+
+    1. 解析层 `memory_model.parse_operations`——按 kind 分方向挑证据发言者；
+    2. 写入层 `memory_store.commit` 的 `deleted_evidence` 判据——键被划掉过（留下墓碑）
+       之后，只有**她新发的**那句才算新证据（旧那句不认，不然等于把划掉的记忆写回来）。
+
+    > 测不到什么：`intention` 是谁、什么时候写进记忆的——维护 agent 下一拍照 prompt 写，
+    > 不在这一层。这里只测"它交上来之后，这条依据认不认"。
+    """
+
+    def op(self, *, evidence, kind=INTENTION_KIND, key="ask_about_api",
+           content="回头问他那个接口好没", scope="user_global", ttl=7, durable=False) -> str:
+        """一条 ADD 的原始输出（只过解析层，不进 `store.commit`）。"""
+
+        return json.dumps({"operations": [{
+            "op": "ADD", "scope_type": scope, "kind": kind, "normalized_key": key,
+            "content": content, "confidence": 0.9, "ttl_days": ttl,
+            "evidence_event_ids": list(evidence), "subjects": [],
+            "durable": durable, "targets": []}]}, ensure_ascii=False)
+
+    def two_voices(self, *, note="回头问他那个接口好没"):
+        """一批里同时有"她说的"和"这个人说的"两句话——证据方向拿它俩对照。"""
+
+        self.now += 1
+        own = self.event(note, speaker="yunru")
+        self.store.append(own)
+        self.now += 1
+        theirs = self.event("那个接口怎么样了")
+        self.store.append(theirs)
+        batch = self.store.claim({GROUP}, lease_seconds=60)
+        assert batch is not None, "两句都该被认领进同一批"
+        return batch, own, theirs
+
+    def test_the_parser_accepts_her_own_words_for_an_intention(self) -> None:
+        """解析层：`intention` 只认**她自己的**发言当依据；拿他的话当依据整条打回。"""
+
+        batch, own, theirs = self.two_voices()
+
+        ops = parse_operations(self.op(evidence=[own.id]), batch)
+        self.assertEqual([op.kind for op in ops], [INTENTION_KIND])
+
+        with self.assertRaises(MemoryValidationError) as caught:
+            parse_operations(self.op(evidence=[theirs.id]), batch)
+        self.assertEqual(str(caught.exception), "invalid_operation",
+                         "依据是别人说的 → 这条 intention 不该被解析出来")
+
+    def test_the_parser_keeps_the_old_direction_for_ordinary_kinds(self) -> None:
+        """别的 kind 方向不变：只有**她自己的**话当依据，照样整条打回。
+
+        这条与上一条成对——放开 `intention` 的那一支不许顺手把别的类别也放开。
+        """
+
+        batch, own, theirs = self.two_voices()
+
+        with self.assertRaises(MemoryValidationError) as caught:
+            parse_operations(self.op(evidence=[own.id], kind="preference",
+                                     key="likes_tea", content="喜欢喝龙井"), batch)
+        self.assertEqual(str(caught.exception), "invalid_operation")
+
+        ops = parse_operations(self.op(evidence=[theirs.id], kind="preference",
+                                       key="likes_tea", content="喜欢喝龙井"), batch)
+        self.assertEqual([op.kind for op in ops], ["preference"], "他本人说的话照旧算数")
+
+    def _deleted_intention(self):
+        """写一条 intention → 划掉（留墓碑）→ 返回那句原话（下面两条用例的分岔点）。"""
+
+        batch, own, _theirs = self.two_voices()
+        applied = self.commit(batch, "ADD", evidence=[own.id], kind=INTENTION_KIND,
+                              key="ask_about_api", content=own.text, ttl=7)
+        self.assertEqual(len(applied), 1, applied)
+        record = self.counts_for("ask_about_api")
+        self.assertIsNotNone(record)
+        self.assertEqual(record["kind"], INTENTION_KIND)
+        self.assertEqual(record["tier"], "memory_short", "她自己的备忘不进长期")
+
+        self.now += 1
+        self.assertEqual(self.store.purge_records([record["id"]], reason="agent_delete"), 1)
+        with self.store.connection() as db:
+            tomb = db.execute(
+                "SELECT deleted_at FROM tombstones WHERE normalized_key='ask_about_api'"
+            ).fetchone()
+        self.assertIsNotNone(tomb, "删除必须留下墓碑（不然旧证据能把它写回来）")
+        return own.text
+
+    def test_a_deleted_key_is_not_revived_by_her_old_words(self) -> None:
+        """她**以前**那句（时刻早于墓碑）当依据 → 整批 `deleted_evidence`：划掉就是划掉。"""
+
+        note = self._deleted_intention()
+
+        self.now += 1
+        stale = self.event(note, speaker="yunru", when=self.now - 10_000)
+        self.store.append(stale)
+        stale_batch = self.store.claim({GROUP}, lease_seconds=60)
+        with self.assertRaises(MemoryValidationError) as caught:
+            self.commit(stale_batch, "ADD", evidence=[stale.id], kind=INTENTION_KIND,
+                        key="ask_about_api", content=stale.text, ttl=7)
+        self.assertEqual(str(caught.exception), "deleted_evidence")
+
+    def test_a_deleted_key_comes_back_when_she_promises_again(self) -> None:
+        """她**新发**的那句（时刻晚于墓碑）当依据 → 写得回来：划掉的是那件旧事，不是这个键。
+
+        与上一条成对，两条一起钉住"谁的哪句话算新证据"：
+
+        * 旧那句（早于墓碑）→ `deleted_evidence`，划掉就是划掉；
+        * 新那句（晚于墓碑）→ 算新证据，她重新应下同一件事就该记下来。
+
+        这一条原来是**绊线用例**：2026-10-11 写完这条链路时
+        `memory_store.py:763` 按 kind 挑"谁的发言算证据时刻"写成了
+        `voices = (("user", INTENTION_KIND) if … else ("user",))`，而发言者只有
+        `user` / `yunru` 两种，`"intention"` 永远匹配不上——于是 intention 的
+        证据时刻恒为 0、`evidence_time <= tomb[0]` 恒成立，**任何**留过墓碑的键
+        都再也写不回来。已改成 `("yunru",)`（与那一行自己的注释、以及
+        `qq_roleplay_bot/memory_grounding.py:197` 的
+        `own_voice = "yunru" if op.kind == "intention" else "user"` 同一套判据），
+        这条随之倒过来断言。突变自检：把 `:763` 改回 `("user", INTENTION_KIND)` → 必红。
+        """
+
+        note = self._deleted_intention()
+
+        self.now += 10
+        fresh = self.event(note, speaker="yunru")
+        self.store.append(fresh)
+        fresh_batch = self.store.claim({GROUP}, lease_seconds=60)
+
+        applied = self.commit(fresh_batch, "ADD", evidence=[fresh.id], kind=INTENTION_KIND,
+                              key="ask_about_api", content=fresh.text, ttl=7)
+
+        self.assertEqual(len(applied), 1, applied)
+        record = self.counts_for("ask_about_api")
+        self.assertIsNotNone(record, "她重新应下这件事，就该重新记下来")
+        self.assertEqual(record["kind"], INTENTION_KIND)
+        self.assertEqual(record["tier"], "memory_short")
+
+    def test_her_own_note_still_has_to_be_hearsay_free(self) -> None:
+        """她自己的话当依据也不能凭空补数字/型号（`rejected_ungrounded_specifics`）。"""
+
+        batch, own, _theirs = self.two_voices(note="回头我看看那个接口")
+
+        applied = self.commit(batch, "ADD", evidence=[own.id], kind=INTENTION_KIND,
+                              key="ask_about_api", content="回头问他那个接口 8080 端口的事", ttl=7)
+
+        self.assertEqual(list(applied), [], "凭空补出来的端口号不该被记下来")
+        self.assertIsNone(self.counts_for("ask_about_api"))

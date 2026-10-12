@@ -151,6 +151,12 @@ WHITELIST = {
     "tests/test_stage4_plugins.py":
         "Stage 4 的命令走插件：档位声明 + 动作意图，判定与执行留在核心。整份都在测"
         "`plugins/group_admin/` 那族命令与它们的边界。",
+    "tests/test_timeout_alert.py":
+        "超时通知插件（`plugins/timeout_alert/`；用户 2026-10-12：“还有就是短时间内频繁"
+        "超时则发送邮件通知我”）那一半：窗口 / 门槛 / 降温各是多少、快照读不出来怎么办、"
+        "措辞是不是她那口气（不调模型、不带机制词），外加“发信失败只记一行”与“删掉整个"
+        "插件包核心与 mail 照跑”。它在模块顶层 import `plugins.timeout_alert.*`，装配走的是"
+        "真的 `discover()`——本体侧没有那个插件文件夹，它在那边根本收集不起来。",
     "tests/test_vision.py":
         "识图插件：`describe` 的缓存 / 降级、占位符替换、以及引擎里的接线。"
         "`ImageDescriber` 已从包根搬进 `plugins/vision/`，本体侧没有这个模块。",

@@ -204,7 +204,7 @@ const TAB_NOTES = {
   actions: "清短期会话、调关系、重启 bot",
   history: "面板自己的操作审计（改了什么、什么时候、从哪来）",
   overview: "她现在在不在跑、在哪些群说话、这次重启之后干了多少活",
-  group: "群聊：启停群、群管理动作（以云茹自己的名义执行）",
+  group: "群聊：启停群（每一行一个开关）；群管理动作与入群申请在各自的插件 tab 里",
   private: "私聊：跟谁聊过、聊了几轮（骨架，数据待接）",
   memory: "记忆只能删、不能改：写入只走记忆维护 agent，面板顶多把有问题的删掉（删前先归档）",
   memory_profile: "记忆里的「人物画像」：一个人一张，跟着人走、不按词检索；同样只能删不能改",
@@ -213,7 +213,7 @@ const TAB_NOTES = {
   knowledge_quotes: "金句：从她自己的话里学来的——按群的表情含义表，以及风格 / 语境笔记（可纠正方向、可停用笔记）",
   knowledge_quotes_evidence: "金句审核：她那条被点过表情的原话 + 开口前后的上下文 + 表情 + 结论落到哪条笔记（选一条看一条）",
   knowledge_slang: "黑话：她听到别人解释时记下来的词条（词 / 释义 / 谁解释的与原句 / 听到几次 / 改口）",
-  plugins: "插件：每个插件一个 tab；预装的不给卸，webui 自己也不给卸（骨架，接口待接）",
+  plugins: "插件：每个插件一个 tab，它自己的界面由它自己声明；预装的不给卸，webui 自己也不给卸",
 };
 
 const state = {
@@ -1537,8 +1537,6 @@ async function viewSettings() {
 }
 
 async function viewGroup() {
-  const stateData = await api("/api/state");
-  const pending = await api("/api/approvals/pending");
   // **她所在的全部群**（用户 2026-10-09：*"应当展示云茹所在的所有群聊并展示群名
   // 而不是群号"*）。数据只从 `/api/groups` 来——那是核心 `registry.ui.groups` 那一条
   // 只读窄接缝，**不是**"开过对话的群"（那是 `enabled_group_ids`，只列一部分）。
@@ -1573,30 +1571,6 @@ async function viewGroup() {
     holder.outerHTML = groupRow({ ...known, dialogue_on: on });
     return true;
   };
-  const pendingRows = (pending.rows || []).map((row) =>
-    prefRow(
-      `<div class="pref-title">${esc(row.nickname || row.user_id)}</div>` +
-      `<div class="pref-summary">群 <span class="mono">${esc(row.group_id)}</span>` +
-      ` · QQ <span class="mono">${esc(row.user_id)}</span>` +
-      (row.comment ? ` · 留言：${esc(row.comment)}` : "") + `</div>`,
-      `<button class="join-approve" data-flag="${esc(row.flag)}" data-group="${esc(row.group_id)}">通过</button>
-       <button class="danger join-reject" data-flag="${esc(row.flag)}" data-group="${esc(row.group_id)}">拒绝</button>`,
-      { icon: "join_approve" })).join("");
-  const catalog = await api("/api/actions/preview");
-  // 动作目录保留表格式的排布（它是"一组输入 + 一个执行"的表单矩阵，横着对齐才好填），
-  // 但放进 `.pref-list` 那种卡片里，跟设置页一套外观。
-  const actionRows = (catalog.actions || []).map((action) => `
-    <tr>
-      <td class="mono">${esc(action.group)}</td>
-      <td>${esc(action.label)}</td>
-      <td>${action.needs_target ? '<input class="a-target" type="text" placeholder="QQ 号" size="12">' : ""}</td>
-      <td>${action.needs_text ? `<input class="a-text" type="text" placeholder="${esc(action.needs_text)}">` : ""}</td>
-      <td>${action.needs_message ? '<input class="a-msg" type="text" placeholder="要撤回的消息 id" size="16">' : ""}</td>
-      <td><input class="a-group" type="text" placeholder="群号" size="12"></td>
-      <td><button class="do-action" data-group="${esc(action.group)}" data-kind="${esc(action.kind)}"
-           data-needs-target="${action.needs_target ? 1 : 0}"
-           data-needs-message="${action.needs_message ? 1 : 0}">执行</button></td>
-    </tr>`).join("");
   return `<div class="pref-group"><div class="pref-group-title">她所在的群（${
       num((groupData.rows || []).length)} 个）</div>
       <div class="pref-list">${
@@ -1604,19 +1578,7 @@ async function viewGroup() {
           ? '<p class="hint pref-empty">读不到群列表（核心那条只读接缝这次没给）。</p>'
           : (groups || '<p class="hint pref-empty">她还没进任何群。</p>')}</div></div>
       <div class="row pref-add-group"><input id="group-add" type="text" placeholder="要开启的群号">
-       <button id="group-on">开启</button></div>`
-    + `<div class="pref-group"><div class="pref-group-title">入群申请</div>
-      <div class="pref-list">${
-        pending.available
-          ? (pendingRows || '<p class="hint pref-empty">没有待处理的申请。</p>')
-          : '<p class="hint pref-empty">读不到申请列表（对面没回或没接这条能力）。</p>'
-      }</div></div>`
-    + card("群管理动作", `<p class="hint">以<b>云茹自己</b>的名义执行（她的 QQ 由核心查）；
-       她不是那个群的群主时，群主动作会被核心挡回来。全部动作都要二次确认。</p>
-       <table class="cols-actions">
-       <thead><tr><th class="nowrap">族</th><th class="nowrap">动作</th><th class="nowrap">目标</th>
-         <th>参数</th><th class="nowrap">消息 id</th><th class="nowrap">群号</th><th></th></tr></thead>
-       <tbody>${actionRows}</tbody></table>`);
+       <button id="group-on">开启</button></div>`;
 }
 
 async function viewActions() {
@@ -2177,12 +2139,69 @@ function bind() {
 
 /* ---------- 装配与刷新 ---------- */
 
+/* 把一个**插件自报的块**画出来。
+ *
+ * 面板**不认识任何具体插件**：它只认一套封闭的 `kind`（今天两个：`action_form`
+ * 群管理动作表、`join_queue` 入群申请队列）。块是插件交上来的**数据**，所以每个
+ * 字符串都先 `esc()` 再拼（`card()` 的 body 是 innerHTML）；`read` 那种取数闭包
+ * **由面板后端执行**，浏览器这边只收 `rows`（读失败时后端附带 `error`）。
+ * 不认识的 kind **如实说出来**——不静默丢掉，那才看得出该去更新面板。
+ */
+function renderPluginBlock(block) {
+  const kind = block && block.kind;
+  if (kind === "join_queue") {
+    const pendingRows = (block.rows || []).map((row) =>
+      prefRow(
+        `<div class="pref-title">${esc(row.nickname || row.user_id)}</div>` +
+        `<div class="pref-summary">群 <span class="mono">${esc(row.group_id)}</span>` +
+        ` · QQ <span class="mono">${esc(row.user_id)}</span>` +
+        (row.comment ? ` · 留言：${esc(row.comment)}` : "") + `</div>`,
+        `<button class="join-approve" data-flag="${esc(row.flag)}" data-group="${esc(row.group_id)}">通过</button>
+         <button class="danger join-reject" data-flag="${esc(row.flag)}" data-group="${esc(row.group_id)}">拒绝</button>`,
+        { icon: "join_approve" })).join("");
+    const body = block.error
+      ? `<p class="hint pref-empty">读不到申请列表（对面没回或没接这条能力）：${esc(block.error)}</p>`
+      : (pendingRows || '<p class="hint pref-empty">没有待处理的申请。</p>');
+    return `<div class="pref-group"><div class="pref-group-title">${
+      esc(block.title || "入群申请")}</div>
+      <div class="pref-list">${body}</div></div>`;
+  }
+  if (kind === "action_form") {
+    // 动作目录保留表格式的排布（它是"一组输入 + 一个执行"的表单矩阵，横着对齐才好填），
+    // 放进一张卡片里，跟设置页一套外观。
+    const actionRows = (block.rows || []).map((action) => `
+    <tr>
+      <td class="mono">${esc(action.group)}</td>
+      <td>${esc(action.label)}</td>
+      <td>${action.needs_target ? '<input class="a-target" type="text" placeholder="QQ 号" size="12">' : ""}</td>
+      <td>${action.needs_text ? `<input class="a-text" type="text" placeholder="${esc(action.needs_text)}">` : ""}</td>
+      <td>${action.needs_message ? '<input class="a-msg" type="text" placeholder="要撤回的消息 id" size="16">' : ""}</td>
+      <td><input class="a-group" type="text" placeholder="群号" size="12"></td>
+      <td><button class="do-action" data-group="${esc(action.group)}" data-kind="${esc(action.kind)}"
+           data-needs-target="${action.needs_target ? 1 : 0}"
+           data-needs-message="${action.needs_message ? 1 : 0}">执行</button></td>
+    </tr>`).join("");
+    return card(block.title || "群管理动作", `<p class="hint">以<b>云茹自己</b>的名义执行（她的 QQ 由核心查）；
+       她不是那个群的群主时，群主动作会被核心挡回来。全部动作都要二次确认。</p>
+       <table class="cols-actions">
+       <thead><tr><th class="nowrap">族</th><th class="nowrap">动作</th><th class="nowrap">目标</th>
+         <th>参数</th><th class="nowrap">消息 id</th><th class="nowrap">群号</th><th></th></tr></thead>
+       <tbody>${actionRows}</tbody></table>`);
+  }
+  return '<p class="hint pref-empty">这个面板不认识这种块（kind）——它需要在新版面板里才有得画。</p>';
+}
+
 /* 一个插件自己的页面。
  *
- * 数据来自 `/api/plugins`（背后是只读接缝 `UiSeams.plugins`）。**这一版只显示
- * "这个插件是什么、装没装上、依赖谁、能不能卸"**——每个插件自己的界面还没做，
- * 就如实写"这个插件自己的界面还没做"，不糊一个假界面上去。 */
-function viewPlugin(name) {
+ * 两半拼起来：**清单里的那点信息**（`/api/plugins`，背后是只读接缝
+ * `UiSeams.plugins`）+ **插件自己声明的界面**（`/api/plugin/<名字>`，背后是
+ * `panel_spec` 那条接缝）。面板**不认识任何具体插件**——它只按封闭的 `kind`
+ * 词表画块（`renderPluginBlock`），插件没声明界面就如实说没有，不糊假的上去。
+ */
+async function viewPlugin(name) {
+  // 清单是异步读的：直接落进这一页时它可能还没到（`viewPluginList()` 那个占位
+  // 说的就是这种时候），所以这里补读一次，别拿"清单里没有"冤枉一个装上了的插件。
+  if (!(state.plugins || []).length) await loadPlugins();
   const item = (state.plugins || []).find((row) => row.name === name);
   if (!item) {
     return card(`插件 · ${esc(name)}`,
@@ -2205,10 +2224,33 @@ function viewPlugin(name) {
         : "不给卸（预装的插件只能停用，不能从面板删除）")],
     ["说明", item.note || "（这个插件没写 docstring）"],
   ].map(([label, value]) => kv(label, value)).join("");
-  return card(`插件 · ${esc(item.title || name)}`,
-    `<div class="kv">${rows}</div>`
-    + '<p class="hint">这个插件自己的界面还没做——先把清单接上，'
-    + '让它能出现在这张卡片里。启用/停用也还没做（那要写 data/，不能动 src/）。</p>');
+  let panel = null;
+  let readError = "";
+  try {
+    panel = await api("/api/plugin/" + encodeURIComponent(name));
+  } catch (error) {
+    readError = error.message;
+  }
+  let body = `<div class="kv">${rows}</div>`;
+  if (readError) {
+    body += `<p class="hint">它自己的界面这次没读到：${esc(readError)}`
+      + '——这不是"它没做界面"，先看面板令牌与网络，再刷新。</p>';
+  } else if (panel && panel.available === false) {
+    // 面板**如实说清是哪一种"没有"**，三种原因不许糊成一句"没做"。
+    const why = {
+      no_seam: "面板这边没拿到「插件自报界面」那条接缝（装配点这次没给）——不是插件没交。",
+      unknown: "装配点说没有这个插件，所以也没有它自己的界面。",
+      no_panel: "这个插件没声明自己的界面——它只交了清单里那点信息。",
+    }[panel.reason] || "这个插件自己的界面这次没画出来（原因面板不认识）。";
+    body += `<p class="hint">${esc(why)}</p>`;
+  } else {
+    if (panel && panel.note) body += `<p class="hint">${esc(panel.note)}</p>`;
+    const blocks = (panel && panel.blocks) || [];
+    body += blocks.length
+      ? blocks.map(renderPluginBlock).join("")
+      : '<p class="hint">这个插件没有自己的界面——它只交了清单里那点信息。</p>';
+  }
+  return card(`插件 · ${esc(item.title || name)}`, body);
 }
 
 //: 读插件清单。读不到就保持空数组——卡片会退回一个占位口，**不编列表**。

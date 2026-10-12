@@ -159,6 +159,54 @@ class MemoryService:
         except Exception as exc:  # noqa: BLE001
             logger.warning("memory_status_mark_failed category=%s", type(exc).__name__)
 
+    def note_own_words(self, message, text: str) -> bool:
+        """把**她自己应下的那句话**送进记忆收件箱（2026-10-11「惦记事」）。
+
+        用户口径（逐字）：*"惦记的事由审核agent负责，交给下一轮的回复agent和判定agent…
+        当然，惦记的事同时要交给记忆agent维护"*。所以审核那一趟抓到的半句原话从这里进来。
+
+        为什么走收件箱而不是直接写记忆：**写记录只有维护 agent 一条路**（内容闸、依据闸、
+        近重复、每日上限都挂在那条路上）。这里送进去的是原始材料——和"她真的发过那句话"
+        同一条路，只换了一个 `session_key`（去重键与事件 id 都带上 `#note`），所以既不会
+        跟那条真回复撞车，也不必新增字段或动表。维护 agent 下一拍（≤10 分钟）照自己的
+        规矩把它写成 `intention`。
+
+        刻意**不是当场生效**：她刚说完那句，下一轮立刻再看见"你自己记着的事"就成了复读。
+        """
+
+        if not self.settings.enabled:
+            return False
+        text = (text or "").strip()
+        if not text:
+            return False
+        session_key = getattr(message, "session_id", None) or ""
+        return self.inbox.offer(message, reply=text, session_key=f"{session_key}#note")
+
+    async def own_notes(self, message, *, limit: int = 2) -> tuple[dict, ...]:
+        """她自己记着、还没划掉的那些事（这一轮顺得上就自然问一句）。
+
+        与 `care_note` 是**两样东西**：那是"别人的处境，提过一次就够"；这是"她自己的备忘，
+        没办完就还在"——所以按小时限流、可以提不止一次。拿不到就当没有：不该影响这一轮。
+        """
+
+        group = message.target.group_id
+        if not self.settings.enabled or group not in self.allowed_groups():
+            return ()
+        try:
+            return await asyncio.to_thread(
+                self.store.retrieve_own_notes, group, message.user_id, limit=limit)
+        except Exception as exc:  # noqa: BLE001 - 她自己的备忘拿不到就不提
+            logger.warning("memory_own_notes_failed category=%s", type(exc).__name__)
+            return ()
+
+    async def mark_own_note_noted(self, record_id: str) -> None:
+        """记下"这条备忘这一轮已经带进对话了"（`status` 是一次性，这里是限流）。"""
+
+        try:
+            await asyncio.to_thread(self.store.mark_reminded, record_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("memory_own_note_mark_failed category=%s", type(exc).__name__)
+
     def snapshot(self):
         return {"enabled": self.settings.enabled, "queued_events": self.inbox.queue.qsize(),
                 # 保留期清理掉的条数（2026-10-08 隔离增长审计 [8][9]）：关系流水与墓碑

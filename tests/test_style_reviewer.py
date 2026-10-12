@@ -38,10 +38,12 @@ from qq_roleplay_bot.runtime_flags import RuntimeFlags
 from qq_roleplay_bot.stage3_main import DialogueEngine
 from qq_roleplay_bot.style_reviewer import (
     EMPTY_REPLY_REASON,
+    MAX_NOTE_CHARS,
     MAX_REASON_CHARS,
     REVIEW_SYSTEM_PROMPT,
     StyleReviewer,
-    is_contentless,
+    is_blank,
+    parse_review,
     parse_review_output,
 )
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
@@ -225,18 +227,32 @@ class StyleReviewerTests(unittest.TestCase):
         self.assertEqual(reviewer.stats["calls"], 0)
 
     def test_contentless_drafts_are_blocked(self) -> None:
-        """空回复那一类：空串 / 只有空白 / 只有标点 → **不通过**（机器判，不花调用）。"""
+        """空回复那一类：**只有空白**→ **不通过**（机器判，不花调用）。
 
-        for draft in ("", "   ", "。。。", "……", "，。！？ "):
-            self.assertTrue(is_contentless(draft), repr(draft))
+        2026-10-11 收窄：原来 `。。。`/`……`/`，。！？ ` 也被机器判空回复，现在它们
+        **照常走模型**——用户要的就是"单个标点符号、一个语气词"这种句子偶尔能发出去
+        （"比如'？'或者'。'或者'啥'或者'哦哦'"），这件事机器判不了。
+        """
+
+        for draft in ("", "   ", "\n", " \t "):
+            self.assertTrue(is_blank(draft), repr(draft))
         client = _Client("BLOCK: 什么都不是")
         reviewer = StyleReviewer(client)
         self.assertEqual(asyncio.run(reviewer.review("   ")), (False, EMPTY_REPLY_REASON))
         self.assertEqual(client.requests, [], "空草稿不该花一次调用")
         self.assertEqual(reviewer.stats["calls"], 1)
         self.assertEqual(reviewer.stats["blocked"], 1)
-        # **只有语气词**的交给模型判（她真的可能就回一个嗯），机器不越权替她决定。
-        self.assertFalse(is_contentless("嗯。"))
+
+    def test_single_punctuation_and_particles_reach_the_model(self) -> None:
+        """单标点 / 单语气词**不再被机器拦**，而是照常交给模型判（2026-10-11）。"""
+
+        for draft in ("。", "？", "……", "哦哦", "嗯。", "啥"):
+            self.assertFalse(is_blank(draft), repr(draft))
+        client = _Client("PASS")
+        reviewer = StyleReviewer(client)
+        self.assertEqual(asyncio.run(reviewer.review("？")), (True, ""))
+        self.assertEqual(len(client.requests), 1, "单标点要真的问一次模型，不能机器判死")
+        self.assertEqual(client.requests[0][1]["content"].splitlines()[-1], "待判断的草稿：？")
 
     def test_the_reason_is_passed_the_context_but_never_her_draft_back(self) -> None:
         """交给审核的是现场 + 草稿；它**只回判定行**，不回台词。"""
@@ -323,8 +339,27 @@ class StyleReviewerTests(unittest.TestCase):
         self.assertIn("是**通过**的", REVIEW_SYSTEM_PROMPT)
 
     def test_prompt_covers_the_empty_reply_criterion(self) -> None:
-        for marker in ("空回复", "只有标点", "只有语气词"):
-            self.assertIn(marker, REVIEW_SYSTEM_PROMPT, marker)
+        """第 6 类只管**真的什么都没写**；单标点 / 单语气词另有明文许可（2026-10-11）。"""
+
+        self.assertIn("空回复", REVIEW_SYSTEM_PROMPT)
+        self.assertIn("一个字都没有", REVIEW_SYSTEM_PROMPT)
+        self.assertIn("单发一个标点或一个语气词是允许的", REVIEW_SYSTEM_PROMPT)
+        # 边界：**对方在正面问她**时，一个没有信息量的语气词仍算第 6 类。
+        self.assertIn("对方在正面问她、求她办事", REVIEW_SYSTEM_PROMPT)
+        self.assertIn("那不算回应，判不过", REVIEW_SYSTEM_PROMPT)
+
+    def test_prompt_lets_casual_texture_through(self) -> None:
+        """**口语毛边放行**（2026-10-11，用户："说话太书面化了有感觉吗"）。
+
+        人设那边松了口（允许半句、句末语气词、整句不打句号），审核这边必须同步——
+        否则她写得越随手，越容易被判成第 5 类打回去。守两条边界：
+        毛边放行，但"**只有**语气词"在对她正面提问时仍归第 6 类。
+        """
+
+        self.assertIn("口语的省略不算这一类", REVIEW_SYSTEM_PROMPT)
+        self.assertIn("把她打成书面语才是改坏了", REVIEW_SYSTEM_PROMPT)
+        self.assertIn("口语的毛边", REVIEW_SYSTEM_PROMPT)
+        self.assertIn("句末带一个语气词的正常句子**不**算这一类", REVIEW_SYSTEM_PROMPT)
 
     def test_prompt_forbids_judging_her_taste(self) -> None:
         """**不许审核评价"好不好听 / 像不像她 / 够不够有人味"**（防它又把她磨平）。"""
@@ -427,6 +462,108 @@ class ParseReviewOutputTests(unittest.TestCase):
         self.assertEqual(parse_review_output("```\nBLOCK: 越权。\n```"), (False, "越权。"))
 
 
+class ReviewVerdictNoteTests(unittest.TestCase):
+    """审核顺手带走的那半句（2026-10-11「惦记事」）。
+
+    审核是**唯一在她发出去之前看到成品**的环节，所以她"应下了一件以后要跟的小事"
+    由它顺手抓（用户口径："惦记的事由审核agent负责"）。抓的是**照抄的原话**，
+    它接着会进记忆收件箱、下一拍被写成 `intention`，所以取错了就是"她记着的事
+    被人改过一遍"。这里逐条钉住 `parse_review` / `review_verdict` 对 `NOTE:` 的取法。
+
+    > 测不到什么：真正会不会写 `NOTE:` 是**模型**按 prompt 判的（判据原文在
+    > `REVIEW_SYSTEM_PROMPT` 末尾那一段）；这里只测**它写了之后这边怎么读**。
+    """
+
+    def test_a_pass_with_a_note_keeps_her_own_half_sentence(self) -> None:
+        """`PASS` + 一行 `NOTE:` → `note` 就是那半句原话，理由仍是空的。"""
+
+        verdict = parse_review("PASS\nNOTE: 回头问他那个接口好没")
+
+        self.assertTrue(verdict.passed)
+        self.assertEqual(verdict.reason, "")
+        self.assertEqual(verdict.note, "回头问他那个接口好没")
+
+    def test_a_pass_without_a_note_keeps_the_note_empty(self) -> None:
+        """没应下什么就只写 `PASS`：`note` 必须是空串（不是空白、也不是那行判定本身）。"""
+
+        for raw in ("PASS", "PASS\n", "通过", "OK\n", "```\nPASS\n```"):
+            verdict = parse_review(raw)
+            self.assertEqual(verdict.note, "", raw)
+
+    def test_the_note_is_flattened_to_one_line_and_capped(self) -> None:
+        """`NOTE:` 那一行内的空白压成一个空格；超长截到 `MAX_NOTE_CHARS`。
+
+        上限的由来（判据原文）：它是**照抄的原话**，长了就说明模型在替她总结。
+        """
+
+        self.assertEqual(parse_review("PASS\nNOTE: 回头  问他  那个接口").note,
+                         "回头 问他 那个接口")
+        long_note = "怎" * (MAX_NOTE_CHARS + 40)
+        self.assertEqual(parse_review(f"PASS\nNOTE: {long_note}").note,
+                         long_note[:MAX_NOTE_CHARS])
+
+    def test_only_the_first_note_line_is_kept_and_extra_lines_are_dropped(self) -> None:
+        """只取**第一条** `NOTE:`；第二行（换行接着写）不算进去——prompt 里写明"不要写第二条"。"""
+
+        self.assertEqual(parse_review("PASS\nNOTE: 回头问他那个接口\nNOTE: 明天再看一遍").note,
+                         "回头问他那个接口")
+        self.assertEqual(parse_review("PASS\nNOTE: 回头问他\n那个接口").note, "回头问他")
+
+    def test_a_blocked_draft_never_carries_a_note(self) -> None:
+        """判**不过**时即使模型多写了 `NOTE:` 也不取——那一版不是她要发出去的话。"""
+
+        verdict = parse_review("BLOCK: 越权——在教对方怎么做。\nNOTE: 回头问他那个接口")
+
+        self.assertFalse(verdict.passed)
+        self.assertEqual(verdict.note, "")
+        self.assertEqual(verdict.reason, "越权——在教对方怎么做。")
+
+    def test_a_note_is_copied_verbatim_with_no_filtering(self) -> None:
+        """**照抄就是照抄**：这一行不做任何过滤或清洗（连短码形状也照抄）。
+
+        所以"进去的这一串安全不安全"不归这里管——`MemoryService.note_own_words`
+        那一侧自己过 `safe_memory_text`（凭据 / 本机路径那类在那里被拦）。
+        这条钉的是"这里没有偷偷改写或替她抹掉什么"。
+        """
+
+        raw = "PASS\nNOTE: 行，回头把 ‹A1B2C3D› 那句给他看"
+
+        self.assertEqual(parse_review(raw).note, "行，回头把 ‹A1B2C3D› 那句给他看")
+
+    def test_review_verdict_reads_the_note_through_the_real_call_path(self) -> None:
+        """走 `StyleReviewer.review_verdict`（不只测解析函数）：`NOTE:` 到得了调用方。"""
+
+        reviewer = StyleReviewer(_Client("PASS\nNOTE: 明天问他那个接口好了没"))
+
+        verdict = asyncio.run(reviewer.review_verdict("行，明天我问他那个接口好了没。"))
+
+        self.assertTrue(verdict.passed)
+        self.assertEqual(verdict.note, "明天问他那个接口好了没")
+        self.assertEqual(reviewer.stats["calls"], 1)
+        self.assertEqual(reviewer.stats["blocked"], 0)
+
+    def test_a_retry_that_comes_back_readable_still_carries_the_note(self) -> None:
+        """第一次输出认不出来、重试后才 `PASS` + `NOTE:` → 那半句照样到得了。"""
+
+        reviewer = StyleReviewer(_Client(["我改好了：行，明天问他。",
+                                          "PASS\nNOTE: 明天问他那个接口"]))
+
+        verdict = asyncio.run(reviewer.review_verdict("行，明天我问他那个接口。"))
+
+        self.assertTrue(verdict.passed)
+        self.assertEqual(verdict.note, "明天问他那个接口")
+        self.assertEqual(reviewer.stats["retried"], 1)
+
+    def test_the_prompt_tells_her_judge_when_to_write_a_note(self) -> None:
+        """判据原文里那一段必须在（判过才写、照抄原话、不要第二条、判不过不写）。"""
+
+        self.assertIn("顺手记一笔", REVIEW_SYSTEM_PROMPT)
+        self.assertIn("`NOTE: `", REVIEW_SYSTEM_PROMPT)
+        self.assertIn("照抄她那半句原话", REVIEW_SYSTEM_PROMPT)
+        self.assertIn("不要写第二条", REVIEW_SYSTEM_PROMPT)
+        self.assertIn("判**不过**的时候不写 `NOTE`", REVIEW_SYSTEM_PROMPT)
+
+
 class EngineReviewWiringTests(unittest.TestCase):
     def test_a_rejected_reply_is_rewritten_once_in_the_same_turn(self) -> None:
         reviewer = StyleReviewer(_Client(["BLOCK: 越权——替对方定了对错。", "PASS"]))
@@ -447,6 +584,34 @@ class EngineReviewWiringTests(unittest.TestCase):
         snapshot = engine.snapshot()
         self.assertEqual(snapshot.reply_reviewed, 1)
         self.assertEqual(snapshot.reply_review_rejected_final, 0)
+
+    def test_she_can_refuse_the_rewrite_by_writing_the_same_line_back(self) -> None:
+        """她说"这句我不改"的方式：把原来那句**原样写回来**。
+
+        2026-10-11 用户："审核agent打回后回复agent可以拒绝重写原样发出"。
+        风格这一趟判的是**审美**（措辞、分寸、像不像人），不是"这句话有事实错误"——
+        所以最后由**她自己**决定改不改：逐字相同 = 拒绝，照**第一版**发出去
+        （不是重写的那一版），并记一笔"她拒绝了"。
+        """
+
+        reviewer = StyleReviewer(_Client("BLOCK: 太书面了，像在念稿。"))
+        reply = _Reply("她自己的原话。", "她自己的原话。")   # 第二版：原样写回
+        engine = _engine(reply, reviewer)
+
+        outgoing = asyncio.run(engine.handle(message(text="@YunRu 在吗")))
+
+        self.assertIsNotNone(outgoing)
+        self.assertEqual(outgoing.text, "她自己的原话。", "拒绝之后发的是她原来那一句")
+        self.assertEqual(len(reply.requests), 2, "还是只重写一次，不循环")
+        # 拒绝的**办法**要写在现场提示里（她不会用一句话说出来，说了就变成台词）
+        self.assertIn("原样再写一遍", _last_note(reply))
+        # 只给风格这一趟：另两趟（没把握就别断言 / 别抄短码）必须照改
+        self.assertIn("不合适的地方", _last_note(reply))
+        snapshot = engine.snapshot()
+        self.assertEqual(snapshot.reply_reviewed, 1)
+        self.assertEqual(snapshot.reply_review_rewrite_declined, 1)
+        self.assertEqual(snapshot.reply_review_rejected_final, 0,
+                         "拒绝不是「重写后仍被拒」——那一条计的是照重写版发")
 
     def test_a_rewrite_that_is_rejected_again_is_still_sent(self) -> None:
         """重写后仍被拒 → **发重写的那一版**，最多一次、不许循环、不许丢掉。"""

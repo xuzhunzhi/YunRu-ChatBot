@@ -172,7 +172,10 @@ def _logs(name: str):
 
 
 def test_one_outage_sends_exactly_one_mail_with_the_fixed_template() -> None:
-    """断一次 → **一封**；主题是固定的那一句，正文含【时间】【症状】【怎么办】。"""
+    """断一次 → **一封**；主题固定，正文是**她求人帮忙**的四件事。
+
+    四个锚：第一行说清是什么事、症状、**问句形式的求助**、以及一个原样的时刻。
+    """
 
     registry, sends = _wired()
 
@@ -182,14 +185,21 @@ def test_one_outage_sends_exactly_one_mail_with_the_fixed_template() -> None:
     assert len(sends) == 1, f"断一次该只发一封，实际 {len(sends)} 封：{sends}"
     subject, body = sends[0]
     assert subject == outage_notice.SUBJECT == "云茹断线了", subject
-    # 三段小标题一个都不能少（不必逐字，但这三样是"读得懂"的最低要求）
-    assert "【时间】" in body and "【症状】" in body and "【怎么办】" in body, body
-    # 时间：形如 2026-10-06 21:37:12（+08:00）——操作者不必自己换算时区
-    assert re.search(r"【时间】\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}（[+-]\d{4}）", body), body
-    # 症状：说的是"她收不到也发不出"，不是"协议断了"这类机制话
+    # 第一行：一眼看出是什么事
+    assert body.startswith("我这边断了。"), body
+    # 症状
     assert "收不到" in body and "发不出" in body, body
-    # 怎么办：给的是**动作**（把 NapCat 重开一次），不是"请检查配置"
+    # 求助：给的是**动作**（把 NapCat 重开一次），而且是**在问**，不是在下通知
     assert "NapCat" in body and "重开" in body, body
+    assert "能不能" in body, f"这是求助邮件，动作要用问句提出来：{body}"
+    # 时刻：形如 2026-10-06 21:37:12（+0800）——操作者不必自己换算时区
+    assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}（[+-]\d{4}）", body), body
+    # 方括号那套小标题是**通知腔**，用户 2026-10-11 明确去掉（"这是求助邮件不是通知"）
+    assert "【" not in body and "】" not in body, f"正文里不该再有小标题方括号：{body}"
+    # 结尾那句机制交代也删了（同一天："这封是自动发的不留，不用交代机制"）
+    assert "自动" not in body and "只发一封" not in body, body
+    # 正文到那个时刻就完了：最后一行是时刻，后面没有别的段落
+    assert body.rstrip().splitlines()[-1].startswith("断的时候是 "), body
 
 
 def test_the_body_is_built_without_any_model_call() -> None:
@@ -453,18 +463,28 @@ def test_the_mail_body_carries_no_persona_mechanism_words() -> None:
     assert scan_persona_text(sent_subject) == [], scan_persona_text(sent_subject)
 
 
-def test_the_mail_does_not_speak_in_her_voice() -> None:
-    """**不扮演**：正文不提她的人设、不用第一人称讲自己的状况。
+def test_the_mail_speaks_in_her_voice() -> None:
+    """**用她那口气**（2026-10-11 用户："这里，我认为可以用yunru语气"）。
 
-    用户把措辞交给我们时说的是"写清楚、别扮演"：这封信的收件人是操作者，
-    它该像一封运维告警（谁、什么时候、做什么），不像"云茹写给主人的信"。
+    早先那版是第三人称的运维腔（"她收不到群里的消息"），理由是"告警要一眼看懂"；
+    用户看过线上那封《云茹断线了》之后否掉了它：**看得懂和像她说话不冲突**。
+    这条钉住三样：**第一人称**、**不撒娇不卖惨不叫她主人**、
+    **不许交代机制/自称自动**（2026-10-11 用户："这封是自动发的不留，不用交代机制"——
+    一个人求人帮忙，不会在自己消息末尾附"本条为系统自动发出"），
+    以及"第三人称运维腔不许回来"。
     """
 
     _subject, body = outage_notice.build_notice(1_800_000_000.0)
-    for awkward in ("我觉得", "呜", "人家", "云茹我", "主人"):
+    assert "我这边断了" in body, body
+    assert "我收不到" in body and "我说的话也发不出去" in body, body
+    # 第三人称运维腔（第一版的写法）不许回来
+    assert "她" not in body, f"正文是她自己在说话，不该用第三人称讲她：{body}"
+    # 她的语气里没有撒娇、没有自称、没有称呼
+    for awkward in ("呜", "人家", "云茹我", "主人"):
         assert awkward not in body, f"这封告警不该有 {awkward!r}：{body}"
-    assert "我" not in body, f"正文不该用她的口吻讲自己的状况：{body}"
-    assert "自动发的告警" in body, "要说明这是自动告警（免得被当成她本人写的）"
+    # 不交代机制：不声明"自动发的"、不提"一段只发一封/恢复不发"这类运维口径
+    for mechanised in ("自动", "系统", "程序", "只发一封", "恢复不发", "重新连接"):
+        assert mechanised not in body, f"这是她求人帮忙的话，不该有 {mechanised!r}：{body}"
 
 
 # --- 装配的其余分支：开关与"能力没提供" ---------------------------------------
@@ -572,7 +592,7 @@ def test_the_mail_plugin_provides_the_sender_and_the_outage_uses_it_end_to_end()
     assert len(sends) == 1, f"该正好发一封，实际 {len(sends)}：{sends}"
     assert sends[0]["to"] == dev_config.MAIL_REPORT_TO, sends[0]
     assert sends[0]["subject"] == "云茹断线了"
-    assert "【症状】" in sends[0]["body"]
+    assert "断的时候是" in sends[0]["body"] and "【" not in sends[0]["body"]
 
 
 # --- 这个文件自己的守卫 -------------------------------------------------------

@@ -80,9 +80,12 @@ class EngineSnapshot:
     guard_probe_held: int = 0
     # 风格审核（**只判不改**，2026-10-05）打回、要求重写的条数。
     # `reply_review_rejected_final` 是"重写后仍被拒、照重写的那一版发出"的条数
-    # （它不该是常态：常态是第一次就过，或者重写一次就过）。没配审核时两者恒为 0。
+    # （它不该是常态：常态是第一次就过，或者重写一次就过）。没配审核时三者恒为 0。
+    # `reply_review_rewrite_declined`（2026-10-11）是"她把原来那句**原样写回来**"的条数：
+    # 那等于她说"这句我不改"，照第一版发。风格这一趟才可能发生，另两趟不传这个退路。
     reply_reviewed: int = 0
     reply_review_rejected_final: int = 0
+    reply_review_rewrite_declined: int = 0
     # 审核自己的运行计数（2026-10-05 追加：**把拦截率露出来**，靠数字判松紧，不靠感觉）。
     # `review_calls` 是它判断过的草稿数（含机器判的空回复），`review_blocked` 是判不过的次数，
     # `review_unrecognized` 是"重试一次之后仍读不出判定"的次数（那种情况按通过处理），

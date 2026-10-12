@@ -33,6 +33,9 @@ from .background import JoinApprovalPlugin
 
 logger = logging.getLogger(__name__)
 
+#: 面板上的显示名（`plugins.inventory()` 读它）。
+TITLE = "入群申请"
+
 
 class _RoleSource:
     """"她在某个群里是什么角色"的来源：**共享位上那一份**（现在由核心放上来）。
@@ -102,8 +105,53 @@ def build(*, call_action, notify, roles):
     return JoinApprovalPlugin(poller, interval_seconds=dev_config.APPROVE_POLL_SECONDS)
 
 
+def _pending_reader(call_action, *, limit: int = 50):
+    """本插件那一页的**只读取数闭包**：待处理的入群申请（面板画队列用）。
+
+    为什么解析回到这里（2026-10-11 用户点名的那处接缝）：面板原来替本插件做这件事——
+    `webui_panel._pending_approvals()` 里那句
+    `from ..join_approval.join_approval import JOIN_SUB_TYPE, parse_pending`，
+    是全仓库唯一一处"面板认识具体插件"。拆掉之后**谁的数据谁解析**，面板只拿扁平的
+    `rows`，它自己不再 import 任何兄弟插件。
+
+    只许**读**：这条闭包只调 `get_group_system_msg`。通过 / 拒绝仍走既有的
+    `POST /api/approval`（核心那条已鉴权、已审计的写路由）——描述符里一个写动作都不许有。
+
+    `call_action` 是核心那条**异步**接缝，所以 `read` 本身就是协程；面板那边经既有的
+    `_call()` 跑它（`sync 直调 / awaitable 走 _ASYNC_RUNNER`）。
+    """
+
+    async def read() -> list[dict[str, object]]:
+        if not callable(call_action):
+            return []
+        from .join_approval import parse_pending
+
+        # ⚠️ 这里**不许**加 `isinstance(data, dict)` 那种形状假设：`parse_pending` 认的是
+        # **列表**（`JoinApprovalPoller.tick` 就是 `await call_action(...)` 之后直接交给它）。
+        # 按"dict"判的话真机上永远走那一支 → 这一页**永远说没有申请**，而且一个字都不报错。
+        # 非列表由 `parse_pending` 自己 fail-closed（回空元组）。
+        data = await call_action("get_group_system_msg", {})
+        rows = [
+            {"flag": item.flag, "group_id": item.group_id, "user_id": item.user_id,
+             "nickname": item.nickname, "comment": item.comment}
+            for item in parse_pending(data) if getattr(item, "is_join", False)
+        ]
+        return rows[:limit]
+
+    return read
+
+
 def register(registry) -> None:
     # 角色来源走**共享位**（`registry.shared_roles()`，现在由核心放上来），
     # 并且延后到真正用它的那一刻取——见本模块 docstring 与 `_RoleSource`。
     registry.background(build(call_action=registry.call_action, notify=registry.notify,
                               roles=_RoleSource(registry)))
+    # 本插件自己报那一页：**描述符在函数体内造**，因为取数闭包要用 `registry.call_action`。
+    # 面板那边只会看到 `{"kind": "join_queue", "…", "rows": [...]}`，
+    # 不认识本插件叫什么、也不自己去解析待处理申请（那句直连就是这么拆掉的）。
+    registry.provide_panel("join_approval", {
+        "title": "入群申请",
+        "note": "通过 / 拒绝都会过核心的闸门，并留下审计记录。",
+        "blocks": [{"kind": "join_queue", "title": "入群申请",
+                    "read": _pending_reader(registry.call_action)}],
+    })

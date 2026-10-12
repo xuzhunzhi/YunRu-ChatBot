@@ -34,7 +34,8 @@
      或者把来信**搅碎**成残句（"今天的大大的哈基米"）。由来是
      "哦，看啊，云茹，今天的大大的哈基米。"。
      边界写在同一段里：**原样**接住一句通顺的话再补自己的话 = 通过（用户说这样有意思）。
-   另外补两类：**空回复**（空串 / 只有标点 / 只有语气词）与上面那条**搅碎**。
+   另外补两类：**空回复**（空串 / 只有空白；标点与语气词从 2026-10-11 起不再由机器判，
+   见下面那一节）与上面那条**搅碎**。
 3. **输出认不出来 → 重试一次**（原来直接放行）。重试仍认不出才按通过处理，
    并且记一笔 `unrecognized`——"它又想改写了"是这套东西最该被看见的退化。
 4. **拦截率可见**：`calls` / `blocked` / `unrecognized` / `failed` 进
@@ -45,6 +46,24 @@
 
 第 1 条**不等于**放开手拦：prompt 末尾照旧明写"只看这六类""不负责把话改短、改客气、
 改平稳""'好不好听''像不像她''够不够有人味'不归你管"，她的脾气与情绪仍然不是要拦的东西。
+
+## 2026-10-11 第三次改动：一个字也算话（用户："单个标点符号，一个语气词"）
+
+用户原话：*"我感觉可以来一些比如单个标点符号，一个语气词的这种句子有感觉吗，
+比如"？"或者"。"或者"啥"或者"哦哦""*。同一天早先那条是"说话太书面化了"，
+所以这一条是同一个方向的继续：**她的毛边里也包括"只说一个字"**。
+
+改了两处，**都是放松，不是收紧**：
+
+1. **机器那一档收窄成"只有空白"**（`is_blank`）：原来 `。`、`……`、`，。！？ ` 这些
+   只有标点的草稿在问模型之前就被判空回复。现在它们**照常走模型**——单发一个标点
+   很可能是"接住了眼前这一段"，这件事机器判不了，不该由一条正则替她决定。
+   （代价是这类草稿多花一次审核调用；它本来就少见。）
+2. **第 6 类只在"什么都没写"时命中**，另加一段明文许可：「？」「。」「……」「嗯。」
+   「哦哦」「啥」这种，只要是在接住眼前那一段，一律通过。**留了一条边界**：
+   对方在正面问她、求她办事，而她只回一个没有信息量的语气词或标点（对方问"这个怎么弄"，
+   她回「哦。」）——那不算回应，仍归第 6 类。这条边界靠审核手里的**只读现场**
+   （`stage3_main._review_context`：谁在跟她说话、对方说了什么、现在聊的是什么）判。
 
 ## 历史（为什么它原来是窄职责改写，而不是开放重写）
 
@@ -84,13 +103,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
 # 审核是"多发一条消息之前"的最后一道，不能拖：超时就按通过处理（原稿直发）。
 # 2026-10-10 从 8s 收到 3s（用户拍板）：deepseek-flash 有长尾，8s 等满纯属浪费——
 # 超时本来就放行 ✓ 等得越短越好 ✓。
-REVIEW_TIMEOUT_SECONDS = 3.0
+# 2026-10-11 再从 3s 放到 4.5s（用户拍板）：3s 太紧——当天 158 条回复里有 84 次
+# 是 3s 超时（约 53%），这道判断等于白等一趟还没干活；离线拿 12 条真实草稿量过，
+# 给 8s 预算时它能正确打回 1 条（"把话说成一般规律、讲道理拔到一般结论"），
+# 耗时中位数 2.6s、慢的一档在 4.8~5.9s。4.5s 是把常见那一档收进来，
+# 又不像 8s 那样在最坏情况下白等。
+REVIEW_TIMEOUT_SECONDS = 4.5
 # 理由的长度上限：它是给回复 agent 看的一句话，不是一篇分析。
 MAX_REASON_CHARS = 200
 # 审核输出里常见的"包装"：引号、代码块。
@@ -99,6 +124,10 @@ _FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
 _PASS_RE = re.compile(r"^(?:PASS|OK|通过|没问题|可以)[。.！!\s]*$", re.I)
 #: 判定行：不通过（后面跟理由）。
 _BLOCK_RE = re.compile(r"^(?:BLOCK|REJECT|FAIL|不通过|不过关|驳回)\s*[:：]?\s*", re.I)
+#: **她自己应下的那半句**（2026-10-11「惦记事」）：判过的时候写在 `PASS` 下面那行。
+_NOTE_RE = re.compile(r"^\s*NOTE\s*[:：]\s*(?P<text>.+)$", re.I)
+#: 那半句的长度上限：它是**照抄的原话**，长了就说明模型在替她总结。
+MAX_NOTE_CHARS = 120
 
 REVIEW_SYSTEM_PROMPT = """你在一句话**发出去之前**看一眼它能不能发。你**只判断，不改写**：
 你的输出是"过"或"不过 + 理由"；不过的时候，**由写这句话的人自己重写**，
@@ -124,12 +153,23 @@ REVIEW_SYSTEM_PROMPT = """你在一句话**发出去之前**看一眼它能不�
 5. **不成句**——读不通、拼不出一个意思、词序错乱；**用第三人称说她自己**
    （"云茹今天……"）；或者把对方的来信**搅碎**成没有意义的残句——比如把
    「宝宝你是一个大大的哈基米」搅成「今天的大大的哈基米」。这一类判不过。
-6. **空回复**——草稿是空的、只有标点（"。。。"、"……"）、或者只有语气词（"嗯。""哦。"）。
+   **口语的省略不算这一类**（2026-10-11）：只写半句、句末带"吧/啊/呢/嘛"、重复一个词、
+   整句不打句号——只要意思读得通，一律**通过**。她本来就是随手打字的人，
+   把她打成书面语才是改坏了。
+6. **空回复**——草稿是空的，或者只有空白/换行，一个字都没有。
+
+**单发一个标点或一个语气词是允许的**（2026-10-11）：草稿只有「？」「。」「……」
+「嗯。」「哦哦」「啥」这种，只要它读起来是**接住了眼前那一段**——回一个反应、
+表示"我看见了"、把话头递回去——一律**通过**。她本来就是随手打字的人，一个字也是话。
+**唯一**算第 6 类的情形：对方在正面问她、求她办事，而她只回一个没有任何信息量的
+语气词或标点（对方问"这个怎么弄"，她回「哦。」）——那不算回应，判不过。
+句末带一个语气词的正常句子**不**算这一类。
 
 **只看这六类。** 她的脾气、情绪、语气、冷淡与兴趣都**不是**要拦的东西：
 - 不耐烦、嫌弃、懒得理、突然没兴趣、来了兴致，都放行；写得冲也不算越界；
 - 反问、抢白、吐槽、一句难听的实话，只要不是冲着人去的，一律放行；
-- 长短、有没有"其实/总之"这类口头上的连接词，都不归你管——
+- 长短、口语的毛边（半句、句末语气词、不写句号）、有没有"其实/总之"这类口头上的连接词，
+  都不归你管——
   **你不负责把话改短、改客气、改平稳**，也不要因为"读着不够客气/不够热情"就判不过；
 - **"好不好听""像不像她""够不够有人味"不归你管**：你只判上面那几类明显坏了的，
   不去评价她的味道，也不许拿这几类当借口把她的脾气磨掉。
@@ -141,15 +181,22 @@ REVIEW_SYSTEM_PROMPT = """你在一句话**发出去之前**看一眼它能不�
 - **过**：只写 `PASS`；
 - **不过**：写 `BLOCK: ` 后面跟一句话理由，说清是上面哪一类、草稿里哪一处不合适。
   理由要能让写这句话的人照着重写：**只说不合适在哪，不要给出改好的句子**，
-  也不要替她补上"应该怎么说"。一行就够。"""
+  也不要替她补上"应该怎么说"。一行就够。
+
+**顺手记一笔**（只在你判**过**的时候）：这句话里如果她自己**应下了一件以后要跟的小事**
+（"回头问他那个接口好没""明天再看看""等我查一下"），在 `PASS` 下面另起一行写
+`NOTE: ` 后面**照抄她那半句原话**——一个字都不改，不要补时间、不要解释、不要写第二条。
+没有这种事就**只写 `PASS`**，一行都不要多。判**不过**的时候不写 `NOTE`——
+那一版不是她要发出去的话。"""
 
 #: 空回复的理由（机器判出来的那一档，不花模型调用）。
 EMPTY_REPLY_REASON = "空回复：这一句没有内容。"
 
-#: 只有空白与标点/符号的草稿：一个字的内容都没有。**"只有语气词"不在这里**——
-#: `嗯。`这种要模型判（她真的可能就回一个嗯），机器只拦连词都没有的（空串、`。。。`、`……`）。
-_DRAFT_PUNCTUATION = "。，、！？；：…～~·．,.;:!?\"'“”‘’（）()[]【】《》<>—-－_=+*/\\|"
-_EMPTY_DRAFT_RE = re.compile(r"^[\s" + re.escape(_DRAFT_PUNCTUATION) + r"]+$")
+#: 只有空白才算"没内容"。**标点与语气词都交给模型判**（2026-10-11 用户："我感觉可以来一些
+#: 比如单个标点符号，一个语气词的这种句子…比如"？"或者"。"或者"啥"或者"哦哦""）：
+#: `。`/`……` 不再被机器当成空回复——单发一个标点很可能是"接住了眼前这一句"，
+#: 机器判不了这件事，只有"什么都没有"（空串 / 空格 / 换行）才是机器判得准的那一档。
+_BLANK_DRAFT_RE = re.compile(r"^\s*$")
 
 
 
@@ -175,8 +222,32 @@ def _verdict_is_readable(raw: str) -> bool:
     return bool(_PASS_RE.match(first) or _BLOCK_RE.match(first))
 
 
-def parse_review_output(raw: str) -> tuple[bool, str]:
-    """把审核的输出读成 `(是否通过, 不通过的理由)`。
+@dataclass(frozen=True, slots=True)
+class ReviewVerdict:
+    """一次审核的结果：过不过、不通过的理由、以及（判过时）她自己应下的那半句。
+
+    `note` 是 2026-10-11「惦记事」用的：审核是唯一在她**发出去之前**看到成品的环节，
+    所以她应下了什么由这里顺手抓（用户口径："惦记的事由审核agent负责"）。它**只是原话**，
+    不解释、不改写；记不记、怎么记，由记忆那条路自己决定（`MemoryService.note_own_words`）。
+    """
+
+    passed: bool
+    reason: str = ""
+    note: str = ""
+
+
+def _read_note(rest: str) -> str:
+    """从 `PASS` 后面那几行里取 `NOTE:` 那一行（只取第一条，多的丢掉）。"""
+
+    for line in rest.splitlines():
+        matched = _NOTE_RE.match(line)
+        if matched:
+            return " ".join(matched.group("text").split())[:MAX_NOTE_CHARS]
+    return ""
+
+
+def parse_review(raw: str) -> ReviewVerdict:
+    """把审核的输出读成 `ReviewVerdict`（认不出来一律按**过**，fail-open）。
 
     **认不出来一律按通过**（fail-open）：审核是"多发一条消息之前"的最后一道，
     它自己出问题时，代价必须是"少一次重写"，不能是"她的话被挡下来"。
@@ -185,29 +256,38 @@ def parse_review_output(raw: str) -> tuple[bool, str]:
 
     text = _clean(raw)
     if not text:
-        return True, ""
+        return ReviewVerdict(True)
     first, _, rest = text.partition("\n")
     first = first.strip()
     if _BLOCK_RE.match(first):
         reason = _BLOCK_RE.sub("", first).strip() or rest.strip()
         # 理由也认不出来（只写了 "BLOCK"）时仍算不通过，但理由留空——
         # 调用方照着空理由重写一次，总比"因为审核少写了几个字就放它过去"更符合意图。
-        return False, " ".join(reason.split())[:MAX_REASON_CHARS]
+        # **不通过那一版不取 `NOTE`**：那不是她要发出去的话。
+        return ReviewVerdict(False, " ".join(reason.split())[:MAX_REASON_CHARS])
     if _PASS_RE.match(first):
-        return True, ""
-    return True, ""
+        return ReviewVerdict(True, note=_read_note(rest))
+    return ReviewVerdict(True)
 
 
-def is_contentless(draft: str) -> bool:
-    """整句只有空白、标点或符号 → **没有内容**（空回复那一类）。
+def parse_review_output(raw: str) -> tuple[bool, str]:
+    """旧形状：`(是否通过, 不通过的理由)`。新代码用 `parse_review`。"""
 
-    它是纯函数，所以"空回复"这一档不花模型调用、也没有"判不准"的余地。
-    **只管连词都没有的**：`嗯。`这种只有语气词的交给模型判（她真的可能就回一个嗯），
-    机器不替她决定那句话算不算内容。
+    verdict = parse_review(raw)
+    return verdict.passed, verdict.reason
+
+
+def is_blank(draft: str) -> bool:
+    """整句只有空白（空串 / 空格 / 换行）→ **没有内容**（空回复那一类）。
+
+    它是纯函数，所以"什么都没有"这一档不花模型调用、也没有"判不准"的余地。
+
+    **标点与语气词都不在这里**（2026-10-11）：`？`、`。`、`哦哦` 都交给模型判——
+    单发一个标点或一个语气词，很可能是"接住了眼前这一句"（回一个反应、表示看见了），
+    这件事机器判不了；机器只拦"一个字都没有"的那一档。
     """
 
-    body = (draft or "").strip()
-    return not body or bool(_EMPTY_DRAFT_RE.match(body))
+    return bool(_BLANK_DRAFT_RE.match(draft or ""))
 
 
 class StyleReviewer:
@@ -232,28 +312,36 @@ class StyleReviewer:
         return self.client is not None
 
     async def review(self, draft: str, *, context: str = "") -> tuple[bool, str]:
-        """返回 `(是否通过, 不通过的理由)`；**绝不返回改写后的文本**。
+        """旧形状：`(是否通过, 不通过的理由)`。要看"她自己应下了什么"用 `review_verdict`。"""
 
-        * **空回复**（空白 / 只有标点）由 `is_contentless` 直接判不过，不问模型；
+        verdict = await self.review_verdict(draft, context=context)
+        return verdict.passed, verdict.reason
+
+    async def review_verdict(self, draft: str, *, context: str = "") -> ReviewVerdict:
+        """返回一次审核的全部结果；**绝不返回改写后的文本**。
+
+        * **空回复**（只有空白）由 `is_blank` 直接判不过，不问模型；
+          标点与语气词（`？`、`。`、`哦哦`）**交给模型判**，机器不替她决定那句话算不算回应；
         * 输出**认不出来**时重试一次（把格式要求再说一遍），仍认不出才按**通过**处理；
-        * 超时、报错一律按**通过**处理：`(True, "")`——审核自己坏掉不能变成她不说话。
+        * 超时、报错一律按**通过**处理：原稿直发——审核自己坏掉不能变成她不说话；
+        * 判**过**的时候，`note` 可能是她自己应下的那半句原话（`NOTE:` 那一行）。
 
-        理由是给人看的一句话，正文永远来自回复 agent 自己。
+        理由与 `note` 都是给人看的一句话，正文永远来自回复 agent 自己。
         """
 
         if self.client is None:
-            return True, ""
-        if is_contentless(draft):
+            return ReviewVerdict(True)
+        if is_blank(draft):
             # 没内容不是"判不准"，所以不放行、也不花一次调用（理由照旧给写话的人）。
             self.stats["calls"] += 1
             self.stats["blocked"] += 1
             logger.info("style_review_blocked reason=empty draft=%s", len(draft or ""))
-            return False, EMPTY_REPLY_REASON
+            return ReviewVerdict(False, EMPTY_REPLY_REASON)
         self.stats["calls"] += 1
         messages = self._messages(draft, context)
         raw = await self._ask(messages)
         if raw is None:
-            return True, ""
+            return ReviewVerdict(True)
         if not _verdict_is_readable(raw):
             # 模型没按格式写（空输出 / 直接把台词抄了一遍 / 讲了一段分析）：
             # **重试一次**再决定，别拿"它又想改写了"当判定。
@@ -261,18 +349,18 @@ class StyleReviewer:
             logger.info("style_review_unreadable_retrying draft=%s", len(draft))
             retry_raw = await self._ask(self._format_reminder(messages))
             if retry_raw is None:
-                return True, ""
+                return ReviewVerdict(True)
             if not _verdict_is_readable(retry_raw):
                 # 重试仍认不出 → 放行（少一次重写），但记一笔：这是最该被看见的退化。
                 self.stats["unrecognized"] += 1
                 logger.info("style_review_unrecognized reason=no_verdict draft=%s", len(draft))
-                return True, ""
+                return ReviewVerdict(True)
             raw = retry_raw
-        passed, reason = parse_review_output(raw)
-        if passed:
-            return True, ""
+        verdict = parse_review(raw)
+        if verdict.passed:
+            return verdict
         self.stats["blocked"] += 1
-        return False, reason
+        return verdict
 
     async def _ask(self, messages: list[dict[str, str]]) -> str | None:
         """问一次审核模型。超时/报错返回 `None`（并记 `failed`），由调用方按通过处理。"""
@@ -310,7 +398,8 @@ class StyleReviewer:
 
         return [*messages, {
             "role": "user",
-            "content": "只回一行：`PASS`，或者 `BLOCK: ` 加一句话理由。不要写别的。",
+            "content": "只回一行：`PASS`（她要是应下了什么，再跟一行 `NOTE: ` 照抄她那半句），"
+                       "或者 `BLOCK: ` 加一句话理由。不要写别的。",
         }]
 
     def snapshot(self) -> dict[str, int]:

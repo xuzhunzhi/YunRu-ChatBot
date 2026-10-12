@@ -97,6 +97,14 @@ class _Service:
     async def mark_care_noted(self, record_id):
         return None
 
+    async def own_notes(self, message, *, limit: int = 2):
+        """「她自己记着的事」；这些用例不关心它。"""
+
+        return ()
+
+    async def mark_own_note_noted(self, record_id):
+        return None
+
     def snapshot(self) -> dict:
         return {"queued_events": 0}
 
