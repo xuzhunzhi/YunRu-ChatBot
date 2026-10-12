@@ -578,7 +578,9 @@ def main(argv: list[str]) -> int:
     if nowhere:
         tail += f"另有 {len(nowhere)} 项在包根与 plugins/ 下都找不到。"
     if couplings:
-        tail += f"另有 {len(couplings)} 项核心↔插件拴缚检查全部走注册表。"
+        # 措辞用“与”不用 `↔`：那个箭头不在 GBK 字库里，默认控制台（GBK）会在这最后
+        # 一行 print 上抛 UnicodeEncodeError——检查全过了、门槛却退 1（2026-10-12 实测）。
+        tail += f"另有 {len(couplings)} 项核心与插件拴缚检查全部走注册表。"
     if missing_couplings:
         tail += (f"另有 {len(missing_couplings)} 项拴缚名单里的插件在这条线上不存在，"
                  f"探不了。")

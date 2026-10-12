@@ -1389,9 +1389,11 @@ class DialogueEngine:
             # `guard_probe_held` 是"有人打探她怎么做出来的，所以这一轮不接"的次数
             # （2026-10-09 加）：它**不写关系轴**，只是"这一轮没开口"的出口。
             "guard_raised", "guard_rejected", "guard_probe_held",
-            # 风格审核（只判不改）：被打回、要求重写的条数，以及"重写后仍被拒、
-            # 照重写的那一版发出"的条数（没配审核时两者恒为 0）。
+            # 风格审核（只判不改）：被打回、要求重写的条数，"重写后仍被拒、
+            # 照重写的那一版发出"的条数，以及"她把原来那句原样写回来 = 拒绝改"
+            # 的条数（2026-10-11；没配审核时三者恒为 0）。
             "reply_reviewed", "reply_review_rejected_final",
+            "reply_review_rewrite_declined",
             # 识图成功几次（把 `[图片]` 换成描述的次数；没配识图时恒为 0）。
             "media_described",
             # 「没把握就别断言」（旧名"不懂就问"）：`clarify_quiet` 是"没被叫到、没把握、
@@ -1567,7 +1569,8 @@ class DialogueEngine:
 
     def _revision_request(self, request: list[dict[str, str]], draft: str,
                           reason: str, *, note: str = "",
-                          redact: tuple[str, ...] = ()) -> list[dict[str, str]]:
+                          redact: tuple[str, ...] = (),
+                          allow_decline: bool = False) -> list[dict[str, str]]:
         """把"这一版被退回来了"接在**同一份请求**后面。
 
         为什么不重新拼一遍整个请求：`build_dialogue_messages` 有十几个参数，抄一遍
@@ -1585,6 +1588,18 @@ class DialogueEngine:
         只有"回复抄了边界短码"那一趟用它——否则"你刚写的是：…‹7K3Q9ZM›…"会把那个
         短码**又递回给她一次**，等于一边说不许抄、一边示范一遍。抹掉的位置写
         `（那串记号）`，她看得到"这里原本有个记号"，但拿不到可抄的字串。
+
+        `allow_decline`（2026-10-11，用户："审核agent打回后回复agent可以拒绝重写
+        原样发出"）：**只给风格审核那一趟**用。文字上把"拒绝"的办法说清楚——她
+        能说的话只有要发出去的那一句，所以拒绝的表达方式就是**原样再写一遍**；
+        引擎把"重写版与第一版逐字相同"读成"她认为原来那句本来就没问题"。
+
+        2026-10-11 第二次改（真机探针实测 9 组：给她退路 0 次用，宁可顺着改一点）：
+        用户裁决"只把提示写硬一点"——补上"这不算顶嘴、不会因为这个再退回来、
+        改不改你定"。**不改机制**：打回仍然打回，只是把"她可以不认"说到明处。
+
+        为什么只给它：另外两趟里，"没把握就别断言"与"别抄不可信短码"都不是审美，
+        是**这一版确实有问题**；那两趟必须照打回的要求改，不设退路。
         """
 
         shown = draft or ""
@@ -1592,6 +1607,12 @@ class DialogueEngine:
             if token:
                 shown = shown.replace(token, "（那串记号）")
         note_block = f"\n{note.strip()}\n" if note.strip() else ""
+        decline_block = (
+            "\n要是你觉得原来那句本来就没问题、改了反而更差，就把原来那句"
+            "**原样再写一遍**（一个字都别改）——那我就照它发出去，"
+            "不会因为这个再退回来。这不算顶嘴：改不改，你定。"
+            if allow_decline else ""
+        )
         body = (
             "--- 你刚写的那一句要重来 ---\n"
             f"你刚写的是：{shown}\n"
@@ -1599,6 +1620,7 @@ class DialogueEngine:
             f"{note_block}\n"
             "照这个地方**重写一遍**——只改不合适的那处，别的不用动。"
             "不要解释、也不要提这一段，像平常那样把新的一句说出来。"
+            f"{decline_block}"
         )
         return [*request, {"role": "user", "content": body}]
 
@@ -1606,7 +1628,8 @@ class DialogueEngine:
                                     session_id: str, trigger: str, trigger_kind: str,
                                     context: str, known_message_ids: frozenset[str],
                                     must_reply: bool, note: str = "",
-                                    redact: tuple[str, ...] = ()) -> str | None:
+                                    redact: tuple[str, ...] = (),
+                                    allow_decline: bool = False) -> str | None:
         """打回之后：**在同一轮里**让回复 agent 重写一次。返回新正文或 `None`。
 
         两个调用方共用这一条路（**不另造机器**）：
@@ -1626,9 +1649,17 @@ class DialogueEngine:
           （`reply_review_rejected_final`）——审核打回不是否决权；
         * 走的是同一个回复 client（`_client_for`）、同一条调用路径与同一份账本，
           没有另造一套客户端。
+
+        `allow_decline`（2026-10-11，用户："审核agent打回后回复agent可以拒绝重写
+        原样发出"）：**只有风格审核那一趟传 True**。她的拒绝没法用一句话说出来
+        （说什么都会变成发出去的那条），所以约定俗成：把原来那句**原样再写一遍**
+        就是"不改"。这里认出这种重写 → 记一笔 `reply_review_rewrite_declined`、
+        返回 `None`（调用方照第一版发）。**这是她对自己那句话的最后一次发言权**：
+        审核能说"不行"，但不能替她把话改成另一句。
         """
 
-        retry_request = self._revision_request(request, draft, reason, note=note, redact=redact)
+        retry_request = self._revision_request(request, draft, reason, note=note,
+                                               redact=redact, allow_decline=allow_decline)
         self._stats["model_calls"] += 1
         started_at = self.clock()
         try:
@@ -1647,6 +1678,12 @@ class DialogueEngine:
                                          must_reply=must_reply)
         if rewritten.kind is not DecisionKind.REPLY or not rewritten.text:
             logger.warning("Stage 3 rewrite after review came back empty；按第一版发出")
+            return None
+        if allow_decline and rewritten.text.strip() == (draft or "").strip():
+            # 她把原来那句原样写回来了 = "我不改"：按第一版发，记一笔（只记数，不记正文）。
+            self._stats["reply_review_rewrite_declined"] += 1
+            logger.info("Stage 3 rewrite declined by the reply agent: chars=%s",
+                        len(rewritten.text))
             return None
         if self.style_reviewer is None:
             # 没配审核（或审核被关掉）时，这一条路只有"打回重写"这一半：
@@ -3943,6 +3980,12 @@ class DialogueEngine:
             f"今天还能重试：{status['tries_left_today']} 次",
             f"本次进程：成功 {status['sent']} 封，失败 {status['failures']} 次",
         ]
+        pending = status.get("pending_report") or {}
+        if pending:
+            lines.append(
+                f"有一封写好了还没寄出去（{pending.get('day') or '?'} 写的"
+                f"「{pending.get('subject') or '（无主题）'}」）：下次到点先把它原样寄出去。"
+            )
         sends = status.get("last_sends") or []
         if sends:
             lines.append("最近几次：")
@@ -3964,13 +4007,30 @@ class DialogueEngine:
                 )
         return "\n".join(lines)
 
+    def _report_seams_for_mail(self):
+        """日报要用的那份接缝（`ReportSeams`）。
+
+        **不能把引擎自己当接缝递给 `run_once`**：`collect_materials` 张口就是
+        `report.snap()`，而引擎上那个方法叫 `snapshot()`（也没有 `remember_letter`，
+        它叫 `note_letter`）——所以 2026-10-11 之前 `/super mail send` 一按就
+        `AttributeError`。装配点在 `runtime.py` 里把 `ReportSeams` 挂在
+        `engine.plugin_registry.report` 上，这里取那一份。
+        """
+
+        registry = getattr(self, "plugin_registry", None)
+        seams = getattr(registry, "report", None)
+        return seams
+
     async def _mail_send_now(self) -> str:
         """立刻写一封发出去。用来"跑通一次"，也给超管一个不等到 23:00 的办法。"""
 
         reporter = getattr(self, "daily_reporter", None)
         if reporter is None:
             return "每日汇报未启用，无法发送。"
-        draft = await reporter.run_once(self, force=True)
+        seams = self._report_seams_for_mail()
+        if seams is None:
+            return "没有找到日报的接缝（插件装配没走到），这次不发。"
+        draft = await reporter.run_once(seams, force=True)
         if draft is None:
             return "这次没发出去（写不出来或发送失败）。看看日志里的原因。"
         return f"已寄出：{draft.subject}（正文 {len(draft.body)} 字）。"
@@ -4194,6 +4254,20 @@ class DialogueEngine:
                       "memory_on": group_id in self.memory_group_ids}
                      for group_id in known)
 
+    def _forget_groups_cache(self) -> None:
+        """名单一变就把群列表缓存作废（否则面板最长 600 秒还画着旧状态）。
+
+        2026-10-11 用户报"webui 里的记忆开关不生效"：开关**本身**每次现读都对，
+        坏的是记忆页那一列状态——它来自 `list_groups()`，而那份列表只在
+        `groups_cache_seconds()`（默认 600 秒）到期时才重算，`memory_on` 是
+        **填缓存那一刻**算的。于是关掉之后整页重画/切页回来又变回"开"（生产
+        审计里那颗开关 71.5 秒内被点了两次，就是这么来的）。名单一变就作废：
+        缓存只省"OneBot 打得太勤"，不再兼任"状态的旧快照"。
+        """
+
+        self._groups_cache = ()
+        self._groups_cache_at = 0.0
+
     def enable_group(self, group_id: str) -> bool:
         # 群号必须是 **ASCII 数字**（`isdigit()` 对全角数字也返回真，而那不是 QQ 号）
         if not (group_id.isascii() and group_id.isdigit()) or not 5 <= len(group_id) <= 12:
@@ -4201,6 +4275,7 @@ class DialogueEngine:
         before = group_id in self.enabled_group_ids
         self.enabled_group_ids.add(group_id)
         if not before:
+            self._forget_groups_cache()
             self.persist_state()
         return not before
 
@@ -4211,6 +4286,7 @@ class DialogueEngine:
         was_enabled = group_id in self.enabled_group_ids
         self.enabled_group_ids.discard(group_id)
         if was_enabled:
+            self._forget_groups_cache()
             session_id = f"group:{group_id}"
             self.sessions.leave(session_id)
             # **只清"调度/待发"这类东西，不碰会话历史与记忆**：用户 2026-10-08 定死
@@ -4240,6 +4316,7 @@ class DialogueEngine:
         before = group_id in self.memory_group_ids
         self.memory_group_ids.add(group_id)
         if not before:
+            self._forget_groups_cache()
             self.persist_state()
         return not before
 
@@ -4257,6 +4334,7 @@ class DialogueEngine:
         was_enabled = group_id in self.memory_group_ids
         self.memory_group_ids.discard(group_id)
         if was_enabled:
+            self._forget_groups_cache()
             self.persist_state()
         return was_enabled
 
@@ -4823,7 +4901,11 @@ class DialogueEngine:
         # --- 焦点门：同一时刻只有一段对话在当值 -------------------------------
         # 热群照常处理（它正在当值）；私聊不进焦点，与群并行、优先处理；
         # 其余（冷群）只把消息记成背景，**明确找她**的进队列：
-        #   @ 她 → 先回一句"稍等"（同群 120 秒冷却）；提及/引用 → 静默进队列。
+        #   提及/引用 → 静默进队列；@ 她 → **也静默进队列**。
+        # 被 @ 不等于必须出声（2026-10-11 用户："被艾特到可以不说话"）：她可以
+        # 排到队里，轮到她了再由判定决定接不接。**只有这个群真的积压了**
+        # （队列里已经有别人在等）才回一句"稍等"（同群 120 秒冷却）——用户原话：
+        # "只有积压的才会说必须回复一下，因为积压的时候会回复等会回你这种规则性发送的话"。
         # 没有人在当值时，走下面的 20 条巡检路子；巡检同一时刻只跑一个。
         if group_chat and not allowed_private and not is_admin_control and not resumed:
             if not self.focus.is_hot(message.session_id):
@@ -4845,7 +4927,11 @@ class DialogueEngine:
                             message.session_id,
                             queued,
                         )
-                        if message.is_bot_mentioned and self.focus.ack_allowed(message.session_id, now):
+                        # 积压才开口：`queued` 是这一条入队之后的深度。深度 1 说明
+                        # 她是第一个在等的——那就先不出声（轮到她了，判定还能不接）；
+                        # 深度 ≥2 说明这个群已经有人在等，回一句"稍等"才是真的在交代。
+                        if (queued > 1 and message.is_bot_mentioned
+                                and self.focus.ack_allowed(message.session_id, now)):
                             self.focus.note_ack(message.session_id, now)
                             ack = self._pick_ack()
                             # 回过"稍等"的，之后必须给结果：判定不许否决它。
@@ -5006,6 +5092,11 @@ class DialogueEngine:
         # 判定说"这一句在问她的世界吗"——只有 YES 才去翻世界观资料（单 agent 模式照旧查）。
         lore_wanted = True
         care_note: dict | None = None
+        # 「惦记事」（2026-10-11）：她自己记着、还没划掉的事（"回头问他那个接口好没"）。
+        # 与 `care_note` 是两样东西：那是"别人的处境，提一次就够"，这是"她自己的备忘，
+        # 没办完就还在"——所以按小时限流、可以提不止一次，而且**判定与回复两边都看得到**
+        # （用户口径："交给下一轮的回复agent和判定agent（判定这边我不是很确定，你看着办）"）。
+        own_notes: tuple[dict, ...] = ()
         # 「没把握就别断言」这条路的确定性结论（`ask_when_unsure`）：第一道在判定刚回来时
         # 就能算（没被叫到又没懂 → 直接不出声），第二道要等资料取完才算得出来
         # （三处根据一样都没有 + 被叫到 → 之后要看她的草稿）。
@@ -5092,6 +5183,8 @@ class DialogueEngine:
                 message,
                 topic_shifted=bool(self._judge_on(message.session_id) and not verdict_related),
             )
+            # 「惦记事」：她自己的备忘（最多两条；拿不到就是空元组）。
+            own_notes = await self.memory_service.own_notes(message)
         # 「没把握就别断言」的第二道：**根据检查**（确定性，模型"觉得自己懂"绕不过它）。
         # 三种根据——知识库命中 / 记忆命中 / 语境明确——一样都没有、判定又说这是具体的
         # 专业·事实话题（或者判定说她没懂）时：**没被叫到就不出声**；被叫到照常开口，
@@ -5158,6 +5251,7 @@ class DialogueEngine:
             stance=self._stance_for(message),
             profile_note=profile_note,
             care_note=care_note,
+            own_notes=own_notes,
             # 「她写出去的信」：不问也该知道刚寄出的那一封，问起时能翻出最近一封。
             # 只有收信人本人能看到内容（`_letter_note` 里判）。
             letter_note=self._letter_note(message),
@@ -5227,15 +5321,29 @@ class DialogueEngine:
         # 在**同一轮**里重写一次（最多一次，不许循环）；重写后仍被拒 → **发重写的那一版**
         # （绝不把回复丢掉、也不卡住），并记一笔。审核超时/报错/输出认不出来一律按通过。
         # `review_enabled` 是运行期开关（面板可关）——关掉就是原稿直发。
+        # **`allow_decline=True`（2026-10-11，用户："审核agent打回后回复agent可以拒绝重写
+        # 原样发出"）**：这一趟是**审美**（措辞、分寸、不像人），不是"这句话有事实错误"，
+        # 所以由**她自己**决定改不改——把原来那句原样写回来 = 拒绝，照第一版发。
+        # 另两趟（「没把握就别断言」、「别抄不可信短码」）不传这个参数：那两趟是这一版
+        # 确实有问题，必须照改，不设退路。
         # `style_rewrote` 记"**风格审核**已经把这一次重写用掉了"（见下面那一关）：
         # 它负责的是"审核与「没把握就别断言」**共用同一次**重写机会"这条规矩。
         style_rewrote = False
         if (self._flags().review_enabled and self.style_reviewer is not None
                 and decision.kind is DecisionKind.REPLY
                 and decision.text):
-            passed, reason = await self.style_reviewer.review(
+            checked = await self.style_reviewer.review_verdict(
                 decision.text, context=self._review_context(message, state))
-            if not passed:
+            # 「惦记事」的**入口**（2026-10-11 用户："惦记的事由审核agent负责"）：审核是唯一
+            # 在她**发出去之前**看到成品的环节，所以她刚应下的那半句原话由这里顺手抓走。
+            # 它进的是**记忆收件箱**（原始材料那条路，不是直接写记录——写记录只有维护 agent
+            # 一条路）；维护 agent 下一拍照自己的规矩把它写成 `intention`。
+            # **刻意不当场生效**：她刚说完那句，下一轮立刻再看见"你自己记着的事"就是复读。
+            if checked.passed and checked.note and self.memory_service is not None:
+                if self.memory_service.note_own_words(message, checked.note):
+                    logger.info("Stage 3 own note captured chars=%s", len(checked.note))
+            if not checked.passed:
+                reason = checked.reason
                 self._stats["reply_reviewed"] += 1
                 logger.info(
                     "Stage 3 reply rejected by review: reason=%s draft=%s",
@@ -5246,6 +5354,7 @@ class DialogueEngine:
                     context=self._review_context(message, state),
                     known_message_ids=frozenset(message_ids),
                     must_reply=self._judge_on(message.session_id),
+                    allow_decline=True,
                 )
                 style_rewrote = True
                 if rewritten is not None:
@@ -5389,6 +5498,12 @@ class DialogueEngine:
                 # 时机选在这里而不是"发送成功之后"：宁可万一发失败少提一次，
                 # 也不能因为重试把同一件事提醒两遍（那正是要防的唠叨）。
                 await self.memory_service.mark_care_noted(care_note["id"])
+            if own_notes and self.memory_service is not None:
+                # 「惦记事」：她自己的备忘**不是一次性的**（没办完就还得记着），所以这里
+                # 只更新"上次说起它"的时刻，隔 `INTENTION_REPEAT_HOURS` 小时才会再拿出来。
+                # 与上面同口径：把这一轮带进对话的那几条都记一笔，不分辨她具体提了哪一条。
+                for note in own_notes:
+                    await self.memory_service.mark_own_note_noted(note["id"])
             # 她真的开口了 → 这段对话开始"当值"。
             # 往后这段时间里，别的群"明确找她"的消息只排队 + 回一句"稍等"。
             if group_chat:
@@ -5785,9 +5900,14 @@ class DialogueEngine:
         """
 
         identity = ""
+        own_notes: tuple[dict, ...] = ()
         if self.memory_service is not None:
             material = await self.memory_service.identity_for(message)
             identity = material.as_judge_note(message.target.group_id, message.user_id)
+            # 「惦记事」：她自己记着的事，判定这边一样只看得到、只是 DATA（"判定这边我不是
+            # 很确定，你看着办"——看着办的结果是**给它**：判定要判"还在不在同一条线上"，
+            # 而"她答应过回头问一句"正是这条线上的一件事）。
+            own_notes = await self.memory_service.own_notes(message)
         request = build_judge_messages(
             state.topic_history(),
             current=message,
@@ -5809,6 +5929,7 @@ class DialogueEngine:
             # 它自己看到的数据里（回复段则当场就用新值）。
             stance=self._stance_for(message),
             identity=identity,
+            own_notes=own_notes,
             # 判定也要知道现在什么时候：它判断"还在不在同一条线上"靠的正是
             # "刚才/昨天晚上/三天前"这类说法（2026-09-30 加）。
             # 与回复那条路同源：`self.wall_clock()`（墙上时间），不是 `self.clock()`。

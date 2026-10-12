@@ -10,7 +10,8 @@ plugins/
 ├── join_approval/       入群审批：白名单 → 黑名单 → 正则 → 模型兜底
 ├── vision/              识图：把图片消息换成一句描述
 ├── webui/               控制面板：本地与远程两套接入 + 前端资源
-└── mail/                邮件通道：读信回信 + 每日汇报
+├── mail/                邮件通道：读信回信 + 每日汇报
+└── outage_notice/       掉线通知：断一次给操作者发一封固定模板的邮件（依赖 mail）
 ```
 
 ## 契约
@@ -28,6 +29,7 @@ plugins/
 装进来的插件**可以**声明下面三个（都不是必需的，老插件一个字不改照样装）：
 
     VERSION = "1.2.3"   # 插件版本（面板展示；以后安装时用它比对身份）
+    TITLE = "邮件"       # 面板上的**显示名**（`inventory()` 读它；不写就显示模块名 = 那个丑的）
     HOST_API = 1        # 宿主接口版本：不声明就放行；声明了必须等于 `API_VERSION`，否则拒绝加载
     # SOURCE 不用自己写——它由加载根算出来（`plugin_source()`）
 
@@ -37,9 +39,10 @@ plugins/
     registry.report                   # ReportSeams：写日报要的五项
     registry.ui                       # UiSeams：控制面板要的十项
     registry.link                     # LinkSeams：掉线事件（on_disconnect(接收者)）
+    registry.mail                     # MailSeams：发一封给操作者的普通邮件（provide/notify）
     registry.call_action / notify     # 动作与通知（后台插件用）
-    registry.roles / loop             # 前置插件放上来的共享能力 / 事件循环
-    registry.shared_roles()           # 取前置插件放上来的角色查询
+    registry.roles / loop             # 预留（**未接线**） / 事件循环
+    registry.shared_roles()           # 共享位：角色事实（**核心**放上来的那一份）
     registry.command(plugin)          # 一条命令插件
     registry.background(plugin)       # 一条后台节拍（有 name/interval_seconds/poll_once）
     registry.provide_roles(cache)     # 前置插件：把共享能力放上来
@@ -47,6 +50,7 @@ plugins/
     registry.provide_prompt(name, t)  # 某套 prompt 的**内置原稿**（识图那套走这里）
     registry.provide_group_action(g, f)  # 群管理动作的**执行函数**（见下）
     registry.provide_owner_channel(c)  # 渠道声明"可以声明这条来自主人"（见下）
+    registry.provide_panel(name, spec)  # 插件自报界面：纯数据描述符（+最多一个只读取数闭包）
     registry.vision = factory         # 一个"看一眼图"的工厂（`(usage_store) -> 识图器`）
 
 **这里没有 `engine`**（2026-10-01 改）：引擎上有 `transport` 与三份权限名单，
@@ -61,9 +65,14 @@ plugins/
 ## 为什么这样切
 
 - **可单独拿走**：不想要识图，删掉 `vision/` 就行；核心对它的引用都是"没有就降级"。
-  2026-10-05 起这句是**结构上**成立的：核心连"识图"这个模块名都不提了——识图器由
+  2026-10-05 起这句在**运行路径上**成立：核心**不再 import 那个模块**——识图器由
   `vision` 插件经 `registry.vision` 给一个工厂、它的 prompt 由
-  `registry.provide_prompt("vision", …)` 登记，删掉那个文件夹就是"这次部署没有识图"。
+  `registry.provide_prompt("vision", …)` 登记，删掉那个文件夹就是"这次部署没有识图"
+  （实测：`tests/check_module_removal.py` 拦掉整棵子树后 `build_engine()` 照起）。
+  **一处例外要如实说**（2026-10-05 核对时发现）：`prompt_library._vision_plugin_present()`
+  用 `importlib.util.find_spec("qq_roleplay_bot.plugins.vision.vision")` 问"那个模块在不在"
+  （面板的 `available()` 不许在插件被藏起来时撒谎）。**它提了模块名，但不 import**，
+  所以"删掉照跑"仍然成立；只是"核心一个字都不提那个模块名"这句**不成立**，别那么写。
 - **群管理动作也走这条口**（2026-10-06 补）：动作的**判定与执行仍在核心**
   （`stage3_main.execute_action` 判权限、过闸门、审计），核心只是不再自己去
   `import` 插件里的执行函数——`group_admin` 插件在 `register()` 里用
@@ -97,10 +106,24 @@ plugins/
   把看门狗本来就有的状态变成**确定的边沿**（`在线 → 掉线` 算一段），再在
   `registry.link` 上广播**"断了"这个事实**。谁来接、拿它做什么（发信 / 记日志 /
   面板弹一条）都是插件的事；核心不知道有邮件这回事，也不会去发。见 `LinkSeams`。
-- **`roles/` 也是插件**（2026-10-01 用户）："一个东西搬进插件另一个插件失效不代表
-  前者不能作为插件，只需要把前者作为前置插件就行。" 群管理与入群审批都要它，
-  所以它是**前置插件**：`group_admin` / `join_approval` 声明 `REQUIRES = ("roles",)`。
-  "B 依赖 A"从来不是 A 该进核心的理由——那样换思维链路时 A 会跟着核心一起被换掉。
+  接它的那一个（`outage_notice/`）**依赖 `mail`**：`REQUIRES = ("mail",)`，方向不许反，
+  见 `MailSeams`。
+- **`roles/` 曾经也是插件**（2026-10-01 用户）："一个东西搬进插件另一个插件失效不代表
+  前者不能作为插件，只需要把前者作为前置插件就行。" 当时群管理与入群审批都要它，
+  所以它是**前置插件**：那两个声明 `REQUIRES = ("roles",)`。那句话本身仍然成立
+  （"B 依赖 A"不是"A 该进核心"的理由，现在活着的正例是 `outage_notice → mail`）。
+  **但 2026-10-05 变了**：用户把**身份/权限事实**判给核心，角色就是这种东西，
+  于是那两个插件的 `REQUIRES` 撤掉了，角色改由**核心**放进共享位
+  （本体 `1c5fcf3`：`runtime.build_engine` 在 `discover()` 之前
+  `registry.provide_roles(engine.group_roles)`；插件问 `registry.shared_roles()`）。
+  `group_admin` 更是连角色查询都不碰：执行端拿的是核心**递进来**的那份
+  （`stage3_main.execute_action(roles=engine.group_roles, …)`）。
+  `plugins/roles/` 那个文件夹**已经删掉**了——它和核心那一份都走 `provide_roles`
+  这条"后到者覆盖先到者"的路，插件一装上就把核心那份替换掉（实测：核心
+  `tests/test_group_roles.py` 当场四条报 `SelfRoleCache` 没有 `self_role` / `ready`）。
+  删掉它之后共享位上只剩核心一份，**单一来源**才真的成立。
+  这条与 `AGENTS.md` §2.3 是同一个道理：**能当插件不等于什么都该当插件**——
+  身份/权限事实属于核心（它是权限判定的一部分）。
 """
 from __future__ import annotations
 
@@ -108,6 +131,7 @@ import importlib
 import logging
 import os
 import pathlib
+import re
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -325,9 +349,32 @@ async def _maybe_await(value: object) -> object:
     return value
 
 
+#: 一个地址的形状（与 `remind.find_email` 同一个口径：必须是完整形状）。
+_ADDRESS_SHAPE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
+
+
+def _one_address(address: object) -> str:
+    """把"收件人"检查成**一个**地址的形状；不合法一律抛 `ValueError`。
+
+    拒掉的三类（`MailSeams.send_to` 的窄就窄在这里）：
+
+    - 空 / 只有空白：没有收件人就别发；
+    - 逗号、分号、空格分隔的**多个**地址：一次只寄给一个人；
+    - 换行（`\\r` / `\\n`）与任何不像地址的东西：头注入与"粘一段别的东西进去"都从这儿进来。
+
+    为什么校验放在**接缝这一侧**而不是 mail 插件里：mail 只是执行者，闸门要在
+    "谁能要求发"这一侧——换一个邮件实现，这条窄口仍然窄。
+    """
+
+    text = str(address if address is not None else "").strip()
+    if not _ADDRESS_SHAPE.match(text):
+        raise ValueError(f"不是一个邮箱地址：{text!r}")
+    return text
+
+
 @dataclass(frozen=True, slots=True)
 class ReportSeams:
-    """写日报 / 写信要的东西。**实测出来的五项**，一项不多给。
+    """写日报 / 写信要的东西。**实测出来的六项**，一项不多给。
 
     `plugins/mail/daily_report.py` 用引擎的地方只有这些（量出来的，不是估的）：
 
@@ -338,8 +385,9 @@ class ReportSeams:
     | `log_model_io(...)` | 把这次模型 I/O 记进按功能分的日志（`data/logs/`） |
     | `note_letter(letter)` | 发完记一笔"她写过这封信" |
     | `memory_service` | 信里要提到最近的记忆 |
+    | `window_facts(since)` | 这一段窗口里**有多少条、多少回、多少人来叫**（只读、只数） |
 
-    **五项里没有一样是权限名单**。所以这里给的是五个具体东西，而不是引擎——
+    **六项里没有一样是权限名单**。所以这里给的是六个具体东西，而不是引擎——
     插件拿不到 `transport`，也就发不出绕过闸门的消息。
 
     全部可缺省：缺省时快照为空、没有 client（写信判为不可用）、其余是空操作。
@@ -350,6 +398,16 @@ class ReportSeams:
     log_model_io: object = None
     note_letter: object = None
     memory_service: object = None
+    #: `(since) -> ChatWindowFacts | None`：**只读、只数**的窗口聚合。
+    #:
+    #: 用户 2026-10-11 授权的例外（原话：*"读取为啥不给读取，只读又不影响"*）：
+    #: 日报可以按聊天日志数出"这段时间有多少人来过话、她回了多少次、有多少次
+    #: 专门叫她、几条带图或表情、哪些群最热闹、哪些人说得最多"。
+    #: 范围就是这些**计数**——没有正文、没有原话，不碰记忆库、不碰知识库。
+    #: 为什么要它：引擎那份计数是进程内的，一重启就归零，她因此连着几天的信里
+    #: 都写着"两个群里没人开口"。字段清单由 `tests/test_mail_report_window.py`
+    #: 逐个钉住（含"聚合对象里不许出现正文"那条）。
+    facts: object = None
     #: `() -> client`：**写信 agent 自己那把模型通道**。
     #:
     #: 为什么要单独有一个（2026-09-30 用户要求"写信 agent 用独立的 client 与 user_id"）：
@@ -411,6 +469,22 @@ class ReportSeams:
             self.note_letter(letter)
         except Exception:  # noqa: BLE001
             logger.warning("plugin_report_note_failed", exc_info=True)
+
+    def window_facts(self, since: float) -> object | None:
+        """取一份窗口聚合；没有接缝、或数不出来，就是 `None`。
+
+        **返回 None 时调用方不许拿引擎计数补位**——那正是重启归零、逼她写
+        "没人开口"的那份数。宁可素材里写"我记不清了"。
+        """
+
+        taker = self.facts
+        if not callable(taker):
+            return None
+        try:
+            return taker(since)
+        except Exception:  # noqa: BLE001 - 数不出来就不报数字，别让日报炸
+            logger.warning("plugin_report_window_facts_failed", exc_info=True)
+            return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -594,11 +668,147 @@ class LinkSeams:
             logger.warning("plugin_link_register_failed", exc_info=True)
 
 
+class MailSeams:
+    """**"给操作者发一封普通邮件"**的能力面：谁来发由 `mail` 插件登记，别的插件只管用它。
+
+    由来（2026-10-06 用户）：*"掉线可以调用 mail 插件给我发消息通知我"* ·
+    *"这个作为 mail 插件的后置插件，也就是说 mail 插件是这个插件的依赖，不要搞错了"*。
+
+    ## 为什么要有它
+
+    mail 插件的发信能力原来只服务它自己（每日汇报从 `wire.build_daily_report` 里
+    直接 `MailClient(...)`）。别的插件要发一封"给自己人看的"邮件**没有口子**——
+    没有这个口子，掉线通知只有两条路：把逻辑写进 mail 插件（用户明确否了），
+    或者自己再造一个 `MailClient`（配置就有了第二份）。两条都不是"插件之间的依赖"。
+
+    ## 方向（这一条绝不能反）
+
+    | 谁 | 做什么 |
+    | --- | --- |
+    | `mail`（前置） | 在 `register()` 里 `registry.mail.provide(fn)` —— **提供**发信能力 |
+    | `outage_notice`（后置） | `REQUIRES = ("mail",)`，在 `register()` 里 `registry.mail.notify(...)` —— **使用** |
+
+    反过来（mail 认识掉线通知、或核心认识邮件）都是错的：`discover()` 保证前置先装，
+    装不上就跳过后置（见那个函数的 `REQUIRES` 一节）。
+
+    ## 它给的是"发一封信"，不是"邮件通道"
+
+    接收者拿到的是 `(subject, body) -> await`：**收件人与发信方式都由 mail 插件定**
+    （它读自己的配置 `MAIL_REPORT_TO`，与日报同一个收件人）。使用者指定不了发件人、
+    指定不了收件人、也拿不到 `MailClient`——所以"给任意地址发信"这个原语没有被发出去。
+
+    字段同样是**函数**（同 `ChatSeams` 的理由）：这里给的是插件登记的一个函数，
+    不是引擎、不是传输层、也不是邮箱凭据。
+
+    ## 一件刻意不做的事：这里不写"失败怎么办"
+
+    `notify()` 把异常**照原样抛**——是使用者（发告警的那个插件）自己决定
+    "记一笔还是吞掉"，还是核心的广播侧兜住。在这里吞掉等于让一切都变成静默成功，
+    而"发信失败要记一笔"正是使用者的责任（见 `plugins/outage_notice/`）。
+
+    ## 为什么是普通类，不是 `@dataclass(frozen=True, slots=True)`
+
+    与 `LinkSeams` 的唯一区别：那一个的字段（`disconnect_sink`）**由注册表在构造时绑好、
+    之后只读**；这一个的字段是**别的插件登记进来的**，所以它必须能被写一次。
+    写成 frozen dataclass 就得用 `object.__setattr__` 绕过——那是为了形状统一而绕过
+    自己定的规矩，不值得。字段清单仍然只有下面一个，语义仍然是"只放函数"。
+    """
+
+    #: `(subject, body) -> await`：登记上来的发信函数；缺省 `None` = 这次部署没有 mail。
+    #: 与 `LinkSeams.disconnect_sink` 同一形状（注册表自己持有名单，不需要引擎注入）。
+    __slots__ = ("operator_sender", "address_sender")
+
+    def __init__(self, operator_sender: object = None,
+                 address_sender: object = None) -> None:
+        self.operator_sender = operator_sender
+        #: `(address, subject, body) -> await`：**寄给指定的一个地址**那条窄口
+        #: （2026-10-08 加，为了"到点提醒"的邮箱那一路）。与 `operator_sender` 是
+        #: **两条独立的能力**：那一条的收件人写死在 mail 自己的配置里（操作者），
+        #: 这一条由**使用者**指定一个地址。缺省 `None` = 这次部署不提供，
+        #: 使用者据此**不提供**那一路功能（fail-closed，不是"发个空的试试"）。
+        self.address_sender = address_sender
+
+    def provide(self, sender: object) -> None:
+        """**前置插件**（`mail`）把"发一封给操作者的邮件"放上来。
+
+        非可调用的东西一律不收（`on_disconnect` 同一条纪律：错在这里发现，
+        比在掉线那一刻发现便宜得多）。后到者覆盖先到者，与 `provide_prompt` 一致。
+        """
+
+        if not callable(sender):
+            logger.warning("plugin_mail_sender_refused type=%s", type(sender).__name__)
+            return
+        self.operator_sender = sender
+
+    def knows(self) -> bool:
+        """**这个能力在不在**（区分"没人提供"与"有人提供了但发不出去"）。
+
+        同 `ChatSeams.knows_reserved()` 的道理：使用者据此**决定要不要登记掉线接收者**——
+        没有发信能力时登记一个注定失败的接收者，只会在每次掉线时往日志里灌一行错。
+        """
+
+        return callable(self.operator_sender)
+
+    async def notify(self, subject: str, body: str) -> object:
+        """发一封给操作者的邮件；**没有提供者就抛 `RuntimeError`**（不许静默丢弃）。
+
+        为什么不静默返回 `None`：调用方（告警）**必须**能分清"发出去了"与"根本没人接"。
+        在这条路上"以为发了其实没发"的代价是"断了没人知道"，比一行异常贵得多。
+        """
+
+        sender = self.operator_sender
+        if not callable(sender):
+            raise RuntimeError("没有插件提供发信能力（registry.mail 是空的）")
+        return await _maybe_await(sender(str(subject), str(body)))
+
+    # --- 第二条窄口：寄给**指定的一个**地址（2026-10-08 加） -------------------
+
+    def provide_address_sender(self, sender: object) -> None:
+        """**前置插件**（`mail`）把"寄给某个地址"放上来（与 `provide` 同一套纪律）。"""
+
+        if not callable(sender):
+            logger.warning("plugin_mail_address_sender_refused type=%s",
+                           type(sender).__name__)
+            return
+        self.address_sender = sender
+
+    def knows_address_sender(self) -> bool:
+        """**"寄给某个地址"这条口子接上了吗**（使用者据此不提供那一路功能）。
+
+        与 `knows()` 分开报：一个部署可能配了操作者收件人（`knows()` 为真）而这条口子
+        因为别的原因没接上——两件事合成一个布尔，使用者就分不出该退哪一半。
+        """
+
+        return callable(self.address_sender)
+
+    async def send_to(self, address: str, subject: str, body: str) -> object:
+        """寄一封给 `address`；**一次只寄给一个人**，而且地址必须是地址的形状。
+
+        窄在三处（要的就是这个）：
+
+        1. **收件人只有一个**：逗号 / 分号 / 空白分隔的多个地址一律拒——
+           "寄给任意一群人"这个原语不从这里出去；
+        2. **地址里的换行一律拒**（`To:` / `From:` 头注入最经典的入口）——
+           正文与主题怎么编码是 mail 那一侧的事，这一侧只管住地址；
+        3. **不给出别的**：拿不到 `MailClient`、拿不到邮箱配置、拿不到 transport，
+           也发不出"不是邮件"的任何东西。
+
+        没有提供者就抛 `RuntimeError`（同 `notify`：不许静默丢弃）。
+        """
+
+        sender = self.address_sender
+        if not callable(sender):
+            raise RuntimeError("没有插件提供「寄给某个地址」的能力"
+                               "（registry.mail 上只有发给操作者那条）")
+        return await _maybe_await(sender(_one_address(address), str(subject), str(body)))
+
+
+
 class PluginRegistry:
     """插件能用的**全部**东西。核心造一个，交给 `discover()`。
 
     **这里没有 `engine`**——那是刻意的。插件要用的能力都由窄接缝给：
-    `call_action` / `notify` / `roles` / `loop` / `chat` / `report` / `link`。
+    `call_action` / `notify` / `roles` / `loop` / `chat` / `report` / `link` / `mail`。
 
     为什么连"只读的引擎"也不给：引擎上有 `transport`（活的传输层）与三份权限名单
     （超管、管理员、补发白名单）。给出去就等于**插件能自己发消息、能读权限名单**，
@@ -606,10 +816,12 @@ class PluginRegistry:
     """
 
     __slots__ = ("call_action", "notify", "roles", "loop", "chat", "report", "ui",
-                 "link", "vision", "remind", "remind_send", "action_caller", "commands",
+                 "link", "mail", "vision", "remind", "remind_send", "action_caller",
+                 "commands",
                  "backgrounds",
                  "_shared_roles", "_commands", "_prompts", "_prompt_defaults",
-                 "_group_actions", "_owner_channels", "_disconnect_receivers", "loaded")
+                 "_group_actions", "_panels", "_owner_channels", "_disconnect_receivers",
+                 "loaded")
 
     def __init__(self, *, call_action=None, notify=None, roles=None,
                  loop=None, chat: ChatSeams | None = None,
@@ -621,6 +833,13 @@ class PluginRegistry:
                  action_caller=None) -> None:
         self.call_action = call_action
         self.notify = notify
+        #: **预留、当前未接线**：读它的地方一处都没有（`runtime.build_engine` 传的是
+        #: `None`）。身份/权限事实进核心那件事**没有**走这个槽位——本体 `1c5fcf3`
+        #: 走的是**既有接缝** `provide_roles()` / `shared_roles()`：
+        #: 核心在 `discover()` **之前** `provide_roles(engine.group_roles)`，
+        #: 插件问 `registry.shared_roles()` 拿到的就是核心那一份
+        #: （见 `plugins/join_approval/plugin._RoleSource` 与 `AGENTS.md` §3.3
+        #: 对"先画好的插座"的口径：要么接上，要么在文档里标"预留、未接线"）。
         self.roles = roles
         self.loop = loop
         #: 识图器的**工厂**：`(usage_store) -> 有 describe()/enabled 的对象 | None`。
@@ -679,6 +898,13 @@ class PluginRegistry:
         #: 接收者名单本来就归注册表自己管（同 `_prompts` / `_shared_roles`），
         #: 核心的看门狗只问 `disconnect_receivers()`。少一个旋钮就少一处"装配漏了"。
         self.link: LinkSeams = LinkSeams(disconnect_sink=self._add_disconnect_receiver)
+        #: **"给操作者发一封普通邮件"**那条接缝（见 `MailSeams`）。
+        #:
+        #: 与 `link` 同一形状、同一个理由：**名单/能力本来就归注册表自己管**
+        #: （由 `mail` 插件在 `register()` 里 `provide()` 填），不需要核心递引擎绑定的闭包。
+        #: 缺省是空的：没有 mail 插件时 `knows()` 为假，使用者据此**不登记**
+        #: （所以要在这里就造好，而不是等某个插件来赋值——`__slots__` 也不允许那样）。
+        self.mail: MailSeams = MailSeams()
         #: 已登记的掉线接收者（`registry.link.on_disconnect(...)` 往这里放）。
         self._disconnect_receivers: list[object] = []
         #: `(purpose) -> async (action, params) -> response`：造一个**已过闸门**的调用函数。
@@ -708,6 +934,12 @@ class PluginRegistry:
         #: 核心因此**不认识任何插件模块名**——把 `plugins/group_admin/` 改名不会让功能
         #: 静默消失，只会变成"这次部署没有群管理能力"（fail-closed，那句话本身是对的）。
         self._group_actions: dict[str, object] = {}
+        #: **插件自报的界面描述符**：`{插件名: 描述符}`，由插件经 `provide_panel()` 登记，
+        #: 面板按 `/api/plugin/<名字>` 取（装配点在 `plugins/webui/wire.py` 把
+        #: `panel_spec` / `provided_panel_names` 递进面板的 seams）。
+        #: 与 `_group_actions` 同一套形状（一个名字一份、后到者覆盖先到者）：
+        #: **面板因此不认识任何具体插件名**——加一个插件就多一个 tab，面板源码不用改。
+        self._panels: dict[str, object] = {}
         #: **哪些渠道声明了"可以声明主人"**（`provide_owner_channel()` 往这里放）。
         #:
         #: 为什么是声明而不是核心写死一张表：核心原来有一个
@@ -882,6 +1114,60 @@ class PluginRegistry:
 
         return tuple(sorted(self._group_actions))
 
+    def provide_panel(self, name: str, panel: object) -> None:
+        """登记**某个插件自己那一页的界面描述符**：`{插件名: 描述符}`，面板照它画那张 tab。
+
+        形状照 `provide_group_action`：一个名字一份、**同名后到者覆盖先到者**；
+        `panel` 为 `None` 时忽略（这一轮不声明界面就是没声明，不是错）。
+
+        描述符是**纯数据 + 最多一个只读取数闭包**，顶层只有三个键：
+
+        | 键 | 是什么 |
+        | --- | --- |
+        | `title` | 这一页的标题（字符串） |
+        | `note` | 这一页下面那句话（字符串） |
+        | `blocks` | 这一页的块，每块 `kind` / `title` / `rows` / `read` |
+
+        `read` 是**可选的一个可调用对象**（`() -> [行, …]`）：面板每次打开这一页时调它
+        取数。取数闭包由插件自己写——数据在哪只有它知道，面板不认识任何插件的
+        `call_action` 用法。
+
+        **三条边界**（2026-10-11 用户点名的这处接缝）：
+
+        1. 只放**描述符与只读取数闭包**，面板只负责调它、把回的东西画出来。
+        2. **不放路由、不放 HTML/JS/CSS。** 描述符里出现 `route` / `url` / `method` /
+           `html` / `js` / `css` 这类键，面板**一个都不认**（键白名单，见
+           `webui_panel._panel_block`）。理由：面板同源、token 在浏览器里、写接口只认
+           token + `confirm`——一旦描述符能指名路由或塞脚本，任何插件（含第三方放进
+           `data/plugins/` 的）都能借面板去调 `/api/memory/purge`。
+           写动作一律复用既有的、已鉴权且已审计的两条路由（`/api/action`、`/api/approval`），
+           **不为这处接缝新开任何写路由**。
+        3. **面板不认识具体插件名**：面板按一张封闭的 `kind` 词表渲染，认不出就如实说
+           "这个面板不认识这种块"。加一种 `kind` 是面板侧的一次改动（走评审），
+           插件无法自己封一个新权限。
+        """
+
+        if panel is not None:
+            self._panels[str(name)] = panel
+
+    def panel_spec(self, name: str) -> object | None:
+        """取某个插件自报的界面描述符；没人登记就返回 `None`。
+
+        调用方拿到 `None` 时**必须 fail-closed**：面板不编一份界面出来，
+        只如实回 `available: false` 与原因（同 `group_action` 那句口径）。
+        """
+
+        return self._panels.get(str(name))
+
+    def provided_panel_names(self) -> tuple[str, ...]:
+        """已经自报了界面的插件名（按名字排序）。
+
+        与 `provided_group_actions()` 同一个理由：**"到底有哪些页"必须是可读的事实**，
+        而不是靠面板里 `if name == "某个插件"` 去猜——那种写法正是这处接缝要拆掉的。
+        """
+
+        return tuple(sorted(self._panels))
+
     def provide_owner_channel(self, channel: str) -> None:
         """**渠道自己声明**："我这个渠道比过发件人是谁，可以声明这条来自主人。"
 
@@ -993,7 +1279,7 @@ def discover(registry: PluginRegistry, *, only: tuple[str, ...] = ()) -> tuple[s
 
     - `register(registry)`（必须）
     - `ENABLED = False`（可选，装在这里但先别启用）
-    - **`REQUIRES = ("roles",)`**（可选，**前置插件**）
+    - **`REQUIRES = ("mail",)`**（可选，**前置插件**）
     - `VERSION = "1.2.3"` / `HOST_API = 1`（可选，见 `API_VERSION`：不声明就放行，
       `HOST_API` 声明了却不等于宿主那一份 → **拒绝加载**并记 `plugin_host_api_mismatch`）
 
@@ -1006,11 +1292,17 @@ def discover(registry: PluginRegistry, *, only: tuple[str, ...] = ()) -> tuple[s
     B 声明 `REQUIRES = ("A",)`，由这里保证 A 先装上。把 A 塞进核心才是错的——
     那样换一套思维链路时，A 会跟着核心一起被换掉，而它其实只是个功能。
 
+    **但反过来也成立：进了核心的东西不再是插件依赖**（2026-10-05）。用户把
+    **身份/权限事实**判给核心，`plugins/roles/` 于是不再是 `group_admin` /
+    `join_approval` 的前置——那两个插件的 `REQUIRES` 已经撤掉（角色由核心注入，
+    见 `PluginRegistry.roles`）。这条规矩现在活着的正例是
+    `outage_notice → mail`（`REQUIRES = ("mail",)`，方向不许反）。
+
     本函数据此做三件事：
 
     1. **按依赖顺序装**：`_load(name)` 先递归装它的 `REQUIRES`，再装自己；
-    2. **前置装不上就跳过自己**（并记一行日志）：`roles` 没装成，
-       `group_admin` 就不该半死不活地挂在那里；
+    2. **前置装不上就跳过自己**（并记一行日志）：`mail` 没装成，
+       `outage_notice` 就不该半死不活地挂在那里；
     3. **环依赖不会转不出来**：正在装的集合里出现重复就报错跳过。
     """
 

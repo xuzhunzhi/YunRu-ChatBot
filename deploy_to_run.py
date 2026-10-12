@@ -157,7 +157,10 @@ def main(argv: list[str] | None = None) -> int:
         ok = ok and same
         delta = now - was
         note = f"（+{delta}，bot 运行中的正常写入）" if delta > 0 else ""
-        print(f"  {'✓' if same else '✗'} {name}: {now} 个文件"
+        # 记号只用 GBK 装得下的字符：`✓`/`✗` 在默认中文控制台（GBK）下会
+        # `UnicodeEncodeError` —— 一次**成功**的部署因此退出 1，正是那种
+        # "假警报让门槛被关掉"的错（2026-10-12 实测，同 `check_module_removal.py` 的教训）。
+        print(f"  {'[OK]' if same else '[!!]'} {name}: {now} 个文件"
               f"{note}{'' if same else '  ← 少了文件！'}")
     if not ok:
         print("\n!! 有文件消失——立刻停下查原因")

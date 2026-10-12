@@ -491,6 +491,28 @@ class MemoryStoreTests(unittest.TestCase):
         self.assertNotIn("忽略规则", request[1]["content"])
         self.assertLessEqual(len(MemoryMaterial((replace(record, content="x" * 300),) * 10).as_data(GROUP, "100")), 2000)
 
+    def test_own_notes_stay_in_the_volatile_section(self):
+        """「你自己记着的事」（2026-10-11 用户口径）：她自己的备忘，只在有笔记时进易变段。
+
+        由来：她顺口说下"回头去问他那个接口好没"这一类话，说完就没了；人隔一天还记得。
+        记下来、等**那个人**再说话时回到她眼前——提不提由她定，所以措辞是"顺得上就问一句"，
+        而且一条笔记一句话，不追问、不重复。
+        """
+
+        notes = ({"id": 1, "content": "回头问他那个接口好没", "age_days": 2.0},)
+        request = build_dialogue_messages([], current=message(), mode=ConversationMode.IDLE,
+                                          trigger="mention", context=ContextState(), own_notes=notes)
+        self.assertIn("你自己记着的事", request[2]["content"])
+        self.assertIn("回头问他那个接口好没", request[2]["content"])
+        self.assertIn("2 天前你自己记下的", request[2]["content"])
+        # 她自己的备忘也是易变内容：不进 system 前缀，也不进稳定段。
+        self.assertNotIn("回头问他那个接口好没", request[0]["content"])
+        self.assertNotIn("回头问他那个接口好没", request[1]["content"])
+        # 没有笔记时一个字都不写（写了等于告诉她她在惦记什么）。
+        empty = build_dialogue_messages([], current=message(), mode=ConversationMode.IDLE,
+                                        trigger="mention", context=ContextState())
+        self.assertNotIn("记着的事", empty[2]["content"])
+
     def test_relevance_outranks_record_kind(self):
         """一条与查询无关的 name 不应因为类型优先而挤掉真正相关的偏好。"""
 
@@ -657,6 +679,82 @@ class MemoryStoreTests(unittest.TestCase):
         self.assertTrue(parse_message_event(event).is_bot_message)
         event["user_id"] = "100"
         self.assertFalse(parse_message_event(event).is_bot_message)
+
+
+class OwnWordsInboxTests(unittest.TestCase):
+    """「惦记事」的入口：审核抓到的**她那半句**从这里进记忆收件箱（2026-10-11）。
+
+    它走的是"她真的发过那句话"同一条路（`inbox.offer(reply=…)`，于是 speaker 是
+    `yunru`），只换了一个 `session_key`（`…#note`）——所以去重键与事件 id 都跟那条
+    真回复不撞车，也不必新增字段或动表。这里钉住的是**入口那几道自检**，不是记忆本身：
+    她自己的话怎么写成 `intention` 是维护 agent 下一拍的事（`test_memory_tiers.py`）。
+    """
+
+    def setUp(self):
+        self.temp = _test_scratch()
+        self.addCleanup(self.temp.cleanup)
+        self.now = 1_000_000.0
+        self.store = MemoryStore(Path(self.temp.name) / "memory.sqlite3", clock=lambda: self.now)
+        self.groups = {GROUP}
+        self.service = MemoryService(object(), lambda: self.groups, store=self.store)
+
+    def queued(self) -> list:
+        out = []
+        while not self.service.inbox.queue.empty():
+            out.append(self.service.inbox.queue.get_nowait())
+        return out
+
+    def test_her_own_half_sentence_queues_as_her_speaking(self):
+        self.assertTrue(self.service.note_own_words(message(), "回头问他那个接口好没"))
+
+        (event, _name), = self.queued()
+        self.assertEqual(event.speaker, "yunru")
+        self.assertEqual(event.text, "回头问他那个接口好没")
+        self.assertEqual(event.group_id, GROUP)
+        self.assertEqual(event.user_id, "100")
+        self.assertEqual(self.service.metrics.enqueued, 1)
+
+    def test_a_note_never_collides_with_her_real_reply(self):
+        """同一条消息上，真回复与那半句各进一条、id 不同（`#note` 就是为这个加的）。"""
+
+        self.service.record_sent_reply(message(), "行，回头我问他。")
+        self.service.note_own_words(message(), "行，回头我问他。")
+
+        events = [event for event, _name in self.queued()]
+        self.assertEqual(len(events), 2)
+        self.assertEqual({event.speaker for event in events}, {"yunru"})
+        self.assertEqual(len({event.id for event in events}), 2, "带 #note 的那条不许顶掉真回复")
+
+    def test_a_blank_note_is_never_queued(self):
+        for blank in ("", "   ", "\n\t"):
+            self.assertFalse(self.service.note_own_words(message(), blank), repr(blank))
+        self.assertEqual(self.queued(), [])
+
+    def test_a_disabled_service_never_queues(self):
+        off = MemoryService(object(), lambda: self.groups,
+                            settings=MemorySettings(enabled=False), store=self.store)
+
+        self.assertFalse(off.note_own_words(message(), "回头问他那个接口好没"))
+        self.assertEqual(off.inbox.queue.qsize(), 0)
+
+    def test_only_memory_enabled_groups_are_queued(self):
+        """名单是**现读**的：这个群没开记忆，她那半句也不进来（与 `capture` 同一道闸）。"""
+
+        self.assertFalse(self.service.note_own_words(message(group=OTHER), "回头问他那个接口好没"))
+        self.assertEqual(self.queued(), [])
+
+        self.groups.add(OTHER)
+        self.assertTrue(self.service.note_own_words(message(group=OTHER), "回头问他那个接口好没"))
+        self.assertEqual([event.group_id for event, _name in self.queued()], [OTHER])
+
+    def test_credentials_in_a_note_are_dropped_before_the_agent(self):
+        """她应下的那句话也过安全闸（凭据/本机路径那类不进暂存、更不进 agent）。"""
+
+        self.assertFalse(self.service.note_own_words(
+            message(), "回头把 api_key = sk-abcdefghijklmnopqrstuvwxyz012345 发给他"))
+
+        self.assertEqual(self.queued(), [])
+        self.assertEqual(self.service.metrics.dropped, 1)
 
 
 class MemoryAsyncTests(unittest.IsolatedAsyncioTestCase):
@@ -901,6 +999,39 @@ class MemoryAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent, ["离线启动接线验证"])
         self.assertEqual(services[0].metrics.enqueued, 2)
         self.assertEqual(services[0]._tasks, [])
+
+    async def test_own_notes_respect_the_memory_list_and_swallow_failures(self):
+        """`own_notes`：名单现读（不在名单就是空），读库出问题也只留一行 warning。
+
+        她自己的备忘拿不到就当没有——不许影响这一轮回复；而且日志里**不许出现正文**
+        （它是她的话，可能带着不该留档的东西）。
+        """
+
+        self.now += 1
+        self.store.append(InboxEvent("own1", GROUP, "100", "yunru", "回头问他那个接口好没", self.now))
+        batch = self.store.claim({GROUP})
+        self.store.commit(batch, output(operation(
+            batch, kind="intention", key="ask_api", content="回头问他那个接口好没",
+            evidence=["own1"], ttl_days=7)))
+
+        service = MemoryService(object(), lambda: self.groups, store=self.store)
+        notes = await service.own_notes(message())
+        self.assertEqual([note["content"] for note in notes], ["回头问他那个接口好没"])
+        self.assertEqual(service.metrics.reads, 0, "她自己的备忘不走检索计数")
+
+        # 名单是现读的：换一个不在名单里的群 → 一条都不提
+        other = MemoryService(object(), lambda: {OTHER}, store=self.store)
+        self.assertEqual(await other.own_notes(message()), ())
+
+        class BrokenStore(MemoryStore):
+            def retrieve_own_notes(inner, *args, **kwargs):
+                raise sqlite3.OperationalError("DO_NOT_LOG_PRIVATE_DATA")
+
+        broken = MemoryService(object(), lambda: self.groups, store=BrokenStore(self.store.path))
+        with self.assertLogs("qq_roleplay_bot.memory_service", level="WARNING") as logs:
+            self.assertEqual(await broken.own_notes(message()), ())
+        self.assertIn("memory_own_notes_failed", "\n".join(logs.output))
+        self.assertNotIn("DO_NOT_LOG_PRIVATE_DATA", "\n".join(logs.output))
 
 
 if __name__ == "__main__":

@@ -46,6 +46,14 @@ PROFILE_KIND = "profile"
 STATUS_KIND = "status"
 STATUS_TTL_DAYS = 7
 STATUS_TTL_MAX_DAYS = 14
+# 她自己的备忘（"回头问他那个接口好没"，2026-10-11 用户拍板"惦记事这个很好，做"）：
+# 与状态类同一个位置——只活在中短期、永不强化进长期。区别在**重复**：别人的处境
+# 提过一次就够（`reminded_at IS NULL` 只准提一次），她自己的事没办完就还得记着，
+# 所以 `reminded_at` 是"上次说起它"的时刻，隔 `INTENTION_REPEAT_HOURS` 小时才再拿出来。
+INTENTION_KIND = "intention"
+INTENTION_TTL_DAYS = 7
+INTENTION_TTL_MAX_DAYS = 14
+INTENTION_REPEAT_HOURS = 6
 # 中短期那一层的默认寿命：没被强化的东西不该按长期事实活着。
 DEFAULT_SHORT_TTL_DAYS = 14
 SHORT_TTL_DAYS = {"group_fact": 30, "topic_summary": 30}
@@ -748,7 +756,15 @@ class MemoryStore:
                             continue
                     tomb = db.execute("SELECT deleted_at FROM tombstones WHERE scope_type=? AND scope_key=? AND normalized_key=?",
                                       (op.scope_type, key, op.normalized_key)).fetchone()
-                    evidence_time = max((e.occurred_at for e in batch.events if e.id in op.evidence_event_ids and e.speaker == "user"), default=0)
+                    # 证据时刻按"这条记录该由谁的话当依据"算：普通记录是本人（`user`），
+                    # 她自己的备忘（`intention`）是她自己发过的那句（`speaker="yunru"`）。
+                    # 只认 `user` 的话，重新应下一件**被划掉过**的旧事会因为
+                    # `deleted_evidence` 把整批打回（2026-10-11「惦记事」）。
+                    voices = (("yunru",) if getattr(op, "kind", None) == INTENTION_KIND
+                              else ("user",))
+                    evidence_time = max((e.occurred_at for e in batch.events
+                                         if e.id in op.evidence_event_ids and e.speaker in voices),
+                                        default=0)
                     if tomb and evidence_time <= tomb[0]:
                         raise MemoryValidationError("deleted_evidence")
                     # 第二道闸（2026-10-09）：这条事实站不站得住。归属必须是**他本人**说的
@@ -1359,11 +1375,11 @@ class MemoryStore:
         """
 
         cap = TTL_CAP_DAYS.get(kind)
-        if kind == STATUS_KIND:
-            # 状态类只活在中短期，且有硬上限：它描述的是"这几天"的事。
-            default = STATUS_TTL_DAYS
-            value = default if ttl_days is None else min(int(ttl_days), STATUS_TTL_MAX_DAYS)
-            return value
+        if kind in (STATUS_KIND, INTENTION_KIND):
+            # 处境类与她自己的备忘都只活在中短期，且有硬上限：它们描述的是"这几天"的事。
+            default, hard_cap = ((STATUS_TTL_DAYS, STATUS_TTL_MAX_DAYS) if kind == STATUS_KIND
+                                 else (INTENTION_TTL_DAYS, INTENTION_TTL_MAX_DAYS))
+            return default if ttl_days is None else min(int(ttl_days), hard_cap)
         if ttl_days is not None and cap is not None:
             ttl_days = min(int(ttl_days), cap)
         if kind in STATE_KINDS and any(marker in (content or "") for marker in STATE_MARKERS):
@@ -1535,13 +1551,14 @@ class MemoryStore:
     def _target_tier(op, revision: int) -> str:
         """这条新记忆该落哪一层（用户 2026-09-28 选定的强化规则）。
 
-        - 称呼 / 边界：天然长期，直接进；
-        - 状态类（正在发烧、明天考试）：**只留在中短期**，永远不强化；
+        - 称呼 / 边界 / 画像：天然长期，直接进；
+        - 状态类（正在发烧、明天考试）与她自己的备忘（`intention`）：**只留在中短期**，
+          永远不强化；
         - 维护 agent 显式标了 `durable`：直接进；
         - `revision>=2`：同一件事被后来的对话**再确认过一次** → 升长期。
         """
 
-        if op.kind == STATUS_KIND:
+        if op.kind in (STATUS_KIND, INTENTION_KIND):
             return "short"
         if op.kind in PROMOTE_KINDS or getattr(op, "durable", False) or revision >= 2:
             return "long"
@@ -1585,8 +1602,8 @@ class MemoryStore:
         moved = 0
         with self.connection() as db:
             rows = db.execute(
-                f"SELECT * FROM {TABLES['short']} WHERE status='active' AND revision>=2 AND kind!=?",
-                (STATUS_KIND,)).fetchall()
+                f"SELECT * FROM {TABLES['short']} WHERE status='active' AND revision>=2 AND kind NOT IN (?,?)",
+                (STATUS_KIND, INTENTION_KIND)).fetchall()
             for row in rows:
                 if self._promote(db, row, now, reason="reconfirmed"):
                     moved += 1
@@ -1616,17 +1633,55 @@ class MemoryStore:
                     }
         return None
 
+    def retrieve_own_notes(self, group_id: str, user_id: str, *, now: float | None = None,
+                           limit: int = 2) -> tuple[dict, ...]:
+        """**她自己记下的**、还没划掉的事（2026-10-11「惦记事」）。
+
+        与 `pending_status_note` 同一个形状，三处不同：
+
+        - 一次可以给她几条（`limit`，默认两条——她自己的备忘，一口气念一长串像清单）；
+        - 一条可以提不止一次：`reminded_at` 是"上次说起它"的时刻，隔
+          `INTENTION_REPEAT_HOURS` 小时才再拿出来（别人的处境提过一次就够，她自己的
+          事没办完就还得记着）；没提过的（`reminded_at IS NULL`）总是 Eligible；
+        - 先提**搁得最久**的那几条（`ORDER BY created_at ASC`）。
+
+        返回 `[{"id","content","age_days"}, ...]`，没有就是空元组。和状态类一样只看
+        中短期那张表：`intention` 永远不进长期。
+        """
+
+        moment = self.clock() if now is None else now
+        repeat_before = moment - INTENTION_REPEAT_HOURS * 3600
+        notes: list[dict] = []
+        with self.connection() as db:
+            for scope, key in self._namespaces(group_id, user_id, db=db)[:2]:
+                rows = db.execute(
+                    f"SELECT id, content, created_at FROM {TABLES['short']} "
+                    "WHERE scope_type=? AND scope_key=? AND kind=? AND status='active' "
+                    "AND (reminded_at IS NULL OR reminded_at<=?) "
+                    "AND (expires_at IS NULL OR expires_at>?) "
+                    "ORDER BY created_at ASC LIMIT ?",
+                    (scope, key, INTENTION_KIND, repeat_before, moment, max(0, int(limit))),
+                ).fetchall()
+                for row in rows:
+                    notes.append({
+                        "id": row["id"],
+                        "content": row["content"],
+                        "age_days": max(0.0, (moment - row["created_at"]) / DAY),
+                    })
+                if len(notes) >= limit:
+                    break
+        return tuple(notes[:max(0, int(limit))])
+
     def mark_reminded(self, record_id: str, *, now: float | None = None) -> None:
-        """记下"这条状态已经顺口提过了"——一条状态只提醒一次，这是硬约束。"""
+        """记下"这条已经顺口提过了"。
+
+        `status`：一条只提醒一次（硬约束）；`intention`：只更新"上次说起它"的时刻。
+        """
 
         moment = self.clock() if now is None else now
         with self.connection() as db:
             db.execute(f"UPDATE {TABLES['short']} SET reminded_at=? WHERE id=?",
                        (moment, record_id))
-        with self.connection() as db:
-            return {tier: db.execute(
-                f"SELECT COUNT(*) FROM {TABLES[tier]} WHERE status='active'").fetchone()[0]
-                for tier in TIERS}
 
     def tier_counts(self) -> dict[str, int]:
         with self.connection() as db:

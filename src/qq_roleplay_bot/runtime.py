@@ -33,6 +33,7 @@ from .background_plugins import (
     run_background_plugin,
 )
 from .capabilities import CapabilityRegistry
+from .chat_window import collect_window_facts
 from .conversation_context import ConversationContextProvider
 from .extensions import PromptSources
 from .llm_client import OpenAICompatibleClient, apply_client_overrides
@@ -655,8 +656,11 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
     engine.prompt_library = prompts
     engine.memory_ops = MemoryOps(None, source="webui")
     engine.control_audit = audit
-    # 记忆维护的**运行期总闸**（面板能关）：关掉只是不再批新记忆，检索照旧。
-    engine.memory_enabled = flags.memory_enabled
+    # 记忆维护的**运行期总闸**在 `memory_maintenance_agent` 那一侧（面板能关）：它每一拍现读
+    # `runtime_flags`，关掉只是不再批新记忆，检索照旧——**面板那颗开关的语义就是这个**。
+    # 2026-10-11 查"面板开关不生效"时才发现这里原来还有一句
+    # `engine.memory_enabled = flags.memory_enabled`：全仓库（三条线）只有那一次赋值、
+    # 零次读取，抄过去的值谁也不看，只让面板回的 `applied:"live"` 显得比实际更可信。删掉。
     # 网卡流量要滚动窗口：后台每 30 秒采一次（`/super lan` 读这份样本）。
     diagnostics = engine.runtime_diagnostics
     if hasattr(diagnostics, "ensure_sampler"):
@@ -1214,6 +1218,26 @@ class _SeamBinder:
         if callable(taker):
             taker(letter)
 
+    def report_window_facts(self, since: float):
+        """日报要的窗口聚合（用户 2026-10-11 授权的**只读**例外）。
+
+        回的是 `chat_window.collect_window_facts(...)` 那份**计数**：多少条、她回了
+        多少、多少次专门叫她、几条带图或表情、哪些群与哪些人最活跃。
+        **正文一个字都不出去**——聚合函数自己只看计数，不把 `body` 往外带。
+
+        为什么不能只靠 `snapshot()`：引擎那份计数是**进程内**的，重启归零，
+        她因此连着几天在信里写"两个群里没人开口"。聊天日志是落盘的，不受重启影响。
+        """
+
+        path = _chat_log_path(self._require())
+        if path is None:
+            return None
+        try:
+            return collect_window_facts(path, since=since)
+        except Exception:  # noqa: BLE001 - 数不出来就不报数字，不编
+            logger.exception("report_window_facts_failed")
+            return None
+
     def report_seams(self) -> ReportSeams:
         engine = self._require()
         return ReportSeams(snapshot=self.report_snapshot,
@@ -1221,6 +1245,8 @@ class _SeamBinder:
                            log_model_io=self.report_log_io,
                            note_letter=self.report_note_letter,
                            memory_service=getattr(engine, "memory_service", None),
+                           # 只读窗口聚合（计数，不含正文）。见 `report_window_facts`。
+                           facts=self.report_window_facts,
                            # **工厂**：写信 agent 自己那把通道（独立 user_id，
                            # 与群聊不共用缓存隔离空间）。给工厂而不是给 client，
                            # 因为装配点离写第一封信很远，client 要现造。
@@ -1615,6 +1641,18 @@ def _quote_evidence_paths(engine) -> tuple[Path, Path]:
     from .quote_samples import default_paths
 
     return default_paths()
+
+
+def _chat_log_path(engine):
+    """聊天日志在哪（**只读**，日报数窗口用）。
+
+    取法与 quote 学习那条证据读口完全同一条（`_quote_evidence_paths`）：
+    优先这次运行真正在写的那一份，退到同一套口径的默认位置。
+    这里**只取路径**：不新建、不轮转、不改内容，也不动 quote 学习那边。
+    """
+
+    chat_log, _ = _quote_evidence_paths(engine)
+    return chat_log
 
 
 def _evidence_lines(context) -> list:

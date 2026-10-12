@@ -5,7 +5,7 @@
 """
 import asyncio
 
-from qq_roleplay_bot.stage3_main import FOCUS_FAREWELL_LINE, DialogueEngine
+from qq_roleplay_bot.stage3_main import FOCUS_ACK_LINES, FOCUS_FAREWELL_LINE, DialogueEngine
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 
 A = "717151356"
@@ -130,7 +130,14 @@ def test_hot_group_keeps_deciding_every_message_no_frequency_brake() -> None:
     assert engine.snapshot().judge_calls == before + 4, "当值期间每条都要交给判定"
 
 
-def test_at_in_a_cold_group_gets_an_ack_and_is_queued() -> None:
+def test_at_in_a_cold_group_is_queued_without_an_ack() -> None:
+    """被 @ 不等于必须出声：冷群里**只有一条在等**，就一个字都不发。
+
+    用户 2026-10-11 原话："被艾特到可以不说话"、"只有积压的才会说必须回复一下，
+    因为积压的时候会回复等会回你这种规则性发送的话"。所以这里钉住：队列深度 1
+    → 不发"稍等"；她仍然把它排进队列，轮到她了再由判定决定接不接。
+    """
+
     clock = Clock()
     judge = ScriptedJudge()
     engine, reply = build_engine(clock, judge)
@@ -139,9 +146,31 @@ def test_at_in_a_cold_group_gets_an_ack_and_is_queued() -> None:
 
     result = asyncio.run(engine.handle(message(2, B, text="@她 你看这个", mentioned=True)))
 
-    assert result is not None, "被 @ 时要先回一句收到"
+    assert result is None, "只有这一条在等的时候，不该刷一句「稍等」"
+    assert engine.focus.queue_size(sid(B)) == 1, "被 @ 的要排队，谁都不许丢"
+    assert reply.calls == calls_before, "冷群的消息不许现在调回复模型"
+    assert engine._stats["focus_acks"] == 0
+    assert engine.focus.is_hot(sid(A)), "当值群仍然是 A，没被抢走"
+
+
+def test_a_backlog_earns_an_ack() -> None:
+    """"稍等"留给**真的积压**：已经有人在等，再来一条被 @ 的才交代一句。"""
+
+    clock = Clock()
+    judge = ScriptedJudge()
+    engine, reply = build_engine(clock, judge)
+    make_hot(engine, clock)
+    calls_before = reply.calls
+
+    first = asyncio.run(engine.handle(message(2, B, text="云茹你怎么看")))     # 提及 → 静默排队
+    result = asyncio.run(engine.handle(
+        message(3, B, text="@她 你看这个", mentioned=True)
+    ))                                                                        # 深度 2 → 回一句
+
+    assert first is None, "第一条只是静默排队"
+    assert result is not None, "积压了（队列深度 2）就该回一句收到"
     assert result.paced is False, "稍等要立刻发，不摆拟人化节奏"
-    assert engine.focus.queue_size(sid(B)) == 1
+    assert engine.focus.queue_size(sid(B)) == 2
     assert reply.calls == calls_before, "冷群的消息不许现在调回复模型"
     assert engine._stats["focus_acks"] == 1
     # "稍等"要进她的历史，但不算真实回复
@@ -182,17 +211,20 @@ def test_ack_cooldown_allows_only_one_per_window() -> None:
     engine, _ = build_engine(clock, ScriptedJudge())
     make_hot(engine, clock)
 
-    first = asyncio.run(engine.handle(message(2, B, text="@她 一", mentioned=True)))
+    # 先垫一条**提及**（静默入队，深度 1）：她只在自己这条队列**已经有人在等**
+    # 的时候才回"稍等"（2026-10-11），所以从这里开始每一条 @ 都算积压。
+    asyncio.run(engine.handle(message(2, B, text="云茹你怎么看")))
+    first = asyncio.run(engine.handle(message(3, B, text="@她 一", mentioned=True)))
     clock.advance(30)
-    second = asyncio.run(engine.handle(message(3, B, text="@她 二", mentioned=True)))
+    second = asyncio.run(engine.handle(message(4, B, text="@她 二", mentioned=True)))
     clock.advance(100)                # 累计 130 秒，过了 120 秒的冷却
-    third = asyncio.run(engine.handle(message(4, B, text="@她 三", mentioned=True)))
+    third = asyncio.run(engine.handle(message(5, B, text="@她 三", mentioned=True)))
 
-    assert first is not None
+    assert first is not None, "有积压时第一条 @ 要回一句"
     assert second is None, "冷却期内不再刷「稍等」"
     assert third is not None, "过了 120 秒可以再回一句"
     assert engine._stats["focus_acks"] == 2
-    assert engine.focus.queue_size(sid(B)) == 3, "三条都要排队，谁都不许丢"
+    assert engine.focus.queue_size(sid(B)) == 4, "四条都要排队，谁都不许丢"
 
 
 def test_private_chat_is_not_gated_by_the_focus() -> None:
@@ -254,13 +286,16 @@ def test_promised_message_uses_the_routing_only_judge() -> None:
 
     "要不要回"这件事在她说出"稍等"的时候就已经定了；再给判定一个否决权，
     要么得绕过它、要么得让它说违心话，都不干净。
+
+    （"稍等"现在只在**有积压**时才有，所以先垫一条提及把队列垫到深度 1。）
     """
 
     clock = Clock()
     judge = ScriptedJudge()
     engine, reply = build_engine(clock, judge)
     make_hot(engine, clock)
-    asyncio.run(engine.handle(message(2, B, text="@她 你看这个", mentioned=True)))
+    asyncio.run(engine.handle(message(2, B, text="云茹你怎么看")))          # 静默排队
+    asyncio.run(engine.handle(message(3, B, text="@她 你看这个", mentioned=True)))  # 这条拿到"稍等"
     calls_before = reply.calls
     # 即使模型学舌吐出 NO_REPLY，也必须按 REPLY 处理
     judge.reply = False
@@ -269,7 +304,7 @@ def test_promised_message_uses_the_routing_only_judge() -> None:
     deliveries = asyncio.run(engine.tick(clock.monotonic()))
 
     assert deliveries, "答应过「稍等」的消息必须给出结果"
-    assert reply.calls == calls_before + 1
+    assert reply.calls == calls_before + 1, "只有被承诺的那条必须回"
     judge_request = judge.requests[-1]
     assert "<route>" not in judge_request[0]["content"], "judge' 的 prompt 里不该有 route"
     assert "不需要判断要不要开口" in judge_request[0]["content"]
@@ -400,9 +435,11 @@ def test_sweep_is_deferred_while_another_sweep_runs() -> None:
     judge = ScriptedJudge()
     engine, reply = build_engine(clock, judge)
     engine.focus.begin_sweep("recv:group:另一个群")   # 假装另一个群正在巡检
-    result = asyncio.run(engine.handle(message(1, A, text="@她 在吗", mentioned=True)))
-    assert result is not None and result.paced is False, "巡检占用期间被 @ 也要先回一句稍等"
-    assert engine.focus.queue_size(sid(A)) == 1, "巡检占用期间明确找她的要排队"
+    first = asyncio.run(engine.handle(message(1, A, text="云茹你怎么看")))       # 静默排队
+    result = asyncio.run(engine.handle(message(2, A, text="@她 在吗", mentioned=True)))
+    assert first is None, "巡检占用期间第一条也只是排队"
+    assert result is not None and result.paced is False, "积压了才先回一句稍等，且立刻发"
+    assert engine.focus.queue_size(sid(A)) == 2, "巡检占用期间明确找她的要排队"
     assert reply.calls == 0
 
     engine.focus.end_sweep("recv:group:另一个群")
@@ -418,14 +455,15 @@ def test_snapshot_exposes_focus_state_without_content() -> None:
     clock = Clock()
     engine, _ = build_engine(clock, ScriptedJudge())
     make_hot(engine, clock)
-    asyncio.run(engine.handle(message(2, B, text="@她 你看这个", mentioned=True)))
+    asyncio.run(engine.handle(message(2, B, text="云茹你怎么看")))              # 提及：静默排队
+    asyncio.run(engine.handle(message(3, B, text="@她 你看这个", mentioned=True)))  # 积压 → 回一句
 
     snapshot = engine.snapshot()
     assert snapshot.focus is not None
     hot = snapshot.focus["hot"]
     assert hot is not None and hot["session_id"] == sid(A)
-    assert snapshot.focus["queued_total"] == 1
-    assert snapshot.focus_queued == 1
+    assert snapshot.focus["queued_total"] == 2
+    assert snapshot.focus_queued == 2
     assert snapshot.focus_acks == 1
     assert "在吗" not in str(snapshot.focus)
 
@@ -473,9 +511,10 @@ def test_runtime_ticker_delivers_the_queued_reply() -> None:
     async def main():
         transport = FakeTransport()
         transport.push(message(1, A, text="@她 在吗", mentioned=True))
-        transport.push(message(2, B, text="@她 你看这个", mentioned=True))
+        transport.push(message(2, B, text="云茹你怎么看"))                  # B：静默排队
+        transport.push(message(3, B, text="@她 你看这个", mentioned=True))  # B 积压 → 一句"稍等"
         loop = asyncio.create_task(_message_loop(transport, engine, tick_seconds=0.01))
-        for _ in range(50):                    # 让两条消息被处理完
+        for _ in range(50):                    # 让三条消息被处理完
             await asyncio.sleep(0.01)
         clock.advance(60)                      # 当值群安静下来
         for _ in range(50):                    # 等时钟把排队的回复发出去
@@ -487,5 +526,6 @@ def test_runtime_ticker_delivers_the_queued_reply() -> None:
     transport = asyncio.run(main())
     texts = [text for _, text in transport.sent]
     assert any(text == "收到。" for text in texts), f"当值群的回复要发出去: {texts}"
-    assert len(texts) >= 3, f"还应包括一句稍等与排队回复: {texts}"
+    assert any(text in FOCUS_ACK_LINES for text in texts), f"积压时那句「稍等」要发出去: {texts}"
+    assert len(texts) >= 3, f"还应包括排队回复: {texts}"
     assert engine.focus.is_hot(sid(B)), "时钟应当把当值切到 B"

@@ -192,7 +192,10 @@ def grounding_rejection(op: "MemoryOperation", *, cited: tuple["InboxEvent", ...
     if op.scope_type != "group":
         if foreign_speakers:
             return "rejected_other_speaker"
-        spoken = tuple(e for e in cited if e.speaker == "user")
+        # `intention`（她自己的备忘）方向相反：依据得是**她自己发过的那句话**。
+        # 别的话仍按"依据必须是本人说的"办。
+        own_voice = "yunru" if op.kind == "intention" else "user"
+        spoken = tuple(e for e in cited if e.speaker == own_voice)
         if not spoken:
             # 没有本人发言：只放行"正文一个字没改"的复查（周期复查常常只确认一下），
             # 其余（拿旧记录当依据改出新正文）一律不记——真库那条 `participating_in_diansai`

@@ -112,16 +112,33 @@ class ScriptedReply:
 
 
 class ScriptedReviewer:
-    """脚本化的风格审核：`(passed, reason)` 一次一条，最后一对一直重复。"""
+    """脚本化的风格审核：`(passed, reason)` 或 `(passed, reason, note)`，最后一组一直重复。
+
+    生产侧引擎调的是 `review_verdict`（它比 `review` 多带一路"顺手记一笔"的 `note`）。
+    """
 
     def __init__(self, *results) -> None:
         self.results = list(results) or [(True, "")]
         self.calls: list = []
 
-    async def review(self, draft, *, context=""):
+    def _next(self, draft):
+        """记一次调用并取出这一轮的脚本（最后一条一直重复）。"""
+
         self.calls.append(draft)
         index = min(len(self.calls) - 1, len(self.results) - 1)
         return self.results[index]
+
+    async def review(self, draft, *, context=""):
+        # 旧形状：只有 `(passed, reason)`——重写那一趟走的是这个（`_rewrite_after_review`）。
+        passed, reason, *_rest = self._next(draft)
+        return passed, reason
+
+    async def review_verdict(self, draft, *, context=""):
+        from qq_roleplay_bot.style_reviewer import ReviewVerdict
+
+        result = self._next(draft)
+        note = result[2] if len(result) > 2 else ""
+        return ReviewVerdict(result[0], result[1], note)
 
     def snapshot(self) -> dict[str, int]:
         return {"calls": len(self.calls)}
@@ -155,6 +172,8 @@ class FakeMemory:
 
     def __init__(self, hit: bool) -> None:
         self.hit = hit
+        # 审核抓到的"她那半句"（`note_own_words`）：记下调用参数就够，验接线用。
+        self.notes: list[tuple[str, str]] = []
 
     def capture(self, message) -> None:
         return None
@@ -185,6 +204,17 @@ class FakeMemory:
 
     async def mark_care_noted(self, record_id):
         return None
+
+    async def own_notes(self, message, *, limit: int = 2):
+        """「她自己记着的事」；这些用例不关心它。"""
+        return ()
+
+    async def mark_own_note_noted(self, record_id):
+        return None
+
+    def note_own_words(self, message, text: str) -> bool:
+        self.notes.append((message.user_id, text))
+        return True
 
 
 def _volatile(request) -> str:
@@ -362,7 +392,24 @@ def test_ask_budget_limits_per_topic_and_per_window() -> None:
 #: 那一条（`stage3_runtime.TONE_READS_THE_ROOM_RULE`，用户拍板的 A+C）。它有**自己的判据**
 #: （`tests/test_tone_reads_the_room.py`：规矩在不在、默认档温不温、现场那几条嘲讽只能落在
 #: 反例一侧），所以这个数字照旧按"逐字长度"更新，没有放松——多一个字、少一个字仍然红。
-SYSTEM_PROMPT_CHARS = 6788
+#:
+#: 2026-10-11 更新 **6788 → 6793（+5）**：不是加段，是**改措辞**——安全边界那两处
+#: （`stage3_runtime.py:791`、`:804`）原来写着"说话的规矩"，而"规矩"这两个字会顺着
+#: 每轮进 user 段的那句说明（`stage3_runtime.py:1755`）漏进她的嘴里（她真的回过
+#: "规矩收到。"，见 `data/logs/reply.jsonl` 10-11 16:09）。三处一起改成"你说话的样子"
+#: 这一类交谈视角的说法，常驻 system 里那两处合计多 5 个字。规矩的**内容一条没动**
+#: （该有的人格/协议/安全规则全在），所以这里按逐字长度更新数字，钉子本身没有放松。
+#:
+#: 2026-10-11 第二次更新 **6793 → 7090（+297）**：加的是**口语毛边**那一条（用户：
+#: "说话太书面化了有感觉吗"、"单个标点符号，一个语气词的这种句子"）。模板 `## 说话方式`
+#: 的第 7 条把这两件事一起写进了"人格该怎么写"：允许句末语气词 / 只写半句 / 重复一个词 /
+#: 整句不打句号，以及"**一个字也算话**"（接话头时单发一个「？」「哦哦」可以，
+#: 只有"人家正经问她、求她办事，她拿一个'哦'把问题挡回去"才不算回应）。
+#: 它**有自己的判据**：模板长度区间与对照格式在 `tests/test_persona_shape.py`，
+#: 审核那一侧在 `tests/test_style_reviewer.py`（`test_prompt_lets_casual_texture_through`
+#: 与第 6 类的单标点许可、`test_single_punctuation_and_particles_reach_the_model`）。
+#: 所以这个数字照旧按逐字长度更新，钉子本身没有放松：多一个字、少一个字仍然红。
+SYSTEM_PROMPT_CHARS = 7090
 
 
 def test_the_resident_system_prompt_carries_no_unsure_rule() -> None:
@@ -527,6 +574,8 @@ def test_called_unsure_with_assertion_is_pushed_back_and_rewritten() -> None:
     # 重写那一趟带着"别断言你不知道的"那句话；**不是**"问她一句"
     assert NO_ASSERT_MARKER in _volatile(reply.requests[1])
     assert "别拿反问绕过去" in _volatile(reply.requests[1])
+    # **这一趟不许有"拒绝"的退路**（2026-10-11）：它不是审美，是这一版确实没根据。
+    assert "原样再写一遍" not in _volatile(reply.requests[1])
     assert result.text == "这个我真不清楚，你那边是哪个学校的规定？", "发出的是重写的那一版"
     # **这一层一个字都没进常驻 system**：前后两次 system 逐字相同
     assert reply.requests[0][0]["content"] == reply.requests[1][0]["content"]
@@ -721,3 +770,74 @@ def test_review_and_grounding_share_one_rewrite_chance() -> None:
     assert len(reviewer.calls) == 2, "初稿一遍 + 重写版一遍（重写版没有再被打回）"
     assert engine.snapshot().reply_grounding_rewrites == 0, "审核已经用掉那次机会"
     assert engine.snapshot().reply_reviewed == 1
+
+
+# --- 「惦记事」的入口：判过时把她应下的半句交给记忆 --------------------------
+
+
+def _own_note_engine(reviewer, memory, reply, *, review=True):
+    """装一台引擎：审核与记忆面都换成替身，`review_enabled` 钉在这一台上。"""
+
+    from qq_roleplay_bot.runtime_flags import RuntimeFlags
+
+    judge = ScriptedJudge("<route>REPLY</route><topic>接口</topic>")
+    engine = DialogueEngine(reply, judge_client=judge, style_reviewer=reviewer,
+                            memory_service=memory)
+    engine._default_flags = RuntimeFlags(review_enabled=review)
+    return engine
+
+
+def test_a_passed_review_hands_her_own_half_sentence_to_memory() -> None:
+    """审核判**过**且带 `NOTE:` → 那半句原话**逐字**进 `note_own_words`。
+
+    用户口径（逐字）：*"惦记的事由审核agent负责"*——这是那条链路的**唯一入口**，
+    所以"接线断了"必须在这里红。
+    """
+
+    memory = FakeMemory(False)
+    reviewer = ScriptedReviewer((True, "", "回头问他那个接口好没"))
+    reply = ScriptedReply("行，回头我问他那个接口好没。")
+    engine = _own_note_engine(reviewer, memory, reply)
+
+    result = asyncio.run(engine.handle(msg(1, "@YunRu 那个接口的事", mentioned=True)))
+
+    assert result is not None and result.text == "行，回头我问他那个接口好没。"
+    assert memory.notes == [("100", "回头问他那个接口好没")], memory.notes
+    assert len(reply.requests) == 1, "判过就不该重写"
+
+
+def test_a_passed_review_without_a_note_calls_nothing() -> None:
+    """判过但没应下什么（没有 `NOTE:`）→ **一次都不调**（别往收件箱里灌空话）。"""
+
+    memory = FakeMemory(False)
+    engine = _own_note_engine(ScriptedReviewer((True, "")), memory, ScriptedReply("在。"))
+
+    asyncio.run(engine.handle(msg(1, "@YunRu 在吗", mentioned=True)))
+
+    assert memory.notes == []
+
+
+def test_a_blocked_review_never_hands_a_note_over() -> None:
+    """判**不过**时即使审核多写了一句 `NOTE:` 也不许送去记忆——那一版不是她要发的话。"""
+
+    memory = FakeMemory(False)
+    reviewer = ScriptedReviewer((False, "越权——在教对方怎么做。", "回头问他那个接口"))
+    engine = _own_note_engine(reviewer, memory, ScriptedReply("你得先看文档。", "行，不说了。"))
+
+    asyncio.run(engine.handle(msg(1, "@YunRu 接口怎么调", mentioned=True)))
+
+    assert memory.notes == []
+    assert engine.snapshot().reply_reviewed == 1, "打回那一条照旧记一笔"
+
+
+def test_turning_the_review_off_never_hands_a_note_over() -> None:
+    """`review_enabled` 关掉 → 审核那一趟根本不跑，也就没有那半句。"""
+
+    memory = FakeMemory(False)
+    reviewer = ScriptedReviewer((True, "", "回头问他那个接口好没"))
+    engine = _own_note_engine(reviewer, memory, ScriptedReply("在。"), review=False)
+
+    asyncio.run(engine.handle(msg(1, "@YunRu 在吗", mentioned=True)))
+
+    assert memory.notes == []
+    assert reviewer.calls == [], "关掉之后审核一次都不该被叫"
