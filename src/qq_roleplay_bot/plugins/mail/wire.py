@@ -79,14 +79,32 @@ def build_daily_report(report, *, registry=None):
         registry.register_reporter(reporter)
     # 把她以前写出去的信灌回核心（最近在前）：这样**重启之后**她照样记得自己写过什么、
     # 那些信是写给谁的。存储层是唯一来源，核心只持有内存副本。
+    #
+    # **顺序不能靠数组顺序猜**（2026-10-13 修）：`note_letter` 是"最近在前"（新的一封
+    # 插到 `[0]`），所以这里必须**从早到晚**灌，灌完最新那封才落在 `letter_history[0]`。
+    # `mail_state.json` 里存的是**旧→新**（`letters.append(...)` + 只留最后 `MAX_LETTERS`
+    # 条），原先那个 `reversed(...)` 正好把它灌成"最旧在前"——重启之后"上一封信"会指到
+    # 十几天前那一封，`_letter_note`（它取 `letter_history[0]` 当"最近一封"）也跟着看错。
+    # 按 `at` 排序，既不依赖存储顺序，也不依赖写入的人都记得这条约定。
     try:
         state = store.load()
     except Exception:  # noqa: BLE001 - 读不到就当她还没写过信，对话照常
         logger.exception("mail_state_load_failed")
     else:
-        for letter in reversed(state.letters):
+        for letter in sorted(state.letters, key=_letter_at):
             report.remember_letter(letter)
     return reporter
+
+
+def _letter_at(letter: object) -> float:
+    """排序键：一封信的墙上时间（坏值当 0，排到最前，不影响新的一封）。"""
+
+    if not isinstance(letter, dict):
+        return 0.0
+    try:
+        return float(letter.get("at") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def build_operator_mail_sender(seams):

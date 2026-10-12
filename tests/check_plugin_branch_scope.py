@@ -112,7 +112,7 @@ WHITELIST = {
         "文本——本体侧没有 `plugins/mail/`，它在那边根本收集不起来。",
     "tests/test_mail_letter_agent.py":
         "写信 agent 自己的那一半（`plugins/mail/letter_writer.py`）：人格与事实表由核心"
-        "按次递进来、旧事她自己翻（`<lookup>`，最多三轮）、`<skip>` 就是今晚不写。"
+        "按次递进来、旧事她自己翻（`<lookup>`，翻到上限就收手）、`<skip>` 就是今晚不写。"
         "整份 import `plugins.mail.letter_writer` / `plugins.mail.daily_report`，还直接读"
         "插件包源码文本核对“不再自己找人格”——本体侧没有这些模块，搬过去只会收集失败。",
     "tests/test_mail_report_window.py":

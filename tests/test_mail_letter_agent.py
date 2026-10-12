@@ -123,7 +123,7 @@ def test_a_letter_carries_the_persona_into_the_model_call():
     assert writer.stats["drafts"] == 1
 
 
-# --- 旧事她自己翻：只读口、最多三轮 ------------------------------------------
+# --- 旧事她自己翻：只读口、翻到上限就收手 -------------------------------------
 
 
 def test_a_lookup_round_goes_through_the_readonly_reader():
@@ -141,14 +141,17 @@ def test_a_lookup_round_goes_through_the_readonly_reader():
     assert subject == "今天" and body.strip()
 
 
-def test_the_lookup_rounds_are_capped_at_three():
+def test_the_lookup_rounds_are_capped():
     queries: list[str] = []
     client = _Client("<lookup>再翻一次</lookup>")
     writer, (subject, body) = _write(
         client=client, lookup=lambda query: queries.append(query) or "")
 
-    assert len(queries) == lw.MAX_LOOKUPS == 3, "用户裁定：最多三轮"
-    assert writer.stats["lookups"] == 3
+    assert len(queries) == lw.MAX_LOOKUPS == 6, (
+        "用户 2026-10-13：*'不是非要一次输入就得到一封信'*——记忆随时能翻，"
+        "额度从 3 放宽到 6（2026-10-12 那次定的 3 轮就此作废）"
+    )
+    assert writer.stats["lookups"] == 6
     assert client.requests[-1][-1]["content"] == lw.LOOKUP_ENOUGH, "到顶了就明说别翻了"
     assert (subject, body) == ("", ""), "翻不完又交不出信：这一封就是没有"
     assert writer.last_skip == "", "它不是说不写，是没写出来"

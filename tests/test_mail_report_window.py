@@ -212,12 +212,16 @@ PERSONA_TEXT = "（测试用的信人格正文）"
 FACTS_TEXT = "（测试用的事实表：她读过仪表盘）"
 
 
-def _seams(client, *, letters=None, facts=None, persona=PERSONA_TEXT, reader=None) -> ReportSeams:
+def _seams(client, *, letters=None, facts=None, persona=PERSONA_TEXT, reader=None,
+           his=None) -> ReportSeams:
     """生产接缝的那一份（外加只读记忆口）。
 
     2026-10-12 起两处变了：`memory_service`（可写的工程件）换成只读的 `memory_read`；
     信人格与事实表也走接缝——插件不许再 `from ...base_prompt import BASE_PROMPT`。
     `persona=None` 就是"核心那边读不到"：那种情况下一封信都不该发出去。
+
+    `his` 是 2026-10-13 加的那条（"他说过的话"）：缺省 `None` 就是"他这几天没说什么"
+    ——**接缝上没有这一样时素材照样组得出来**，这条要一直成立。
     """
 
     return ReportSeams(
@@ -227,6 +231,7 @@ def _seams(client, *, letters=None, facts=None, persona=PERSONA_TEXT, reader=Non
         note_letter=(letters.append if letters is not None else None),
         memory_read=reader,
         facts=facts,
+        letter_context=his,
         letter_persona=(lambda: persona),
         letter_facts=lambda: FACTS_TEXT,
     )
@@ -463,6 +468,42 @@ def test_report_prompt_asks_for_her_own_thoughts():
     for words in ("别报数目", "别照着它念", "不要把他人的原话抄给他看",
                   "不是……而是……", "落款就写你自己的名字"):
         assert words in dr.REPORT_PROMPT, f"{words} 这条规矩被删了"
+
+
+def test_report_prompt_asks_for_a_letter_not_a_diary():
+    """提示词：得写"一封信长什么样"，不只是"别像机器写的"。
+
+    2026-10-13 用户读到一封这样的信（"这写的啥啊。。根本不像是人写的信"）：
+    四段互不相干、每段结尾一句把话咽回去、拿事实表里的旧事当今天发生的事。
+    上一版规矩只禁了机器腔（对仗/首先其次/比方/语气标签），一条也没说信的形状。
+    这四条是那次投诉的修法——删掉任意一条，那封信的形状就会回来。
+    """
+
+    assert scan_persona_text(dr.REPORT_PROMPT) == [], "加了形状要求也不许混进机制词"
+    assert "这是一封写给他的信，不是写给自己看的" in dr.REPORT_PROMPT, "信/日记这一条被删了"
+    for words in ("开头要有一句是**对他说的**", "中间挑**一件事**说给他听",
+                  "信里得有他", "结尾收在对他说话上"):
+        assert words in dr.REPORT_PROMPT, f"{words} 这条形状要求被删了"
+    assert "别从你那边起头" in dr.REPORT_PROMPT, "日记式开场（夜深了/我坐在工作台前面）得点名禁掉"
+    assert "不许把那里面的旧事写成" in dr.REPORT_PROMPT, "旧事冒充今天的新事，是那封信的老毛病"
+    assert "发生的新鲜事" in dr.REPORT_PROMPT
+    assert "这像不像一封写给他的信" in dr.REPORT_PROMPT, "自检那一问也得问信的形状"
+
+
+def test_report_prompt_tells_her_to_pick_up_on_what_he_said():
+    """他说过的话进了素材，规矩里就得有对应的那一条（2026-10-13 用户："加"）。
+
+    这一条单列，是因为它和"不要把他人的原话抄给他看"**看着像冲突**：那句说的是
+    **别人**，他本人的话正好相反——要接上一句，只是不许照抄一遍。两句都得在。
+    """
+
+    assert scan_persona_text(dr.REPORT_PROMPT) == []
+    assert "他这段时间说过的话" in dr.REPORT_PROMPT, "素材里那一段得在规矩里点名"
+    assert "至少接上一句" in dr.REPORT_PROMPT
+    assert "别把他的话抄一遍" in dr.REPORT_PROMPT
+    assert "不要把他人的原话抄给他看**（说的是**别人**" in dr.REPORT_PROMPT, (
+        "两句的关系要写清楚，不然她会分不清该不该提他说过的话"
+    )
 
 
 def test_super_mail_send_now_hands_the_seams_not_the_engine():
@@ -704,3 +745,131 @@ def test_materials_survive_a_snapshot_that_is_not_there():
     data = materials.as_data((), ())
     assert "（这是最近一天里的事）" in data, "缺的是数字，不是整段素材"
     assert "群里" not in data, "计数不可信时不许给「热闹还是安静」那句语气"
+
+
+# --- 他说过的话（2026-10-13 用户："加，不是说了允许读取记忆吗"）----------------
+
+
+class _HisContext:
+    """核心那边递过来的"他说过的话"（`letter_context.LetterContext` 的形状）。"""
+
+    def __init__(self, lines=(), *, at: float = 0.0, subject: str = "") -> None:
+        self.his_lines = tuple(lines)
+        self.last_letter_at = at
+        self.last_letter_subject = subject
+
+
+def test_the_materials_carry_what_he_said():
+    """他本人的话要原样进素材，而且只问窗口这一段（别把整本日志端过来）。
+
+    在这之前素材里一句人话都没有：实测同一份素材三封信里，有一封把《已确定的事》
+    里的旧事写成了"今天"发生的新事，用户读到的那封"根本不像是人写的信"就是这么来的。
+    """
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = MailStateStore(Path(tmp) / "mail_state.json")
+        writer = _Writer()
+        reporter = _reporter(store, _Mail())
+        reporter.writer = writer
+        asked: list[float] = []
+
+        def his(since):
+            asked.append(since)
+            return _HisContext(["你上次说的那个问题，我想了想", "别太晚睡"],
+                               at=NOW - 2 * 86400.0, subject="没别的，说件事")
+
+        draft = asyncio.run(reporter.run_once(_seams(_Client(), his=his)))
+
+    assert draft is not None
+    data = writer.materials[0].as_data((), ())
+    assert "他这段时间说过的话（从早到晚）：" in data, "这一段就是这次加的素材"
+    assert "· 你上次说的那个问题，我想了想" in data and "· 别太晚睡" in data, "原样给，不改字"
+    assert "你上一次写信是2 天前，主题是「没别的，说件事」。" in data, (
+        "上一封信要给一句人话（几天前 + 主题），不是给一个时间戳"
+    )
+    assert asked == [NOW - 86400.0], "要拿窗口起点去问"
+
+
+def test_a_broken_his_context_does_not_stop_the_letter():
+    """读不出来只是素材缺一块：信照写，只是不提他说过什么。"""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = MailStateStore(Path(tmp) / "mail_state.json")
+        writer = _Writer()
+        mail = _Mail()
+        reporter = _reporter(store, mail)
+        reporter.writer = writer
+
+        def boom(since):
+            raise RuntimeError("chat log locked")
+
+        with _no_logs():
+            draft = asyncio.run(reporter.run_once(_seams(_Client(), his=boom)))
+
+    assert draft is not None and mail.sent, "这一条炸了不该把整封信拦下"
+    data = writer.materials[0].as_data((), ())
+    assert "他这段时间说过的话" not in data
+    assert "你上一次写信是" not in data
+
+
+def test_an_empty_his_context_prints_nothing():
+    """接缝在、但这几天他什么都没说：素材里连标题都不该冒出来。"""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = MailStateStore(Path(tmp) / "mail_state.json")
+        writer = _Writer()
+        reporter = _reporter(store, _Mail())
+        reporter.writer = writer
+
+        draft = asyncio.run(
+            reporter.run_once(_seams(_Client(), his=lambda since: _HisContext()))
+        )
+
+    assert draft is not None
+    data = writer.materials[0].as_data((), ())
+    assert "他这段时间说过的话" not in data and "你上一次写信是" not in data
+
+
+def test_the_stored_letters_are_loaded_oldest_first():
+    """重启之后 `letter_history[0]` 必须是**最近那一封**。
+
+    2026-10-13 修的：`mail_state.json` 里最后一封信在**数组末尾**（存储层是
+    `append` + 只留最后几条），而 `note_letter` 是"最近在前"（新的一封插到
+    `[0]`）。原先这里 `reversed(state.letters)` 会把最旧的一封灌到最前面，
+    于是重启后"上一封信"指到十几天前那一封（`_letter_note` 也照着看错）。
+    这条钉的是**灌进去的顺序**，与 `at` 在数组里的位置无关。
+    """
+
+    from unittest import mock
+
+    from qq_roleplay_bot.plugins.mail import mail_client as mail_client_module
+    from qq_roleplay_bot.plugins.mail import mail_state as mail_state_module
+    from qq_roleplay_bot.plugins.mail import wire
+    from qq_roleplay_bot.plugins.mail.mail_state import MailState
+
+    seen: list[float] = []
+
+    class _Store:
+        def load(self):
+            # 故意乱序：谁在备份里改过顺序都不该影响结果
+            return MailState(letters=[
+                {"at": 3.0, "subject": "最近那封"},
+                {"at": 1.0, "subject": "最早那封"},
+                {"at": 2.0, "subject": "中间那封"},
+            ])
+
+    class _Report:
+        letter_client = staticmethod(lambda: object())
+
+        def remember_letter(self, letter):
+            seen.append(float(letter["at"]))
+
+    # `wire` 是在函数体里 import 这两个的，所以要打在**来源模块**上
+    with (
+        mock.patch.object(mail_client_module, "MailClient", lambda *a, **k: object()),
+        mock.patch.object(mail_state_module, "MailStateStore", _Store),
+    ):
+        built = wire.build_daily_report(_Report())
+
+    assert built is not None
+    assert seen == [1.0, 2.0, 3.0], "从早到晚灌，最新那封才落在最前面"

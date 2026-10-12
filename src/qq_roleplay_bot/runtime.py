@@ -36,6 +36,7 @@ from .capabilities import CapabilityRegistry
 from .chat_window import collect_window_facts
 from .conversation_context import ConversationContextProvider
 from .extensions import PromptSources
+from .letter_context import collect_letter_context
 from .letter_docs import load_letter_facts, load_letter_persona
 from .llm_client import OpenAICompatibleClient, apply_client_overrides
 from .memory_config import MemorySettings
@@ -1246,6 +1247,38 @@ class _SeamBinder:
             logger.exception("report_window_facts_failed")
             return None
 
+    def report_letter_context(self, since: float):
+        """写信要的"他说过的话"（用户 2026-10-13 授权的第二次破例）。
+
+        由来说在 `letter_context.py` 与 `ReportSeams.letter_context` 上。这里只做三件
+        装配上的事：
+
+        1. 收信人由**引擎**认（`_letter_owner_ids()`：部署级管理员 ∪ 超管）。认不出来
+           （或这台引擎没有那个方法）就**一句话都不给**——`collect_letter_context`
+           `owner_ids` 为空时就是这个行为，宁可她今晚没素材，也不把一屋子人的话递出去。
+        2. 上一封信取 `letter_history[0]`（`note_letter` 记的，最新的那条）。
+        3. 读不出来就 `None`：调用方按"他这几天没说什么"处理，**不编**。
+        """
+
+        path = _chat_log_path(self._require())
+        if path is None:
+            return None
+        owner = getattr(self._require(), "_letter_owner_ids", None)
+        owners = ()
+        if callable(owner):
+            try:
+                owners = tuple(owner() or ())
+            except Exception:  # noqa: BLE001 - 认不出收信人就不给素材
+                logger.exception("report_letter_owner_failed")
+                owners = ()
+        letters = list(getattr(self._require(), "letter_history", ()) or ())
+        try:
+            return collect_letter_context(path, since=since, owner_ids=owners,
+                                          last_letter=letters[0] if letters else None)
+        except Exception:  # noqa: BLE001 - 读不出来就不给素材，不编
+            logger.exception("report_letter_context_failed")
+            return None
+
     def report_seams(self) -> ReportSeams:
         engine = self._require()
         return ReportSeams(snapshot=self.report_snapshot,
@@ -1257,6 +1290,9 @@ class _SeamBinder:
                            memory_read=_memory_read(engine),
                            # 只读窗口聚合（计数，不含正文）。见 `report_window_facts`。
                            facts=self.report_window_facts,
+                           # 收信人自己说过的话 + 她上一封信的主题。见
+                           # `report_letter_context`：只对收信人一个人破例。
+                           letter_context=self.report_letter_context,
                            # **这一封信专用**的人格正文，每次现读（不是聊天那份）。
                            # 读不到返回 `None`，那一晚就不写——不回落到模板。
                            letter_persona=load_letter_persona,
