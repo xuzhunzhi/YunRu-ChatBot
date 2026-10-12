@@ -332,6 +332,93 @@ def test_the_blocked_line_carries_no_count():
     assert "换过几次对象" not in data, "忙不忙的话也不进素材——她要写的是自己的想法"
 
 
+# --- "上次没寄出去"这句话什么时候才该出现（2026-10-12 修） ----------------------
+
+
+class _Writer:
+    """假的写信口（两阶段那条路）：把收到的素材留下来给测试看。"""
+
+    enabled = True
+
+    def __init__(self) -> None:
+        self.materials: list = []
+
+    async def write(self, materials, *, closeness_names=(), guardedness_names=(),
+                    now=None):
+        self.materials.append(materials)
+        return "今天", "群里今天挺热闹，我跟几个人说了话。"
+
+
+def test_only_the_latest_report_send_decides_whether_she_mentions_it():
+    """一次失败不该让后面每一封信都提"上次没寄出去"。
+
+    真实数据（`run/data/mail_state.json`）：10-10 夜里连着三条
+    `发送失败：credential_lock_unavailable`，10-11 那封其实寄成了，可 10-11、10-12
+    两天的素材里都有那句"这件事也要提一句"——旧算法翻最近 5 条、见到失败就写，
+    根本不看最新那条是不是成功。用户看到的就是连着两天同一件事（"这叽里咕噜说啥呢"）。
+    """
+
+    failed = {"kind": "report", "ok": False, "detail": "发送失败：credential_lock_unavailable"}
+    timed_out = {"kind": "report", "ok": False, "detail": "发送失败：timeout"}
+    sent = {"kind": "report", "ok": True, "detail": "ok"}
+
+    assert dr.last_failure_note([]) == "", "一封都没寄过，没什么可提的"
+    assert dr.last_failure_note(None) == ""
+    assert dr.last_failure_note([failed, failed, failed, sent]) == "", (
+        "最新那封寄成了：更早的失败不该再让这封信提'上次没寄出去'"
+    )
+    assert dr.last_failure_note([sent, failed, failed, timed_out]) == "发送失败：timeout", (
+        "最新那封没寄成：这句话要出来，而且报的是最新那一次"
+    )
+    assert dr.last_failure_note([sent, failed, {"kind": "manual", "ok": False}]) == (
+        "发送失败：credential_lock_unavailable"
+    ), "只看 report 这条线：别的记录不能替汇报作证"
+    assert dr.last_failure_note([{"kind": "manual", "ok": True}]) == "", "没有 report 记录就当没提过"
+    assert dr.last_failure_note([sent, failed, "不是字典"]) == "发送失败：credential_lock_unavailable", (
+        "状态文件里混进怪东西也不该炸"
+    )
+
+
+def test_a_sent_letter_does_not_tell_her_to_mention_the_old_one():
+    """接上：上一封寄成了，素材里就不许出现那句话（走两阶段那条路验一遍）。"""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = MailStateStore(Path(tmp) / "mail_state.json")
+        for _ in range(3):
+            store.record(kind="report", to="owner@example.com", ok=False,
+                         detail="发送失败：credential_lock_unavailable")
+        store.record(kind="report", to="owner@example.com", ok=True, detail="ok")
+
+        writer = _Writer()
+        reporter = _reporter(store, _Mail())
+        reporter.writer = writer
+        draft = asyncio.run(reporter.run_once(_seams(_Client(), letters=[])))
+
+    assert writer.materials, "两阶段那条路该把素材交给写信口"
+    assert writer.materials[0].last_failure == "", "上一封寄成了：别再提'上次没寄出去'"
+    assert "上一次想给他写信没寄出去" not in writer.materials[0].as_data((), ())
+    assert draft is not None and draft.subject == "今天"
+
+
+def test_a_letter_that_really_failed_still_gets_mentioned():
+    """反过来也要钉住：上一封真没寄出去，这句话必须出来。"""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = MailStateStore(Path(tmp) / "mail_state.json")
+        store.record(kind="report", to="owner@example.com", ok=True, detail="ok")
+        store.record(kind="report", to="owner@example.com", ok=False,
+                     detail="发送失败：credential_lock_unavailable")
+
+        writer = _Writer()
+        reporter = _reporter(store, _Mail())
+        reporter.writer = writer
+        asyncio.run(reporter.run_once(_seams(_Client(), letters=[])))
+
+    data = writer.materials[0].as_data((), ())
+    assert "上一次想给他写信没寄出去。这件事也要提一句。" in data
+    assert "credential_lock_unavailable" not in data, "失败原因是机器字眼，不进她的信"
+
+
 # --- 接缝与提示词 -------------------------------------------------------------
 
 

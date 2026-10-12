@@ -92,6 +92,26 @@ def window_label(window_hours: float) -> str:
     return f"距你上一次写信已经 {days} 天，下面是这中间的事"
 
 
+def last_failure_note(sends) -> str:
+    """**上一封**汇报寄出去了没有——只看最新那条记录，不翻更早的。
+
+    2026-10-12 修（用户看到那封补发的信，问："这叽里咕噜说啥呢"）：这段以前是
+    "翻最近 5 条，只要有一条失败就写这句"。10-10 夜里连着三条
+    `credential_lock_unavailable` 之后，10-11 那封其实寄成了，可 10-11、10-12
+    两天的信都在提同一件事，连 10-11 那封成功寄出的也在提——她那句话只该在
+    **上一封真的没寄出去**时出现。真要补发那封，走 `pending_report` 那条路，
+    跟这句话无关。
+    """
+
+    for record in reversed(list(sends or ())):
+        if not isinstance(record, dict) or record.get("kind") != "report":
+            continue
+        if record.get("ok"):
+            return ""
+        return str(record.get("detail") or "未知原因")
+    return ""
+
+
 @dataclass(frozen=True, slots=True)
 class DayMaterials:
     """这一份窗口里"发生过什么"。**没有数目、没有任何聊天正文。**
@@ -487,11 +507,7 @@ class DailyReporter:
             # 过期了：它写的那个日子已经过去，留着只会让下一封对不上。丢掉重写。
             logger.info("daily_report_pending_expired at=%s", state.pending_report.get("at"))
             self.state_store.clear_pending_report(state=state)
-        failure_note = ""
-        for record in reversed(state.sends[-5:]):
-            if not record.get("ok") and record.get("kind") == "report":
-                failure_note = str(record.get("detail") or "未知原因")
-                break
+        failure_note = last_failure_note(state.sends)
         from ...stage3_runtime import CLOSENESS_LABELS, GUARDEDNESS_LABELS
 
         materials = collect_materials(
