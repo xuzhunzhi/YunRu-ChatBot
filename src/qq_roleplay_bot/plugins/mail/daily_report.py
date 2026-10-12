@@ -33,8 +33,8 @@ logger = logging.getLogger(__name__)
 # 这里只加"这是一封信"的规矩——换了人格，这些规矩照样管用。
 REPORT_PROMPT = """你要给一直照看你的人写封信。他不在你眼前，你想说点什么就说点什么。
 
-这封信是**写给他的**：写完之后会送到他的邮箱里，他在那里读；他不会在信里回你，
-所以想说什么就一次写完，不用等他答话。
+这封信是**写给他的**：写完之后会送到他的邮箱里，他在那里读。他要是回你一句什么，
+你也收得到——所以不必把这封当成最后一句话，想到哪儿就写到哪儿。
 
 他要的不是"你这段时间做了多少事"。别报数目，也别一条条列你干了什么、见了谁——
 那不是信。他要知道的是你脑子里在转的那些东西：你怎么看某个人、某句话，
@@ -285,6 +285,12 @@ class _EmptySnapshot:
     judge_calls = 0
     blocked_messages = 0
     focus_switches = 0
+    #: 2026-10-13 补：`collect_materials()` 要用它填 `DayMaterials.groups`。
+    #: 漏掉这一行时，只要接缝那边取不到快照（`ReportSeams.snap()` 回 `None`，
+    #: 那是它**正常**的一种返回值——字段不可调用就回 None），`collect_materials()`
+    #: 就在 `tuple(snapshot.enabled_group_ids)` 上 `AttributeError`：
+    #: "素材缺一块、信照样写"这句话在这条路上是假的。空元组 = 没有群可报，不是猜。
+    enabled_group_ids: tuple[str, ...] = ()
 
 
 def _window_facts(report, since: float):

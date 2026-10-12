@@ -677,3 +677,30 @@ def test_a_broken_reader_does_not_stop_the_letter():
     data = writer.materials[0].as_data((), ())
     assert "跟你说过话的人" not in data
     assert "改变了态度" not in data
+
+
+def test_materials_survive_a_snapshot_that_is_not_there():
+    """快照取不到只是"数字不可信"：素材照样组得出来，一个字都不许炸。
+
+    2026-10-13 修：`_EmptySnapshot` 少一个 `enabled_group_ids`，于是
+    `ReportSeams.snapshot` 缺省——`snap()` **正常**的一种返回值就是 `None`——
+    这条路上 `collect_materials()` 直接 `AttributeError`。
+    "素材缺一块、信照样写"在那条路上是句空话。
+    """
+
+    from qq_roleplay_bot.plugins.mail import daily_report as dr
+
+    # snapshot / memory_read / window_facts 全缺省：接缝上一块都没有的最坏形状
+    seams = ReportSeams(
+        client=_Client(),
+        letter_persona=lambda: PERSONA_TEXT,
+        letter_facts=lambda: FACTS_TEXT,
+    )
+    materials = dr.collect_materials(seams, window_hours=24.0, since=NOW - 86400.0)
+
+    assert materials.groups == (), "没有快照就没有群可报，别猜一个"
+    assert materials.counts_reliable is False, "数不出来就承认数不出来"
+    assert materials.people == () and materials.relationship_changes == ()
+    data = materials.as_data((), ())
+    assert "（这是最近一天里的事）" in data, "缺的是数字，不是整段素材"
+    assert "群里" not in data, "计数不可信时不许给「热闹还是安静」那句语气"
