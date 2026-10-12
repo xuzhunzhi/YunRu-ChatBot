@@ -428,6 +428,10 @@ def test_the_real_assembly_wires_memory_to_the_memory_list_not_the_chat_list() -
     )
 
     class _Endpoint:
+        # 真的 `TaskEndpoint` 也带 `provider`（装配点用它决定请求体发不发 DeepSeek
+        # 专有字段），所以这个小替身要跟上，否则测的就不是真实形状。
+        provider = "deepseek"
+
         def triple(self):
             return ("http://offline.invalid", "offline-key", "offline-model")
 

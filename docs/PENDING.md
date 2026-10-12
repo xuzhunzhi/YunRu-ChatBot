@@ -207,6 +207,12 @@ outage_notice **取用**它；mail 那一侧不认识任何使用者的名字。
    跑完 cwd 里长出 `yunru-source/`（探测目录我已经删掉）。
    → "仓库根会多出 `yunru-source/`"成立，**但触发条件是临时目录取不到**；
    我**没有**在正常 TEMP 下跑全量套件重现它落在仓库根这一件事。是测试的副作用，迟早要收拾。
+   **2026-10-11 已收拾**：`make_corpus()` 现在拒绝写到系统临时目录之外
+   （`tempfile.gettempdir()` 退化成 cwd 时当场 `AssertionError`），四条
+   `make_corpus(Path(tmp) / "..")` 改成临时目录里的一棵子目录（`Path(tmp) / "corpus"`）。
+   两棵树里那两份残留已删。实测三种越界写法逐一被拦（往 `dev/`、往 `yunru-stage4/`、
+   把 cwd 当临时目录），拦下之后两边仓库根都没被写脏；`test_knowledge_base.py` 的 34 条
+   在 dev 与 worktree 两边都过。
 
 10. **`dev/data/logs/verify_runs.log` 的 `branch=`** —— 实测最后 8 行全是 `branch=stage4-on-host`
     （`sha=8b73969/e84dc7e/f9b10a2`），而那些运行是在 worktree `yunru-stage4` 里跑的，

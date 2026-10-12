@@ -24,9 +24,19 @@ from qq_roleplay_bot.knowledge_base import (
 
 
 def make_corpus(tmp: str) -> Path:
-    """造一份结构与真语料相同的小语料：有的该收、有的必须排除。"""
+    """造一份结构与真语料相同的小语料：有的该收、有的必须排除。
+
+    **只许写在系统临时目录里。** `TEMP`/`TMP`/`TMPDIR` 都取不到时
+    `tempfile.gettempdir()` 会退化成**当前工作目录**，那一句 `Path(tmp) / ".."`
+    就成了仓库根——2026-10-11 实测它确实在 `dev/` 与 `yunru-stage4/` 各留下一份
+    未跟踪的 `yunru-source/`（`docs/PENDING.md` 第 9 条）。宁可红，
+    也不许把测试数据写进工作区。
+    """
 
     root = Path(tmp) / "yunru-source"
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    if temp_root == Path.cwd().resolve() or temp_root not in root.resolve().parents:
+        raise AssertionError(f"测试语料只许写在临时目录里，实际指向 {root}")
     files = {
         "02-核心设定/官方设定.md": (
             "# 云茹\n\n## 能力\n百夫长攻城机甲是她亲手造的保护壳，靠的是转移反应时间。"
@@ -242,7 +252,8 @@ class _FakeEmbedder:
 def test_vectors_are_built_and_stored() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         index = KnowledgeIndex(Path(tmp) / "knowledge.sqlite3")
-        stats = index.build(make_corpus(Path(tmp) / ".."), embedder=_FakeEmbedder())
+        # 语料在临时目录里的一棵子目录（索引文件那一层之外，但不再跑到上一层的仓库根去）。
+        stats = index.build(make_corpus(Path(tmp) / "corpus"), embedder=_FakeEmbedder())
         assert stats["vectors"] > 0
         connection = sqlite3.connect(index.path)
         try:
@@ -260,7 +271,8 @@ def test_semantic_search_merges_with_lexical() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         index = KnowledgeIndex(Path(tmp) / "knowledge.sqlite3")
-        index.build(make_corpus(Path(tmp) / ".."), embedder=_FakeEmbedder())
+        # 语料在临时目录里的一棵子目录（索引文件那一层之外，但不再跑到上一层的仓库根去）。
+        index.build(make_corpus(Path(tmp) / "corpus"), embedder=_FakeEmbedder())
         plain = index.search("百夫长攻城机甲", limit=3)
         semantic = index.search("百夫长攻城机甲", limit=3, embedder=_FakeEmbedder())
         assert plain and semantic
@@ -280,7 +292,8 @@ def test_semantic_path_degrades_when_the_embedder_breaks() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         index = KnowledgeIndex(Path(tmp) / "knowledge.sqlite3")
-        index.build(make_corpus(Path(tmp) / ".."), embedder=_FakeEmbedder())
+        # 语料在临时目录里的一棵子目录（索引文件那一层之外，但不再跑到上一层的仓库根去）。
+        index.build(make_corpus(Path(tmp) / "corpus"), embedder=_FakeEmbedder())
         results = index.search("百夫长攻城机甲", limit=3, embedder=Broken())
         assert results, "查询编码失败也必须退回词面结果"
         assert results[0].source.startswith("02-核心设定")
@@ -291,7 +304,8 @@ def test_search_without_embedder_ignores_stored_vectors() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         index = KnowledgeIndex(Path(tmp) / "knowledge.sqlite3")
-        index.build(make_corpus(Path(tmp) / ".."), embedder=_FakeEmbedder())
+        # 语料在临时目录里的一棵子目录（索引文件那一层之外，但不再跑到上一层的仓库根去）。
+        index.build(make_corpus(Path(tmp) / "corpus"), embedder=_FakeEmbedder())
         results = index.search("百夫长攻城机甲", limit=3)
         assert results and results[0].source.startswith("02-核心设定")
 

@@ -132,6 +132,16 @@ COMPAT_PROVIDER_ENV = "QQBOT_API_PROVIDER"
 #: （`QQBOT_API_KEY` + `QQBOT_API_BASE_URL`），两者成对使用。
 MAIN_KEY = "main"
 
+#: **兜底那条** key 条目的名字（主家余额耗尽时整条切过去的那一家）。
+#:
+#: 它跟上面六条不一样：**不绑定任何用途**，而是"主家整条挂了"时所有用途共用的
+#: 那一份来源。哪个用途能在它上面跑由 `FALLBACK_TASKS` 决定；用哪家地址由它
+#: 自己那条的 `provider` 决定（`resolve_fallback` 只取那一个地址）。
+#: 操作者可以用 `QQBOT_FALLBACK_API_KEY` 配一把专用兜底 key；没配就沿
+#: `fallback` 链借**同家**那条——按本机 `.env` 的实际配置，落到的是那把实测
+#: 还活着的 mimo 写信 key（`letter`）。
+FALLBACK_KEY = "fallback"
+
 #: key 条目 → **它属于哪家** + 从哪个环境变量取值 + 不配时回落哪一条。
 #:
 #: 回落的含义是"**整份来源**一起换"（值 + 地址），见模块说明。所以它只会指向
@@ -143,6 +153,28 @@ KEYS: dict[str, dict[str, str]] = {
     "memory": {"provider": "deepseek", "env": "QQBOT_MEMORY_API_KEY", "fallback": "judge"},
     "review": {"provider": "deepseek", "env": "QQBOT_REVIEW_API_KEY", "fallback": "judge"},
     "vision": {"provider": "deepseek", "env": "QQBOT_VISION_API_KEY", "fallback": "judge"},
+    # 兜底那条（见 `FALLBACK_KEY`）：`TASKS` 里没有谁指向它，它只在
+    # "主家余额耗尽"这一条保命路径上被 `resolve_fallback` 用到。
+    FALLBACK_KEY: {"provider": "mimo", "env": "QQBOT_FALLBACK_API_KEY", "fallback": "letter"},
+}
+
+#: 主家余额耗尽、整条切到兜底那一家时：**哪些用途接得住、各用什么模型名**。
+#:
+#: "这一家接不住这个用途" = 那个用途**不在表里**——那时如实失败，不硬凑。
+#:
+#: 有实测证据的模型名只有一个：`mimo-v2.6-pro`（`letter` 一直在用它；2026-10-12
+#: 又把真实 judge 形状在它上面重放过，5/5 出 `<route>`+`<topic>`）。
+#: 不在表里的两个用途，理由分别是：
+#: - `letter`：它**本来就在** mimo 上（`TASKS["letter"]`），主家挂了没有"另一家"可切；
+#: - `vision`：要传图片，mimo 那一路**没实测过**收不收图片，按"没证据就别写进
+#:   生产表"的纪律先不写。主家挂着的时候这一路如实失败。
+# TODO(mimo-vision): 实测过 mimo 的图片入参之后再决定要不要加。
+# TODO(mimo-flash): `mimo-v2.6-flash` 在本仓库还没有实测记录，先不写进生产表。
+FALLBACK_TASKS: dict[str, str] = {
+    "reply": "mimo-v2.6-pro",
+    "judge": "mimo-v2.6-pro",
+    "memory": "mimo-v2.6-pro",
+    "review": "mimo-v2.6-pro",
 }
 
 #: 每个用途可选的**任务级地址覆盖**变量名。
@@ -450,6 +482,26 @@ def _known_provider(provider: str, where: str) -> str:
     return key
 
 
+def _fallback_source() -> _KeySource | None:
+    """兜底那条 key 的来源：自己那条有值就用它，没有就沿 `fallback` 链借同家那条。
+
+    与其它所有来源一样（见模块说明）：**值与地址从同一条解析出来**，
+    `resolve_fallback` 只取 `provider_base_url(source.provider)`。
+
+    链子走回兼容档那一对时（那时 `source.provider` 是空串）**当作没有**：兼容档
+    就是主家那一对，正是要躲开的那一趟——把兜底 key 往 `QQBOT_API_BASE_URL` 上
+    打，就是 2026-10-06 那个三系统 401 的形状。
+    """
+
+    entry = _own_entry(FALLBACK_KEY)
+    if entry.value:
+        return entry
+    source = _follow(FALLBACK_KEY)
+    if source is None or not source.provider:
+        return None
+    return source
+
+
 def _base_url_for(task: str, source: _KeySource) -> str:
     """地址：任务级覆盖 → **这份来源自己的地址**。
 
@@ -533,6 +585,52 @@ def require(task: str) -> TaskEndpoint:
     return endpoint
 
 
+def resolve_fallback(task: str) -> TaskEndpoint | None:
+    """把某个用途解析成**兜底那一家**上的一个客户端；那一家接不住就返回 `None`。
+
+    只用在本模块之外那条保命路径上（主家余额耗尽 → 整条切走，见
+    `provider_failover`）。四道闸，顺序写死在这里：
+
+    ① 这个用途**不在 `FALLBACK_TASKS`** → `None`（那一家接不住它）；
+    ② 这个用途的主家来源是**兼容档那一对**（`_key_source(task).is_main`）→ `None`：
+       那时操作者只配了一把 key，没有"另一家"可言；而且兼容档的地址是
+       `QQBOT_API_BASE_URL`，兜底 key 打它正是那次 401 的形状；
+    ③ 兜底那条 key（含它的同家回落链）**没有值** → `None`；
+    ④ 有值 → 地址**只**取 `provider_base_url(source.provider)`。
+
+    ④ 那一行是这个函数存在的理由：地址**绝不**再读一次 `BASE_URL_ENV[task]`。
+    任务级地址覆盖属于**主家那一路**（`_base_url_for` 的第一档），在这里读它
+    就等于"兜底 key 打主家地址"。模型名同理只取 `FALLBACK_TASKS` 里的字面量，
+    不读 `MODEL_ENV`（那是主家那个模型名）。缺 key **不抛**，返回 `None` ——
+    调用方要的就是"接不住就别切"，不是启动期报错。
+    """
+
+    key = str(task or "").strip().casefold()
+    if key not in TASKS:
+        raise UnknownTask(f"不认识的用途：{task}")
+    model = str(FALLBACK_TASKS.get(key, "") or "")
+    if not model:
+        return None
+    if _key_source(key).is_main:
+        return None
+    source = _fallback_source()
+    if source is None:
+        return None
+    return TaskEndpoint(
+        task=key,
+        provider=source.provider,
+        declared_provider=source.provider,
+        base_url=provider_base_url(source.provider),
+        api_key=source.value,
+        model=model,
+        key_name=source.name,
+        key_env=source.env,
+        # 兜底永远是"借来的那一条"：`own_key=False` 让自检那一行写明回落，
+        # 也提醒后来的人"这不是这个用途自己那条 key"。
+        own_key=False,
+    )
+
+
 def endpoints() -> dict[str, TaskEndpoint]:
     """全部用途的解析结果（自检 / 报告 / 测试用）。"""
 
@@ -549,3 +647,32 @@ def self_check_lines() -> list[str]:
     """
 
     return [endpoint.safe_summary() for endpoint in endpoints().values()]
+
+
+def fallback_self_check_lines() -> list[str]:
+    """兜底那一路的自检行：供应商 / 模型名 / 变量名 + 有值没有，**绝不含 key 值**。
+
+    为什么不并进 `self_check_lines()`：那一份是"**每个用途一行**"，条数被用例
+    `test_the_self_check_prints_names_not_values` 钉死
+    （`len(lines) == len(EXPECTED)`）。兜底是"另一家"的额外一路，混进去会让那条
+    不变式不再成立，所以单独一份、由调用方自己决定打在哪。
+    """
+
+    source = _fallback_source()
+    provider = str(KEYS[FALLBACK_KEY]["provider"])
+    env = str(KEYS[FALLBACK_KEY]["env"])
+    mark = "**缺**"
+    origin = ""
+    if source is not None:
+        mark = "有值"
+        env = source.env
+        if source.name != FALLBACK_KEY:
+            origin = f"（回落到 {source.name}）"
+    lines = [f"兜底: provider={provider} key={env}{origin} {mark}"]
+    for task in TASK_NAMES:
+        model = str(FALLBACK_TASKS.get(task, "") or "")
+        if model:
+            lines.append(f"兜底·{task}: provider={provider} model={model} {mark}")
+        else:
+            lines.append(f"兜底·{task}: 不在表里（主家挂了这一路如实失败）")
+    return lines

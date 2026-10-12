@@ -55,8 +55,14 @@ q = Chr(34)
 ' State the package path explicitly. The shared venv's .pth points at the
 ' deployment tree (run\src), so each side must name its own src -- otherwise
 ' it silently imports the other tree.
+' PYTHONIOENCODING 同样要显式给：不给的话 data\bot.err.log 的行编码跟着启动者
+' 的环境走，同一个文件半截 GBK 半截 UTF-8（2026-10-12 实测）。
+' 还有一条不能改：本文件必须保持 **CRLF 行尾**。wscript 按 GBK 读这种非 Unicode
+' 脚本，中文的 UTF-8 多字节在 LF 行尾下可能把换行也吃掉，于是整个脚本编译不过
+' （VBScript 报 Expected statement，2026-10-12 实测；用只写 LF 的编辑器改完务必转回来）。
 command = "cmd.exe /c cd /d " & q & root & q & " && " & _
           "set " & q & "PYTHONPATH=" & root & "\src" & q & " && " & _
+          "set " & q & "PYTHONIOENCODING=utf-8" & q & " && " & _
           q & ".venv\Scripts\python.exe" & q & " -m qq_roleplay_bot.stage3_main " & _
           "1>>" & q & "data\bot.out.log" & q & " " & _
           "2>>" & q & "data\bot.err.log" & q

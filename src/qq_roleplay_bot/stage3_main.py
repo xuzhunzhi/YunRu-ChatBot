@@ -125,6 +125,8 @@ from .admin_control import AdminCommand, AdminCommandKind, parse_admin_command
 from .memory_model import MemoryMaterial
 from .memory_service import MemoryService
 from . import data_boundary
+from . import face_names
+from . import provider_failover
 from . import runtime_flags
 
 if TYPE_CHECKING:
@@ -142,6 +144,17 @@ COMPACT_KEEP = 50
 # 一轮最多压几批。压缩按条数切批（见 `split_compaction_batches`），
 # 一次触发通常 4 批左右能压完；这里只是防止积压过大时一轮里发出太多调用。
 MAX_COMPACT_BATCHES_PER_TURN = 6
+# 「她自己的老习惯」那块材料的**换季周期**（秒），**与压缩一起**决定它什么时候重算。
+#
+# 2026-10-11 用户口径：*"我要丢到易变区开头，每几个小时更新一次，只有触发压缩的时候
+# 才更新，这样命中率更高"*，然后一句更正：*"到了 3 小时也得等压缩，只有同时达到 3 小时
+# 和压缩过后才会变"*。
+#
+# 所以判据是 **并且**，不是"或者"：`_style_material` 只在"自上次算它之后压过一次"
+# **而且**"距上次算它已过这个时长"时才重算。单独出现任何一个都不动它——于是它的换季点
+# 被压到"压缩刚发生 + 本来也该换了"那一刻，其余时间逐字不变。
+# 三个小时是"几个小时"的中间值，没有实测依据（真要看的是前缀命中率，将来可以调）。
+STYLE_MATERIAL_TTL_SECONDS = 3 * 3600.0
 ACTIVE_TIMEOUT_SECONDS = 180.0
 # 「被焦点排队过」的消息 id（`_resumed_ids`）的上限。超了淘汰**最旧**的一条。
 # 条目只在那条消息"还在排队等当值"时有意义，而队列本身有上限
@@ -1431,21 +1444,58 @@ class DialogueEngine:
     def self_roles(self, value) -> None:
         self.group_roles = value
 
-    def _style_material(self, message: IncomingMessage, state) -> str:
-        """「她自己的老习惯」那一段材料（**热路径上零模型调用**）。
+    def _data_marker(self, state) -> str:
+        """这一轮边界记号的取法（两档，见 `data_boundary` 模块说明"两档"）。
 
-        来源是金句学习 agent 定期学出来的笔记（`quote_learning.QuoteProfile`）。三条纪律：
+        * 总闸门关掉（`data_marker_enabled`）→ `""`：下面每一处包裹与判定都变成恒等操作；
+        * **缓存友好型**（默认，`data_marker_cache_friendly`）→ `state.ensure_season_marker()`：
+          一季一个（3 个全角生僻符号），**压缩时换一季**；同一季里逐轮一字不差，所以
+          带记号的金句材料能跟着它落进前缀缓存；
+        * **增强型** → `session_marker()`：每轮现取 7 位随机，抄一次就作废。
+
+        两档只在**取法**上不同：入站中和（`neutralize_text`）与出站判违规
+        （`reply_leaks_marker`）都认两种形状，切档不留绕过。
+        """
+
+        flags = self._flags()
+        if not flags.data_marker_enabled:
+            return ""
+        if flags.data_marker_cache_friendly:
+            return state.ensure_season_marker()
+        return data_boundary.session_marker()
+
+    def _style_material(self, message: IncomingMessage, state) -> str:
+        """「她自己的老习惯 / 她踩过的坑」那块材料（**热路径上零模型调用**）。
+
+        来源是金句学习 agent 定期学出来的笔记（`quote_learning.QuoteProfile`）。五条纪律：
 
         1. **只在开关打开时读**：`quote_enabled` 关掉 = 直接空串，于是请求与改动前逐字相同；
         2. **任何异常都当"没有材料"**：读文件、挑笔记都是本地的，但仍然包一层
            ——她这一轮说不说话。**绝不能因为材料读不到而影响回复**；
         3. **不是指令、也不是台词**：渲染在 `quote_learning.inject_block` 里，
-           措辞是"她以前遇到这种时候"，进的是 user 段的 DATA 区（system 一个字不动）。
+           措辞是"她以前遇到这种时候"，进的是 user 段的 DATA 区（system 一个字不动）；
+        4. **算出来的结果缓存在会话状态上**（2026-10-11 用户原话：*"我要丢到易变区开头，
+           每几个小时更新一次，只有触发压缩的时候才更新，这样命中率更高"*，紧接着一条
+           更正：*"到了 3 小时也得等压缩，只有同时达到 3 小时和压缩过后才会变"*）：
+           **两个条件同时满足**才重算——自上次算它之后**压过一次**
+           （`state.compactions` 变了）**并且**距上次算它已过
+           `STYLE_MATERIAL_TTL_SECONDS`。缺一个就沿用旧的那一段字节，
+           其余每一轮都返回**同一段字节**——前缀缓存按前缀算，一个字变了后面全得重算。
+           第一次没有缓存时当然要算（否则永远没有）；
+        5. **空材料不缓存**：没挑到笔记时返回空串、且**不记账**，下一轮还会再试
+           （空串本来就不占字节，不会破坏前缀；反过来"空着缓存几个小时"才是真的坏）。
         """
 
         profile = getattr(self, "quote_profile", None)
         if profile is None or not self._flags().quote_enabled:
             return ""
+        cached = getattr(state, "style_material", "")
+        computed_at = getattr(state, "style_material_at", 0.0)
+        if computed_at and cached:
+            compacted = getattr(state, "style_material_compactions", -1) != state.compactions
+            aged = (self.clock() - computed_at) >= STYLE_MATERIAL_TTL_SECONDS
+            if not (compacted and aged):
+                return cached
         try:
             from .quote_learning import inject_block
 
@@ -1454,9 +1504,42 @@ class DialogueEngine:
                 message.text or "",
                 state.context.topic or "",
             )
-            return inject_block(notes)
+            material = inject_block(notes)
         except Exception:  # noqa: BLE001 - 材料拿不到不该影响这一轮回复
             logger.warning("quote_material_failed", exc_info=True)
+            return ""
+        if material and hasattr(state, "style_material"):
+            state.style_material = material
+            state.style_material_at = self.clock()
+            state.style_material_compactions = state.compactions
+        return material
+
+    def _reaction_material(self, message: IncomingMessage) -> str:
+        """「**刚才**有人给她贴了什么」那块材料（2026-10-11，用户选的"甲"）。
+
+        与 `_style_material` 的差别只有一处：它**逐轮**算——"有人刚给她那句话贴了 ㊗"
+        是眼前这件事，不能跟着那块稳定材料一起冻几个小时。读的是对话日志的**尾巴**
+        （有界、纯本地，见 `quote_samples.ReactionFeed`），失败当没有。
+        """
+
+        profile = getattr(self, "quote_profile", None)
+        feed = getattr(self, "quote_reactions", None)
+        if profile is None or feed is None or not self._flags().quote_enabled:
+            return ""
+        try:
+            from .quote_learning import inject_block
+
+            emoji_ids = feed.recent_emoji_ids(
+                message.target.group_id or "", session_id=message.session_id or "")
+            if not emoji_ids:
+                return ""
+            lines = profile.emoji_notes_for(
+                message.target.group_id or "", emoji_ids, just_now=True)
+            # 这里**不设**"最多几条"的额外限制：`ReactionFeed` 已经只给最多
+            # `MAX_REACTION_MATERIALS` 个，`inject_block` 还有一道总上限。
+            return inject_block(lines)
+        except Exception:  # noqa: BLE001 - 材料拿不到不该影响这一轮回复
+            logger.warning("quote_reaction_material_failed", exc_info=True)
             return ""
 
     def _review_context(self, message: IncomingMessage, state) -> str:
@@ -3124,6 +3207,11 @@ class DialogueEngine:
                     f"上一次：{_format_clock(float(stats['last_run_at']))}   "
                     f"{stats.get('last_result', '')}"
                 )
+        faces = face_names.shared().snapshot()
+        if faces["count"]:
+            lines.append(f"表情名字表：{faces['count']} 条（{faces['path']}）")
+        else:
+            lines.append("表情名字表：还没有（下面只显示数字）")
         table = store.meanings.get(group_id) or {}
         if not table:
             lines.append(f"本群（{group_id}）还没有表情含义（样本不够，或者她的消息还没被贴过表情）。")
@@ -3132,17 +3220,25 @@ class DialogueEngine:
             for emoji in sorted(table, key=lambda key: (len(key), key)):
                 sense = store.effective_sense(group_id, emoji)
                 detail = store.effective_note(group_id, emoji)
-                manual = store.override(group_id, emoji).get("sense")
-                mark = "（人工改的）" if manual else ""
+                # 方向是谁定的要看得出来：人工改的、用户点名写死的（`㊗`）、还是要它自己学的。
+                source = store.sense_source(group_id, emoji) if hasattr(store, "sense_source") else ""
+                mark = {"人工": "（人工改的）", "写死": "（写死的）"}.get(source, "")
+                name = face_names.shared().label_for(emoji)
+                shown = f"{emoji}（{name}）" if name else emoji
                 lines.append(
-                    f"· {emoji} → {SENSE_LABELS.get(sense, sense)}{mark}"
+                    f"· {shown} → {SENSE_LABELS.get(sense, sense)}{mark}"
                     + (f"：{detail}" if detail else "")
                 )
         if store.notes:
             lines.append("她自己的老习惯（学来的，都是短句）：")
             for item in store.notes[:6]:
                 key = note_id(item.get("when"), item.get("note"))
-                mark = "（已停用）" if store.note_disabled(key) else ""
+                marks = []
+                if item.get("avoid"):
+                    marks.append("反面：那次被嫌")
+                if store.note_disabled(key):
+                    marks.append("已停用")
+                mark = "（" + "、".join(marks) + "）" if marks else ""
                 lines.append(f"· [{key}] {item.get('when', '')}——{item.get('note', '')}{mark}")
             hidden = len(store.notes) - 6
             if hidden > 0:
@@ -3514,6 +3610,9 @@ class DialogueEngine:
 
         2026-09-30 用户："status 同理"——所以除了"本次重启之后"那一行，
         再加一行全时累计（账本 `ApiUsageStore` 里的 baseline + 本次进程）。
+
+        2026-10-13 加一行**模型来源**（`provider_failover.status_line()`）：它印的是
+        "当值的是主家还是兜底那一家"，不是余额数字——余额仍然只在 `/super apicheck`。
         """
 
         snapshot = self.snapshot()
@@ -3538,6 +3637,9 @@ class DialogueEngine:
         lines = [
             "运行状态（本次重启之后）",
             f"已运行：{_format_duration(uptime)}   开始于：{_format_clock(snapshot.started_at)}",
+            # 模型来源那一行：主家余额耗尽（HTTP 402）时会自动切到兜底那一家，
+            # 这件事必须一眼看得见——否则"她怎么突然换了个口气"没有解释。
+            provider_failover.status_line(),
             f"内存：{_format_bytes(snapshot.memory_bytes)}"
             + (f"（峰值 {_format_bytes(snapshot.memory_peak_bytes)}）" if snapshot.memory_peak_bytes else "")
             + (f"   数据目录：{_format_bytes(database)}" if database else ""),
@@ -4909,12 +5011,12 @@ class DialogueEngine:
         # （三处根据一样都没有 + 被叫到 → 之后要看她的草稿）。
         grounding = None
         ask_rules = self._flags().ask_when_unsure
-        # 这一轮的**短码**（不可信数据的边界，2026-10-08）：回复段用它把每个 DATA 块
-        # 包起来，回复回来之后再拿它做一次纯字符串判定（`data_boundary.reply_leaks_marker`）。
-        # 开关关掉时是空串：下面的包裹与判定都变成恒等操作，请求与改动前逐字相同。
-        # **每轮现取**（不是每条消息共用）：`secrets` 取 7 位，见 `data_boundary`。
-        marker = (data_boundary.session_marker()
-                  if self._flags().data_marker_enabled else "")
+        # 这一轮的**记号**（不可信数据的边界，2026-10-08；两档见 2026-10-11）：回复段用它
+        # 把每个 DATA 块包起来，回复回来之后再拿它做一次纯字符串判定
+        # （`data_boundary.reply_leaks_marker`）。总闸门关掉时是空串：下面的包裹与判定都
+        # 变成恒等操作，请求与改动前逐字相同。**取法跟档位走**（`_data_marker`）：
+        # 缓存友好型是"一季一个、压缩才换"，增强型是"每轮现取 7 位"。
+        marker = self._data_marker(state)
         # 「到点提醒」的邮箱那一步（2026-10-08）：他这一句里如果带着邮箱，而核心正等着
         # 他给（上一轮认到提醒但没值），就在这里收下来——记进记忆（按人）+ 补交那条待办。
         # 放在判定之前：他这一句常常就是"我的邮箱是 x@y"，判定很可能判 NO_REPLY。
@@ -5074,8 +5176,16 @@ class DialogueEngine:
             clarify_note=self._remind_ask_note(message),
             # 「她自己的老习惯」（2026-10-06 金句学习）：按眼前这句的语境挑几条**材料**
             # 进 DATA 段。关掉开关 / 还没学出东西时是空串，请求与改动前逐字相同。
+            # 2026-10-11 起它**缓存在会话状态上**（只在压缩或过了几小时才重算），
+            # 理由见 `_style_material` 的说明；**放哪一段跟着档位走**（用户定案
+            # "位置跟档位走"）：缓存友好型进稳定段（记号一季不变，材料才吃得到前缀
+            # 缓存），增强型留在易变段——见 `build_dialogue_messages` 的
+            # `style_material_stable`。
             style_material=self._style_material(message, state),
-            # 不可信数据的边界短码（空串 = 那个开关关掉了，见上面 `marker`）。
+            style_material_stable=self._flags().data_marker_cache_friendly,
+            # 「刚才有人给她贴了什么」（2026-10-11 的"甲"）：逐轮算，进易变段尾巴。
+            reaction_material=self._reaction_material(message),
+            # 不可信数据的边界记号（空串 = 总闸门关掉了，见上面 `marker`；取法跟档位走）。
             session_marker=marker,
         )
         self._stats["model_calls"] += 1

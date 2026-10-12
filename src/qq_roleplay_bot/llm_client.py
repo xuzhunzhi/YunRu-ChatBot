@@ -189,6 +189,7 @@ class OpenAICompatibleClient:
         user_id: str = "",
         usage_store=None,
         usage_role: str = "",
+        provider: str = "",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
@@ -215,6 +216,11 @@ class OpenAICompatibleClient:
         # 而不是"这次重启之后"。`usage_role` 是它记账时的名目（dialogue/judge/memory/…）。
         self.usage_store = usage_store
         self.usage_role = str(usage_role or "")
+        # 这一家是**哪一家**（`""` = 还不知道是哪一家）。两处用它：
+        # ① `_complete_sync` 门控 DeepSeek 专有的请求字段；
+        # ② 余额耗尽切兜底时 `provider_failover.reapply()` 就地改它。
+        # 默认空串，所以今天所有调用点的请求体**一个字节都不变**。
+        self.provider = str(provider or "").strip().casefold()
 
     def cache_stats(self) -> dict[str, object]:
         """提示词缓存命中情况。命中率低说明请求前缀每次都在变，成本会成倍上升。"""
@@ -245,11 +251,22 @@ class OpenAICompatibleClient:
         self.last_attempts = 0
         self.last_error_kind = ""
         last_error: LLMError | None = None
-        for attempt in range(1, self.max_attempts + 1):
+        attempt = 0
+        # 余额耗尽（HTTP 402）那一次是**保命**重试，不是"同一条路再试一次"：
+        # 它换了一整份来源，所以**不占** `max_attempts` 的普通重试配额，
+        # 而且整条命里只允许一次（切过去之后再 402 就如实失败，不来回弹）。
+        failover_retried = False
+        while attempt < self.max_attempts:
+            attempt += 1
             self.last_attempts = attempt
             try:
                 return await asyncio.to_thread(self._complete_sync, messages)
             except ModelRequestError as exc:
+                if not failover_retried and self._is_balance_exhausted(exc):
+                    failover_retried = True
+                    if self._switch_to_fallback():
+                        attempt -= 1  # 这一次重试不计入普通配额
+                        continue
                 error = self._classify(exc)
                 self.last_error_kind = error.kind
                 if attempt >= self.max_attempts or not self._is_retryable(exc):
@@ -270,6 +287,36 @@ class OpenAICompatibleClient:
                 self.last_error_kind = exc.kind
                 raise
         raise last_error if last_error is not None else LLMError("模型请求失败")
+
+    @staticmethod
+    def _is_balance_exhausted(exc: ModelRequestError) -> bool:
+        """这一趟是不是"这一家**余额耗尽**了"。
+
+        判据写死成 HTTP 402（DeepSeek 余额不足时回的就是它；实测 body 里是
+        `Insufficient Balance`）。**不看 body 文本**——那玩意会被网关改写，
+        状态码才是契约。
+        """
+
+        return exc.kind == "http_error" and int(exc.status or 0) == 402
+
+    def _switch_to_fallback(self) -> bool:
+        """余额耗尽：请 `provider_failover` 把整条链切到兜底，再重试同一次调用。
+
+        **函数内 import**：`provider_failover` 要 import 本模块，模块级 import
+        会成环（`model_config._env_file_main_key` 那处也是这么处理的）。
+
+        返回 True 只在"真的换到了另一份来源"时：这样调用方才值得拿新端点再打一次，
+        否则按原样如实失败（**fail-closed**，绝不吞掉这个错误）。
+        """
+
+        from . import provider_failover  # 反向依赖，只能在函数里 import
+
+        task = provider_failover.task_of_role(self.usage_role)
+        before = (self.base_url, self.api_key, self.model)
+        if not provider_failover.note_balance_exhausted(self.provider, task=task):
+            return False
+        provider_failover.reapply()
+        return (self.base_url, self.api_key, self.model) != before
 
     def _classify(self, exc: ModelRequestError) -> LLMError:
         if exc.kind == "http_error":
@@ -297,17 +344,25 @@ class OpenAICompatibleClient:
         }
         if self.max_tokens is not None:
             body["max_tokens"] = self.max_tokens
-        if self.user_id:
+        # `user_id` 与 `reasoning_effort` 是**DeepSeek 专有**的调优字段：前者给同一
+        # 账号下的每个 agent 隔离 KVCache 与调度，后者控制 v4 系列的思考深度。
+        # 别的家未必认这两个字段（实测 2026-10-12：mimo 收下它们**不会** 400，但会
+        # 带 `reasoning_content` 静默思考——兜底时那是白花的钱），所以按 `self.provider`
+        # 门控：`""`（还不知道是哪一家）或 `"deepseek"` → 照旧发；其它家 → 一个都不发。
+        deepseek_fields = self.provider in ("", "deepseek")
+        if self.user_id and deepseek_fields:
             # 同一账号下按 agent 隔离 KVCache 与调度；不带则所有请求共享隔离空间。
             body["user_id"] = self.user_id
         # 采样参数（temperature / top_p）：按用途**每次请求现读**环境，
         # 没配置的用途一个键都不放。frequency_penalty 已被 DeepSeek API 废弃（删了）。
+        # 这两个是两家都认的通用字段，不分家。
         for key, value in _sampling_params_for(self.usage_role).items():
             body[key] = value
-        # reasoning_effort：控制 DeepSeek v4 系列的思考深度（默认 high → 改 low ✓ 快很多）。
-        # 2026-10-10 用户拍板。API 文档：none=关闭思考 / low / high / max。
-        from .dev_config import reasoning_effort
-        body["reasoning_effort"] = reasoning_effort(self.usage_role)
+        if deepseek_fields:
+            # reasoning_effort：控制 DeepSeek v4 系列的思考深度（默认 high → 改 low ✓ 快很多）。
+            # 2026-10-10 用户拍板。API 文档：none=关闭思考 / low / high / max。
+            from .dev_config import reasoning_effort
+            body["reasoning_effort"] = reasoning_effort(self.usage_role)
         payload = json.dumps(body).encode("utf-8")
         request = urllib.request.Request(
             f"{self.base_url}/chat/completions",

@@ -37,9 +37,11 @@ from .security import sanitize_chat_text
 from .remind import RemindIntent
 from .stage3_runtime import (
     SECTION_IS_DATA_RULE,
+    TIRED_MOOD_HINT,
     _format_message,
     _now_text,
     _quote_label,
+    on_slow_model,
     render_roster,
 )
 from .transport import IncomingMessage
@@ -341,6 +343,12 @@ def build_judge_messages(
         # 相处分寸只用来决定"没被叫到时要不要插话"。**被叫到时它没有否决权**：
         # 那一版连 route 都不输出，这里给什么都不影响她必须回。
         + (stance.as_judge_hint() if stance is not None else "")
+        # 跑在慢的那一家（兜底）时，判定这一侧也把她的意愿降下来（2026-10-12 用户拍板，
+        # 与回复那条 `TIRED_MOOD_RULE` 同一天）。**两种情况下不拼**：① 直接叫到她
+        # （`addressed`）——"她又突然不说话了"正是用户最烦的那件事，这条状态不许碰它；
+        # ② 她答应过人家"稍等"（`must_reply`，那一版判定只答话题起点、不回 route）。
+        + (TIRED_MOOD_HINT
+           if (not addressed and not must_reply and on_slow_model("judge")) else "")
         # 最小记忆（称呼/边界）走 DATA 段：不撑大判定 prompt，也要照样当不可信资料读。
         + (f"这个人的称呼与边界：{identity}\n" if identity else "")
         + "<current_message>\n"
