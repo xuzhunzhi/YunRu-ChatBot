@@ -110,6 +110,11 @@ WHITELIST = {
         "收件人被拒之后**不许**把半截状态留在 `mail_state` 里。它第 28 行 `from "
         "qq_roleplay_bot.plugins.mail.mail_client import …`、第 201 行还直接读插件包源码"
         "文本——本体侧没有 `plugins/mail/`，它在那边根本收集不起来。",
+    "tests/test_mail_letter_agent.py":
+        "写信 agent 自己的那一半（`plugins/mail/letter_writer.py`）：人格与事实表由核心"
+        "按次递进来、旧事她自己翻（`<lookup>`，最多三轮）、`<skip>` 就是今晚不写。"
+        "整份 import `plugins.mail.letter_writer` / `plugins.mail.daily_report`，还直接读"
+        "插件包源码文本核对“不再自己找人格”——本体侧没有这些模块，搬过去只会收集失败。",
     "tests/test_mail_report_window.py":
         "日报那条接缝（`ReportSeams.facts` / `window_facts`：「这一窗里群里发生了什么」）"
         "从核心递到插件、再落进日报正文的过程。第 37-39 行 import `plugins` / "
