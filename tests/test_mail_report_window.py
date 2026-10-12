@@ -571,9 +571,11 @@ def test_the_old_single_agent_path_also_needs_a_real_persona():
 
         with _no_logs():
             draft = asyncio.run(reporter.run_once(_seams(client, persona=None)))
+        state = store.load()
 
     assert draft is None and mail.sent == [] and client.calls == 0
-    assert "信人格读不到" in store.load().sends[-1]["detail"]
+    assert state.sends[-1]["ok"] is True, "这不是发送失败"
+    assert "信人格读不到" in state.sends[-1]["detail"]
 
 
 def test_a_skipped_night_is_recorded_but_not_a_send_failure():
@@ -585,7 +587,9 @@ def test_a_skipped_night_is_recorded_but_not_a_send_failure():
     """
 
     with tempfile.TemporaryDirectory() as tmp:
-        store = MailStateStore(Path(tmp) / "mail_state.json")
+        # 存状态那份自己也有一个时钟（`record()` 用它记 `last_report_at`），
+        # 不跟着 `_reporter` 的假时钟走的话，"今天问过了"这句就没法对表。
+        store = MailStateStore(Path(tmp) / "mail_state.json", clock=lambda: NOW)
         mail = _Mail()
         reporter = _reporter(store, mail)
         reporter.writer = _QuietWriter("今晚没什么想说的")
