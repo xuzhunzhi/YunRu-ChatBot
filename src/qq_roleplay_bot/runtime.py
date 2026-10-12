@@ -36,9 +36,11 @@ from .capabilities import CapabilityRegistry
 from .chat_window import collect_window_facts
 from .conversation_context import ConversationContextProvider
 from .extensions import PromptSources
+from .letter_docs import load_letter_facts, load_letter_persona
 from .llm_client import OpenAICompatibleClient, apply_client_overrides
 from .memory_config import MemorySettings
 from .memory_ops import MemoryOps
+from .memory_readonly import MemoryRead
 from .memory_service import MemoryService
 from .onebot_client import SnowLumaHttpClient
 from .outbox import Outbox
@@ -159,6 +161,12 @@ def build_knowledge_base():
 #: 2026-10-06 加了 `letter_api_key` / `vision_api_key`：这两个用途以前**没有**面板
 #: 入口（识图那把 key 甚至没有装配点，见汇报里的清单）。它们的取值方式与
 #: 其余几路一字不差——都走 `model_config` 的用途解析。
+#:
+#: 2026-10-12 起 `letter_api_key` 有一处要留神：写信那一路的**默认** key 已经改成借
+#: `judge` 那条（见 `model_config.TASKS`），所以面板改这一项只影响这个 client 就地
+#: 用的那把 key（`_apply_live` 是按 `usage_role` 找它的），**不改**"默认从哪个变量
+#: 来"。要整路换默认：地址（`letter_api_base_url`）与模型（`letter_api_model`）得
+#: 跟着一起改，否则就是"A 家 key 打 B 家地址"。
 _KEY_SETTING_ROLES: dict[str, str] = {
     "api_key": "dialogue",
     "reply_api_key": "dialogue",
@@ -1244,9 +1252,17 @@ class _SeamBinder:
                            client=getattr(engine, "client", None),
                            log_model_io=self.report_log_io,
                            note_letter=self.report_note_letter,
-                           memory_service=getattr(engine, "memory_service", None),
+                           # 只读记忆口（2026-10-12 换掉了 `memory_service`）：
+                           # 递过去的是 `MemoryRead`——只有查询方法，没有 store。
+                           memory_read=_memory_read(engine),
                            # 只读窗口聚合（计数，不含正文）。见 `report_window_facts`。
                            facts=self.report_window_facts,
+                           # **这一封信专用**的人格正文，每次现读（不是聊天那份）。
+                           # 读不到返回 `None`，那一晚就不写——不回落到模板。
+                           letter_persona=load_letter_persona,
+                           # 同一条路走的《已确定的事》：也是现读，读不到那晚同样不写
+                           # （事实校对全靠它，对着模板"校"等于没校）。
+                           letter_facts=load_letter_facts,
                            # **工厂**：写信 agent 自己那把通道（独立 user_id，
                            # 与群聊不共用缓存隔离空间）。给工厂而不是给 client，
                            # 因为装配点离写第一封信很远，client 要现造。
@@ -1655,6 +1671,22 @@ def _chat_log_path(engine):
     return chat_log
 
 
+def _memory_read(engine) -> MemoryRead:
+    """写信那条路的**只读**记忆口（见 `memory_readonly.py`）。
+
+    拿的是记忆库那个**文件的路径**（`MemoryStore.path`），不是 `MemoryStore`：
+    写信端手上因此没有 `commit` / `purge_records` / `retrieve`（它会写
+    `last_used_at`）这些东西——"插件不准碰记忆"由接缝的形状保证，不再靠
+    它自己"恰巧只调了两个只读方法"。
+
+    2026-10-12 换的。改之前这个位置递的是 `engine.memory_service`（真 service，
+    顺着 `.store` 能拿到整个可写的库）。
+    """
+
+    store = getattr(getattr(engine, "memory_service", None), "store", None)
+    return MemoryRead(db_path=getattr(store, "path", None))
+
+
 def _evidence_lines(context) -> list:
     """证据里的上下文：**一条条列出来**，不是压成一段说明。
 
@@ -1679,7 +1711,7 @@ def _reporter_sink_for(engine: DialogueEngine):
 
 
 def _report_seams_for(engine: DialogueEngine) -> ReportSeams:
-    """写日报要用、但**不属于权限**的五样东西（见 `ReportSeams` 的说明）。
+    """写日报、写信要用、但**不属于权限**的那几样东西（见 `ReportSeams` 的说明）。
 
     ⚠️ **每一样都必须经由 `_SeamBinder`，不能直接塞引擎的方法或属性。**
     2026-10-01 审查抓到两轮：
@@ -1889,8 +1921,10 @@ def _build_letter_client() -> OpenAICompatibleClient:
     为什么单独一份：信的 prompt 前缀又大又恒定（人设 + 信件规矩 + 已确定事实），
     跟群聊共用一份缓存隔离空间只会互相挤；分开之后它的命中率与成本都能单独看。
 
-    凭据走 `model_config` 的 **letter** 那个用途：自己的 key
-    （`QQBOT_LETTER_API_KEY`）→ 回落 reply 那把 **mimo** key → 兼容档。
+    凭据走 `model_config` 的 **letter** 那个用途。2026-10-12 起那一行借的是
+    `judge` 那条（deepseek / `deepseek-v4-pro`）——与 reply 同一个形状：模型的哪家
+    就借哪家的 key。它自己那把 `QQBOT_LETTER_API_KEY`（mimo）留着不动，主家余额
+    耗尽切兜底时由 `FALLBACK_TASKS` + `FALLBACK_KEY` 借走（见 `model_config`）。
 
     留在核心（而不是跟着装配搬去 `background_plugins.py`）：它要往**核心的用量账本**
     （`_USAGE_STORE`）里记一笔，那是核心状态。

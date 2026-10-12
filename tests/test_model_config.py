@@ -38,8 +38,11 @@ EXPECTED: tuple[tuple[str, str, str, str, str], ...] = (
     # 那条 key**（deepseek / deepseek-flash）走，`QQBOT_REPLY_API_KEY` 因此闲置。
     ("reply", "deepseek", "https://api.deepseek.com", "deepseek-flash",
      "QQBOT_JUDGE_API_KEY"),
-    ("letter", "mimo", "https://api.xiaomimimo.com/v1", "mimo-v2.6-pro",
-     "QQBOT_LETTER_API_KEY"),
+    # 2026-10-12 用户拍板"信用v4pro写"：letter 与 reply 同一个形状——要的模型挂在
+    # 哪一家就借哪家的 key，`QQBOT_LETTER_API_KEY`（mimo 那把）因此在正常路径上
+    # 闲置，只在"主家余额耗尽切兜底"那条链上被借走（见 `FALLBACK_TASKS`）。
+    ("letter", "deepseek", "https://api.deepseek.com", "deepseek-v4-pro",
+     "QQBOT_JUDGE_API_KEY"),
     ("judge", "deepseek", "https://api.deepseek.com", "deepseek-flash",
      "QQBOT_JUDGE_API_KEY"),
     ("memory", "deepseek", "https://api.deepseek.com", "deepseek-flash",
@@ -148,30 +151,39 @@ def test_the_three_layers_are_layered() -> None:
         assert fields["model"] != "deepseek-chat", f"{task} 还在用别名"
 
 
-def test_the_letter_purpose_has_its_own_key_and_the_pro_model() -> None:
-    """用户原话："长文用 mimo pro 吧"——写信那一路有自己的 key 条目 + pro 模型。"""
+def test_the_letter_purpose_uses_the_pro_model_through_the_judge_key() -> None:
+    """用户原话（2026-10-12）："信用v4pro写"——写信那一路要 pro 那档。
 
-    assert model_config.TASKS["letter"]["model"] == "mimo-v2.6-pro"
+    `deepseek-v4-pro` 只在 deepseek 那一家（与 `deepseek-flash` 不同档），所以这一路
+    跟 reply 一个形状：借 `judge` 那条 key。它自己那条（`QQBOT_LETTER_API_KEY`）是
+    mimo 的，闲置但**没废**——它是兜底链借走的那把（见 `FALLBACK_TASKS`）。
+    """
+
+    assert model_config.TASKS["letter"]["model"] == "deepseek-v4-pro"
+    assert model_config.TASKS["letter"]["key"] == "judge", "模型在哪家就借哪家的 key"
     letter = model_config.KEYS["letter"]
     assert letter["provider"] == "mimo"
     assert letter["env"] == "QQBOT_LETTER_API_KEY"
     assert letter["fallback"] == "reply", "回落规则要写清：先自己的，再 reply 那把 mimo key"
 
 
-def test_the_letter_key_falls_back_to_the_reply_key() -> None:
-    """**用户写明的回落规则**：`QQBOT_LETTER_API_KEY` 没有 → 借 reply 那把（同家 mimo）。
+def test_the_letter_key_entry_still_serves_the_mimo_fallback() -> None:
+    """`QQBOT_LETTER_API_KEY` 那条条目**没废**：主家余额耗尽时信切回它。
 
-    为了让这条规则生效，要先把"兼容档那一对"清干净（只在连主 key 都没有的机器上，
-    这条同家回落才会被走到）——见 `_key_source` 里那三档的顺序。
+    2026-10-12 之前这条测的是"写信用途自己回落 reply 那把 mimo key"——那条规则连同
+    "信跑在 mimo 上"一起作废了（用途现在借 judge 那条）。它自己那条 mimo key 仍然
+    生效，只是生效的地方换到了**兜底链**上：兜底那条 key（mimo / `QQBOT_FALLBACK_API_KEY`）
+    自己没配，按回落链借到 letter 这把。
     """
 
-    with _env(env_file_key="", QQBOT_REPLY_API_KEY="sk-fake-reply"):
-        endpoint = model_config.resolve("letter")
-        assert endpoint.api_key == "sk-fake-reply"
-        assert endpoint.provider == "mimo", "回落也必须同家"
-        assert endpoint.base_url == "https://api.xiaomimimo.com/v1"
-        assert endpoint.key_env == "QQBOT_REPLY_API_KEY"
-        assert endpoint.own_key is False, "回落来的 key 要让自检那一行看得出来"
+    with _env(QQBOT_JUDGE_API_KEY="sk-fake-judge",
+              QQBOT_LETTER_API_KEY="sk-fake-letter"):
+        fallback = model_config.resolve_fallback("letter")
+        assert fallback is not None, "letter 从 2026-10-12 起在兜底表里"
+        assert fallback.triple() == (
+            "https://api.xiaomimimo.com/v1", "sk-fake-letter", "mimo-v2.6-pro")
+        assert fallback.key_env == "QQBOT_LETTER_API_KEY"
+        assert fallback.own_key is False, "兜底那一路永远是借来的 key"
 
 
 # --- ② 改一条 key 的 provider → 地址跟着变（成对取自同一条） ------------------
@@ -483,14 +495,24 @@ def test_the_self_check_prints_names_not_values() -> None:
 
 
 def test_the_self_check_marks_the_missing_purposes() -> None:
-    """缺 key 的用途要在自检里带 `**缺**`（今晚那种事一眼看得出来）。"""
+    """缺 key 的用途要在自检里带 `**缺**`（今晚那种事一眼看得出来）。
+
+    2026-10-12 起"只配 judge 那一把"的机器上**六个用途全都有值**（reply 与 letter
+    都借 judge 那条），所以要看 `**缺**` 得把 judge 也清掉——两半都钉在下面。
+    """
+
+    with _env(env_file_key=""):
+        blob = "\n".join(model_config.self_check_lines())
+        assert "**缺**" in blob
+        for task in ("reply", "letter", "judge"):
+            assert f"{task}: " in blob
 
     with _env(env_file_key="", QQBOT_JUDGE_API_KEY="sk-fake-judge"):
         blob = "\n".join(model_config.self_check_lines())
         # judge 有自己的 key；memory / review / vision 回落到 judge 那把（同家）
         assert "judge: provider=deepseek" in blob
-        # reply / letter 一条都没有 → 兼容档也空 → 报缺
-        assert "reply: " in blob and "**缺**" in blob
+        # reply / letter 都借 judge 那条，因此这一把 key 就够六个用途跑起来
+        assert "**缺**" not in blob, "reply 与 letter 借的都是 judge 那条，不该报缺"
         assert "letter: " in blob
 
 

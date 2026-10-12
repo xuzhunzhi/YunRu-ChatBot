@@ -55,6 +55,11 @@
 | letter | `QQBOT_LETTER_API_KEY` | `QQBOT_REPLY_API_KEY` |
 | judge / memory / review / vision | `QQBOT_JUDGE_API_KEY` / `QQBOT_MEMORY_API_KEY` / `QQBOT_REVIEW_API_KEY` / `QQBOT_VISION_API_KEY` | `QQBOT_JUDGE_API_KEY` |
 
+这张表说的是 **key 条目**之间的回落；"哪个**用途**用哪条 key"由 `TASKS` 定。
+`reply` 与 `letter` 这两路现在都借 `judge` 那条（它们要的模型在 deepseek 上，而
+它们自己那把 key 是 mimo 的）——那两把 mimo key 因此在正常路径上闲置，只在
+"主家余额耗尽切兜底"那条链上被借走（见 `FALLBACK_TASKS`）。
+
 回落到最后那一条（"主 key 那条"，`QQBOT_API_KEY`）时，**地址也一起用兼容档**
 （`QQBOT_API_BASE_URL`）——因为在历史部署里那个 key 与那个地址本来就是**同一份配置**：
 只配一把 key 的机器，改动前后的行为因此**逐字相同**（有测试钉住）。
@@ -98,9 +103,13 @@ PROVIDERS: dict[str, dict[str, str]] = {
 #: 同样提示词中位 10 秒（ds 1.1 秒），用户拍板换回。地址跟着钥匙走（judge → deepseek），
 #: `QQBOT_REPLY_API_KEY`（mimo 那把）因此闲置、原值保留在 .env 里。要换回 mimo：
 #: 把这一行改回 {"key": "reply", "model": "mimo-v2.6-flash"} 即可，其余不动。
+#: letter 是同一个形状（2026-10-12 用户拍板"信用v4pro写"）：`deepseek-v4-pro` 只挂在
+#: deepseek 那一家，所以借 `judge` 那条 key。它自己那条（`QQBOT_LETTER_API_KEY`）是
+#: mimo 的，因此闲置——但**没废**：主家余额耗尽时信会切回它（见 `FALLBACK_TASKS`）。
+#: 要换回去：把 letter 那一行改回 {"key": "letter", "model": "mimo-v2.6-pro"}。
 TASKS: dict[str, dict[str, str]] = {
     "reply": {"key": "judge", "model": "deepseek-flash"},
-    "letter": {"key": "letter", "model": "mimo-v2.6-pro"},
+    "letter": {"key": "judge", "model": "deepseek-v4-pro"},
     "judge": {"key": "judge", "model": "deepseek-flash"},
     "memory": {"key": "memory", "model": "deepseek-flash"},
     "review": {"key": "review", "model": "deepseek-flash"},
@@ -162,16 +171,19 @@ KEYS: dict[str, dict[str, str]] = {
 #:
 #: "这一家接不住这个用途" = 那个用途**不在表里**——那时如实失败，不硬凑。
 #:
-#: 有实测证据的模型名只有一个：`mimo-v2.6-pro`（`letter` 一直在用它；2026-10-12
-#: 又把真实 judge 形状在它上面重放过，5/5 出 `<route>`+`<topic>`）。
-#: 不在表里的两个用途，理由分别是：
-#: - `letter`：它**本来就在** mimo 上（`TASKS["letter"]`），主家挂了没有"另一家"可切；
-#: - `vision`：要传图片，mimo 那一路**没实测过**收不收图片，按"没证据就别写进
-#:   生产表"的纪律先不写。主家挂着的时候这一路如实失败。
+#: 有实测证据的模型名只有一个：`mimo-v2.6-pro`（`letter` 从建起来一直用它，到
+#: 2026-10-12 为止 28 次调用；2026-10-12 又把真实 judge 形状在它上面重放过，
+#: 5/5 出 `<route>`+`<topic>`）。
+#: `letter` 是 2026-10-12 新进这张表的：它的**主家**换成了 deepseek（见 `TASKS`），
+#: 于是"主家余额耗尽 → 切回 mimo"这条路对它成立了（切过去用的是它自己那把 mimo
+#: key，走 `FALLBACK_KEY` 的回落链）。
+#: 不在表里的只剩 `vision`：要传图片，mimo 那一路**没实测过**收不收图片，按
+#: "没证据就别写进生产表"的纪律先不写。主家挂着的时候这一路如实失败。
 # TODO(mimo-vision): 实测过 mimo 的图片入参之后再决定要不要加。
 # TODO(mimo-flash): `mimo-v2.6-flash` 在本仓库还没有实测记录，先不写进生产表。
 FALLBACK_TASKS: dict[str, str] = {
     "reply": "mimo-v2.6-pro",
+    "letter": "mimo-v2.6-pro",
     "judge": "mimo-v2.6-pro",
     "memory": "mimo-v2.6-pro",
     "review": "mimo-v2.6-pro",
