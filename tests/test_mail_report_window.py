@@ -212,7 +212,7 @@ PERSONA_TEXT = "（测试用的信人格正文）"
 FACTS_TEXT = "（测试用的事实表：她读过仪表盘）"
 
 
-def _seams(client, *, letters=None, facts=None, persona=PERSONA_TEXT) -> ReportSeams:
+def _seams(client, *, letters=None, facts=None, persona=PERSONA_TEXT, reader=None) -> ReportSeams:
     """生产接缝的那一份（外加只读记忆口）。
 
     2026-10-12 起两处变了：`memory_service`（可写的工程件）换成只读的 `memory_read`；
@@ -225,7 +225,7 @@ def _seams(client, *, letters=None, facts=None, persona=PERSONA_TEXT) -> ReportS
         client=client,
         log_model_io=None,
         note_letter=(letters.append if letters is not None else None),
-        memory_read=None,
+        memory_read=reader,
         facts=facts,
         letter_persona=(lambda: persona),
         letter_facts=lambda: FACTS_TEXT,
@@ -610,3 +610,70 @@ def test_a_skipped_night_is_recorded_but_not_a_send_failure():
     assert dr.last_failure_note(state.sends) == "", (
         "下一晚的信里不许出现「上次没寄出去」——那晚根本没写"
     )
+
+
+# --- 素材里"跟谁说过话 / 改了看法"来自只读记忆口（2026-10-13 补） ----------------
+
+
+class _Reader:
+    """只读记忆口的假件——形状照生产那份 `memory_readonly.MemoryRead`。
+
+    真件的方法与字段是拿**生产库**核过的（`run/data/memory/memory.sqlite3`）：
+    `people(since)` → `user_id / closeness / guardedness / last_seen_at`，
+    `changes(since)` → `… / reason / occurred_at`。
+    """
+
+    def __init__(self, *, boom: bool = False) -> None:
+        self.boom = boom
+        self.asked: list[float] = []
+
+    def people(self, since=0.0, *, limit=20):
+        self.asked.append(float(since))
+        if self.boom:
+            raise RuntimeError("库打不开")
+        return ({"user_id": "242003347", "closeness": 2, "guardedness": 0},)
+
+    def changes(self, since, *, limit=20):
+        if self.boom:
+            raise RuntimeError("库打不开")
+        return ({"reason": "他当面贬损羞辱"},)
+
+
+def test_the_materials_take_people_and_changes_from_the_readonly_reader():
+    """打过交道的人要用记忆口那份（带亲近/防备档），不是聊天日志里那串光号码。"""
+
+    from qq_roleplay_bot.stage3_runtime import CLOSENESS_LABELS, GUARDEDNESS_LABELS
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = MailStateStore(Path(tmp) / "mail_state.json")
+        reader = _Reader()
+        writer = _Writer()
+        reporter = _reporter(store, _Mail())
+        reporter.writer = writer
+        draft = asyncio.run(reporter.run_once(_seams(_Client(), reader=reader)))
+
+    assert draft is not None, "记忆口只是素材的一半，缺了也不该把信拦下"
+    data = writer.materials[0].as_data(CLOSENESS_LABELS, GUARDEDNESS_LABELS)
+    assert "242003347（亲近 " in data and "防备 " in data, "档位要跟着人一起给她"
+    assert "有几个人让你改变了态度，原因是：他当面贬损羞辱。" in data
+    assert reader.asked == [NOW - 86400.0], "只读口要拿到窗口起点，才能只翻这段日子"
+
+
+def test_a_broken_reader_does_not_stop_the_letter():
+    """「库打不开」只是素材缺一块：信照写，只是不提跟谁说过话。"""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = MailStateStore(Path(tmp) / "mail_state.json")
+        writer = _Writer()
+        mail = _Mail()
+        reporter = _reporter(store, mail)
+        reporter.writer = writer
+        with _no_logs():
+            draft = asyncio.run(
+                reporter.run_once(_seams(_Client(), reader=_Reader(boom=True)))
+            )
+
+    assert draft is not None and mail.sent, "记忆口炸了不该把整封信拦下"
+    data = writer.materials[0].as_data((), ())
+    assert "跟你说过话的人" not in data
+    assert "改变了态度" not in data
