@@ -105,6 +105,16 @@ WHITELIST = {
     "tests/test_mail_channel.py":
         "读信回信插件（`plugins/mail/`）的只认主人 / 幂等 / 旧信 / 上限 / 不回自己。"
         "整份都在测这个插件。",
+    "tests/test_mail_client_errors.py":
+        "邮件客户端（`plugins/mail/mail_client.py`）的错误面：连不上 SMTP、认证失败、"
+        "收件人被拒之后**不许**把半截状态留在 `mail_state` 里。它第 28 行 `from "
+        "qq_roleplay_bot.plugins.mail.mail_client import …`、第 201 行还直接读插件包源码"
+        "文本——本体侧没有 `plugins/mail/`，它在那边根本收集不起来。",
+    "tests/test_mail_report_window.py":
+        "日报那条接缝（`ReportSeams.facts` / `window_facts`：「这一窗里群里发生了什么」）"
+        "从核心递到插件、再落进日报正文的过程。第 37-39 行 import `plugins` / "
+        "`plugins.mail.daily_report` / `plugins.mail.mail_state`——同上，本体侧没有那三个"
+        "模块，搬过去只会收集失败。",
     "tests/test_mail_send_to.py":
         "邮件接缝上**第二条窄口**（`MailSeams.send_to`：「寄给指定的一个地址」）的覆盖，"
         "连「旧那条（发给操作者）不许变」一起钉住。整份都在测插件包里的那条口子——"
