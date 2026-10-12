@@ -417,6 +417,17 @@ class ReportSeams:
     #: 都写着"两个群里没人开口"。字段清单由 `tests/test_mail_report_window.py`
     #: 逐个钉住（含"聚合对象里不许出现正文"那条）。
     facts: object = None
+    #: `(since) -> LetterContext | None`：**收信人自己说过的话**，加上她上一封信的主题。
+    #:
+    #: 用户 2026-10-13 原话：*"加，不是说了允许读取记忆吗，你是不是不懂什么叫不是
+    #: 非要一次输入就得到一封信"*。在那之前素材里一句人话都没有（`facts` 只给计数、
+    #: `memory_read` 只给号码与关系档），她手上唯一有内容的是那份固定事实表——实测
+    #: 同一份素材三封信里有一封把事实表里的旧事写成了"今天"发生的新事，用户读到的那封
+    #: "根本不像是人写的信"就是这么来的。
+    #: 这是对"一句话都不给"的第二次破例，**只对收信人一个人破**（`_letter_owner_ids()`）：
+    #: 信只寄给他一个人，他自己的原话回到他自己手上不构成外泄。别人的话一句都不给。
+    #: 读不出日志返回 `None`，调用方按"他这几天没说什么"处理，不许编。
+    letter_context: object = None
     #: `() -> str | None`：**这一封信专用**的人格正文。
     #:
     #: 用户 2026-10-12 原话：*"写信的人格prompt做单独适配。注意写信agent本身是
@@ -508,6 +519,22 @@ class ReportSeams:
             return taker(since)
         except Exception:  # noqa: BLE001 - 数不出来就不报数字，别让日报炸
             logger.warning("plugin_report_window_facts_failed", exc_info=True)
+            return None
+
+    def his_context(self, since: float) -> object | None:
+        """取一段"他说过的话"；没有接缝、或读不出来，就是 `None`。
+
+        `None` = 他这几天没说什么（或日志读不到）。调用方**不许拿别的东西补位**：
+        素材里宁可少一段，也不能把号码或事实表里的旧事冒充成"他今天说的话"。
+        """
+
+        taker = self.letter_context
+        if not callable(taker):
+            return None
+        try:
+            return taker(since)
+        except Exception:  # noqa: BLE001 - 读不出来就不给素材，别让日报炸
+            logger.warning("plugin_report_letter_context_failed", exc_info=True)
             return None
 
 
