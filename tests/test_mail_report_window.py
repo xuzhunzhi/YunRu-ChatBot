@@ -208,14 +208,27 @@ def _reporter(store: MailStateStore, mail, *, now: float = NOW):
     )
 
 
-def _seams(client, *, letters=None, facts=None) -> ReportSeams:
+PERSONA_TEXT = "（测试用的信人格正文）"
+FACTS_TEXT = "（测试用的事实表：她读过仪表盘）"
+
+
+def _seams(client, *, letters=None, facts=None, persona=PERSONA_TEXT) -> ReportSeams:
+    """生产接缝的那一份（外加只读记忆口）。
+
+    2026-10-12 起两处变了：`memory_service`（可写的工程件）换成只读的 `memory_read`；
+    信人格与事实表也走接缝——插件不许再 `from ...base_prompt import BASE_PROMPT`。
+    `persona=None` 就是"核心那边读不到"：那种情况下一封信都不该发出去。
+    """
+
     return ReportSeams(
         snapshot=lambda: _Snapshot(),
         client=client,
         log_model_io=None,
         note_letter=(letters.append if letters is not None else None),
-        memory_service=None,
+        memory_read=None,
         facts=facts,
+        letter_persona=(lambda: persona),
+        letter_facts=lambda: FACTS_TEXT,
     )
 
 
@@ -342,10 +355,13 @@ class _Writer:
 
     def __init__(self) -> None:
         self.materials: list = []
+        self.seen: dict = {}
+        self.last_skip = ""
 
-    async def write(self, materials, *, closeness_names=(), guardedness_names=(),
-                    now=None):
+    async def write(self, materials, *, persona="", facts="", closeness_names=(),
+                    guardedness_names=(), lookup=None, now=None):
         self.materials.append(materials)
+        self.seen = {"persona": persona, "facts": facts, "lookup": lookup}
         return "今天", "群里今天挺热闹，我跟几个人说了话。"
 
 
@@ -483,4 +499,110 @@ def test_super_mail_send_now_hands_the_seams_not_the_engine():
     assert "已寄出：今天" in text
     assert not hasattr(DialogueEngine, "snap"), (
         "引擎没有 snap：别为了让旧写法能用就给它加一个——那等于让插件又拿到引擎"
+    )
+
+
+# --- 人格由核心现读、今晚写不写她说了算（2026-10-12 用户裁定） -----------------
+
+
+class _QuietWriter:
+    """她说今晚不写：两个空串 + `last_skip` 里放原因（生产的 `LetterWriter` 就是这样）。"""
+
+    enabled = True
+
+    def __init__(self, reason: str = "今晚没什么想说的") -> None:
+        self.last_skip = reason
+
+    async def write(self, materials, *, persona="", facts="", closeness_names=(),
+                    guardedness_names=(), lookup=None, now=None):
+        return "", ""
+
+
+def test_the_letter_uses_the_persona_the_core_handed_over():
+    """写信用的人格与事实表**由核心按次递进来**（不是插件自己找、也不是聊天那份）。"""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = MailStateStore(Path(tmp) / "mail_state.json")
+        mail = _Mail()
+        writer = _Writer()
+        reporter = _reporter(store, mail)
+        reporter.writer = writer
+
+        draft = asyncio.run(reporter.run_once(_seams(_Client(RAW))))
+
+    assert writer.seen["persona"] == PERSONA_TEXT, "人格要原样交到写信口手里"
+    assert writer.seen["facts"] == FACTS_TEXT
+    assert writer.seen["lookup"] is None, "接缝没给记忆口就别自己造一个"
+    assert draft is not None and draft.subject == "今天"
+    assert mail.sent and mail.sent[0]["body"] == "群里今天挺热闹，我跟几个人说了话。"
+
+
+def test_a_missing_persona_means_no_letter_at_all():
+    """"核心那边读不到真人格" ⇒ 不写、不发、也不叫模型，只记一句原因。
+
+    用户 2026-10-12 原话：*"凭啥这玩意能直接复用人格prompt啊"*——所以这里**不许回落**
+    到模板或聊天人格：宁可今晚没有信。
+    """
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = MailStateStore(Path(tmp) / "mail_state.json")
+        mail = _Mail()
+        client = _Client(RAW)
+        reporter = _reporter(store, mail)
+
+        with _no_logs():
+            draft = asyncio.run(reporter.run_once(_seams(client, persona=None)))
+        state = store.load()
+
+    assert draft is None and mail.sent == [], "读不到人格就不写信"
+    assert client.calls == 0, "连模型都不用叫"
+    assert state.sends[-1]["ok"] is True, "这不是发送失败"
+    assert "信人格读不到" in state.sends[-1]["detail"]
+
+
+def test_the_old_single_agent_path_also_needs_a_real_persona():
+    """单 agent 老路（没有 writer 时）同样只在有真人格时才发信。"""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = MailStateStore(Path(tmp) / "mail_state.json")
+        mail = _Mail()
+        client = _Client(RAW)
+        reporter = _reporter(store, mail)  # writer=None：走旧路
+
+        with _no_logs():
+            draft = asyncio.run(reporter.run_once(_seams(client, persona=None)))
+
+    assert draft is None and mail.sent == [] and client.calls == 0
+    assert "信人格读不到" in store.load().sends[-1]["detail"]
+
+
+def test_a_skipped_night_is_recorded_but_not_a_send_failure():
+    """她自己说不写：不发信，但要把"今天问过了"记下来。
+
+    记成 `ok=False` 会有三个后果（`MailStateStore.record` 只认 `ok and kind=="report"`）：
+    `due()` 一直为真、ticker 整晚每隔一分钟再问一次；`attempts`（重试额度）被
+    "她不想写"用光；下一晚的信里冒出"上一次想给他写信没寄出去"——那晚根本没写。
+    """
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = MailStateStore(Path(tmp) / "mail_state.json")
+        mail = _Mail()
+        reporter = _reporter(store, mail)
+        reporter.writer = _QuietWriter("今晚没什么想说的")
+
+        first = asyncio.run(reporter.run_once(_seams(_Client(RAW))))
+        state = store.load()
+        due_after = reporter.due()
+        again = asyncio.run(reporter.run_once(_seams(_Client(RAW))))
+
+    assert first is None and again is None, "没有信，就没有草稿交出来"
+    assert mail.sent == [], "她说今晚不写，就一封信都不发"
+    assert state.last_report_at == NOW, "今天这一次问过了"
+    assert due_after is False, "记下来之后就不该再算到点（否则整晚重复问）"
+    assert state.attempts == 0, "不该被「她不想写」用掉重试额度"
+    assert state.sends[-1]["ok"] is True, "不写不是发送失败"
+    assert "今晚没写" in state.sends[-1]["detail"]
+    assert "今晚没什么想说的" in state.sends[-1]["detail"]
+    assert dr.last_failure_note(state.sends) == "", (
+        "下一晚的信里不许出现「上次没寄出去」——那晚根本没写"
     )

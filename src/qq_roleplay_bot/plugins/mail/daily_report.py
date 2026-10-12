@@ -21,14 +21,16 @@ import re
 import time
 from dataclasses import dataclass, field
 
-from ...base_prompt import BASE_PROMPT
 from .mail_state import MailState
 
 logger = logging.getLogger(__name__)
 
 # 她写信时的附加规矩。**刻意避开机制性词汇**（检查/触发/调用/协议/提示词/上下文/
 # 记忆库/Stage）：措辞会被角色吸收，写进去她就会开始讲自己的运行方式。
-# 人设仍然来自 `base_prompt.py`，这一段只加"这是一封信"的规矩。
+#
+# **这一段里没有人格**（2026-10-12 用户："写信agent本身是插件里的，所以凭啥这玩意能
+# 直接复用人格prompt啊"）：人格是信专用的那一份，由核心每次现读、经接缝给进来。
+# 这里只加"这是一封信"的规矩——换了人格，这些规矩照样管用。
 REPORT_PROMPT = """你要给一直照看你的人写封信。他不在你眼前，你想说点什么就说点什么。
 
 这封信是**写给他的**：写完之后会送到他的邮箱里，他在那里读；他不会在信里回你，
@@ -206,11 +208,12 @@ class DayMaterials:
 def build_report_messages(
     materials: DayMaterials,
     *,
+    persona: str,
     closeness_names: tuple[str, ...],
     guardedness_names: tuple[str, ...],
     now: float | None = None,
 ) -> list[dict[str, str]]:
-    """她写汇报用的请求。人设来自 base_prompt，素材进 DATA。"""
+    """她写信用的请求（**旧路**：一次调用成稿）。`persona` 由调用方从接缝取。"""
 
     stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(now or time.time()))
     user_content = (
@@ -222,7 +225,7 @@ def build_report_messages(
         "按上面的规矩写吧，想到哪儿写到哪儿。"
     )
     return [
-        {"role": "system", "content": BASE_PROMPT + "\n\n" + REPORT_PROMPT},
+        {"role": "system", "content": persona + "\n\n" + REPORT_PROMPT},
         {"role": "user", "content": user_content},
     ]
 
@@ -314,6 +317,24 @@ def _pairs(raw) -> tuple[tuple[str, int], ...]:
     return tuple(pairs)
 
 
+def _matter(report, name: str) -> str:
+    """从接缝上取一份"每次现读"的正文（信人格 / 事实表）。
+
+    核心那边每次调用都重新读文件（`letter_docs.load_letter_persona`），所以这里拿到的是
+    **这一刻**的那一份。取不到（没给、抛异常、返回 None）= 空串：调用方据此决定今晚不写，
+    **不回落模板**（模板不是她——`letter_docs` 的模块开头写了理由）。
+    """
+
+    getter = getattr(report, name, None)
+    if not callable(getter):
+        return ""
+    try:
+        return str(getter() or "")
+    except Exception:  # noqa: BLE001 - 读不到就当作没有
+        logger.exception("daily_report_matter_failed name=%s", name)
+        return ""
+
+
 def collect_materials(
     report,
     *,
@@ -324,9 +345,9 @@ def collect_materials(
     guardedness_names: tuple[str, ...] = (),
     last_failure: str = "",
 ) -> DayMaterials:
-    """从**日报接缝**与记忆库里凑素材。**全是计数与编号，没有一句聊天正文。**
+    """从**日报接缝**与只读记忆口里凑素材。**全是计数与编号，没有一句聊天正文。**
 
-    `report` 是 `plugins.ReportSeams`（六项函数），不是引擎——日报拿不到
+    `report` 是 `plugins.ReportSeams`（那几样只读函数），不是引擎——日报拿不到
     `transport`，也就发不出绕过闸门的消息。
 
     数字从哪来（2026-10-11 改）：优先问接缝要一份**窗口聚合**
@@ -360,21 +381,23 @@ def collect_materials(
     people: tuple[tuple[str, int, int], ...] = ()
     changes: tuple[str, ...] = ()
     try:
-        service = getattr(report, "memory_service", None)
-        store = getattr(service, "store", None)
-    except Exception:  # noqa: BLE001 - 连取 store 都可能炸；素材缺一块也要能把信写出来
+        reader = getattr(report, "memory_read", None)
+    except Exception:  # noqa: BLE001 - 连取只读口都可能炸；素材缺一块也要能把信写出来
         logger.exception("daily_report_store_unavailable")
-        store = None
-    if store is not None:
+        reader = None
+    if reader is not None:
         try:
+            # **只读口**（2026-10-12 改）：以前这条接缝递的是真 `MemoryService`，
+            # 顺着 `service.store` 就能 `purge_records` / `merge_alias`——插件不该握着
+            # 一个可写的记忆库。现在给的是 `memory_readonly.MemoryRead`：它自己过滤
+            # （group_safe + active + 有把握），也自己封口（只读连接、翻看不改状态）。
             people = tuple(
                 (str(row["user_id"]), int(row["closeness"]), int(row["guardedness"]))
-                for row in store.top_relationships(limit=20)
-                if float(row.get("last_seen_at") or 0) >= since
+                for row in reader.people(since)
             )
             changes = tuple(
                 str(row.get("reason") or "").strip()
-                for row in store.recent_relationship_changes(since, limit=20)
+                for row in reader.changes(since)
                 if str(row.get("reason") or "").strip()
             )
         except Exception:  # noqa: BLE001 - 素材缺一块也要能写信
@@ -488,7 +511,7 @@ class DailyReporter:
     async def run_once(self, report, *, force: bool = False) -> ReportDraft | None:
         """写一封并发出去。返回草稿（没发出去就是 None）。
 
-        `report` 是 `plugins.ReportSeams`（六项函数），**不是引擎**。
+        `report` 是 `plugins.ReportSeams`（那几样只读函数），**不是引擎**。
         没有一样是权限名单——日报读不到名单，也没法自己发消息。
 
         **先看有没有上次没送出去的那封**（甲，2026-10-11）：有就原样再发一次，
@@ -527,26 +550,46 @@ class DailyReporter:
             "blocked_messages": snapshot.blocked_messages,
             "focus_switches": snapshot.focus_switches,
         }
-        request = build_report_messages(
-            materials,
-            closeness_names=CLOSENESS_LABELS,
-            guardedness_names=GUARDEDNESS_LABELS,
-            now=now,
-        )
+        # 人格与事实表**每封信现读**（核心那边读文件）：文件改了不用重启，
+        # 读不到就是空串——那今晚不写（2026-10-12 用户："凭啥这玩意能直接复用人格prompt啊"）。
+        persona = _matter(report, "letter_persona")
+        facts = _matter(report, "letter_facts")
         if self.writer is not None and getattr(self.writer, "enabled", False):
             # 两阶段写信（草稿 → 事实校对）。写不出来就记一笔，明天再说——
             # 校对失败时 writer 自己会退回草稿，所以这里拿到的通常还是一封可用的信。
+            if not persona:
+                # 真人格读不到：**不发一封用别人声音（或模板）写的信**。下面那条注释
+                # 说的"不回落模板"就是这个意思——宁可今晚没有信。
+                self._record_skipped("信人格读不到")
+                return None
+            if not facts:
+                self._record_skipped("事实表读不到")
+                return None
+            reader = getattr(report, "memory_read", None)
+            lookup = getattr(reader, "recall", None)
             try:
                 subject, body = await self.writer.write(
                     materials,
+                    persona=persona,
+                    facts=facts,
                     closeness_names=CLOSENESS_LABELS,
                     guardedness_names=GUARDEDNESS_LABELS,
+                    lookup=lookup if callable(lookup) else None,
                     now=now,
                 )
             except Exception as exc:  # noqa: BLE001 - 写不出来就记一笔，明天再说
                 kind = getattr(exc, "safe_summary", None)
                 detail = kind() if callable(kind) else type(exc).__name__
                 self._record(ok=False, detail=f"写信失败：{detail}")
+                return None
+            if not body:
+                # 两个空串有两种意思：**她自己说不写**（不是故障：不发、记一句原因），
+                # 或者写失败了。以前这里要求必须交出一封信，"没什么想说的"只能硬凑一篇。
+                reason = str(getattr(self.writer, "last_skip", "") or "")
+                if reason:
+                    self._record_skipped(f"她自己写的：{reason}")
+                else:
+                    self._record(ok=False, detail="信没写成（输出解析不了）")
                 return None
             draft = ReportDraft(subject=subject, body=body)
             if not draft.usable:
@@ -555,6 +598,17 @@ class DailyReporter:
             self._log_letter(report, draft)
             self._stash_pending(draft, now=now)
             return await self._send_draft(draft, now=now, report=report)
+        if not persona:
+            # 旧路（一次调用成稿）也只在有真人格时才走——不然就是把模板人格发出去。
+            self._record_skipped("信人格读不到")
+            return None
+        request = build_report_messages(
+            materials,
+            persona=persona,
+            closeness_names=CLOSENESS_LABELS,
+            guardedness_names=GUARDEDNESS_LABELS,
+            now=now,
+        )
         client = getattr(report, "client", None)
         if client is None:
             self._record(ok=False, detail="没有可用的模型通道")
@@ -573,6 +627,29 @@ class DailyReporter:
             return None
         self._stash_pending(draft, now=now)
         return await self._send_draft(draft, now=now, report=report)
+
+    def _record_skipped(self, reason: str) -> None:
+        """今晚没有信：**不算发送失败**，但要把"今天这一次问过了"记下来。
+
+        记成 `ok=True` 是有意的（2026-10-12）：
+
+        - `MailStateStore.record` 只在 `ok and kind == "report"` 时更新
+          `last_report_at`——不更新的话 `due()` 会一直为真，ticker 每 60 秒
+          再问她一次，整晚问到底；
+        - `last_failure_note` 只看**最新**那条 report 记录：记成 `ok=False` 的话，
+          下一晚的信里会冒出一句"上一次想给他写信没寄出去"——那晚她根本没写，
+          不是寄丢了，这句就是假的；
+        - `attempts`（`max_tries` 那份）也只在 `ok=False` 时加，不该被"她自己不想写"用光。
+
+        原因进 `state.sends[-1]["detail"]`，所以 `/super mail` 的状态里看得见。
+        """
+
+        text = f"今晚没写：{reason}"[:200]
+        logger.info("daily_report_skipped reason_len=%s", len(reason))
+        try:
+            self.state_store.record(kind="report", to=self.recipient, ok=True, detail=text)
+        except Exception:  # noqa: BLE001 - 状态没记上也不该把 tick 打断
+            logger.exception("daily_report_skip_record_failed")
 
     def _stash_pending(self, draft: ReportDraft, *, now: float) -> None:
         """**发之前**先把这封信存进状态里（甲）。
