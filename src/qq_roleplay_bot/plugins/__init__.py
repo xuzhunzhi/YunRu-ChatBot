@@ -36,7 +36,7 @@ plugins/
 `registry` 携带核心注入的**窄接缝对象**，并提供登记方法：
 
     registry.chat                     # ChatSeams：reserved() / allow() / run() / follow_ups()
-    registry.report                   # ReportSeams：写日报要的五项
+    registry.report                   # ReportSeams：写日报/写信要的那几样（只读口）
     registry.ui                       # UiSeams：控制面板要的十项
     registry.link                     # LinkSeams：掉线事件（on_disconnect(接收者)）
     registry.mail                     # MailSeams：发一封给操作者的普通邮件（provide/notify）
@@ -384,10 +384,12 @@ class ReportSeams:
     | `client` | 生成那封信的模型调用 |
     | `log_model_io(...)` | 把这次模型 I/O 记进按功能分的日志（`data/logs/`） |
     | `note_letter(letter)` | 发完记一笔"她写过这封信" |
-    | `memory_service` | 信里要提到最近的记忆 |
+    | `memory_read` | 翻旧事：按词或按人查记忆、看跟谁打过交道（**只读**） |
+    | `letter_persona()` | 这一封信要用的人格正文（现读，不是聊天那份） |
+    | `letter_facts()` | 这一封信要对着核的事实表（现读；读不到那一晚就不写） |
     | `window_facts(since)` | 这一段窗口里**有多少条、多少回、多少人来叫**（只读、只数） |
 
-    **六项里没有一样是权限名单**。所以这里给的是六个具体东西，而不是引擎——
+    **这里没有一样是权限名单**。所以给的是这份清单上的具体东西，而不是引擎——
     插件拿不到 `transport`，也就发不出绕过闸门的消息。
 
     全部可缺省：缺省时快照为空、没有 client（写信判为不可用）、其余是空操作。
@@ -397,7 +399,14 @@ class ReportSeams:
     client: object = None
     log_model_io: object = None
     note_letter: object = None
-    memory_service: object = None
+    #: `MemoryRead`（见 `memory_readonly.py`）：**只读**的记忆口，只有查询方法。
+    #:
+    #: 2026-10-12 换掉了这里原来的 `memory_service`。那一样递过去的是真
+    #: `MemoryService`，顺着 `service.store` 就能拿到可写的 `MemoryStore`——
+    #: `purge_records` / `merge_alias` / `retrieve`（会写 `last_used_at`）全调得到。
+    #: 也就是说"插件不准碰记忆"当时**不是接缝保证的**，只是 `daily_report.py`
+    #: 恰巧只挑了那两个只读方法，而且没有任何测试拦它。
+    memory_read: object = None
     #: `(since) -> ChatWindowFacts | None`：**只读、只数**的窗口聚合。
     #:
     #: 用户 2026-10-11 授权的例外（原话：*"读取为啥不给读取，只读又不影响"*）：
@@ -408,6 +417,21 @@ class ReportSeams:
     #: 都写着"两个群里没人开口"。字段清单由 `tests/test_mail_report_window.py`
     #: 逐个钉住（含"聚合对象里不许出现正文"那条）。
     facts: object = None
+    #: `() -> str | None`：**这一封信专用**的人格正文。
+    #:
+    #: 用户 2026-10-12 原话：*"写信的人格prompt做单独适配。注意写信agent本身是
+    #: 插件里的，所以凭啥这玩意能直接复用人格prompt啊。"* 在那之前插件是
+    #: `from ...base_prompt import BASE_PROMPT`——群聊那份人格正文，写信时逐字复用。
+    #: 现在由核心每次**现读**一份信专用的人格（`letter_docs.load_letter_persona`），
+    #: 读不到返回 `None`，**那一晚就不写**：不回落模板（模板不是她）。
+    letter_persona: object = None
+    #: `() -> str | None`：**这一封信专用**的《已确定的事》事实表。
+    #:
+    #: 与 `letter_persona` 同一个理由、同一条路径：由核心每次现读
+    #: `data/private_docs/letter_facts.REAL.py|txt`（`letter_docs.load_letter_facts`），
+    #: 插件不许自己去数 `parents[n]`（那个 off-by-one 让线上连着用了几周的模板事实表）。
+    #: 读不到返回 `None`，那一晚同样不写：事实校对全靠它，对着模板"校"等于没校。
+    letter_facts: object = None
     #: `() -> client`：**写信 agent 自己那把模型通道**。
     #:
     #: 为什么要单独有一个（2026-09-30 用户要求"写信 agent 用独立的 client 与 user_id"）：

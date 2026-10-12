@@ -149,7 +149,10 @@ def test_a_402_from_the_main_provider_switches_the_whole_chain() -> None:
 
 
 def test_a_402_from_another_provider_does_not_switch() -> None:
-    """写信那一路本来就在 mimo 上：它被拒不是"主家余额耗尽"。"""
+    """不在主家上的那家报 402 不改状态：letter 的主家现在是 deepseek（借 judge 那条，
+    2026-10-12 起），所以 mimo 报上来的"余额耗尽"对它不算数；
+    没给用途时判不出"这一家是不是主家那一路" → 宁可不切。
+    """
 
     with _isolated(**MAIN_ENV):
         assert provider_failover.note_balance_exhausted("mimo", task="letter") is False
@@ -200,8 +203,9 @@ def test_a_purpose_the_fallback_cannot_serve_fails_honestly() -> None:
     with _isolated(**MAIN_ENV):
         assert provider_failover.note_balance_exhausted("deepseek", task="judge") is True
         assert provider_failover.in_fallback() is True
-        # letter 本来就在兜底那一家上、vision 没实测过它收不收图：两者都不在兜底表里
-        for task in ("letter", "vision"):
+        # letter 在 2026-10-12 进了兜底表（主家换成 deepseek 之后），
+        # 只剩 vision 不在表里——它要传图片，mimo 那一路没实测过收不收图
+        for task in ("vision",):
             assert model_config.resolve_fallback(task) is None, task
             assert (provider_failover.endpoint_for(task).triple()
                     == model_config.require(task).triple()), task
