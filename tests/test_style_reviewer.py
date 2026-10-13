@@ -41,6 +41,7 @@ from qq_roleplay_bot.style_reviewer import (
     MAX_NOTE_CHARS,
     MAX_REASON_CHARS,
     REVIEW_SYSTEM_PROMPT,
+    REVIEW_TIMEOUT_SECONDS,
     StyleReviewer,
     is_blank,
     parse_review,
@@ -366,6 +367,30 @@ class StyleReviewerTests(unittest.TestCase):
 
         self.assertIn('"好不好听""像不像她""够不够有人味"不归你管', REVIEW_SYSTEM_PROMPT)
         self.assertIn("不去评价她的味道", REVIEW_SYSTEM_PROMPT)
+
+    def test_prompt_covers_hitting_back_and_targeting_people(self) -> None:
+        """2026-10-13：第 4 类要能落地"回敬"与"拿人开涮"这两类冲着人的话。
+
+        由来是用户那句"说话冲、怼人的问题又起来了"——之前这一趟只拦越权/事实，
+        回复日志里打回理由里"伤人"一条都没有。
+        """
+
+        self.assertIn("伤人", REVIEW_SYSTEM_PROMPT)
+        self.assertIn("回敬、赌气、把人顶回去", REVIEW_SYSTEM_PROMPT)
+        self.assertIn("拿具体的人开涮", REVIEW_SYSTEM_PROMPT)
+        self.assertIn("冲在人上就是第 4 类", REVIEW_SYSTEM_PROMPT)
+        # 反例得是当天真草稿——规矩靠它们落地，不能只剩一句抽象的话。
+        for sample in ("怎么，我说话还得端着。", "2.7 岁也能算出来，挺细致的。",
+                       "少年感 100，这是拿年龄换的吧。"):
+            self.assertIn(sample, REVIEW_SYSTEM_PROMPT, sample)
+        # 而"冲在事上"照旧放行，不许把她的脾气一起拦掉。
+        self.assertIn("冲在事上", REVIEW_SYSTEM_PROMPT)
+        self.assertIn("写得冲也不算越界", REVIEW_SYSTEM_PROMPT)
+
+    def test_the_review_budget_covers_the_slow_drafts(self) -> None:
+        """超时的后果是**原稿直发**：预算得盖住慢的那一档（2026-10-13 实测量过）。"""
+
+        self.assertGreaterEqual(REVIEW_TIMEOUT_SECONDS, 7.0)
 
 
 class RealFaultReviewTests(unittest.TestCase):
