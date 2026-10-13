@@ -90,11 +90,14 @@ MAX_NOTE_CHARS = 40
 #: "**有没有一段够长的原句**"上：短口吻（"少来"）放行，整句不放行。
 VERBATIM_SPAN_CHARS = 5
 #: 一轮里最多存几条笔记（两份合起来）。多了不会被注入（见 MAX_NOTES_PER_REPLY）。
-MAX_NOTES = 24
-#: 一条回复里最多注入几条材料。
-MAX_NOTES_PER_REPLY = 5
+#: 2026-10-13 从 24 提到 60：用户说"学的太少了"，而样本池同时被放开（见
+#: `MAX_UNREACTIVE_SAMPLES_PER_RUN`），一轮能学到的条数会明显变多。
+MAX_NOTES = 60
+#: 一条回复里最多注入几条材料。2026-10-13 从 5 提到 8：学得多，也要用得上。
+MAX_NOTES_PER_REPLY = 8
 #: 注入块的字符预算：材料不该把 prompt 撑大（回复段的易变段本来就在末尾）。
-INJECT_CHAR_BUDGET = 320
+#: 2026-10-13 从 320 提到 480，与上面那条一起。
+INJECT_CHAR_BUDGET = 480
 #: 挑笔记的两道判据，**按顺序各试一次**：
 #: 1. **词组重合**（`when` 与"这句话 + 当前话题"共享的二字词组）；
 #: 2. 一条都没有才退到**单字包含**（`when` 里的字大多出现在眼前这句/话题里）。
@@ -106,9 +109,19 @@ NOTE_CHAR_MIN = 0.6
 NOTE_CHAR_FALLBACK_MAX = 2
 #: 默认多久跑一次（秒）。一天一次级别——**不是每轮**，也不是每分钟。
 DEFAULT_INTERVAL_SECONDS = 86400.0
-#: 一次学习最多送几条样本（样本太多就分批，一轮最多两批）。
-MAX_SAMPLES_PER_RUN = 8
-MAX_BATCHES_PER_RUN = 2
+#: 一次学习最多送几条样本（样本太多就分批，一轮最多几批）。
+#: 2026-10-13：8 × 2 → **12 × 3**（用户："学的太少了"）。一轮最多 36 条。
+MAX_SAMPLES_PER_RUN = 12
+MAX_BATCHES_PER_RUN = 3
+#: 一次选取里最多**挑**多少条"没有表情"的候选（由来见
+#: `quote_samples.DEFAULT_UNREACTIVE_WINDOW_SECONDS`）。有表情的先占位，剩下的名额用它补：
+#: 她 1442 条发言里只有 97 条被点过表情，不补的话池子早就干了、永远只有那点材料。
+#:
+#: ⚠️ 这个数是**选取上限**，不是每轮学多少：真正学多少由 `MAX_SAMPLES_PER_RUN ×
+#: MAX_BATCHES_PER_RUN`（36 条）管着，而且学过的会被 `seen` 挡掉。所以它必须**远大于**
+#: 每轮 36 条——2026-10-13 先写成 12 就是一版错的：每轮都挑"最新的 12 条"，
+#: 第一轮学完就被 `seen` 全挡掉，补位来源当场作废。240 ≈ 六七轮的量。
+MAX_UNREACTIVE_SAMPLES_PER_RUN = 240
 #: 幂等账本最多记多少条（防它无限长大；只用于"不再重复学同一批"）。
 MAX_SEEN = 2000
 #: 最多能"停用"多少条笔记。停用的是**内容指纹**（见 `note_id`），不是下标。
@@ -189,6 +202,15 @@ LEARNING_SYSTEM_PROMPT = """你是 YunRu 的 Quote Learning Agent。你不跟她
   不是"她的老习惯"。被嫌的是"避免"，不是"不学"。
 这条不是让你猜的，是**用户点名说定的**，写在这里就是为了不让它再被丢成"看不出来"。
 
+## `被点了` 是「（无）」的样本：只学"她怎么说"，**不许判方向**
+
+一批里会有一些样本**没人给它贴表情**（`被点了` 写的是 `（无）`）——它们只是
+"她说完之后很快有人接着说话"才被收进来的。对这种样本：
+- **只写** `style_notes` / `context_notes`（她的说法、什么场合说什么），
+  `reaction_meanings` 里当然也没有它们的事；
+- **不许**写"被嫌""别再这么做""那次踩了坑"这一类结论——**方向只能由表情给**
+  （尤其 `㊗`）。没有表情就是没有判断，**宁可只写事实性的说法**。
+
 ## 你要输出两样东西
 
 ### 1. reaction_meanings：每个群、每个表情**在这个群里是什么意思**
@@ -234,8 +256,9 @@ LEARNING_SYSTEM_PROMPT = """你是 YunRu 的 Quote Learning Agent。你不跟她
  "style_notes":[{"when":"…","note":"…","from_sample":"…"}],
  "context_notes":[{"when":"…","note":"…","from_sample":"…"}]}
 `reaction_meanings` 每个样本里出现的每个表情都要有一条；`quote` 是样本里最能说明方向的
-那一句（照抄，≤30 字）。两份笔记各最多 6 条；**没有值得写的就少写或写空数组**——
-宁可少写，也不要凑数。
+那一句（照抄，≤30 字）。两份笔记**各最多 12 条**；**一条样本通常能各写 1~3 条**
+（宁可具体："被问事实时先答数、再补一句缘由"，别只写一条最保险的）；确实没有值得写的
+才留空数组——但要记住用户要的是"**多学一点**"，**不许凑数**、也别因为保守而漏写。
 """
 
 
@@ -1157,6 +1180,7 @@ class QuoteLearningAgent:
                 reply_log_path=self.reply_log_path,
                 group_ids=tuple(self.allowed_groups() if callable(self.allowed_groups)
                                 else self.allowed_groups),
+                unreactive_max=MAX_UNREACTIVE_SAMPLES_PER_RUN,
             )
             self.last_result = json.dumps(selection.snapshot(), ensure_ascii=False)
             if selection.error or not selection.samples:
