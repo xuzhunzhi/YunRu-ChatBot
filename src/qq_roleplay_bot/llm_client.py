@@ -6,6 +6,7 @@ import logging
 import random
 import re
 import socket
+import time
 import urllib.error
 import urllib.request
 import weakref
@@ -21,6 +22,15 @@ RETRYABLE_KINDS = frozenset({"transport_error"})
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_BACKOFF_SECONDS = 0.5
 MAX_BACKOFF_SECONDS = 8.0
+
+# 流式的"有没有在说话"这道闸（2026-10-13 用户拍板，原话：
+#   "我不管那么多，思考这个不属于客户端要的输出那也算输出，我只管有没有输出。
+#    首字要求3s内，3s无响应则砍掉本轮输出"）。
+#
+# 所以判据是**任何一个字节**：`reasoning_content`（思考）与 `content`（正文）都算，
+# 两者都没有、连着 3 秒一片空白，这一轮就砍掉。`self.timeout` 退化成**总上限**
+# （纯防挂死）——只要一直在输出，就不再按"整段生成"的时间砍人。
+STREAM_STALL_SECONDS = 3.0
 
 # 需要保留的 usage 字段。`prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`
 # 是 DeepSeek 特有的缓存计量（见 https://api-docs.deepseek.com/guides/kv_cache），
@@ -340,7 +350,10 @@ class OpenAICompatibleClient:
         body = {
             "model": self.model,
             "messages": messages,
-            "stream": False,
+            # 流式：输出一块读到一块（2026-10-13 用户拍板，闸门的判据见文件顶上那条
+            # `STREAM_STALL_SECONDS`）。以前这里是非流式的 `False`，"5 秒"盖的是整段
+            # 生成，于是"正在写、字节一直在流"的那些被砍掉、重来、再砍，16~18 秒白等。
+            "stream": True,
         }
         if self.max_tokens is not None:
             body["max_tokens"] = self.max_tokens
@@ -370,11 +383,22 @@ class OpenAICompatibleClient:
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
-                "Accept": "application/json",
+                "Accept": "text/event-stream",
                 "User-Agent": "QQRoleplayBot/0.1",
             },
             method="POST",
         )
+        # 每一次读的等待上限：min(3 秒"没声音"闸, 总上限)。**这一条就是"3 秒无响应
+        # 砍掉本轮"的落点**——服务端连着 3 秒没吐任何 SSE 行，`for raw in response`
+        # 就会抛 `socket.timeout`，而不是像以前那样等到整段生成超时再砍。
+        read_timeout = max(0.1, min(STREAM_STALL_SECONDS, float(self.timeout)))
+        started = time.monotonic()
+        said_something = False
+        saw_sse = False
+        think_parts: list[str] = []
+        content_parts: list[str] = []
+        plain_chunks: list[bytes] = []
+        usage: dict = {}
         try:
             # **每次调用现建一个 opener**，不要用 `urllib.request.urlopen`：
             # 那个走的是模块级全局 opener，而它在**第一次调用时**就把代理设置读死了
@@ -383,8 +407,43 @@ class OpenAICompatibleClient:
             # 之后**每一次**模型调用都走那个死代理，一整天 `URLError` 全废；而新起的
             # 进程（代理设置已恢复）完全正常——现象是"进程活着但谁也联系不上"。
             # 现建现读，代理后来起来了/关掉了都能跟上；代价只是一次对象构造。
-            with _urlopen(request, timeout=self.timeout) as response:
-                raw = response.read()
+            with _urlopen(request, timeout=read_timeout) as response:
+                # 逐行读：SSE 的一条 `data:` 就是一块增量，读到哪算哪，不再等整段。
+                for raw in response:
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    if not line or line.startswith(":"):
+                        continue  # 空行与注释（心跳）不算输出
+                    if line.startswith("data:"):
+                        saw_sse = True
+                        piece = line[5:].strip()
+                        if piece == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(piece)
+                        except ValueError:
+                            continue
+                        if isinstance(chunk.get("usage"), dict):
+                            # usage 通常在最后一块（实测 2026-10-13：不带
+                            # `stream_options` 也给，所以在请求体里不多发这个键）。
+                            usage = chunk["usage"]
+                        for choice in chunk.get("choices") or ():
+                            delta = choice.get("delta") or {}
+                            think = delta.get("reasoning_content")
+                            if isinstance(think, str) and think:
+                                said_something = True
+                                think_parts.append(think)
+                            text = delta.get("content")
+                            if isinstance(text, str) and text:
+                                said_something = True
+                                content_parts.append(text)
+                    elif not saw_sse:
+                        # 还不是 SSE：也许是打桩，或者某一家的非流式回法，
+                        # 先按**原始字节**攒着，读完之后按老路当一整份 JSON 解析
+                        # （留字节不留字符串：解码失败仍是 `invalid_json`，
+                        # 与改动前的分类一致）。
+                        plain_chunks.append(raw)
+                    if time.monotonic() - started > self.timeout:
+                        raise self._stall_error(said_something, detail="total timeout")
         except urllib.error.HTTPError as exc:
             # 立即读出并限制响应体：同一个 HTTPError 的流只能读一次，
             # 否则重试时 body 会变成空串，丢掉唯一的排障线索。
@@ -397,23 +456,30 @@ class OpenAICompatibleClient:
             # detail 里带上**内层原因**（如 `[Errno 11001] getaddrinfo failed`、
             # `Connection refused`）：只记一个 "URLError" 等于什么都没说，
             # 上面那类"走死代理"的问题当初就是因此查了半天。
-            raise ModelRequestError("transport_error", detail=_transport_detail(exc)) from exc
+            raise self._stall_error(said_something, detail=_transport_detail(exc)) from exc
         except OSError as exc:
             # ConnectionResetError / ConnectionAbortedError 等不会进入 URLError 分支。
-            raise ModelRequestError("transport_error", detail=_transport_detail(exc)) from exc
+            raise self._stall_error(said_something, detail=_transport_detail(exc)) from exc
 
-        try:
-            result = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError) as exc:
-            raise LLMError("模型返回不是合法 JSON", kind="invalid_json", detail=type(exc).__name__) from exc
+        if saw_sse:
+            content = "".join(content_parts)
+            if not content.strip():
+                # 一路都在思考、正文一个字都没吐出来（例如 max_tokens 光被思考吃光）。
+                raise LLMError("模型返回了空回复", kind="empty_reply",
+                               detail=f"think_chars={sum(len(x) for x in think_parts)}")
+        else:
+            try:
+                result = json.loads(b"".join(plain_chunks).decode("utf-8"))
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise LLMError("模型返回不是合法 JSON", kind="invalid_json", detail=type(exc).__name__) from exc
 
-        try:
-            content = result["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise LLMError("模型返回格式不正确", kind="invalid_shape", detail=type(exc).__name__) from exc
-        if not isinstance(content, str) or not content.strip():
-            raise LLMError("模型返回了空回复", kind="empty_reply")
-        usage = result.get("usage", {})
+            try:
+                content = result["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError) as exc:
+                raise LLMError("模型返回格式不正确", kind="invalid_shape", detail=type(exc).__name__) from exc
+            if not isinstance(content, str) or not content.strip():
+                raise LLMError("模型返回了空回复", kind="empty_reply")
+            usage = result.get("usage", {})
         if isinstance(usage, dict):
             # 缓存命中字段是判断"提示词前缀是否稳定"的唯一可观测量：
             # 命中率高说明请求前缀可复用，否则每次都在重新计算整个输入。
@@ -423,6 +489,21 @@ class OpenAICompatibleClient:
                                and type(value) is int and value >= 0}
             self._record_usage(self.last_usage)
         return content.strip()
+
+    @staticmethod
+    def _stall_error(said_something: bool, *, detail: str = "") -> Exception:
+        """这一轮停下来了：分"说到一半断"与"一个字都没来"两种，处置不同。
+
+        - **说过话**（思考或正文任何一段）：半截的输出对调用方没有意义（判定要的是
+          结构化结果、回复要的是一句完整的话），所以不再原样重发，直接如实失败
+          ⇒ `stream_stalled`，**不在** `RETRYABLE_KINDS` 里，不会再来一轮。
+        - **一个字都没来**：这更像连接压根没通，按老的传输失败处理 ⇒ 仍然可重试。
+        """
+
+        if said_something:
+            return LLMError("模型说到一半停了", kind="stream_stalled",
+                            detail=detail or f"silent {STREAM_STALL_SECONDS:g}s")
+        return ModelRequestError("transport_error", detail=detail or "TimeoutError")
 
     @staticmethod
     def _safe_error_body(exc: urllib.error.HTTPError, *, limit: int = 500) -> str:

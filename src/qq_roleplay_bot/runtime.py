@@ -1846,7 +1846,12 @@ def _endpoint_of(task: str):
 
 
 def _dialogue_client_factory(session_id: str) -> OpenAICompatibleClient:
-    reply_timeout = dev_config.api_timeout("reply", default=12.0)
+    # 与判定那条同理（2026-10-13）：请求改流式之后，这个数是"整轮最多说多久"的
+    # 总上限，不再是"整段生成的预算"；没输出的那 3 秒由
+    # `llm_client.STREAM_STALL_SECONDS` 单独砍。2026-10-10 拍板的 12 秒是给
+    # **非流式**整段用的，那时它会砍掉"正在写、字节一直在流"的长回复；
+    # 现在统一成 30 秒（只要一直在输出就让它说完）。
+    reply_timeout = dev_config.api_timeout("reply", default=30.0)
     endpoint = _endpoint_of("reply")
     client = OpenAICompatibleClient(
         *endpoint.triple(),
@@ -1854,9 +1859,7 @@ def _dialogue_client_factory(session_id: str) -> OpenAICompatibleClient:
         user_id=dev_config.session_user_id(dev_config.DIALOGUE_USER_ID, session_id),
         usage_store=_USAGE_STORE,
         usage_role="dialogue",
-        # 2026-10-10 用户拍板：回复 12 秒超时（原默认 60s，deepseek-flash 长尾会拖垮队列）。
-        # 余额兜底那一档更宽（mimo 慢一个量级），由 `provider_failover` 集中决定；
-        # primary 模式下这里**逐字**还是 12.0。
+        # 余额兜底那一档更宽（mimo 慢一个量级），由 `provider_failover` 集中决定。
         timeout=provider_failover.effective_timeout("reply", reply_timeout),
     )
     # 切回主家时要把这道闸还回原值（兜底那一档是临时放宽的）。
@@ -1865,7 +1868,19 @@ def _dialogue_client_factory(session_id: str) -> OpenAICompatibleClient:
 
 
 def _judge_client_factory(session_id: str) -> OpenAICompatibleClient:
-    judge_timeout = dev_config.api_timeout("judge", default=5.0)
+    # 2026-10-13 起这个数的**含义变了**：客户端的请求改成流式之后，它不再是
+    # "整段生成的预算"，而是"这一轮最多允许它说多久"（总上限，纯防挂死）；
+    # "3 秒没有输出就砍掉本轮"那道闸在 `llm_client.STREAM_STALL_SECONDS` 里，
+    # 与这里的 total 是两件事（见那条常量的注释与用户 2026-10-13 的原话）。
+    #
+    # 所以默认值从 5.0 放宽到 30.0：旧的 5 秒正是"砍在 3.88s 中位数附近、
+    # 34% 的判定为一次被砍掉的生成白付时间"的那个数（2026-10-12 实测：成功判定
+    # 中位 2.92s、均值 4.21s；2026-10-12 拍板的 5 秒是给**非流式**整段用的）。
+    # 现在只要一直在输出就不会被砍，30 秒只用来兜住"连接活着但永远说不完"。
+    # 仍然远小于原来的 60s 默认值（deepseek-flash 长尾实测 65.9s，会把整条串行
+    # 流水线卡死，绝不能回到那个值）。兜底那一档单独放宽（mimo 上判定实测中位
+    # 36.8s），由 `provider_failover` 集中决定。
+    judge_timeout = dev_config.api_timeout("judge", default=30.0)
     endpoint = _endpoint_of("judge")
     client = OpenAICompatibleClient(
         *endpoint.triple(),
@@ -1873,14 +1888,6 @@ def _judge_client_factory(session_id: str) -> OpenAICompatibleClient:
         user_id=dev_config.session_user_id(dev_config.JUDGE_USER_ID, session_id),
         usage_store=_USAGE_STORE,
         usage_role="judge",
-        # 2026-10-12 用户拍板：判定放宽到 5 秒（原 3 秒）。放宽是有实测依据的：
-        # 2026-10-12 那天 218 次**成功**判定的 `elapsed` 中位数 2.92s、均值 4.21s，
-        # 3 秒正好切在分布正中间——那天 7 次被 @ 里有 5 次就是撞这个闸被丢的
-        # （失败行 `elapsed` 记 0.0，所以只有成功行能看出这条闸压掉了多少）。
-        # 仍远小于原来的 60s 默认值：deepseek-flash 长尾实测 65.9s，会把整条串行
-        # 流水线卡死，绝不能回到那个值。
-        # 兜底那一档单独放宽（mimo 上判定实测中位 36.8s），同样由
-        # `provider_failover` 集中决定；primary 模式下到这里**逐字**还是 5.0。
         timeout=provider_failover.effective_timeout("judge", judge_timeout),
     )
     provider_failover.remember_primary_timeout(client, judge_timeout)

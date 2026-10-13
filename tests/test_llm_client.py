@@ -7,7 +7,7 @@ import socket
 import urllib.error
 from unittest.mock import patch
 
-from qq_roleplay_bot.llm_client import LLMError, OpenAICompatibleClient
+from qq_roleplay_bot.llm_client import LLMError, OpenAICompatibleClient, STREAM_STALL_SECONDS
 
 REQUEST = [{"role": "user", "content": "hi"}]
 
@@ -235,19 +235,30 @@ def test_max_tokens_is_only_sent_when_configured() -> None:
     assert json.loads(captured[1])["max_tokens"] == 256
 
 
-def test_request_is_non_streaming_and_bearer_scoped() -> None:
+def test_request_is_streaming_and_bearer_scoped() -> None:
+    """请求体里的 `stream` 是 True（2026-10-13 改的，见 llm_client 顶部那条常量）。
+
+    这条以前叫 `..._non_streaming_...`：那时闸门盖的是"整段生成"，5 秒砍一次、
+    砍完重来，日志里那 16~18 秒就是这么来的。
+    """
+
     captured = {}
 
     def fake_urlopen(request, timeout=None):
         captured["data"] = json.loads(request.data)
         captured["auth"] = request.get_header("Authorization")
-        return _Response(json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode())
+        captured["accept"] = request.get_header("Accept")
+        captured["timeout"] = timeout
+        return _Response(_sse({"choices": [{"delta": {"content": "ok"}}]}))
 
     with patch("qq_roleplay_bot.llm_client._urlopen", side_effect=fake_urlopen):
         _complete()
 
-    assert captured["data"]["stream"] is False
+    assert captured["data"]["stream"] is True
     assert captured["auth"] == "Bearer secret-key"
+    assert captured["accept"] == "text/event-stream"
+    # 每一次读等的上限是那道"没声音"的闸（这里 client 的 timeout=1.0 更小，取小的）。
+    assert captured["timeout"] == min(STREAM_STALL_SECONDS, 1.0)
 
 
 def test_transport_error_detail_keeps_the_inner_reason() -> None:
@@ -408,3 +419,118 @@ def test_bad_sampling_values_fall_back_and_out_of_range_clamp() -> None:
         body = _captured_body(_role_client("judge"))
         assert "temperature" not in body
         assert body["frequency_penalty"] == -2.0
+
+
+# --- 流式：输出按块读，"3 秒没声音就砍掉本轮" ---------------------------------
+
+
+def _sse(*chunks) -> bytes:
+    """拼一份和真实服务端一样的 SSE 响应体（每条 `data:` 一行，末尾 `[DONE]`）。"""
+
+    lines = [f"data: {json.dumps(chunk)}" for chunk in chunks]
+    lines.append("data: [DONE]")
+    return ("\n\n".join(lines) + "\n\n").encode()
+
+
+class _StallingResponse:
+    """先吐几行、然后"没声音了"：迭代到尽头抛 `socket.timeout`。"""
+
+    def __init__(self, lines, *, then_raise=None):
+        self._lines = list(lines)
+        self._exc = then_raise if then_raise is not None else socket.timeout("silent")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def __iter__(self):
+        for line in self._lines:
+            yield line
+        raise self._exc
+
+
+def test_streaming_assembles_content_and_usage_from_the_chunks() -> None:
+    """思考与正文都在 `delta` 里一块块来：正文拼起来，usage 取最后带它的那一块。"""
+
+    body = _sse(
+        {"choices": [{"delta": {"reasoning_content": "先想"}}]},
+        {"choices": [{"delta": {"reasoning_content": "一下"}}]},
+        {"choices": [{"delta": {"content": "你"}}]},
+        {"choices": [{"delta": {"content": "好"}}]},
+        {"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 3,
+                                  "prompt_cache_hit_tokens": 5, "prompt_cache_miss_tokens": 2}},
+    )
+    client = _client()
+    with patch("qq_roleplay_bot.llm_client._urlopen", return_value=_Response(body)):
+        assert _complete(client) == "你好"
+    assert client.last_usage == {"prompt_tokens": 7, "completion_tokens": 3,
+                                 "prompt_cache_hit_tokens": 5, "prompt_cache_miss_tokens": 2}
+
+
+def test_a_stream_that_dies_half_way_is_not_retried() -> None:
+    """说到一半断了（思考已经来过）→ `stream_stalled`，**不再**原样重发。"""
+
+    attempts = {"n": 0}
+
+    def fake_urlopen(request, timeout=None):  # noqa: ARG001
+        attempts["n"] += 1
+        line = f"data: {json.dumps({'choices': [{'delta': {'reasoning_content': '想'}}]})}\n"
+        return _StallingResponse([line.encode()])
+
+    client = OpenAICompatibleClient("https://example.invalid/v1", "k", "m",
+                                    timeout=1.0, max_attempts=3, backoff_seconds=0.0)
+    with patch("qq_roleplay_bot.llm_client._urlopen", side_effect=fake_urlopen):
+        try:
+            _complete(client)
+        except LLMError as exc:
+            assert exc.kind == "stream_stalled"
+        else:  # pragma: no cover - 走到这里说明闸没生效
+            raise AssertionError("说到一半断了却没有失败")
+    assert attempts["n"] == 1
+    assert client.last_error_kind == "stream_stalled"
+
+
+def test_a_stream_with_no_output_at_all_is_still_retried() -> None:
+    """一个字都没来 = 连接压根没通，还是按传输失败重试（第二次成功）。"""
+
+    attempts = {"n": 0}
+
+    def fake_urlopen(request, timeout=None):  # noqa: ARG001
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return _StallingResponse([])
+        return _Response(_sse({"choices": [{"delta": {"content": "好在"}}]}))
+
+    client = OpenAICompatibleClient("https://example.invalid/v1", "k", "m",
+                                    timeout=1.0, max_attempts=3, backoff_seconds=0.0)
+    with patch("qq_roleplay_bot.llm_client._urlopen", side_effect=fake_urlopen):
+        assert _complete(client) == "好在"
+    assert attempts["n"] == 2
+
+
+def test_a_stream_that_only_thinks_is_an_empty_reply() -> None:
+    """只有思考、正文一个字没有 → 仍按空回复处理（细节里带上思考长度便于排查）。"""
+
+    body = _sse({"choices": [{"delta": {"reasoning_content": "光想不说"}}]})
+    client = _client()
+    with patch("qq_roleplay_bot.llm_client._urlopen", return_value=_Response(body)):
+        try:
+            _complete(client)
+        except LLMError as exc:
+            assert exc.kind == "empty_reply"
+            assert exc.detail == "think_chars=4"
+        else:  # pragma: no cover - 走到这里说明空回复没被拦住
+            raise AssertionError("只有思考却当成了正常回复")
+
+
+def test_a_whole_json_body_is_still_accepted() -> None:
+    """不是 SSE 的一整份 JSON（打桩 / 别的家）仍走老路解析，不是流式专属。"""
+
+    body = json.dumps({"choices": [{"message": {"content": "老形状"}}],
+                       "usage": {"prompt_tokens": 1, "completion_tokens": 1}}).encode()
+    client = _client()
+    with patch("qq_roleplay_bot.llm_client._urlopen", return_value=_Response(body)):
+        assert _complete(client) == "老形状"
+    assert client.last_usage == {"prompt_tokens": 1, "completion_tokens": 1}
