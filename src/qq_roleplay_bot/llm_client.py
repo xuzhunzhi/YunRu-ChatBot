@@ -406,6 +406,7 @@ class OpenAICompatibleClient:
         got_bytes = False
         said_something = False
         saw_sse = False
+        saw_done = False
         think_parts: list[str] = []
         content_parts: list[str] = []
         plain_chunks: list[bytes] = []
@@ -442,6 +443,7 @@ class OpenAICompatibleClient:
                         saw_sse = True
                         piece = line[5:].strip()
                         if piece == "[DONE]":
+                            saw_done = True
                             break
                         try:
                             chunk = json.loads(piece)
@@ -452,6 +454,11 @@ class OpenAICompatibleClient:
                             # `stream_options` 也给，所以在请求体里不多发这个键）。
                             usage = chunk["usage"]
                         for choice in chunk.get("choices") or ():
+                            # 结束标记：DeepSeek 两样都给（实测 2026-10-13：134 行里有 1 行
+                            # 带 `finish_reason`，末尾还有 `data: [DONE]`）。两样认一样，
+                            # 网关吞掉 `[DONE]` 的那种实现也照旧算收尾。
+                            if choice.get("finish_reason"):
+                                saw_done = True
                             delta = choice.get("delta") or {}
                             think = delta.get("reasoning_content")
                             if isinstance(think, str) and think:
@@ -490,6 +497,13 @@ class OpenAICompatibleClient:
                 # 一路都在思考、正文一个字都没吐出来（例如 max_tokens 光被思考吃光）。
                 raise LLMError("模型返回了空回复", kind="empty_reply",
                                detail=f"think_chars={sum(len(x) for x in think_parts)}")
+            if not saw_done:
+                # 2026-10-13 补（专家评审指出的漏洞，是这次改流式**新开**的）：
+                # 服务端**干净收摊**（`readline()` 返回空，不是超时）时，以前会把已经拼到的
+                # 半句话当成完整回复交出去——判定的结构化输出多半解析失败（走 fail-closed），
+                # 但回复那一路就是**把半句发出去**。没见到 `[DONE]`／`finish_reason` 就按
+                # 半截断处理：`stream_stalled`，调用方按自己的降级走（不重试）。
+                raise self._stall_error(True, detail="没等到结束标记")
         else:
             try:
                 result = json.loads(b"".join(plain_chunks).decode("utf-8"))
