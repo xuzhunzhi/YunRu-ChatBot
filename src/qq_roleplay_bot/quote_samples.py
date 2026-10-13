@@ -89,6 +89,17 @@ DEFAULT_CONTEXT_AFTER = 2
 MAX_BODY_CHARS = 240
 #: 单条样本最多带几个表情回应。
 MAX_REACTIONS_PER_SAMPLE = 6
+#: **没有表情**的样本（2026-10-13 用户："学的太少了"）。
+#:
+#: 实情：她 1442 条发言里**只有 97 条**被点过表情——只学这 97 条，池子早就干了
+#: （档案 `seen` 107 条，日志里天天 `quote_learning_idle`）。所以开第二条来源：
+#: 她说的话**没人点、但说完之后这么短时间里有人接着说话**——弱信号，含义是
+#: "有人在接"，**不是**"这句说得好"。
+#:
+#: 因此这类样本在提示词里只许写 `style_notes` / `context_notes`（她怎么说、
+#: 什么场合说什么），**不许**下"被嫌/避开"的结论：判方向仍然只认表情那一条路
+#: （尤其 `㊗` = 不赞同，用户点名说定的）。
+DEFAULT_UNREACTIVE_WINDOW_SECONDS = 120.0
 #: `reply.jsonl` 里那次回复与这条消息最多差多少秒才算"同一个话题"。
 TOPIC_MATCH_SECONDS = 120.0
 
@@ -204,8 +215,10 @@ class QuoteSample:
             "sample_id": self.sample_id,
             "group_id": self.group_id,
             "她说的": _clip(self.body),
-            "被点了": [r.as_data(for_learning=for_learning, names=names)
-                       for r in self.reactions],
+            # 没有表情的样本明写「（无）」：提示词里对这两类给的规矩不同
+            # （有表情的才允许判方向、写"避开"）。
+            "被点了": ([r.as_data(for_learning=for_learning, names=names)
+                        for r in self.reactions] if self.reactions else "（无）"),
         }
         if self.topic:
             data[self.TOPIC_KEY] = self.topic
@@ -302,6 +315,25 @@ def _is_her_message(row: dict) -> bool:
 
 def _is_incoming(row: dict) -> bool:
     return str(row.get("direction") or "") == "in" and not _is_reaction(row)
+
+
+def _followed_by_incoming(rows: list[dict], position: int, window: float) -> bool:
+    """她这条之后 `window` 秒内有没有入站消息（弱信号："有人在接"）。
+
+    这是给**没有表情**的样本用的补位判据：表情是"说得好不好"的线索，这个只是
+    "有没有人在听"。所以它挑出来的样本**不许**用来判方向。
+    """
+
+    if window <= 0:
+        return False
+    at = _float(rows[position].get("at"))
+    for row in rows[position + 1:]:
+        stamp = _float(row.get("at"))
+        if stamp - at > window:
+            return False
+        if _is_incoming(row):
+            return True
+    return False
 
 
 def _display_name(row: dict) -> str:
@@ -516,10 +548,18 @@ def context_for(rows: list[dict], message_id: object, *, before: int, after: int
 
 def build_samples(rows: list[dict], *, topic_index=None, group_ids=(),
                   context_before: int = DEFAULT_CONTEXT_BEFORE,
-                  context_after: int = DEFAULT_CONTEXT_AFTER) -> SampleSelection:
+                  context_after: int = DEFAULT_CONTEXT_AFTER,
+                  unreactive_max: int = 0,
+                  unreactive_window_seconds: float = DEFAULT_UNREACTIVE_WINDOW_SECONDS,
+                  ) -> SampleSelection:
     """把日志行整理成样本。**只认 `message_id` 配对**，不做任何正负判断。
 
     `group_ids` 给了就只收这些群（与"允许的群"同一口径）；空元组 = 全都收。
+
+    `unreactive_max > 0` 时**再收一类样本**（2026-10-13 用户："学的太少了"）：
+    她说过、**一个表情都没有**、但说完之后 `unreactive_window_seconds` 秒内
+    有人接着说话。只取**最近的** `unreactive_max` 条，而且**排在带表情的样本后面**
+    （先学有方向的那批）。这类样本只许写"她怎么说 / 什么场合说什么"。
     """
 
     allowed = {str(g) for g in group_ids if str(g)}
@@ -570,8 +610,36 @@ def build_samples(rows: list[dict], *, topic_index=None, group_ids=(),
             intent=intent,
         ))
 
+    unreactive: list[QuoteSample] = []
+    if unreactive_max > 0:
+        for position, row in enumerate(rows):
+            if not _is_her_message(row):
+                continue
+            message_id = _clean_id(row.get("message_id"))
+            group_id = str(row.get("group_id") or "")
+            if allowed and group_id not in allowed:
+                continue
+            if by_target.get(message_id):
+                continue  # 有表情的走上一条路（只有那些允许判方向）
+            if not _followed_by_incoming(rows, position, unreactive_window_seconds):
+                continue
+            earlier, later = _context(rows, position, before=context_before, after=context_after)
+            topic, intent = _topic_for(topic_index or {}, str(row.get("session_id") or ""),
+                                       _float(row.get("at")))
+            unreactive.append(QuoteSample(
+                message_id=message_id,
+                group_id=group_id,
+                body=_clip(row.get("body")),
+                at=_float(row.get("at")),
+                reactions=(),
+                context_before=earlier,
+                context_after=later,
+                topic=topic,
+                intent=intent,
+            ))
+
     return SampleSelection(
-        samples=tuple(samples),
+        samples=tuple(samples) + tuple(unreactive[-unreactive_max:] if unreactive_max else ()),
         reactions=len(reactions),
         matched_reactions=matched,
         unmatched_reactions=len(reactions) - matched,
@@ -582,15 +650,23 @@ def build_samples(rows: list[dict], *, topic_index=None, group_ids=(),
 
 def collect_samples(chat_log_path: Path | str, *, reply_log_path: Path | str | None = None,
                     group_ids=(), context_before: int = DEFAULT_CONTEXT_BEFORE,
-                    context_after: int = DEFAULT_CONTEXT_AFTER) -> SampleSelection:
-    """一次选取的入口：读两份日志 → 返回样本。**任何读不开都返回空样本 + 原因**。"""
+                    context_after: int = DEFAULT_CONTEXT_AFTER,
+                    unreactive_max: int = 0,
+                    unreactive_window_seconds: float = DEFAULT_UNREACTIVE_WINDOW_SECONDS,
+                    ) -> SampleSelection:
+    """一次选取的入口：读两份日志 → 返回样本。**任何读不开都返回空样本 + 原因**。
+
+    `unreactive_max` 的来历见 `build_samples`（"没有表情、但有人在接"的那一类）。
+    """
 
     rows, error = read_rows(chat_log_path)
     if not rows:
         return SampleSelection(error=error or "empty")
     index, _ = read_topic_index(reply_log_path)
     selection = build_samples(rows, topic_index=index, group_ids=group_ids,
-                             context_before=context_before, context_after=context_after)
+                             context_before=context_before, context_after=context_after,
+                             unreactive_max=unreactive_max,
+                             unreactive_window_seconds=unreactive_window_seconds)
     return selection if not error else SampleSelection(
         samples=selection.samples, reactions=selection.reactions,
         matched_reactions=selection.matched_reactions,
