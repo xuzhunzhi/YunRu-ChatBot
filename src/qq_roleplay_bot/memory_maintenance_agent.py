@@ -273,7 +273,11 @@ class MemoryMaintenanceAgent:
                     request = build_maintenance_messages(batch, self.store.clock(), roster)
                     started_call = time.monotonic()
                     try:
-                        raw = await asyncio.wait_for(self.client.complete(request), self.timeout)
+                        # 2026-10-13（用户拍板："超时只管首字，首字超时才跳过，不要重试，
+                        # 重试还不如干等着，所有 agent 都一样"）：**不再套总超时**——
+                        # 首字 3 秒不来由 client 自己放掉这一轮（`STREAM_STALL_SECONDS`），
+                        # 首字来了就让它说完；client 的 `timeout` 只是停顿网。
+                        raw = await self.client.complete(request)
                     except Exception as exc:
                         self._log_io(request, "", batch=batch, error=type(exc).__name__)
                         raise

@@ -15,28 +15,30 @@ from .dev_config import sampling_params
 
 logger = logging.getLogger(__name__)
 
-# 只有这些失败值得重试：限流、服务端错误和传输层抖动。
-# 4xx（除 429）是请求本身的问题，重试没有意义。
+# 哪些失败算"值得再来一次"：限流、服务端错误、传输层抖动；4xx（除 429）不算。
+# **但默认次数是 1：不重试。** 2026-10-13 用户拍板，原话：
+#   "超时只管首字，首字超时才跳过，不要重试，重试还不如干等着，所有 agent 都一样"。
+# 重试的花费是实打实的等待——当天实测有 3 条判定因为"23s 长生成失败 + 又重试一轮"
+# 到了 50.4 / 49.2 / 54.4s，而它换来的只是"再赌一次"。不如把这一轮直接放掉，
+# 下一批消息照常走。这两个集合与 `max_attempts` 参数**留着当机制**（显式传 >1 才会
+# 重试），生产里没有任何调用点传过 >1；`provider_failover` 那次换源（HTTP 402
+# 余额耗尽 ⇒ 换一份凭据）不算重试，它是保命，不占普通配额。
 RETRYABLE_HTTP_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 RETRYABLE_KINDS = frozenset({"transport_error"})
-DEFAULT_MAX_ATTEMPTS = 3
+DEFAULT_MAX_ATTEMPTS = 1
 DEFAULT_BACKOFF_SECONDS = 0.5
 MAX_BACKOFF_SECONDS = 8.0
 
-# 流式的"有没有在说话"这道闸（2026-10-13 用户拍板，原话：
+# 流式：**唯一的超时是首字**（2026-10-13 用户拍板，原话：
 #   "我不管那么多，思考这个不属于客户端要的输出那也算输出，我只管有没有输出。
-#    首字要求3s内，3s无响应则砍掉本轮输出"）。
+#    首字要求3s内，3s无响应则砍掉本轮输出"，随后又补："超时只管首字，首字超时才跳过"）。
 #
-# 所以判据是**任何一个字节**：`reasoning_content`（思考）与 `content`（正文）都算，
-# 两者都没有、连着 3 秒一片空白，这一轮就砍掉。`self.timeout` 退化成**总上限**
-# （纯防挂死）——只要一直在输出，就不再按"整段生成"的时间砍人。
+# 判据是**任何一个字节**：`reasoning_content`（思考）与 `content`（正文）都算。
+# 首字 3 秒不来 ⇒ 这一轮放掉（`transport_error`，调用方按自己的降级走：判定不出声、
+# 回复不发、审核按通过）。**首字来了之后不再按总时长砍**：说到一半的长生成照旧读完，
+# 只有"连着 `self.timeout` 秒一个字节都不吐"才当连接死了（`stream_stalled`）——
+# 那是停顿网，不是总上限。
 STREAM_STALL_SECONDS = 3.0
-
-# 重试是给"**立刻**失败的抖动"用的（连不上、连接被重置），不是"再赌一次长生成"。
-# 2026-10-13 查到 3 条判定 50.4s / 49.2s / 54.4s：一次 ~23s 的长生成超时，重试**又整整
-# 给了一轮**（~27s），而判定就在关键路径上、还 fail-closed（静默不出声）——两头都亏。
-# 所以：这一轮已经烧掉 ≥ 这个秒数，就不再原样重来，直接把失败交上去。
-SLOW_ATTEMPT_SECONDS = 8.0
 
 # 需要保留的 usage 字段。`prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`
 # 是 DeepSeek 特有的缓存计量（见 https://api-docs.deepseek.com/guides/kv_cache），
@@ -275,7 +277,6 @@ class OpenAICompatibleClient:
         while attempt < self.max_attempts:
             attempt += 1
             self.last_attempts = attempt
-            attempt_started = time.monotonic()
             try:
                 return await asyncio.to_thread(self._complete_sync, messages)
             except ModelRequestError as exc:
@@ -286,19 +287,9 @@ class OpenAICompatibleClient:
                         continue
                 error = self._classify(exc)
                 self.last_error_kind = error.kind
+                # 默认 `max_attempts = 1` ⇒ 走到这里就如实失败（用户 2026-10-13：
+                # "不要重试，重试还不如干等着"）。只有显式传过 >1 才会走到下面。
                 if attempt >= self.max_attempts or not self._is_retryable(exc):
-                    raise error from exc
-                # 慢失败不再重播（2026-10-13）：见 SLOW_ATTEMPT_SECONDS 的注释。
-                spent = time.monotonic() - attempt_started
-                if spent >= SLOW_ATTEMPT_SECONDS:
-                    logger.warning(
-                        "model_retry_skipped attempt=%s/%s kind=%s detail=%s elapsed=%.2fs",
-                        attempt,
-                        self.max_attempts,
-                        error.kind,
-                        error.detail,
-                        spent,
-                    )
                     raise error from exc
                 last_error = error
                 delay = self._backoff_delay(attempt)
@@ -407,11 +398,12 @@ class OpenAICompatibleClient:
             },
             method="POST",
         )
-        # 每一次读的等待上限：min(3 秒"没声音"闸, 总上限)。**这一条就是"3 秒无响应
-        # 砍掉本轮"的落点**——服务端连着 3 秒没吐任何 SSE 行，`for raw in response`
-        # 就会抛 `socket.timeout`，而不是像以前那样等到整段生成超时再砍。
+        # 每一次读的等待上限：min(首字闸, 停顿网)。**这一条就是"3 秒无响应砍掉本轮"的
+        # 落点**——服务端连着 3 秒没吐任何字节，`response.readline()` 就抛 `socket.timeout`。
+        # 首字来了之后，这个短超时只是"再等一轮"的心跳，真正放手看的是停顿网。
         read_timeout = max(0.1, min(STREAM_STALL_SECONDS, float(self.timeout)))
-        started = time.monotonic()
+        last_byte_at = time.monotonic()
+        got_bytes = False
         said_something = False
         saw_sse = False
         think_parts: list[str] = []
@@ -428,7 +420,21 @@ class OpenAICompatibleClient:
             # 现建现读，代理后来起来了/关掉了都能跟上；代价只是一次对象构造。
             with _urlopen(request, timeout=read_timeout) as response:
                 # 逐行读：SSE 的一条 `data:` 就是一块增量，读到哪算哪，不再等整段。
-                for raw in response:
+                # 这里手动 `readline()`（而不是 `for raw in response`）是为了**接住读超时**：
+                # 首字没来时它就是"这一轮没起来"，首字来了之后它只是"再等一轮"的心跳。
+                while True:
+                    try:
+                        raw = response.readline()
+                    except (socket.timeout, TimeoutError) as exc:
+                        if not got_bytes:
+                            raise self._stall_error(said_something, detail="首字超时") from exc
+                        if time.monotonic() - last_byte_at > float(self.timeout):
+                            raise self._stall_error(said_something, detail="停顿超时") from exc
+                        continue
+                    if not raw:
+                        break  # 服务端收摊了
+                    got_bytes = True
+                    last_byte_at = time.monotonic()
                     line = raw.decode("utf-8", errors="replace").strip()
                     if not line or line.startswith(":"):
                         continue  # 空行与注释（心跳）不算输出
@@ -461,8 +467,6 @@ class OpenAICompatibleClient:
                         # （留字节不留字符串：解码失败仍是 `invalid_json`，
                         # 与改动前的分类一致）。
                         plain_chunks.append(raw)
-                    if time.monotonic() - started > self.timeout:
-                        raise self._stall_error(said_something, detail="total timeout")
         except urllib.error.HTTPError as exc:
             # 立即读出并限制响应体：同一个 HTTPError 的流只能读一次，
             # 否则重试时 body 会变成空串，丢掉唯一的排障线索。
@@ -511,12 +515,14 @@ class OpenAICompatibleClient:
 
     @staticmethod
     def _stall_error(said_something: bool, *, detail: str = "") -> Exception:
-        """这一轮停下来了：分"说到一半断"与"一个字都没来"两种，处置不同。
+        """这一轮停下来了：分"说到一半断"与"一个字都没来"两种，只影响**日志与计数**。
 
-        - **说过话**（思考或正文任何一段）：半截的输出对调用方没有意义（判定要的是
-          结构化结果、回复要的是一句完整的话），所以不再原样重发，直接如实失败
-          ⇒ `stream_stalled`，**不在** `RETRYABLE_KINDS` 里，不会再来一轮。
-        - **一个字都没来**：这更像连接压根没通，按老的传输失败处理 ⇒ 仍然可重试。
+        2026-10-13 之后两者都不重试（`DEFAULT_MAX_ATTEMPTS = 1`）：调用方各自降级——
+        判定不出声、回复不发、审核按通过。
+
+        - **说过话**（思考或正文任何一段）：输出是半截的，对调用方没有意义
+          ⇒ `stream_stalled`。
+        - **一个字节都没来**：更像连接压根没通 ⇒ `transport_error`。
         """
 
         if said_something:

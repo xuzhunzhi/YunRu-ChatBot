@@ -401,12 +401,12 @@ class StyleReviewerTests(unittest.TestCase):
         self.assertIn("9950 好办，倒是改卡那台的电源别省", REVIEW_SYSTEM_PROMPT)
 
     def test_the_review_budget_covers_the_slow_drafts(self) -> None:
-        """超时的后果是**原稿直发**，可这一趟在发送路径上：预算换的是对方等的秒数。
+        """这个数**不再是总上限**，而是审核 client 的**停顿网**（2026-10-13 拍板）。
 
-        2026-10-13 实测（部署后的 prompt、24 条真草稿）：中位 3.46s、p75 8.27s、
-        p90 11.49s、最长 24.48s；跳过率 4.5s→41%、7s→29%、9s→20%。用户当天第二次问
-        "为什么还是有明显延迟"，所以停在 6 秒：盖住中位与快的那一档，砍掉长尾（代价是
-        慢的两三成按原稿直发）。**不许再往下**——4.5s 那版跳过 41%，等于四成不做判断。
+        用户原话："超时只管首字，首字超时才跳过，不要重试，重试还不如干等着，
+        所有 agent 都一样。" 所以：首字 3 秒不来就放掉这一轮（`STREAM_STALL_SECONDS`，
+        后果＝原稿直发），首字来了就让她说完——整趟只认"连着这么久一个字节都不吐"
+        ＝连接死了。实测这个网远大于块间最大间隔（0.64s），正常生成碰不到它。
         """
 
         self.assertGreaterEqual(REVIEW_TIMEOUT_SECONDS, 6.0)

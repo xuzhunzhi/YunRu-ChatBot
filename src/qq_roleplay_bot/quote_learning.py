@@ -1245,7 +1245,10 @@ class QuoteLearningAgent:
             existing={group: table for group, table in self.store.meanings.items()},
             names=names,
         )
-        raw = await asyncio.wait_for(self.client.complete(request), self.timeout)
+        # 2026-10-13（用户拍板："超时只管首字，首字超时才跳过，不要重试，重试还不如干等着，
+        # 所有 agent 都一样"）：**不再套总超时**——首字 3 秒不来由 client 自己放掉这一轮，
+        # 首字来了就让它说完；client 的 `timeout` 只是停顿网。
+        raw = await self.client.complete(request)
         source_text = " ".join(sample.body for sample in batch)
         # 两趟都走同一个解析器：**第一趟只取方向**（算出哪些样本被嫌），第二趟带
         # `negative_samples` 真正过护栏。解析是纯本地的字符活，两趟不花一分钱、不写盘。
