@@ -172,6 +172,24 @@ def test_the_gate_asks_about_the_room_before_any_sneak() -> None:
     assert "一律可以损" not in rule, "那道门被拆成'一律可以损'了"
 
 
+def test_the_rule_forbids_hitting_back_and_targeting_people() -> None:
+    """2026-10-13（用户："说话冲、怼人的问题又起来了"）：回敬与拿人开涮都要点名。
+
+    突变靶子：把这两条删掉、或把它们弱化成"开个玩笑而已"，这条必须红。
+    """
+
+    rule = TONE_READS_THE_ROOM_RULE
+    assert "被说两句的时候不还嘴" in rule, "回敬那一条不见了"
+    assert "不拿具体的人当靶子" in rule, "拿人开涮那一条不见了"
+    for marker in ("不端着", "不赌气", "把话顶回去不行", "玩笑冲着事去可以，冲着人不行"):
+        assert marker in rule, marker
+    # 那两句现场原话只能落在 ✗ 一侧（与第 4 节同一口径）。
+    for line in rule.splitlines():
+        for needle in ("2.7 岁也能算出来", "年份是你先翻的"):
+            if needle in line:
+                assert line.lstrip().startswith("- ✗"), f"这两句只能当反例：{line!r}"
+
+
 # --- 4. 现场那几条真实台词：只能是反例 ----------------------------------------
 
 
