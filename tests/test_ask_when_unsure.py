@@ -415,7 +415,13 @@ def test_ask_budget_limits_per_topic_and_per_window() -> None:
 #: **不拿具体的人当靶子**，各配一组 ✗/✓（见 `stage3_runtime.TONE_READS_THE_ROOM_RULE`）。
 #: 它同样有自己的判据（`tests/test_tone_reads_the_room.py`
 #: 的 `test_the_rule_forbids_hitting_back_and_targeting_people`），数字按逐字长度更新。
-SYSTEM_PROMPT_CHARS = 7401
+#:
+#: 2026-10-13 第四次更新 **7401 → 7357（−44）**：同一批改动里把"被说两句"那条
+#: 内联引号里的赌气话（"怎么，我说话还得端着。""那我少说点。""这就闭嘴。"）删掉了——
+#: 回复侧 A/B 显示这些**赌气形状的负例**可能反过来教她这么说（同一批输入里两条新写法
+#: 带上了"行，那下次我就说'真贵'。""不杠也难受……那就忍一下。"的赌气味）。
+#: 规矩本身一条没删（不还嘴 / 不拿人当靶子 / 两组 ✗✓ 都在），只是不再把顶嘴的句式抄给她看。
+SYSTEM_PROMPT_CHARS = 7357
 
 
 def test_the_resident_system_prompt_carries_no_unsure_rule() -> None:
