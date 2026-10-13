@@ -1238,7 +1238,11 @@ class QuoteLearningAgent:
                     written += await self._learn_batch(batch)
                 except Exception as exc:  # noqa: BLE001 - 学习失败绝不影响对话
                     self.failures += 1
-                    logger.warning("quote_learning_failed category=%s", type(exc).__name__)
+                    # 2026-10-13：把 `detail` 也打出来。原来只打类别名，查那次
+                    # `LLMError` 时只能另写探针复现——而 detail 里就写着是哪一种
+                    # （`empty_reply` / `stream_stalled` / 没等到结束标记…）。
+                    logger.warning("quote_learning_failed category=%s detail=%s",
+                                   type(exc).__name__, getattr(exc, "detail", ""))
                     break
             self.samples += len(fresh)
             self.runs += 1
