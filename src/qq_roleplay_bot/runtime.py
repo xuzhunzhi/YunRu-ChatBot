@@ -2266,6 +2266,35 @@ def _build_slang_learning(engine: DialogueEngine):
     return store, watcher
 
 
+#: 金句学习那条 agent 的输出预算（token）。**不能跟记忆维护共用 4096**——由来见
+#: `_quote_learning_client`。
+QUOTE_LEARNING_MAX_TOKENS = 8192
+
+
+def _quote_learning_client(engine):
+    """金句学习 agent 的 client：与记忆维护**同一条 key 与模型**，但**输出预算单独放大**。
+
+    2026-10-13：把一批从 8 条样本提到 12 条之后，实测连着两次
+    `quote_learning_failed category=LLMError`——原因就是记忆维护那个 `max_tokens = 4096`
+    被**思考**吃光、正文一个字没吐（`llm_client` 里 `empty_reply` 那条注释写的就是这个形状：
+    "例如 max_tokens 光被思考吃光"）。输出的 JSON 本身才 ~1.2k token，8192 给的是推理的余量。
+    """
+
+    endpoint = _memory_endpoint()
+    if endpoint is None:
+        # 没有记忆端点就退到引擎手上那一份（照旧能学，只是预算归它管）。
+        return getattr(engine, "memory_client", None) or getattr(engine, "client", None)
+    return OpenAICompatibleClient(
+        *endpoint.triple(),
+        provider=endpoint.provider,
+        timeout=MemorySettings.from_environment().model_timeout - 1,
+        max_tokens=QUOTE_LEARNING_MAX_TOKENS,
+        user_id=dev_config.MEMORY_USER_ID,
+        usage_store=_USAGE_STORE,
+        usage_role="memory",
+    )
+
+
 def _start_quote_learning(engine: DialogueEngine, *, allowed_groups):
     """金句学习 agent（`quote_learning.py`）：**定期**学"她怎么说、什么场合说什么"。
 
@@ -2282,7 +2311,7 @@ def _start_quote_learning(engine: DialogueEngine, *, allowed_groups):
 
     from .quote_learning import QuoteProfile, QuoteStore, build_quote_agent
 
-    client = getattr(engine, "memory_client", None) or getattr(engine, "client", None)
+    client = _quote_learning_client(engine)
     # 表情的名字表要从本机 SnowLuma 的只读接口拉（`fetch_sys_faces`，动作名与契约在
     # `data/snowluma_actions.json` 里，`capabilities.py` 的白名单里也有）。没配地址就是
     # `None`：那样照旧学，只是样本里少一个名字字段。
