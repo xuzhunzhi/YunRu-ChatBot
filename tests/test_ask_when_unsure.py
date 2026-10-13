@@ -409,7 +409,13 @@ def test_ask_budget_limits_per_topic_and_per_window() -> None:
 #: 审核那一侧在 `tests/test_style_reviewer.py`（`test_prompt_lets_casual_texture_through`
 #: 与第 6 类的单标点许可、`test_single_punctuation_and_particles_reach_the_model`）。
 #: 所以这个数字照旧按逐字长度更新，钉子本身没有放松：多一个字、少一个字仍然红。
-SYSTEM_PROMPT_CHARS = 7090
+#:
+#: 2026-10-13 第三次更新 **7090 → 7401（+311）**：加的是口气规矩里那两条
+#: （用户："说话冲、怼人的问题又起来了"）——**被说两句的时候不还嘴**、
+#: **不拿具体的人当靶子**，各配一组 ✗/✓（见 `stage3_runtime.TONE_READS_THE_ROOM_RULE`）。
+#: 它同样有自己的判据（`tests/test_tone_reads_the_room.py`
+#: 的 `test_the_rule_forbids_hitting_back_and_targeting_people`），数字按逐字长度更新。
+SYSTEM_PROMPT_CHARS = 7401
 
 
 def test_the_resident_system_prompt_carries_no_unsure_rule() -> None:
