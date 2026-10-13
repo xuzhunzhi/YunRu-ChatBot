@@ -1880,7 +1880,12 @@ def _judge_client_factory(session_id: str) -> OpenAICompatibleClient:
     # 仍然远小于原来的 60s 默认值（deepseek-flash 长尾实测 65.9s，会把整条串行
     # 流水线卡死，绝不能回到那个值）。兜底那一档单独放宽（mimo 上判定实测中位
     # 36.8s），由 `provider_failover` 集中决定。
-    judge_timeout = dev_config.api_timeout("judge", default=30.0)
+    #
+    # 2026-10-13 从 30.0 收到 20.0：用户当天第二次问"为什么还是有明显延迟"，
+    # 重启后 64 次判定的分布是 p90 12.38s、最大 54.42s（那三条 50s 是"23s 长生成失败
+    # + 27s 重试"，重试侧已用 SLOW_ATTEMPT_SECONDS 掐掉）。20s 盖住 p90 还有七成余量，
+    # 封住的是"连接活着但说不完"那种极端情况；代价是那种情况下这一次判定不出声（照旧 fail-closed）。
+    judge_timeout = dev_config.api_timeout("judge", default=20.0)
     endpoint = _endpoint_of("judge")
     client = OpenAICompatibleClient(
         *endpoint.triple(),

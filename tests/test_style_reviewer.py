@@ -388,9 +388,16 @@ class StyleReviewerTests(unittest.TestCase):
         self.assertIn("写得冲也不算越界", REVIEW_SYSTEM_PROMPT)
 
     def test_the_review_budget_covers_the_slow_drafts(self) -> None:
-        """超时的后果是**原稿直发**：预算得盖住慢的那一档（2026-10-13 实测量过）。"""
+        """超时的后果是**原稿直发**，可这一趟在发送路径上：预算换的是对方等的秒数。
 
-        self.assertGreaterEqual(REVIEW_TIMEOUT_SECONDS, 7.0)
+        2026-10-13 实测（部署后的 prompt、24 条真草稿）：中位 3.46s、p75 8.27s、
+        p90 11.49s、最长 24.48s；跳过率 4.5s→41%、7s→29%、9s→20%。用户当天第二次问
+        "为什么还是有明显延迟"，所以停在 6 秒：盖住中位与快的那一档，砍掉长尾（代价是
+        慢的两三成按原稿直发）。**不许再往下**——4.5s 那版跳过 41%，等于四成不做判断。
+        """
+
+        self.assertGreaterEqual(REVIEW_TIMEOUT_SECONDS, 6.0)
+        self.assertLessEqual(REVIEW_TIMEOUT_SECONDS, 9.0)
 
 
 class RealFaultReviewTests(unittest.TestCase):

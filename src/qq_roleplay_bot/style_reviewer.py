@@ -103,6 +103,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -122,7 +123,13 @@ logger = logging.getLogger(__name__)
 # p75 8.27s、p90 11.49s、最长 24.48s ⇒ 7s 会跳过 7/24（29%）、9s 跳到 5/24（20%）。
 # 29% 的原稿直发等于这类判断三成不做，所以再多给 2s；再往上（12s 只剩 8% 跳过）
 # 就是拿发送路径的延迟换覆盖率，那个取舍留给用户拍。
-REVIEW_TIMEOUT_SECONDS = 9.0
+# 2026-10-13 又收到 6s（用户当天第二次问"为什么还是有明显延迟"）：这一趟在**发送
+# 路径**上，它花掉的每一秒都直接变成对方等的秒数（中位 1.8~3.5s、慢的一档 9~18s）。
+# 6s 把长尾砍掉，代价是慢的那一档（约两三成）按原稿直发。同一天量过的三条替路都不
+# 划算：`reasoning_effort=none` 快 4 倍但**把越权看丢**（同样 6 条里 low 拦 5 条、
+# none 只拦 3 条：「想象里的价，一般都比实际低一截」「9950 好办，倒是改卡那台的电源
+# 别省」都是真的越权），不带现场也丢判断依据 ⇒ 只好收预算，不动判据和现场。
+REVIEW_TIMEOUT_SECONDS = 6.0
 # 理由的长度上限：它是给回复 agent 看的一句话，不是一篇分析。
 MAX_REASON_CHARS = 200
 # 审核输出里常见的"包装"：引号、代码块。
@@ -385,12 +392,21 @@ class StyleReviewer:
     async def _ask(self, messages: list[dict[str, str]]) -> str | None:
         """问一次审核模型。超时/报错返回 `None`（并记 `failed`），由调用方按通过处理。"""
 
+        started = time.monotonic()
         try:
-            return await asyncio.wait_for(self.client.complete(messages), self.timeout)
+            answer = await asyncio.wait_for(self.client.complete(messages), self.timeout)
         except Exception as exc:  # noqa: BLE001 - 审核失败绝不能挡住一条回复
             self.stats["failed"] += 1
-            logger.warning("style_review_failed category=%s", type(exc).__name__)
+            logger.warning(
+                "style_review_failed category=%s elapsed=%.2fs",
+                type(exc).__name__,
+                time.monotonic() - started,
+            )
             return None
+        # 2026-10-13 加：这一趟在发送路径上，它花的时间就是对方多等的秒数。
+        # 查"明显延迟"时这条腿**一点留痕都没有**，只能靠离线复测猜——补上这一个数。
+        logger.info("style_review_took elapsed=%.2fs", time.monotonic() - started)
+        return answer
 
     @staticmethod
     def _messages(draft: str, context: str) -> list[dict[str, str]]:
