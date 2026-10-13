@@ -387,6 +387,19 @@ class StyleReviewerTests(unittest.TestCase):
         self.assertIn("冲在事上", REVIEW_SYSTEM_PROMPT)
         self.assertIn("写得冲也不算越界", REVIEW_SYSTEM_PROMPT)
 
+    def test_prompt_spells_out_the_two_overreach_mistakes(self) -> None:
+        """这两条真例子是**这一腿换成 `reasoning_effort=none` 的前提**。
+
+        2026-10-13 实测：没有它们时 `none` 在 6 条真越权里只拦 3 条（`low` 拦 5 条），
+        写进第 2 类之后 `none` 也拦 5 条，而速度是 0.72s vs 4.92s（最大 1.15s vs 12.55s）。
+        删掉它们＝把这条腿的判据悄悄削薄，所以钉住。
+        """
+
+        self.assertIn("把一句感受拔成一般规律", REVIEW_SYSTEM_PROMPT)
+        self.assertIn("想象里的价，一般都比实际低一截", REVIEW_SYSTEM_PROMPT)
+        self.assertIn("顺手教他怎么做、怎么选", REVIEW_SYSTEM_PROMPT)
+        self.assertIn("9950 好办，倒是改卡那台的电源别省", REVIEW_SYSTEM_PROMPT)
+
     def test_the_review_budget_covers_the_slow_drafts(self) -> None:
         """超时的后果是**原稿直发**，可这一趟在发送路径上：预算换的是对方等的秒数。
 
