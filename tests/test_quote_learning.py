@@ -733,14 +733,18 @@ def test_injection_picks_at_most_n_by_context_and_is_descriptive_material() -> N
 
     with tempfile.TemporaryDirectory() as tmp:
         store = QuoteStore(Path(tmp) / "profile.json")
-        # 8 条同场合的笔记（验上限）＋ 一条别场合的（不该被挑中）。
+        # 上限**现读**（2026-10-13 从 5 提到 8：用户"学的太少了"），别把数字抄死在测试里。
+        from qq_roleplay_bot.quote_learning import max_notes_per_reply
+
+        cap = max_notes_per_reply()
+        # cap+4 条同场合的笔记（验上限）＋ 一条别场合的（不该被挑中）。
         notes = [{"kind": "context", "when": "有人说字幕翻译的事", "note": f"直接给结论{i}"}
-                 for i in range(8)]
+                 for i in range(cap + 4)]
         notes.append({"kind": "context", "when": "有人在说她不爱听的话", "note": "不接，就当没看见"})
         store.apply_run(notes=notes, meanings={}, seen=[])
         profile = QuoteProfile(store)
         picked = profile.notes_for(GROUP, "这个字幕只能识别不能翻译，是真的吗", "字幕翻译")
-        assert len(picked) == 5, "同场合的笔记按上限给，不多给"
+        assert len(picked) == cap, "同场合的笔记按上限给，不多给"
         assert all("直接给结论" in item["note"] for item in picked), "别的场合那条不该进来"
         block = inject_block(picked)
         assert block.startswith("--- 她以前遇到这种时候 ---")
