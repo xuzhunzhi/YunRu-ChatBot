@@ -46,7 +46,7 @@ from .memory_service import MemoryService
 from .onebot_client import SnowLumaHttpClient
 from .outbox import Outbox
 from .state_store import RuntimeStateStore
-from .style_reviewer import StyleReviewer
+from .style_reviewer import REVIEW_TIMEOUT_SECONDS, StyleReviewer
 from .stage3_main import (
     BATCH_SIZE,
     COOLDOWN_SECONDS,
@@ -1846,11 +1846,11 @@ def _endpoint_of(task: str):
 
 
 def _dialogue_client_factory(session_id: str) -> OpenAICompatibleClient:
-    # 与判定那条同理（2026-10-13）：请求改流式之后，这个数是"整轮最多说多久"的
-    # 总上限，不再是"整段生成的预算"；没输出的那 3 秒由
-    # `llm_client.STREAM_STALL_SECONDS` 单独砍。2026-10-10 拍板的 12 秒是给
-    # **非流式**整段用的，那时它会砍掉"正在写、字节一直在流"的长回复；
-    # 现在统一成 30 秒（只要一直在输出就让它说完）。
+    # 2026-10-13（用户拍板："超时只管首字，首字超时才跳过，不要重试，重试还不如干等着，
+    # 所有 agent 都一样"）：这个数**不是总上限**，而是"连着这么久一个字节都不吐"
+    # 才认连接死了的**停顿网**。首字那 3 秒由 `llm_client.STREAM_STALL_SECONDS` 单独管；
+    # 首字来了就让她说完（旧口径的 12 秒是给**非流式**整段用的，会砍掉"一直在流"的长回复）。
+    # 30 秒远大于实测的块间最大间隔（2026-10-13 实测 0.64s），只有连接真死了才会碰到。
     reply_timeout = dev_config.api_timeout("reply", default=30.0)
     endpoint = _endpoint_of("reply")
     client = OpenAICompatibleClient(
@@ -1868,23 +1868,18 @@ def _dialogue_client_factory(session_id: str) -> OpenAICompatibleClient:
 
 
 def _judge_client_factory(session_id: str) -> OpenAICompatibleClient:
-    # 2026-10-13 起这个数的**含义变了**：客户端的请求改成流式之后，它不再是
-    # "整段生成的预算"，而是"这一轮最多允许它说多久"（总上限，纯防挂死）；
-    # "3 秒没有输出就砍掉本轮"那道闸在 `llm_client.STREAM_STALL_SECONDS` 里，
-    # 与这里的 total 是两件事（见那条常量的注释与用户 2026-10-13 的原话）。
+    # 2026-10-13 起这个数的**含义变了**（用户拍板："超时只管首字，首字超时才跳过，
+    # 不要重试，重试还不如干等着，所有 agent 都一样"）：它不是"整段生成的预算"，
+    # 也不是总上限，而是**停顿网**——首字 3 秒不来就由
+    # `llm_client.STREAM_STALL_SECONDS` 把这一轮放掉（判定不出声）；首字来了之后，
+    # 只有"连着这么久一个字节都不吐"才当连接死了。
     #
-    # 所以默认值从 5.0 放宽到 30.0：旧的 5 秒正是"砍在 3.88s 中位数附近、
-    # 34% 的判定为一次被砍掉的生成白付时间"的那个数（2026-10-12 实测：成功判定
-    # 中位 2.92s、均值 4.21s；2026-10-12 拍板的 5 秒是给**非流式**整段用的）。
-    # 现在只要一直在输出就不会被砍，30 秒只用来兜住"连接活着但永远说不完"。
-    # 仍然远小于原来的 60s 默认值（deepseek-flash 长尾实测 65.9s，会把整条串行
-    # 流水线卡死，绝不能回到那个值）。兜底那一档单独放宽（mimo 上判定实测中位
-    # 36.8s），由 `provider_failover` 集中决定。
-    #
-    # 2026-10-13 从 30.0 收到 20.0：用户当天第二次问"为什么还是有明显延迟"，
-    # 重启后 64 次判定的分布是 p90 12.38s、最大 54.42s（那三条 50s 是"23s 长生成失败
-    # + 27s 重试"，重试侧已用 SLOW_ATTEMPT_SECONDS 掐掉）。20s 盖住 p90 还有七成余量，
-    # 封住的是"连接活着但说不完"那种极端情况；代价是那种情况下这一次判定不出声（照旧 fail-closed）。
+    # 为什么不再是 5 秒那种总上限：旧口径下它砍在 3.88s 中位数附近，34% 的判定是
+    # "生成被砍掉、白付一次时间还不算数"（2026-10-12 实测：成功判定中位 2.92s）。
+    # 现在只要一直在输出就不会被砍。20 秒远大于块间最大间隔（2026-10-13 实测 0.64s），
+    # 兜的是"连接活着但永远说不完"；真碰到就是这一次判定不出声（fail-closed）。
+    # 当天另有一件事已经被别的改法解决：那 3 条 50.4/49.2/54.4s 的判定是
+    # "23s 长生成失败 + 又重试一轮"，现在**默认不重试**（`DEFAULT_MAX_ATTEMPTS = 1`）。
     judge_timeout = dev_config.api_timeout("judge", default=20.0)
     endpoint = _endpoint_of("judge")
     client = OpenAICompatibleClient(
@@ -1959,6 +1954,9 @@ def _build_style_reviewer(usage_store=None):
             user_id=dev_config.REVIEW_USER_ID,
             usage_store=usage_store if usage_store is not None else _USAGE_STORE,
             usage_role="review",
+            # 审核这一路的 **停顿网**（首字那 3 秒由 `STREAM_STALL_SECONDS` 管，
+            # 不再有"整趟总上限"；见 style_reviewer.REVIEW_TIMEOUT_SECONDS 的注释）。
+            timeout=REVIEW_TIMEOUT_SECONDS,
         )
     )
 

@@ -12,6 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from qq_roleplay_bot import runtime_flags
+from qq_roleplay_bot.llm_client import ModelRequestError
 from qq_roleplay_bot.memory_config import MemorySettings
 from qq_roleplay_bot.memory_maintenance_agent import MemoryMaintenanceAgent, build_maintenance_messages
 from qq_roleplay_bot.memory_model import InboxEvent, MemoryMaterial, MemoryMetrics, MemoryValidationError, parse_operations
@@ -796,27 +797,60 @@ class MemoryAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.metrics.input_tokens, 48)
         self.assertEqual(self.metrics.operations, {"ADD": 1, "UPDATE": 1, "DELETE": 1, "IGNORE": 1, "MERGE": 0, "AFFINITY": 0})
 
-    async def test_agent_timeout_retry_no_overlap_and_disable_during_model(self):
+    async def test_a_failed_call_is_not_retried_and_the_batch_goes_back(self):
+        """首字超时那一类失败：**只问一次、不重试**，批次放回去，下一轮照常。
+
+        2026-10-13 用户拍板："超时只管首字，首字超时才跳过，不要重试，重试还不如干等着，
+        所有 agent 都一样。" 所以 agent 这边**不再有**总超时（这条用例原来就是靠
+        `asyncio.wait_for(..., self.timeout)` 把 `Waiting()` 掐断的）——失败改由 client 判
+        （首字 3 秒不来就放掉），agent 只记一笔、把批次放回去。
+        """
+
+        self.store.append(InboxEvent("1", GROUP, "100", "user", "正常材料", self.now))
+        calls = {"n": 0}
+
+        class FirstByteTimeout:
+            async def complete(inner, request):
+                calls["n"] += 1
+                raise ModelRequestError("transport_error", detail="首字超时")
+
+        agent = self.make_agent(FirstByteTimeout())
+        self.assertEqual(await agent.run_once(), 0)
+        self.assertEqual(calls["n"], 1, "失败不再重试")
+        self.assertEqual(self.metrics.failures, 1)
+        self.assertIsNotNone(self.store.claim(self.groups), "批次应当放回去，下一轮还能认领")
+
+    async def test_no_overlap_and_disable_during_model(self):
+        """模型还在跑时第二轮直接返回 0；跑到一半被禁用则不提交（也不算失败）。"""
+
         self.store.append(InboxEvent("1", GROUP, "100", "user", "正常材料", self.now))
         entered, finish = asyncio.Event(), asyncio.Event()
+
         class Waiting:
             async def complete(inner, request):
                 entered.set()
                 await finish.wait()
                 return output({"op": "IGNORE"})
-        agent = self.make_agent(Waiting(), timeout=0.1)
+
+        agent = self.make_agent(Waiting())
         first = asyncio.create_task(agent.run_once())
         await entered.wait()
+        # 同一个 agent 不重叠：锁住的时候第二轮立刻返回 0（不问模型）。
         self.assertEqual(await agent.run_once(), 0)
-        self.assertEqual(await first, 0)
-        self.assertEqual(self.metrics.failures, 1)
+        finish.set()
+        self.assertEqual(await first, 1)
+
+        # 第二轮：模型跑到一半把群禁掉 ⇒ 这次提交不算数（行留在库里等租约到期）。
+        self.now += 1
+        self.store.append(InboxEvent("2", GROUP, "100", "user", "又一条材料", self.now))
         entered.clear()
+        finish.clear()
         second = asyncio.create_task(agent.run_once())
         await entered.wait()
         self.groups.clear()
         finish.set()
         self.assertEqual(await second, 0)
-        self.assertEqual(self.metrics.maintenance_runs, 0)
+        self.assertEqual(self.metrics.maintenance_runs, 1, "禁用之后不再提交")
 
     async def test_background_model_does_not_block_dialogue(self):
         self.store.append(InboxEvent("1", GROUP, "100", "user", "正常材料", self.now))

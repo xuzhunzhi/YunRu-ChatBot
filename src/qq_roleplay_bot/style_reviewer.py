@@ -100,7 +100,6 @@
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 import time
@@ -136,7 +135,14 @@ logger = logging.getLogger(__name__)
 # 标点/语气词（「……」「哦哦」「。」）不误拦，出戏与不成句照抓。速度差一个数量级：
 # 中位 **0.72s vs 4.92s**、最大 **1.15s vs 12.55s**。所以生产改用
 # `QQBOT_REVIEW_REASONING_EFFORT=none`（见 `run\.env`；没有这个键时默认仍是 `low`，
-# 慢但不会出错）。6 秒预算留着当保险——`none` 之后它几乎碰不到。
+# 慢但不会出错）。
+#
+# 2026-10-13 收尾（用户拍板，原话）：「超时只管首字，首字超时才跳过，不要重试，
+# 重试还不如干等着，所有 agent 都一样」。所以这个数**不再是一个总上限**——原来
+# `_ask` 用 `asyncio.wait_for(..., REVIEW_TIMEOUT_SECONDS)` 砍整趟，会在她还在正常
+# 生成的时候把人砍掉。现在它是**审核 client 的停顿网**（装配时 `timeout=` 传给 client）：
+# 首字 3 秒不来就放掉这一轮（`STREAM_STALL_SECONDS`，原稿直发），首字来了之后只认
+# "连着 6 秒一个字节都不吐"= 连接死了。
 REVIEW_TIMEOUT_SECONDS = 6.0
 # 理由的长度上限：它是给回复 agent 看的一句话，不是一篇分析。
 MAX_REASON_CHARS = 200
@@ -342,9 +348,8 @@ class StyleReviewer:
     长期 0 拦截 = 它没在工作；拦截率很高 = 可能过紧。
     """
 
-    def __init__(self, client, *, timeout: float = REVIEW_TIMEOUT_SECONDS) -> None:
+    def __init__(self, client) -> None:
         self.client = client
-        self.timeout = max(0.5, float(timeout))
         self.stats = {"calls": 0, "blocked": 0, "retried": 0, "failed": 0, "unrecognized": 0}
 
     @property
@@ -403,11 +408,18 @@ class StyleReviewer:
         return verdict
 
     async def _ask(self, messages: list[dict[str, str]]) -> str | None:
-        """问一次审核模型。超时/报错返回 `None`（并记 `failed`），由调用方按通过处理。"""
+        """问一次审核模型。失败返回 `None`（并记 `failed`），由调用方按通过处理。
+
+        2026-10-13：**这里不再套总超时**（原来写的是
+        `asyncio.wait_for(self.client.complete(messages), self.timeout)`）。用户拍板
+        "超时只管首字，首字超时才跳过"——首字 3 秒不来由 client 自己判掉
+        （`STREAM_STALL_SECONDS`），首字来了就让她说完；client 那边只留一条停顿网
+        （`REVIEW_TIMEOUT_SECONDS`，装配时传进去）。
+        """
 
         started = time.monotonic()
         try:
-            answer = await asyncio.wait_for(self.client.complete(messages), self.timeout)
+            answer = await self.client.complete(messages)
         except Exception as exc:  # noqa: BLE001 - 审核失败绝不能挡住一条回复
             self.stats["failed"] += 1
             logger.warning(

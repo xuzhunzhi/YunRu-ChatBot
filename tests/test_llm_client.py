@@ -90,8 +90,8 @@ def test_http_error_keeps_status_without_leaking_credentials() -> None:
     assert client.last_attempts == 1
 
 
-def test_http_error_body_survives_retries() -> None:
-    """同一个 HTTPError 的响应流只能读一次；重试不能让 body 变成空串。"""
+def test_http_error_body_survives_the_error_path() -> None:
+    """同一个 HTTPError 的响应流只能读一次；body 必须留在 detail 里（排障唯一的线索）。"""
 
     attempts = {"n": 0}
 
@@ -102,7 +102,7 @@ def test_http_error_body_survives_retries() -> None:
             {}, io.BytesIO(b'{"error":"slow down"}'))
 
     client = OpenAICompatibleClient("https://example.invalid/v1", "k", "m",
-                                   timeout=1.0, max_attempts=3, backoff_seconds=0.0)
+                                   timeout=1.0, backoff_seconds=0.0)
     with patch("qq_roleplay_bot.llm_client._urlopen", side_effect=fake_urlopen):
         try:
             _complete(client)
@@ -110,8 +110,10 @@ def test_http_error_body_survives_retries() -> None:
             assert exc.kind == "http_error"
             assert "slow down" in exc.detail, exc.detail
         else:
-            raise AssertionError("重试耗尽后应当抛出 LLMError")
-    assert attempts["n"] == 3
+            raise AssertionError("HTTP 失败应当抛出 LLMError")
+    # 默认只跑一轮（2026-10-13 用户拍板："不要重试，重试还不如干等着"）。
+    assert attempts["n"] == 1
+    assert client.last_attempts == 1
 
 
 def test_client_error_is_not_retried() -> None:
@@ -136,40 +138,22 @@ def test_client_error_is_not_retried() -> None:
     assert attempts["n"] == 1
 
 
-def test_transport_error_is_retried_until_it_succeeds() -> None:
-    attempts = {"n": 0}
+def test_transport_error_is_not_retried() -> None:
+    """默认只跑一轮（2026-10-13 用户拍板："不要重试，重试还不如干等着，所有 agent 都一样"）。
 
-    def fake_urlopen(request, timeout=None):
-        attempts["n"] += 1
-        if attempts["n"] == 1:
-            raise ConnectionResetError("reset")
-        return _Response(json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode())
-
-    client = OpenAICompatibleClient("https://example.invalid/v1", "k", "m",
-                                   timeout=1.0, max_attempts=3, backoff_seconds=0.0)
-    with patch("qq_roleplay_bot.llm_client._urlopen", side_effect=fake_urlopen):
-        assert _complete(client) == "ok"
-    assert client.last_attempts == 2
-
-
-def test_a_slow_failure_is_not_replayed() -> None:
-    """慢失败不再重播（2026-10-13）。
-
-    判据是"这一轮烧掉的时间"，不是错误种类：一次 20 多秒的长生成失败，重试**又整整
-    给一轮**，只是把等待翻倍（实测 3 条判定因此到了 50.4/49.2/54.4s）。
+    理由不是"重试没用"，而是**重试的等待比放掉这一轮更贵**：当天实测有 3 条判定是
+    "23s 长生成失败 + 又重试一轮" ⇒ 50.4 / 49.2 / 54.4s，而它换来的只是再赌一次。
     """
 
     attempts = {"n": 0}
 
-    def slow_urlopen(request, timeout=None):
+    def fake_urlopen(request, timeout=None):
         attempts["n"] += 1
-        time.sleep(0.06)
         raise ConnectionResetError("reset")
 
     client = OpenAICompatibleClient("https://example.invalid/v1", "k", "m",
-                                    timeout=1.0, max_attempts=3, backoff_seconds=0.0)
-    with patch("qq_roleplay_bot.llm_client.SLOW_ATTEMPT_SECONDS", 0.05), \
-            patch("qq_roleplay_bot.llm_client._urlopen", side_effect=slow_urlopen):
+                                    timeout=1.0, backoff_seconds=0.0)
+    with patch("qq_roleplay_bot.llm_client._urlopen", side_effect=fake_urlopen):
         try:
             _complete(client)
         except LLMError as exc:
@@ -180,26 +164,13 @@ def test_a_slow_failure_is_not_replayed() -> None:
     assert client.last_attempts == 1
 
 
-def test_a_fast_failure_is_still_replayed() -> None:
-    """对照：**立刻**失败照旧重试到配额用完——那才是重试要治的抖动。"""
+def test_the_default_is_a_single_attempt() -> None:
+    """机制还在（显式传 `max_attempts` 才会重试），但**默认是 1**——生产没有人传过 >1。"""
 
-    attempts = {"n": 0}
+    from qq_roleplay_bot.llm_client import DEFAULT_MAX_ATTEMPTS
 
-    def fast_urlopen(request, timeout=None):
-        attempts["n"] += 1
-        raise ConnectionResetError("reset")
-
-    client = OpenAICompatibleClient("https://example.invalid/v1", "k", "m",
-                                    timeout=1.0, max_attempts=3, backoff_seconds=0.0)
-    with patch("qq_roleplay_bot.llm_client._urlopen", side_effect=fast_urlopen):
-        try:
-            _complete(client)
-        except LLMError as exc:
-            assert exc.kind == "transport_error"
-        else:
-            raise AssertionError("传输层失败应当抛出 LLMError")
-    assert attempts["n"] == 3
-    assert client.last_attempts == 3
+    assert DEFAULT_MAX_ATTEMPTS == 1
+    assert _client().max_attempts == 1
 
 
 def test_invalid_reply_shape_is_not_retried() -> None:
@@ -484,7 +455,7 @@ def _sse(*chunks) -> bytes:
 
 
 class _StallingResponse:
-    """先吐几行、然后"没声音了"：迭代到尽头抛 `socket.timeout`。"""
+    """先吐几行、然后"没声音了"：读空之后每次 `readline()` 都抛 `socket.timeout`。"""
 
     def __init__(self, lines, *, then_raise=None):
         self._lines = list(lines)
@@ -496,10 +467,36 @@ class _StallingResponse:
     def __exit__(self, *exc):
         return False
 
-    def __iter__(self):
-        for line in self._lines:
-            yield line
+    def readline(self):
+        if self._lines:
+            return self._lines.pop(0)
         raise self._exc
+
+
+class _PausingResponse:
+    """吐一块 → 静几拍（`readline()` 抛 `socket.timeout`）→ 再吐下一块。
+
+    "静几拍"是**瞬间**发生的（不真睡），用来测"首字来了之后还接着等"这条语义：
+    只要没超过停顿网，读超时只是心跳，不是失败。
+    """
+
+    def __init__(self, chunks, *, quiet_reads: int = 3):
+        self._chunks = list(chunks)
+        self._quiet = quiet_reads
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def readline(self):
+        if self._chunks:
+            return self._chunks.pop(0)
+        if self._quiet > 0:
+            self._quiet -= 1
+            raise socket.timeout("silent")
+        return b""
 
 
 def test_streaming_assembles_content_and_usage_from_the_chunks() -> None:
@@ -521,7 +518,11 @@ def test_streaming_assembles_content_and_usage_from_the_chunks() -> None:
 
 
 def test_a_stream_that_dies_half_way_is_not_retried() -> None:
-    """说到一半断了（思考已经来过）→ `stream_stalled`，**不再**原样重发。"""
+    """说过话之后再也没声音、且超过停顿网 → `stream_stalled`，**不重发**。
+
+    这里的停顿网只有 0.05s（跑得快），所以"静"是真的会撞网——语义与生产一致：
+    首字来了照旧读完，但连接真死了就别耗着。
+    """
 
     attempts = {"n": 0}
 
@@ -531,7 +532,7 @@ def test_a_stream_that_dies_half_way_is_not_retried() -> None:
         return _StallingResponse([line.encode()])
 
     client = OpenAICompatibleClient("https://example.invalid/v1", "k", "m",
-                                    timeout=1.0, max_attempts=3, backoff_seconds=0.0)
+                                    timeout=0.05, backoff_seconds=0.0)
     with patch("qq_roleplay_bot.llm_client._urlopen", side_effect=fake_urlopen):
         try:
             _complete(client)
@@ -543,22 +544,65 @@ def test_a_stream_that_dies_half_way_is_not_retried() -> None:
     assert client.last_error_kind == "stream_stalled"
 
 
-def test_a_stream_with_no_output_at_all_is_still_retried() -> None:
-    """一个字都没来 = 连接压根没通，还是按传输失败重试（第二次成功）。"""
+def test_a_mid_stream_pause_keeps_reading() -> None:
+    """首字来了之后**不按总时长砍**：中间静几拍照旧等下去（"超时只管首字"）。"""
+
+    first = f"data: {json.dumps({'choices': [{'delta': {'content': '前'}}]})}\n".encode()
+    second = f"data: {json.dumps({'choices': [{'delta': {'content': '后'}}]})}\n".encode()
+
+    client = OpenAICompatibleClient("https://example.invalid/v1", "k", "m",
+                                    timeout=1.0, backoff_seconds=0.0)
+    with patch("qq_roleplay_bot.llm_client._urlopen",
+               return_value=_PausingResponse([first, second], quiet_reads=3)):
+        assert _complete(client) == "前后"
+
+
+def test_a_flowing_stream_is_not_cut_by_a_total_cap() -> None:
+    """一直在吐字节就不砍：总耗时超过 client 的 `timeout` 也照旧读完（2026-10-13 拍板）。"""
+
+    class _Flowing:
+        def __init__(self):
+            self.n = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def readline(self):
+            self.n += 1
+            if self.n > 6:
+                return b""
+            time.sleep(0.03)  # 6 块 × 0.03s = 0.18s > timeout(0.05s)
+            return f"data: {json.dumps({'choices': [{'delta': {'content': '字'}}]})}\n".encode()
+
+    client = OpenAICompatibleClient("https://example.invalid/v1", "k", "m",
+                                    timeout=0.05, backoff_seconds=0.0)
+    with patch("qq_roleplay_bot.llm_client._urlopen", return_value=_Flowing()):
+        assert _complete(client) == "字" * 6
+
+
+def test_a_stream_with_no_output_at_all_is_not_retried() -> None:
+    """一个字节都没来 ⇒ `transport_error`（首字超时），**也不再重试**：这一轮直接放掉。"""
 
     attempts = {"n": 0}
 
     def fake_urlopen(request, timeout=None):  # noqa: ARG001
         attempts["n"] += 1
-        if attempts["n"] == 1:
-            return _StallingResponse([])
-        return _Response(_sse({"choices": [{"delta": {"content": "好在"}}]}))
+        return _StallingResponse([])
 
     client = OpenAICompatibleClient("https://example.invalid/v1", "k", "m",
-                                    timeout=1.0, max_attempts=3, backoff_seconds=0.0)
+                                    timeout=1.0, backoff_seconds=0.0)
     with patch("qq_roleplay_bot.llm_client._urlopen", side_effect=fake_urlopen):
-        assert _complete(client) == "好在"
-    assert attempts["n"] == 2
+        try:
+            _complete(client)
+        except LLMError as exc:
+            assert exc.kind == "transport_error"
+        else:  # pragma: no cover
+            raise AssertionError("首字没来却没有失败")
+    assert attempts["n"] == 1
+    assert client.last_error_kind == "transport_error"
 
 
 def test_a_stream_that_only_thinks_is_an_empty_reply() -> None:
