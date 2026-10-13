@@ -1,9 +1,11 @@
 """llm_client 的离线覆盖：只验证错误分类与脱敏，不发起真实网络请求。"""
 import asyncio
+import http.server
 import io
 import json
 import os
 import socket
+import threading
 import time
 import urllib.error
 from unittest.mock import patch
@@ -136,6 +138,58 @@ def test_client_error_is_not_retried() -> None:
             raise AssertionError("4xx 应当抛出 LLMError")
     # 4xx 是请求本身的问题，重试没有意义。
     assert attempts["n"] == 1
+
+
+def test_a_redirect_is_refused_instead_of_silently_rewritten() -> None:
+    """POST 收到 302 时**不许自己改成 GET 再发一遍**（2026-10-13 本机实测过的形状）。
+
+    urllib 默认会跟随重定向，而它的 `redirect_request` 把 POST + 301/302/303 降级成
+    **没有正文的 GET**：实测服务端先收到 `POST … body=106B`、紧接着收到
+    `GET … body=0B`，客户端还把重定向目标的回包**当成模型回复**收下。现在 3xx 直接
+    当 `http_error`（`status=302`，不在可重试状态码里）。
+    """
+
+    seen: list[str] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):  # noqa: ANN002 - 测试里不要服务器日志
+            return
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            seen.append(f"POST body={length}")
+            self.rfile.read(length)
+            self.send_response(302)
+            self.send_header("Location", "/elsewhere/chat/completions")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_GET(self):
+            seen.append("GET")
+            payload = json.dumps(
+                {"choices": [{"message": {"content": "不该被当成回复"}}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        client = OpenAICompatibleClient(
+            f"http://127.0.0.1:{server.server_address[1]}/v1", "k", "m",
+            timeout=5.0, backoff_seconds=0.0)
+        try:
+            _complete(client)
+        except LLMError as exc:
+            assert exc.kind == "http_error", exc.kind
+            assert "status=302" in exc.detail, exc.detail
+        else:
+            raise AssertionError("3xx 应当被当成错误，而不是跟着跳过去")
+        assert len(seen) == 1 and seen[0].startswith("POST"), f"不该跟到 GET 去：{seen}"
+    finally:
+        server.shutdown()
 
 
 def test_transport_error_is_not_retried() -> None:
