@@ -679,9 +679,22 @@ class QuoteStore:
 
     def apply_run(self, *, notes: list[dict[str, object]], meanings: dict[str, dict[str, dict]],
                   seen: list[str]) -> None:
-        """把一轮学习的成果并进去（笔记整份替换，含义表按群合并，见 `_merge_meanings`）。"""
+        """把一轮学习的成果并进去（**笔记也按 `note_id` 合并**，含义表按群合并）。
 
-        self.notes = [dict(item) for item in notes[:MAX_NOTES]]
+        2026-10-13 改（用户："学的太少了"）：这里原来是"**笔记整份替换**"，
+        后果两条都踩到了——
+        1. 档案永远超不过"一轮的产出"：样本是按批送的，一轮只看得见 36 条，
+           所以笔记长期停在个位数；
+        2. **已经学到的"避免"会被下一轮冲掉**：那一轮样本里没有 `㊗`，
+           那两条"踩过的坑"就凭空消失（当天实测：笔记 9 → 19，`avoid` 从 2 → 0）。
+        `_merge_meanings` 的注释早就写明"整份替换会让上一次学过的东西凭空消失"，
+        同一条道理对笔记一样成立。
+        """
+
+        merged_notes = self._merge_notes(self.notes, notes)
+        # 到上限时先丢最老的，但"踩过的坑"永远排最前（它们最容易被一轮轮合并挤掉）。
+        merged_notes.sort(key=lambda item: 0 if item.get("avoid") else 1)
+        self.notes = merged_notes[:MAX_NOTES]
         self.meanings = self._merge_meanings(self.meanings, meanings)
         merged = list(self.seen)
         for key in seen:
@@ -690,6 +703,30 @@ class QuoteStore:
         self.seen = merged[-MAX_SEEN:]
         self.updated_at = self.clock()
         self.save()
+
+    @staticmethod
+    def _merge_notes(existing: list, incoming: list) -> list[dict[str, object]]:
+        """按 `note_id`（`when` + `note`）合并：**这一轮写的覆盖同一条，没写到的留着**。
+
+        顺序是"这一轮新写的在前、上一轮留下来的在后"——到 `MAX_NOTES` 上限时
+        先丢最老的。
+        """
+
+        merged: dict[str, dict[str, object]] = {}
+        order: list[str] = []
+        for item in [*incoming, *existing]:
+            # 第一次出现的赢：`incoming` 排在前 ⇒ **这一轮写的覆盖同一条**，
+            # 而且结果顺序是"这一轮新写的在前、老的在后面"。
+            if not isinstance(item, dict):
+                continue
+            text = _text(item.get("note"))
+            if not text:
+                continue
+            key = note_id(_text(item.get("when")), text)
+            if key not in merged:
+                order.append(key)
+            merged.setdefault(key, dict(item))
+        return [merged[key] for key in order]
 
     @staticmethod
     def _merge_meanings(existing: dict, incoming: dict) -> dict:
