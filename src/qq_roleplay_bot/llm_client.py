@@ -98,14 +98,35 @@ class LLMError(RuntimeError):
         return f"{self.kind}: {self.detail}" if self.detail else self.kind
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """**不跟随任何重定向**（2026-10-13）。
+
+    为什么禁掉：urllib 默认会自动跟随 3xx，而它的 `redirect_request` 按 RFC 把
+    POST + 301/302/303 **降级成没有正文的 GET**。本机实测（`tmp_gate_gaps.py`，本地
+    服务端记录到的是）：先收到 `POST /v1/chat/completions body=106B`，紧接着收到
+    `GET /moved/chat/completions body=0B`，而客户端把重定向目标的回包**当成模型回复
+    收下**（结果打印为"当成正常回复"）。三件事一起坏：正文（人格 + 群聊材料）被丢掉、
+    请求落到别的地址、回包可以是任意内容；同时"首字 3 秒"在每一跳各算一次。
+
+    实测真端点 `https://api.deepseek.com` 在**不跟随重定向**时直接回 HTTP 200，
+    所以禁掉它不影响正常调用；哪天真被重定向，会变成一条明确的 `http_error`
+    （`status=3xx`，不重试），而不是"悄悄换了个请求还装作成功"。
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
+
 def _urlopen(request: urllib.request.Request, *, timeout: float):
     """发一次 HTTP 请求。**每次现建 opener**，理由见 `_complete_sync` 里的注释。
 
     单独包一层是为了有个明确的打桩点：以前测试打的是 `urllib.request.urlopen`
     （模块级全局 opener），换成现建 opener 之后就打不到了。
+    传 `_NoRedirect()` 进去会**替掉**默认的 `HTTPRedirectHandler`（`build_opener`
+    对传入实例的类做 skip），所以重定向不再被跟随。
     """
 
-    return urllib.request.build_opener().open(request, timeout=timeout)
+    return urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout)
 
 
 # --- client 登记簿（2026-10-01 面板热更用） ---------------------------------
