@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from qq_roleplay_bot.quote_learning import MAX_NOTES, QuoteStore
+from qq_roleplay_bot.quote_learning import MAX_AVOID_NOTES, MAX_NOTES, QuoteStore
 
 
 def _note(when: str, note: str, *, avoid: bool = False, kind: str = "style") -> dict:
@@ -61,6 +61,25 @@ class NoteMergeTests(unittest.TestCase):
             self.assertEqual(len(notes), MAX_NOTES)
             self.assertNotIn("笔记0", notes, "最老的先被丢")
             self.assertIn(f"笔记{MAX_NOTES + 4}", notes, "最新的留着")
+
+    def test_avoid_notes_cannot_crowd_out_the_positive_ones(self) -> None:
+        """"踩过的坑"单独限额——一轮补学一大票 `㊗` 样本之后，正面笔记不许被挤光。
+
+        2026-10-13 实测踩到：补学 55 条 `㊗` 样本产出 65 条 avoid，把 60 条上限填满，
+        19 条正面笔记全丢，档案变成清一色"别这么做"。
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = QuoteStore(Path(tmp) / "profile.json")
+            store.apply_run(notes=[_note(f"场合{index}", f"正面笔记{index}")
+                                   for index in range(20)], meanings={}, seen=[])
+            store.apply_run(notes=[_note(f"坑{index}", f"踩过的坑{index}", avoid=True)
+                                   for index in range(65)], meanings={}, seen=[])
+            avoid = [item for item in store.notes if item.get("avoid")]
+            positive = [item for item in store.notes if not item.get("avoid")]
+            self.assertEqual(len(avoid), MAX_AVOID_NOTES, "坑走自己的限额")
+            self.assertEqual(len(positive), 20, "正面笔记一条都不许被挤掉")
+            self.assertLessEqual(len(store.notes), MAX_NOTES)
 
 
 if __name__ == "__main__":  # pragma: no cover

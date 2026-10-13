@@ -93,6 +93,12 @@ VERBATIM_SPAN_CHARS = 5
 #: 2026-10-13 从 24 提到 60：用户说"学的太少了"，而样本池同时被放开（见
 #: `MAX_UNREACTIVE_SAMPLES_PER_RUN`），一轮能学到的条数会明显变多。
 MAX_NOTES = 60
+#: 上面那 60 条里，**"踩过的坑"最多占多少**（其余留给"她怎么说 / 什么场合说什么"）。
+#:
+#: 为什么必须分栏限额：2026-10-13 实测踩到——把一批 `㊗` 样本补学之后，
+#: 一轮就产出 65 条 `avoid`，把 60 条上限**填满**，19 条正面笔记全被挤掉，
+#: 档案变成"清一色别这么做"。她要的是学她怎么说，不是只学别踩雷。
+MAX_AVOID_NOTES = 24
 #: 一条回复里最多注入几条材料。2026-10-13 从 5 提到 8：学得多，也要用得上。
 MAX_NOTES_PER_REPLY = 8
 #: 注入块的字符预算：材料不该把 prompt 撑大（回复段的易变段本来就在末尾）。
@@ -692,9 +698,14 @@ class QuoteStore:
         """
 
         merged_notes = self._merge_notes(self.notes, notes)
-        # 到上限时先丢最老的，但"踩过的坑"永远排最前（它们最容易被一轮轮合并挤掉）。
-        merged_notes.sort(key=lambda item: 0 if item.get("avoid") else 1)
-        self.notes = merged_notes[:MAX_NOTES]
+        # 分栏留：**"踩过的坑"单独限额**（`MAX_AVOID_NOTES`），其余名额给
+        # "她怎么说 / 什么场合说什么"。只用一个总上限的话，坑会把正面笔记挤光
+        # （2026-10-13 实测：一轮 65 条 avoid 填满 60 条上限，19 条正面全丢）。
+        avoid_notes = [item for item in merged_notes if item.get("avoid")][:MAX_AVOID_NOTES]
+        positive_notes = [item for item in merged_notes if not item.get("avoid")]
+        # 正面笔记吃剩下的名额：**没有坑的时候它可以占满 60 条**，有坑时让出那 24 个位置。
+        room = max(0, MAX_NOTES - len(avoid_notes))
+        self.notes = avoid_notes + positive_notes[:room]
         self.meanings = self._merge_meanings(self.meanings, meanings)
         merged = list(self.seen)
         for key in seen:
