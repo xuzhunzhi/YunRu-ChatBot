@@ -957,11 +957,11 @@ RAW_EVENTS_DIR = get("QQBOT_RAW_EVENTS_DIR", "")
 #
 # - **默认开**（用户要求的形状是"默认开、能一键关"）：`QQBOT_QUOTE_LEARN=0` 关掉之后
 #   **行为与改动前逐字相同**——回复 prompt 里一条材料都不加（有测试钉住这条）；
-# - `QQBOT_QUOTE_LEARN_MAX`：一条回复里最多注入几条材料（**不是全塞**）。上限 **8**
-#   （2026-10-13 从 5 提到 8：用户"学的太少了"，学得多也得用得上），
-#   再多就该写进笔记而不是每轮都带；注入块另有一个 **480 字**的预算（见注入侧）。
+# - `QQBOT_QUOTE_LEARN_MAX`：一条回复里最多注入几条材料（**不是全塞**）。上限 5，
+#   再多就该写进笔记而不是每轮都带；注入块另有一个 320 字的预算（见注入侧）。
+#   （2026-10-13 我一度提到 8 / 480 字，理由是"学得多也得用得上"；2026-10-14 用户把
+#    口径说清了——"**贴表情的全部都得学**"是**学**的事，注入这边退回原样。）
 # - `QQBOT_QUOTE_LEARN_INTERVAL`：多久跑一次（秒）。默认一天一次级别，不是每轮；
-#   生产 `.env` 里 2026-10-13 起设成 10800（3 小时一次）；
 #   实现里还有 60 秒下限，防配置把它写成"每轮都问模型"。
 # - `QQBOT_QUOTE_PROFILE`：那份 JSON 的位置（笔记 + 按群的表情含义表 + 操作者覆盖）。
 #   默认 `<项目根>/data/quote/profile.json`（`data/` 已 gitignored）。
@@ -969,7 +969,7 @@ RAW_EVENTS_DIR = get("QQBOT_RAW_EVENTS_DIR", "")
 # **热路径零模型调用**：注入只读这份 JSON（按 mtime 缓存）＋算几个字符重叠，
 # 模型只在定期那一趟里被调一次。
 QUOTE_LEARN_ENABLED = _enabled("QQBOT_QUOTE_LEARN")
-QUOTE_LEARN_MAX = _int("QQBOT_QUOTE_LEARN_MAX", 8)
+QUOTE_LEARN_MAX = _int("QQBOT_QUOTE_LEARN_MAX", 5)
 QUOTE_LEARN_INTERVAL = _float("QQBOT_QUOTE_LEARN_INTERVAL", 86400.0)
 QUOTE_PROFILE_FILE = get("QQBOT_QUOTE_PROFILE", "data/quote/profile.json")
 
