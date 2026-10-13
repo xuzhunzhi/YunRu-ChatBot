@@ -31,7 +31,6 @@
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 import time
@@ -42,7 +41,11 @@ from collections import OrderedDict
 
 logger = logging.getLogger(__name__)
 
-# 识图的墙钟上限：它在判定之前跑，慢了会拖到回复。实测单张小图 1~2 秒。
+# 识图那一路 client 的**停顿网**（不再是"整趟上限"）。2026-10-13 用户拍板：
+# "超时只管首字，首字超时才跳过，不要重试，所有 agent 都一样"——所以这里原来那道
+# `asyncio.wait_for(..., 20s)` 已经删掉：首字那 3 秒由 `llm_client.STREAM_STALL_SECONDS`
+# 管，首字来了就让它说完（实测单张小图 1~2 秒）。这个数现在只在装配处（`plugin.py`）
+# 交给 client，含义是"连着 20 秒一个字节都不吐"才当连接死了。
 DESCRIBE_TIMEOUT_SECONDS = 20.0
 # 描述长度上限：占位符换成的是一句话，不是作文。
 MAX_DESCRIPTION_CHARS = 120
@@ -72,12 +75,11 @@ IMAGE_QUESTION = "这张图里是什么？一句话。"
 class ImageDescriber:
     """一次识图调用 + 一层本地缓存。没配 client 时是直通（返回空串）。"""
 
-    def __init__(self, client, *, timeout: float = DESCRIBE_TIMEOUT_SECONDS,
+    def __init__(self, client, *,
                  max_chars: int = MAX_DESCRIPTION_CHARS,
                  max_images: int = MAX_IMAGES_PER_MESSAGE,
                  cache_size: int = CACHE_SIZE, clock=time.time) -> None:
         self.client = client
-        self.timeout = max(1.0, float(timeout))
         self.max_chars = max(20, int(max_chars))
         self.max_images = max(1, int(max_images))
         self.cache_size = max(0, int(cache_size))
@@ -121,8 +123,10 @@ class ImageDescriber:
             self.stats["skipped"] += len(wanted) - self.max_images
         started = self.clock()
         try:
-            text = await asyncio.wait_for(self.client.complete(self._messages(fresh, sticker)),
-                                          self.timeout)
+            # 2026-10-13：这里原来套着 `asyncio.wait_for(..., 20s)` 的**整趟上限**，
+            # 与"超时只管首字"冲突（会在模型还在正常描述时把它砍掉）。现在只由 client
+            # 自己判——首字 3 秒不来就算这一轮没起来，来了就让它说完。
+            text = await self.client.complete(self._messages(fresh, sticker))
         except Exception as exc:  # noqa: BLE001 - 识图失败不能挡住一条回复
             self.stats["failed"] += 1
             self.last_latency = self.clock() - started

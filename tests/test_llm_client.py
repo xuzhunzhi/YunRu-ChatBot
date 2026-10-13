@@ -553,8 +553,28 @@ def test_a_mid_stream_pause_keeps_reading() -> None:
     client = OpenAICompatibleClient("https://example.invalid/v1", "k", "m",
                                     timeout=1.0, backoff_seconds=0.0)
     with patch("qq_roleplay_bot.llm_client._urlopen",
-               return_value=_PausingResponse([first, second], quiet_reads=3)):
+               return_value=_PausingResponse([first, second, b"data: [DONE]\n"], quiet_reads=3)):
         assert _complete(client) == "前后"
+
+
+def test_a_stream_without_an_end_marker_is_a_half_sentence() -> None:
+    """SSE **干净收摊却没有结束标记** ⇒ 半截，不许当成完整回复发出去（2026-10-13 补）。
+
+    这是改流式时新开的无声截断面：`readline()` 返回空（EOF，不是超时）时，
+    以前会把已经拼到的半句话交出去；判定的结构化输出多半解析失败（fail-closed），
+    但回复那一路就是**把半句发出去**。
+    """
+
+    body = (f"data: {json.dumps({'choices': [{'delta': {'content': '半句话'}}]})}\n\n").encode()
+    client = _client()
+    with patch("qq_roleplay_bot.llm_client._urlopen", return_value=_Response(body)):
+        try:
+            _complete(client)
+        except LLMError as exc:
+            assert exc.kind == "stream_stalled", exc.kind
+            assert "结束标记" in exc.detail, exc.detail
+        else:  # pragma: no cover - 走到这里说明半句被当成完整回复了
+            raise AssertionError("没有结束标记却当成完整回复了")
 
 
 def test_a_flowing_stream_is_not_cut_by_a_total_cap() -> None:
@@ -572,10 +592,14 @@ def test_a_flowing_stream_is_not_cut_by_a_total_cap() -> None:
 
         def readline(self):
             self.n += 1
-            if self.n > 6:
-                return b""
-            time.sleep(0.03)  # 6 块 × 0.03s = 0.18s > timeout(0.05s)
-            return f"data: {json.dumps({'choices': [{'delta': {'content': '字'}}]})}\n".encode()
+            if self.n <= 6:
+                time.sleep(0.03)  # 6 块 × 0.03s = 0.18s > timeout(0.05s)
+                return f"data: {json.dumps({'choices': [{'delta': {'content': '字'}}]})}\n".encode()
+            if self.n == 7:
+                # 结束标记只给 `finish_reason`（不给 `[DONE]`）：两样认一样。
+                return (f"data: {json.dumps({'choices': [{'delta': {}, 'finish_reason': 'stop'}]})}\n"
+                        ).encode()
+            return b""
 
     client = OpenAICompatibleClient("https://example.invalid/v1", "k", "m",
                                     timeout=0.05, backoff_seconds=0.0)

@@ -56,7 +56,7 @@ TITLE = "识图"
 # 记一行 `plugin_import_missing_module` 然后**静默不装**，插件从此隐身。
 from qq_roleplay_bot import dev_config
 
-from .vision import ImageDescriber, VISION_SYSTEM_PROMPT
+from .vision import DESCRIBE_TIMEOUT_SECONDS, ImageDescriber, VISION_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,9 @@ def build(usage_store=None):
             user_id=dev_config.VISION_USER_ID,
             usage_store=usage_store,
             usage_role="vision",
+            # 识图这一路的**停顿网**（不是整趟上限）：首字 3 秒由
+            # `llm_client.STREAM_STALL_SECONDS` 管，首字来了就让它说完。
+            timeout=DESCRIBE_TIMEOUT_SECONDS,
         )
     )
 
