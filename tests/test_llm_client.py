@@ -4,6 +4,7 @@ import io
 import json
 import os
 import socket
+import time
 import urllib.error
 from unittest.mock import patch
 
@@ -149,6 +150,56 @@ def test_transport_error_is_retried_until_it_succeeds() -> None:
     with patch("qq_roleplay_bot.llm_client._urlopen", side_effect=fake_urlopen):
         assert _complete(client) == "ok"
     assert client.last_attempts == 2
+
+
+def test_a_slow_failure_is_not_replayed() -> None:
+    """慢失败不再重播（2026-10-13）。
+
+    判据是"这一轮烧掉的时间"，不是错误种类：一次 20 多秒的长生成失败，重试**又整整
+    给一轮**，只是把等待翻倍（实测 3 条判定因此到了 50.4/49.2/54.4s）。
+    """
+
+    attempts = {"n": 0}
+
+    def slow_urlopen(request, timeout=None):
+        attempts["n"] += 1
+        time.sleep(0.06)
+        raise ConnectionResetError("reset")
+
+    client = OpenAICompatibleClient("https://example.invalid/v1", "k", "m",
+                                    timeout=1.0, max_attempts=3, backoff_seconds=0.0)
+    with patch("qq_roleplay_bot.llm_client.SLOW_ATTEMPT_SECONDS", 0.05), \
+            patch("qq_roleplay_bot.llm_client._urlopen", side_effect=slow_urlopen):
+        try:
+            _complete(client)
+        except LLMError as exc:
+            assert exc.kind == "transport_error"
+        else:
+            raise AssertionError("传输层失败应当抛出 LLMError")
+    assert attempts["n"] == 1
+    assert client.last_attempts == 1
+
+
+def test_a_fast_failure_is_still_replayed() -> None:
+    """对照：**立刻**失败照旧重试到配额用完——那才是重试要治的抖动。"""
+
+    attempts = {"n": 0}
+
+    def fast_urlopen(request, timeout=None):
+        attempts["n"] += 1
+        raise ConnectionResetError("reset")
+
+    client = OpenAICompatibleClient("https://example.invalid/v1", "k", "m",
+                                    timeout=1.0, max_attempts=3, backoff_seconds=0.0)
+    with patch("qq_roleplay_bot.llm_client._urlopen", side_effect=fast_urlopen):
+        try:
+            _complete(client)
+        except LLMError as exc:
+            assert exc.kind == "transport_error"
+        else:
+            raise AssertionError("传输层失败应当抛出 LLMError")
+    assert attempts["n"] == 3
+    assert client.last_attempts == 3
 
 
 def test_invalid_reply_shape_is_not_retried() -> None:

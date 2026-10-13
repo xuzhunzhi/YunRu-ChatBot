@@ -32,6 +32,12 @@ MAX_BACKOFF_SECONDS = 8.0
 # （纯防挂死）——只要一直在输出，就不再按"整段生成"的时间砍人。
 STREAM_STALL_SECONDS = 3.0
 
+# 重试是给"**立刻**失败的抖动"用的（连不上、连接被重置），不是"再赌一次长生成"。
+# 2026-10-13 查到 3 条判定 50.4s / 49.2s / 54.4s：一次 ~23s 的长生成超时，重试**又整整
+# 给了一轮**（~27s），而判定就在关键路径上、还 fail-closed（静默不出声）——两头都亏。
+# 所以：这一轮已经烧掉 ≥ 这个秒数，就不再原样重来，直接把失败交上去。
+SLOW_ATTEMPT_SECONDS = 8.0
+
 # 需要保留的 usage 字段。`prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`
 # 是 DeepSeek 特有的缓存计量（见 https://api-docs.deepseek.com/guides/kv_cache），
 # 其余厂商的字段名不同，缺失时只是不统计，不影响调用。
@@ -269,6 +275,7 @@ class OpenAICompatibleClient:
         while attempt < self.max_attempts:
             attempt += 1
             self.last_attempts = attempt
+            attempt_started = time.monotonic()
             try:
                 return await asyncio.to_thread(self._complete_sync, messages)
             except ModelRequestError as exc:
@@ -280,6 +287,18 @@ class OpenAICompatibleClient:
                 error = self._classify(exc)
                 self.last_error_kind = error.kind
                 if attempt >= self.max_attempts or not self._is_retryable(exc):
+                    raise error from exc
+                # 慢失败不再重播（2026-10-13）：见 SLOW_ATTEMPT_SECONDS 的注释。
+                spent = time.monotonic() - attempt_started
+                if spent >= SLOW_ATTEMPT_SECONDS:
+                    logger.warning(
+                        "model_retry_skipped attempt=%s/%s kind=%s detail=%s elapsed=%.2fs",
+                        attempt,
+                        self.max_attempts,
+                        error.kind,
+                        error.detail,
+                        spent,
+                    )
                     raise error from exc
                 last_error = error
                 delay = self._backoff_delay(attempt)
