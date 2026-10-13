@@ -1245,6 +1245,11 @@ class DialogueEngine:
         # （2026-10-05）：判不过就把理由交回回复 agent 重写一次（见 `_rewrite_after_review`）。
         # 没配就是 None（直通）。
         self.style_reviewer = style_reviewer
+        #: "这一轮现在跑到哪一段了"（2026-10-13 夜间复盘）：`""` / `judging` /
+        #: `replying` / `compacting` / `vision`，由 `dev_config.set_turn_stage` 在
+        #: 跑模型前写、`runtime.handle_turn_within_budget` 在 `turn timeout` 那行读。
+        #: 主循环**串行**处理消息（一条一轮），所以一个引擎上它只有一个值。
+        self.turn_stage = ""
         # 识图（可选）：有图的消息在**进判定之前**先看一眼，把 `[图片]` 换成一句描述。
         # 它只改正文，不新增决策路径——"要不要回、回什么"照旧全在原来那套里。
         self.vision = vision
@@ -1719,6 +1724,9 @@ class DialogueEngine:
 
         kinds = tuple(getattr(message, "media_kinds", ()) or ())
         sticker = bool(kinds) and all(kind == "sticker" for kind in kinds)
+        # "这一轮被砍在哪一段"（2026-10-13 夜间复盘）：识图（它有自己的一档预算，
+        # 见 dev_config 那段注释）。
+        dev_config.set_turn_stage(self, "vision")
         try:
             description = await self.vision.describe(message.media_urls, sticker=sticker)
         except Exception:  # noqa: BLE001 - 识图这条路的异常一律降级
@@ -5286,6 +5294,8 @@ class DialogueEngine:
         )
         self._stats["model_calls"] += 1
         started_at = self.clock()
+        # "这一轮被砍在哪一段"（2026-10-13 夜间复盘）：回复这一腿（含它内部的审核与重写）。
+        dev_config.set_turn_stage(self, "replying")
         try:
             result = await self._client_for(message.session_id).complete(request)
         except Exception as exc:
@@ -5803,6 +5813,9 @@ class DialogueEngine:
             request = build_compaction_messages(batch)
             self._stats["compaction_calls"] += 1
             started_at = self.clock()
+            # "这一轮被砍在哪一段"：压缩。它一轮最多压 `MAX_COMPACT_BATCHES_PER_TURN` 批，
+            # 而每批都有自己的停顿网——这是唯一能"合法地"吃掉大半预算的一段。
+            dev_config.set_turn_stage(self, "compacting")
             try:
                 raw = await client.complete(request)
             except Exception as exc:
@@ -5939,6 +5952,8 @@ class DialogueEngine:
         )
         self._stats["judge_calls"] += 1
         started_at = self.clock()
+        # "这一轮被砍在哪一段"（2026-10-13 夜间复盘）：判定这一腿正在跑。
+        dev_config.set_turn_stage(self, "judging")
         try:
             raw = await self._judge_for(message.session_id).complete(request)
         except Exception as exc:

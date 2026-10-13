@@ -2720,15 +2720,21 @@ async def handle_turn_within_budget(engine: DialogueEngine, item: IncomingMessag
     """
 
     budget = dev_config.turn_timeout_seconds()
+    # 每一轮从"还没进任何一段"开始：不重置的话，上一轮留下的值会替这一轮背锅
+    # （这条网只在卡住时响，卡在收尾/发送这类没有模型调用的时候也会响，那时该印 `-`）。
+    dev_config.set_turn_stage(engine, "")
     try:
         return await asyncio.wait_for(engine.handle(item), timeout=budget)
     except asyncio.TimeoutError:
         # 超时会取消里面那个任务（`asyncio.wait_for` 的语义）；引擎那边的
         # `finally` 负责把巡检守卫还回去（见 `FocusController.end_sweep`）。
         engine.note_turn_timeout()
+        # **被砍在哪一段**（2026-10-13 夜间复盘）：原来只写 session 与 budget，
+        # 事后无从查起。引擎在跑模型前把它写在**自己身上**（`set_turn_stage`），
+        # 取消不会影响这个值；还没进任何一段（收尾/发送/纯逻辑）时如实印成 `-`。
         logger.error(
-            "Stage 3 turn timeout: session=%s budget=%ss（这一条没有回复，历史照留）",
-            item.session_id, budget,
+            "Stage 3 turn timeout: session=%s budget=%ss stage=%s（这一条没有回复，历史照留）",
+            item.session_id, budget, dev_config.current_turn_stage(engine) or "-",
         )
         return None
 

@@ -457,9 +457,46 @@ def session_cache_max_sessions() -> int:
 
 def turn_timeout_seconds() -> float:
     """一条消息从进来到出结果的**总预算**（`QQBOT_TURN_TIMEOUT_SECONDS`，
-    默认 90，夹在 5..600）。超时就当这一条没有回复（历史照留）。"""
+    默认 90，夹在 5..600）。超时就当这一条没有回复（历史留）。"""
 
     return _float_clamped("QQBOT_TURN_TIMEOUT_SECONDS", 90.0, 5.0, 600.0)
+
+
+# --- "这一轮被砍在哪一段" -----------------------------------------------------
+# 由来（2026-10-13 夜间复盘）：`turn timeout` 那一行只写了 session 与 budget，
+# **没写当时在跑哪一段**。这条网是最后一道、也是唯一还会在"她正在流式输出"时把整轮
+# 砍掉的地方，而它历史上只响过 3 次（2026-10-08/09/10）——响得这么少的时候，
+# "被砍的是判定、回复、压缩，还是审核"就成了下一次出事时唯一想知道的数，
+# 事后却无从查起（判定/回复/审核各自的耗时在别的日志里，但**砍的那一刻**没有留痕）。
+#
+# 做法：跑模型前把当前这一段**写在引擎对象上**（`DialogueEngine.turn_stage`）。
+# 不用 `ContextVar`：`asyncio.wait_for` 把 `engine.handle(item)` 包进一个**新任务**，
+# 而任务的 context 是**拷贝**的——内层任务里写的 ContextVar，外层
+# `except asyncio.TimeoutError:` 那一支读不到（实测：读出来是空的）。
+# 引擎对象没有这个隔离问题，而且主循环本来就**串行**处理消息（一条一轮），
+# 所以"当前这一段"本来就是**每台引擎唯一**的一个值。
+#
+# 这一组值是**给维护者看的日志词**，不写进任何 prompt（§2.2 的机制词禁令管的是 prompt，
+# 不是日志）；它们与 `judge` / `reply` / `compaction` / `vision` 这几条模型通道一一对应。
+TURN_STAGES = ("judging", "replying", "compacting", "vision")
+
+
+def set_turn_stage(engine: object, stage: str) -> None:
+    """记下"这一轮现在跑到哪一段了"（空串 = 还没进任何一段）。
+
+    只接受 `TURN_STAGES` 里的名字：写错的名字会让 `turn timeout` 那行印出一个
+    没人认识的值，那还不如不写——所以这里**当场炸**，而不是静默放过。
+    """
+
+    if stage and stage not in TURN_STAGES:
+        raise ValueError(f"未知的一轮阶段: {stage!r}（只认 {TURN_STAGES}）")
+    engine.turn_stage = stage
+
+
+def current_turn_stage(engine: object) -> str:
+    """当前这一段的名字（不在任何一段里时是空串）。**只用于日志**。"""
+
+    return getattr(engine, "turn_stage", "") or ""
 
 
 def remind_min_interval_seconds() -> int:
