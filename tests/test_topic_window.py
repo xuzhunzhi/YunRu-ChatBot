@@ -57,25 +57,9 @@
    `live_history()`（压缩的取数口）不按起点过滤。
 3. **消息本体只在满 500 条时被压缩收走**（进摘要、留最近 50 条）。
 4. **话题换了、摘要脱节 → 丢掉摘要**（判据：话题起点在 `summary_through` 之后）。
-
-## 2026-10-14 补的硬下限（用户："我早就说过历史最短50条"）
-
-上面四条哪一条都**没给"最少看得见几条"兜底**：起点仍是单向棘轮，判定一前进视图就缩。
-
-10-14 实测（`run/data/logs/reply.jsonl` 191 条）：`<history>` **中位 5 条**（1~98）。
-当天的实例——她把「战地六79.2」读成"分数"（判定的话题标签也写成了「战地六评分与秋促」），
-被用户当场纠正「是价格不是分数」。前文不在她眼前，她只能自己补。
-
-所以加一条硬下限 `MIN_HISTORY_MESSAGES = 50`：`topic_history()` 不足 50 条就往前补；
-`advance_topic_start` 也不许把起点推到"剩下不足 50 条"的位置——顺带让视图在稳态下
-仍然**只追加**，前缀缓存不因为锚点一跳就断。
 """
 from qq_roleplay_bot.stage3_main import COMPACT_KEEP, HISTORY_LIMIT, LIVE_TARGET
-from qq_roleplay_bot.stage3_runtime import (
-    MIN_HISTORY_MESSAGES,
-    ConversationState,
-    _format_history,
-)
+from qq_roleplay_bot.stage3_runtime import ConversationState, _format_history
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 
 GROUP = "717151356"
@@ -161,20 +145,12 @@ def test_the_roster_covers_every_visible_speaker_so_who_refs_always_resolve() ->
 
 
 def test_the_roster_can_list_someone_who_has_left_the_visible_window() -> None:
-    """名册是**整个窗口**的人，不随选择收缩——有意的不对称，为了让前缀稳定。
+    """名册是**整个窗口**的人，不随选择收缩——有意的不对称，为了让前缀稳定。"""
 
-    2026-10-14：视图有 50 条下限，所以这里用 120 条的窗口——锚点推到 119 也被夹到
-    "还留 50 条"的位置（视图 = 最后 50 条：第 70~119 条），只说过**第一句**的人
-    照样落在视图之外，名册里仍有他。
-    """
-
-    state = ConversationState(history_limit=HISTORY_LIMIT)
-    state.add(message(0, speaker=0), 0.0)                  # 1001：只在最前面说过这一句
-    for index in range(1, 120):
-        state.add(message(index, speaker=1 + index % 3), 0.0)   # 1002~1004 反复说
+    state = build_state(60)
     early = state.aliases[SPEAKERS[0]]
-    state.advance_topic_start(119)
-    assert len(visible_seqs(state)) == MIN_HISTORY_MESSAGES
+    state.advance_topic_start(59)
+    assert len(visible_seqs(state)) == 1
     assert early in roster_aliases(state), "早期那个人仍在名册里"
     assert state.alias_of(message(0)) not in who_aliases(state), "但他已经不在可见历史里"
 
@@ -196,16 +172,15 @@ def test_the_topic_start_only_moves_forward() -> None:
     assert lengths == sorted(lengths, reverse=True), f"视图应当只减不增：{lengths}"
 
     assert state.advance_topic_start(60) is False, "后退必须是无效的（判定也从没请求过）"
-    # 2026-10-14：起点被 `MIN_HISTORY_MESSAGES` 夹住，199 只推到"还留 50 条"的位置。
-    assert state.topic_start_seq == 200 - MIN_HISTORY_MESSAGES, "夹到留得住 50 条的地方"
-    assert state.advance_topic_start(199) is False, "同一个位置不算变化"
+    assert state.topic_start_seq == 199
+    assert state.advance_topic_start(199) is False, "同一个编号不算变化"
     assert state.advance_topic_start(None) is False, "没报就不动"
 
 
 # --- 选择不销毁消息；只有满 500 条压缩才动消息 ------------------------------
 
 def test_narrowing_the_view_never_removes_a_message_from_the_window() -> None:
-    """起点只裁剪**视图**：缩到下限（50 条）为止，消息本体一条都没少。
+    """起点只裁剪**视图**：缩到只剩 1 条，消息本体一条都没少。
 
     这是这一轮改动里最要紧的一条。我一度把"起点前移"讲成"消息丢了"——**那是错的**：
     `live_history()`（压缩的取数口）不按起点过滤，所以被排除在视图之外的消息
@@ -213,57 +188,75 @@ def test_narrowing_the_view_never_removes_a_message_from_the_window() -> None:
     """
 
     state = build_state(500)
-    state.advance_topic_start(state.seq_range()[1])        # 想缩到只剩最新 1 条
-    assert len(state.topic_history()) == MIN_HISTORY_MESSAGES, "视图有下限，不再只剩 1 条"
+    state.advance_topic_start(state.seq_range()[1])        # 视图缩到最新 1 条
+    assert len(state.topic_history()) == 1, "视图只剩 1 条"
     assert len(state.live_history()) == 500, "但窗口里 500 条一条没少"
     assert state.seq_range() == (0, 499)
     assert state.dropped == 0, "没有任何消息被丢掉"
 
 
-def test_the_history_never_goes_below_fifty_messages() -> None:
-    """**用户 2026-10-14 的原话："我早就说过历史最短50条"**。
+# --- 2026-10-14 老状态遗留：锚点下限的**一次性迁移** --------------------------
+#
+# 这一段是这次改动里**唯一新增的行为**（其余都是把两侧改回文档支持的形状）。
+# 迁移只做一次：没有标记、且载荷里的锚点比最旧一条还晚，才拉回 `seq_range()[0]`，
+# 并把标记落回状态；带着标记再载入就**不动**锚点。
 
-    实测代价（同一天）：`<history>` 中位只有 5 条，于是她把「战地六79.2」读成分数。
-    这条钉两件事：视图**保底 50 条**（窗口不够 50 条时就是整个窗口），
-    而且锚点**推不过去**那个下限。
-    """
-
-    state = build_state(500)
-    for start in (0, 1, 250, 499):
-        state.advance_topic_start(start)
-        visible = state.topic_history()
-        assert len(visible) >= MIN_HISTORY_MESSAGES, f"视图短于 50 条：{len(visible)}"
-        assert visible[-1] is state.recent()[-1], "视图总是带最新那条"
-        seqs = [state.seq_of(item) for item in visible]
-        assert seqs == list(range(seqs[0], seqs[0] + len(seqs))), "视图是一段连续的尾巴"
-
-    small = build_state(20)
-    assert small.advance_topic_start(19) is True, "小窗口里锚点照样能推"
-    assert len(small.topic_history()) == 20, "窗口本身只有 20 条时，视图就是这 20 条"
-
-
-def test_a_persisted_anchor_is_pulled_back_to_the_floor_on_load() -> None:
-    """老状态里"切到只剩两三句"的起点，**载入时拉回下限之内**（一次性纠偏）。
-
-    不拉回来的话 `topic_history()` 只能靠"取最后 50 条"兜底，而那是**滑动**的——
-    每来一条新消息，历史块的头就往前挪一格，prompt 前缀每轮都变（缓存全废）。
-    往回挪这一次之后，视图又变回"从固定起点只追加"。
-    """
+def test_an_old_state_anchor_above_the_window_is_migrated_once() -> None:
+    """老状态（没有标记）里的高锚点，载入时拉回窗口最旧一条，并落下迁移标记。"""
 
     source = build_state(120)
     source.advance_topic_start(10)
     raw = source.as_state()
-    raw["topic_start_seq"] = 119          # 模拟老代码留下的、切到只剩 1 条的锚点
+    raw.pop("anchor_floor_migrated", None)      # 模拟 2026-10-14 之前落盘的老状态
+    raw["topic_start_seq"] = 119                # 老代码留下的、切到只剩 1 条的锚点
     restored = ConversationState.from_state(raw, history_limit=120)
     assert restored is not None
-    assert restored.topic_start_seq == 120 - MIN_HISTORY_MESSAGES, "拉回「还留 50 条」的位置"
-    assert len(restored.topic_history()) == MIN_HISTORY_MESSAGES
-    # 没有锚点的老状态不动它：那时视图本来就是整个窗口（可能比 50 条多得多）。
-    raw2 = source.as_state()
-    raw2["topic_start_seq"] = None
-    untouched = ConversationState.from_state(raw2, history_limit=120)
-    assert untouched is not None and untouched.topic_start_seq is None
-    assert len(untouched.topic_history()) == 120, "没锚点就是整窗，不许被缩到 50"
+    assert restored.topic_start_seq == 0, "拉到窗口最旧一条"
+    assert len(restored.topic_history()) == 120, "视图因此是整个载荷"
+    assert restored.anchor_floor_migrated is True, "标记要落下，否则下次载入还会再拉"
+
+    # 没有锚点的老状态**不动**：那时视图本来就是整个窗口，没什么可迁的。
+    untouched_raw = source.as_state()
+    untouched_raw.pop("anchor_floor_migrated", None)
+    untouched_raw["topic_start_seq"] = None
+    untouched = ConversationState.from_state(untouched_raw, history_limit=120)
+    assert untouched is not None
+    assert untouched.topic_start_seq is None
+    assert len(untouched.topic_history()) == 120, "没锚点就是整窗"
+
+
+def test_the_migration_marker_stops_the_anchor_from_moving_again() -> None:
+    """带着标记再载入，锚点**不动**（迁过一次就够）；标记本身也要落盘。"""
+
+    source = build_state(120)
+    source.advance_topic_start(10)
+    raw = source.as_state()
+    raw.pop("anchor_floor_migrated", None)
+    raw["topic_start_seq"] = 119
+    migrated = ConversationState.from_state(raw, history_limit=120)
+    assert migrated is not None and migrated.topic_start_seq == 0
+
+    # 迁完写出去的标记，下次载入见到就不动锚点（**只许前进**照旧是常态）。
+    persisted = migrated.as_state()
+    assert persisted["anchor_floor_migrated"] is True
+    persisted["topic_start_seq"] = 119          # 就算文件里又被写成高锚点
+    again = ConversationState.from_state(persisted, history_limit=120)
+    assert again is not None
+    assert again.topic_start_seq == 119, "带标记就是「迁过了」，不许再往回拉"
+    assert again.anchor_floor_migrated is True, "标记要一直在，否则下一次载入又会拉"
+
+    # 锚点本来就落在载荷窗口内（不比最旧一条晚）**什么都不发生**：不迁、也不打标记。
+    # 把 `dropped` 抬到 10：载荷里最旧一条变成第 10 条，于是锚点 5 落在窗口之前。
+    plain = build_state(120)
+    plain.advance_topic_start(5)
+    plain_raw = plain.as_state()
+    plain_raw.pop("anchor_floor_migrated", None)
+    plain_raw["dropped"] = 10
+    loaded = ConversationState.from_state(plain_raw, history_limit=120)
+    assert loaded is not None
+    assert loaded.seq_range()[0] == 10, "窗口最旧一条是第 10 条"
+    assert loaded.topic_start_seq == 5, "不比最旧一条晚的锚点一个字都不动"
+    assert loaded.anchor_floor_migrated is False, "没迁过就不打标记"
 
 
 def test_a_narrow_selection_does_not_starve_the_next_compaction() -> None:
