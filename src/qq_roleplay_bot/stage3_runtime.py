@@ -78,6 +78,15 @@ ALIAS_ALSO_LIMIT = 3
 # 对着 `group_roles` 逐字核这一份，改了一边而忘了另一边会红。
 ROSTER_ROLE_MEMBER_LABEL = "普通成员"
 
+#: 交给模型的历史**最少**这么多条（2026-10-14 用户："我早就说过历史最短50条"）。
+#:
+#: 由来：话题锚点（`topic_start_seq`）原来能把视图切到只剩几条——实测回复 prompt 里的
+#: `<history>` **中位只有 5 条**（最少 1、最多 98）。于是"那张图""绷不住""战地六79.2"
+#: 指什么的时候前文已经不在她眼前，她只能自己补（当天实测：她把 79.2 读成"分数"，被用户
+#: 当场纠正「是价格不是分数」）。锚点只决定"从哪儿算话题"，**不决定"最多能看多少"**。
+#: 见 `ConversationState.topic_history` 与 `advance_topic_start`。
+MIN_HISTORY_MESSAGES = 50
+
 
 @dataclass(slots=True)
 class ConversationState:
@@ -236,24 +245,48 @@ class ConversationState:
         return f"；{escape(sanitize_chat_text(label, max_length=32), quote=False)}"
 
     def topic_history(self) -> list[IncomingMessage]:
-        """当前话题的消息：话题起点之后（含起点）的全部消息。
+        """当前话题的消息：话题起点之后（含起点）的全部消息，**但不短于
+        `MIN_HISTORY_MESSAGES` 条**。
 
-        没有起点时（还没压缩过、判定也还没给过）就是整个窗口——与改动前一致。
+        2026-10-14（用户："我早就说过历史最短50条"）：原来只按起点切，实测回复 prompt
+        里的 `<history>` **中位只有 5 条**（1~98）——"那张图""绷不住""79.2"指什么的时候，
+        前文已经不在她眼前，她只能自己补（当天实测：她把"战地六79.2"读成分数，被当场纠正）。
+        **起点只决定"从哪儿算话题"，不决定"最多能看多少"**：不足就往前补到 50 条
+        （窗口本身不够 50 条时就是整个窗口）。
         """
 
         messages = list(self.history)
         if self.topic_start_seq is None:
             return messages
-        return [m for m in messages if (self.seq_of(m) or 0) >= self.topic_start_seq]
+        visible = [m for m in messages if (self.seq_of(m) or 0) >= self.topic_start_seq]
+        if len(visible) < MIN_HISTORY_MESSAGES:
+            return messages[-MIN_HISTORY_MESSAGES:]
+        return visible
+
+    def _history_floor_seq(self) -> int | None:
+        """起点**最多**能推到哪个序号：再往后就剩不下 `MIN_HISTORY_MESSAGES` 条了。
+
+        窗口本身不足 50 条时返回 `None`（那时没有可夹的位置，视图就是整个窗口）。
+        """
+
+        span = self.seq_range()
+        if span is None or len(self.history) <= MIN_HISTORY_MESSAGES:
+            return None
+        return span[1] - MIN_HISTORY_MESSAGES + 1
 
     def advance_topic_start(self, seq: int | None) -> bool:
-        """把话题起点往前推（只许前进）；返回是否真的变了。
+        """把话题起点往前推（只许前进，**且不许推到"剩不到 50 条"的地方**）；
+        返回是否真的变了。
 
         **为什么保留"只许前进"**（2026-10-02 实测，`run/data/logs/judge.jsonl` 1464 条判定）：
         判定**一次都没请求过后退**——88% 原地确认、12% 前进、**0% 后退**。
         因为每一轮都把它当前的起点告诉它（"这段谈话目前的起点：第 N 条"），
         它照着确认就行。所以单向棘轮**没有代价**：它挡掉的那个动作根本不发生。
         而放开后退则会白送一份缓存风险（真退一次就换一次 prompt 前缀）。
+
+        **2026-10-14 加的下限**（用户："我早就说过历史最短50条"）：起点原来能把视图
+        切到只剩几条，现在夹在"还留 50 条"的位置。顺带这也让视图在稳态下**只追加**——
+        锚点不再一跳就砍掉历史前段，前缀缓存不因此断掉。
 
         要区分两件事：
 
@@ -264,6 +297,9 @@ class ConversationState:
 
         if seq is None:
             return False
+        floor_seq = self._history_floor_seq()
+        if floor_seq is not None and seq > floor_seq:
+            seq = floor_seq
         current = self.topic_start_seq
         if current is not None and seq <= current:
             return False
@@ -1742,7 +1778,9 @@ def build_dialogue_messages(
     3. **较早对话的摘要**（`summary`，几百轮不变）——这是长对话下前缀仍然
        可复用的关键：全量历史会让 prompt 持续增长，而只带最近若干条又会丢掉
        上下文，压缩把这两件事分开；
-    4. 当前话题的消息（`topic_history`）——话题内**只追加**。
+    4. 当前话题的消息（`topic_history`）——话题内**只追加**（2026-10-14 起另有
+       `MIN_HISTORY_MESSAGES = 50` 的硬下限：起点只决定"从哪儿算话题"，不让视图
+       短于 50 条；锚点也被夹在"还留 50 条"的位置，所以稳态下这一块仍然只追加）。
 
     易变段放在最后：当前状态、记忆检索结果、扩展材料与本次事件。
     这样整条消息的前缀是"群背景 + 名册 + 摘要 + 历史前段"，**逐轮一字不差**。
