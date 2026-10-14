@@ -157,10 +157,18 @@ def test_a_non_deepseek_provider_drops_the_deepseek_only_fields() -> None:
 
 
 def test_a_402_switches_the_provider_and_retries_the_very_call() -> None:
+    """2026-10-14：驱动这一条的用途从 `judge` 换成 `letter`（如实交代）。
+
+    判定那天改成借 reply 那条 key（xkiro）之后，它**不再属于 deepseek 那一家**——
+    再拿 `usage_role="judge"` 造"deepseek 报 402"这个场景已经不成立（闸门正确地
+    认定"deepseek 不是这一路的主家"，于是不换端点）。仍然绑在 deepseek 上、
+    能驱动同一场景的用途是 **`letter`**（它借 `judge` 那条 deepseek key）。
+    """
+
     with _isolated(**MAIN_ENV):
         client = OpenAICompatibleClient(
             "https://api.deepseek.com", "sk-fake-judge", "deepseek-flash",
-            timeout=5.0, provider="deepseek", usage_role="judge")
+            timeout=5.0, provider="deepseek", usage_role="letter")
         calls: list[str] = []
 
         def fake_urlopen(request, timeout=None):
@@ -188,7 +196,7 @@ def test_a_402_without_a_fallback_endpoint_still_fails_as_before() -> None:
         client = OpenAICompatibleClient(
             "https://api.deepseek.com", "sk-fake-judge", "deepseek-flash",
             timeout=5.0, max_attempts=1, backoff_seconds=0.0,
-            provider="deepseek", usage_role="judge")
+            provider="deepseek", usage_role="letter")
         calls: list[str] = []
 
         def fake_urlopen(request, timeout=None):
