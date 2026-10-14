@@ -575,6 +575,15 @@ class ConversationState:
             message = _message_from_state(item)
             if message is not None:
                 state.history.append(message)
+        # 2026-10-14（用户："我早就说过历史最短50条"）：老状态里那个"切到只剩两三句"的
+        # 起点在**载入时一次性拉回**下限之内。这是"只许前进"的唯一例外，理由：
+        # 不拉回来的话 `topic_history()` 只能靠"取最后 50 条"兜底，而那是**滑动**的——
+        # 每来一条新消息，历史块的头就往前挪一格，prompt 前缀每轮都变（缓存全废）。
+        # 往回挪这一次（结果会落回状态文件）之后，视图又变回"从固定起点只追加"。
+        floor_seq = state._history_floor_seq()
+        if (state.topic_start_seq is not None and floor_seq is not None
+                and state.topic_start_seq > floor_seq):
+            state.topic_start_seq = floor_seq
         return state
 
 
