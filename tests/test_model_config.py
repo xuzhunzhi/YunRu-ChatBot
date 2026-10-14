@@ -22,7 +22,7 @@ key 去打 mimo，**全 401**。根因不是"谁配错了"，是**形状**——
 
 > ⚠️ **2026-10-14 的如实交代（用户原话："你把这个也换成gemini flash吧"）**：
 > 判定（judge）从"用自己那条 deepseek key"改成**借 `reply` 那条 key**（xkiro /
-> `google/gemini-3.8-flash`）——与 letter 借 judge 那条同一个做法：**要的模型挂在
+> `google/gemini-2.5-flash`）——与 letter 借 judge 那条同一个做法：**要的模型挂在
 > 哪一家就借哪家的 key**。
 >
 > 本文件因此要分清两类东西，改的时候别混：
@@ -55,13 +55,18 @@ EXPECTED: tuple[tuple[str, str, str, str, str], ...] = (
     # 这一条推翻了 10-09 的"借 judge 那把 deepseek key"：换家时地址与 key 必须同源，
     # 借来的 key 会被打到新地址上（实测：只填 `QQBOT_REPLY_API_BASE_URL` 时，
     # 解析出来的 key 仍是 judge 那把——`QQBOT_REPLY_API_KEY` 被 `TASKS["reply"]["key"]`
-    # 架空）。模型名 2026-10-14 当天由用户再定了一次（"用最新的 flash"）⇒
-    # `google/gemini-3.8-flash`。⚠️ 如实交代：**这个模型名还没实测过**——
-    # 站上它当时首字超时（2.5-flash / 3-flash 才是实测通的：同一句群聊 prompt
-    # 1.46~1.77s，判定契约三次齐全），而且主会话写这一行时中转站正好连不上
-    # （SSL 握手失败，两把 key 都一样）。上线前必须先验通，不通就按 3.7 → 3.6 →
-    # 3.5 → 3 → 2.5 的顺序退回最近一个能用的。这一条钉的是**配置表**，不是"它一定可用"。
-    ("reply", "xkiro", "https://api.xkiro.com/v1", "google/gemini-3.8-flash",
+    # 架空）。模型名 2026-10-14 当天定过两轮：用户先说"用最新的 flash"，实测之后
+    # **退回 `google/gemini-2.5-flash`**——因为"首字 3 秒"那道闸（`STREAM_STALL_SECONDS`）
+    # 在**她真实的判定 prompt 上**量出来是这样（system 2469 / user 16688 字，流式）：
+
+    #   gemini-3.8-flash 首字 11.69s ／ 3.7-flash 6.02s ／ 3.5-flash 11.35s  ← 过不了闸
+    #   gemini-3-flash   首字 2.21s（贴线，抖动一下就变成"她不回话"）
+    #   gemini-2.5-flash 首字 1.99s（留余量）← 选它
+    #
+    # 实测代价（19:04~19:53 那一小时）：3.8-flash 上**每一次**判定都在 3.15~3.24s
+    # 上 `transport_error`，于是**艾特她也不回**（`trigger=mention` 那几条同样失败）。
+    # 教训：换模型必须在**真实 prompt** 上量首字，裸"你好"量不出这个问题。
+    ("reply", "xkiro", "https://api.xkiro.com/v1", "google/gemini-2.5-flash",
      "QQBOT_REPLY_API_KEY"),
     # 2026-10-12 用户拍板"信用v4pro写"：letter 与 reply 同一个形状——要的模型挂在
     # 哪一家就借哪家的 key，`QQBOT_LETTER_API_KEY`（mimo 那把）因此在正常路径上
@@ -72,7 +77,7 @@ EXPECTED: tuple[tuple[str, str, str, str, str], ...] = (
     # 它借 reply 那条 key（xkiro 那家）——要的模型挂在哪一家就借哪家的 key（letter 借
     # judge 那条是同一个做法）。`QQBOT_JUDGE_API_KEY`（deepseek 那把）仍然被 letter 借走、
     # 被 memory/review/vision 回落，所以 `KEYS["judge"]` 的 provider **不能**跟着改。
-    ("judge", "xkiro", "https://api.xkiro.com/v1", "google/gemini-3.8-flash",
+    ("judge", "xkiro", "https://api.xkiro.com/v1", "google/gemini-2.5-flash",
      "QQBOT_REPLY_API_KEY"),
     ("memory", "deepseek", "https://api.deepseek.com", "deepseek-flash",
      "QQBOT_MEMORY_API_KEY"),
@@ -310,7 +315,7 @@ def test_the_pairing_survives_a_panel_provider_switch() -> None:
         memory = OpenAICompatibleClient("https://old.example", "sk-fake-memory",
                                         "deepseek-flash", user_id="u", usage_role="memory")
         judge = OpenAICompatibleClient("https://old.example", "sk-fake-reply",
-                                       "google/gemini-3.8-flash", user_id="u",
+                                       "google/gemini-2.5-flash", user_id="u",
                                        usage_role="judge")
         try:
             runtime.apply_overrides(
