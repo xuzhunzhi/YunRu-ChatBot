@@ -120,9 +120,14 @@ TASKS: dict[str, dict[str, str]] = {
     # xkiro 的 Gemini Flash。它**用自己的 key 条目**（`reply` → `QQBOT_REPLY_API_KEY`），
     # 所以地址、key、模型三样同源（10-09 那种"借 judge 的 key"在换家时不成立）。
     # 想换回 ds：把这一行改回 {"key": "judge", "model": "deepseek-flash"}（其余不动）。
-    "reply": {"key": "reply", "model": "google/gemini-2.5-flash"},
+    "reply": {"key": "reply", "model": "google/gemini-3.8-flash"},
     "letter": {"key": "judge", "model": "deepseek-v4-pro"},
-    "judge": {"key": "judge", "model": "deepseek-flash"},
+    # 2026-10-14（用户："你把这个也换成gemini flash吧"）：判定也上 xkiro 的 Gemini Flash。
+    # 它**借 reply 那条 key**（xkiro 那家），因为要的模型就挂在那一家——与 letter 借
+    # judge 那条同一个做法。⚠️ 注意别把 `KEYS["judge"]` 的 provider 改成 xkiro：
+    # 那条 key 是 deepseek 的，letter 借它、memory/review/vision 回落到它，
+    # 一改就会把 `deepseek-v4-pro` / `deepseek-flash` 这些模型名打到 xkiro 上。
+    "judge": {"key": "reply", "model": "google/gemini-3.8-flash"},
     "memory": {"key": "memory", "model": "deepseek-flash"},
     "review": {"key": "review", "model": "deepseek-flash"},
     "vision": {"key": "vision", "model": "deepseek-flash"},
