@@ -19,7 +19,7 @@
 
 > ⚠️ **2026-10-14 的口径移动（如实交代，用户原话："你把这个也换成gemini flash吧"）**：
 > **判定**从"用自己那条 deepseek key"改成借 `reply` 那条 key（xkiro /
-> `google/gemini-3.8-flash`）。本文件里凡是以"**deepseek 是这一路的主家**"为前提的
+> `google/gemini-2.5-flash`）。本文件里凡是以"**deepseek 是这一路的主家**"为前提的
 > 用例，驱动用的用途都换成了仍然住在 deepseek 上的 `letter`（借 `judge` 那条），
 > 每一处都写了为什么；判定那道闸另有一条用例
 > （`test_the_judge_chain_now_hangs_on_xkiro`）钉住它的**新家是 xkiro**。

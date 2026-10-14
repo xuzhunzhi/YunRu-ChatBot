@@ -43,12 +43,12 @@
 >
 > ⚠️ 同一天留下的一个**休眠的坑**（写在这里，别当它不存在）：如果哪天
 > `QQBOT_REPLY_API_KEY` 被删掉，reply 会按 `fallback` 回落到"主 key 那一对"，
-> 而**模型名仍然跟着 `tasks` 走**（`google/gemini-3.8-flash`）——那就成了
+> 而**模型名仍然跟着 `tasks` 走**（`google/gemini-2.5-flash`）——那就成了
 > "主家的 key + 主家的地址 + gemini 的模型名"。生产 `.env` 里那条 key 在，
 > 所以这条路现在走不到；自检那一行会同时印 provider / model，真踩到了看得出来。
 
 > ⚠️ **同一天同一条指令还动了判定（如实交代，用户原话："你把这个也换成gemini flash吧"）**：
-> `tasks["judge"]` 改成**借 `reply` 那条 key**（xkiro / `google/gemini-3.8-flash`）。
+> `tasks["judge"]` 改成**借 `reply` 那条 key**（xkiro / `google/gemini-2.5-flash`）。
 > 于是**判定那条 key（`QQBOT_JUDGE_API_KEY`，deepseek）与 reply 彻底无关**，
 > 而 `QQBOT_REPLY_API_KEY` 同时服务 reply 与 judge（judge 是借它）。
 > 本文件里凡是"判定那把 key 属于 deepseek"的断言都因此换了对象：**仍然名副其实的
