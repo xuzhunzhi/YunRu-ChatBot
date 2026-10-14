@@ -22,6 +22,10 @@ from __future__ import annotations
 PROVIDERS: dict[str, str] = {
     "deepseek": "https://api.deepseek.com",
     "mimo": "https://api.xiaomimimo.com/v1",
+    # 2026-10-14（用户给的地址）：OpenAI 兼容中转，里面有 Gemini Flash。回复那一路
+    # 现在挂的就是它（`model_config.TASKS["reply"]`）。两张表必须能对上——
+    # 面板下拉框少一个选项，"换供应商"就会报错。
+    "xkiro": "https://api.xkiro.com/v1",
     "openai": "https://api.openai.com/v1",
     "moonshot": "https://api.moonshot.cn/v1",
     "dashscope": "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -33,6 +37,7 @@ PROVIDERS: dict[str, str] = {
 LABELS: dict[str, str] = {
     "deepseek": "DeepSeek（官方）",
     "mimo": "小米 MiMo",
+    "xkiro": "xkiro 中转（Gemini Flash）",
     "openai": "OpenAI",
     "moonshot": "月之暗面 Kimi",
     "dashscope": "阿里云百炼（通义）",

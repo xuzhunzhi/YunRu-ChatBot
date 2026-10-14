@@ -93,6 +93,14 @@ PROVIDERS: dict[str, dict[str, str]] = {
         "base_url": "https://api.xiaomimimo.com/v1",
         "client_type": "openai",
     },
+    # 2026-10-14（用户给的地址 + key）：一个 OpenAI 兼容中转，里面有 Gemini Flash。
+    # 用户原话："这里面有gemini flash模型，给云茹接上" ⇒ 挂在**回复**那一路（见 `KEYS`
+    # 与 `TASKS` 的 reply 两条）。实测 `google/gemini-2.5-flash` 首字 1.77s、总 1.77s
+    # （同一句群聊 prompt，走本仓库自己的 client）；`google/gemini-3.8-flash` 首字超时。
+    "xkiro": {
+        "base_url": "https://api.xkiro.com/v1",
+        "client_type": "openai",
+    },
 }
 
 #: 用途 → 哪条 key + 哪个模型名。
@@ -108,7 +116,11 @@ PROVIDERS: dict[str, dict[str, str]] = {
 #: mimo 的，因此闲置——但**没废**：主家余额耗尽时信会切回它（见 `FALLBACK_TASKS`）。
 #: 要换回去：把 letter 那一行改回 {"key": "letter", "model": "mimo-v2.6-pro"}。
 TASKS: dict[str, dict[str, str]] = {
-    "reply": {"key": "judge", "model": "deepseek-flash"},
+    # 2026-10-14（用户："这里面有gemini flash模型，给云茹接上"）：回复那一路换成
+    # xkiro 的 Gemini Flash。它**用自己的 key 条目**（`reply` → `QQBOT_REPLY_API_KEY`），
+    # 所以地址、key、模型三样同源（10-09 那种"借 judge 的 key"在换家时不成立）。
+    # 想换回 ds：把这一行改回 {"key": "judge", "model": "deepseek-flash"}（其余不动）。
+    "reply": {"key": "reply", "model": "google/gemini-2.5-flash"},
     "letter": {"key": "judge", "model": "deepseek-v4-pro"},
     "judge": {"key": "judge", "model": "deepseek-flash"},
     "memory": {"key": "memory", "model": "deepseek-flash"},
@@ -156,7 +168,13 @@ FALLBACK_KEY = "fallback"
 #: 回落的含义是"**整份来源**一起换"（值 + 地址），见模块说明。所以它只会指向
 #: 同家的另一条，或者指向兼容档那一对（`main`）。
 KEYS: dict[str, dict[str, str]] = {
-    "reply": {"provider": "mimo", "env": "QQBOT_REPLY_API_KEY", "fallback": MAIN_KEY},
+    # 2026-10-14：回复那一路从"借 judge 那把 deepseek key"改回**自己这条**
+    # （`QQBOT_REPLY_API_KEY`），因为它现在打的是 xkiro（Gemini Flash，见 `PROVIDERS`）。
+    # 借别人 key 的那套（10-09 的形状）在这里不成立：地址换了、key 必须跟着换，
+    # 否则就是把 deepseek 的 key 递给 xkiro（实测：只填 `QQBOT_REPLY_API_BASE_URL`
+    # 时解析出来的 key 仍是 judge 那把——`QQBOT_REPLY_API_KEY` 被 `TASKS["reply"]["key"]`
+    # 架空，`docs/CONFIG_GUIDE.md` 那句"填三个键就能换"因此只对地址与模型成立）。
+    "reply": {"provider": "xkiro", "env": "QQBOT_REPLY_API_KEY", "fallback": MAIN_KEY},
     "letter": {"provider": "mimo", "env": "QQBOT_LETTER_API_KEY", "fallback": "reply"},
     "judge": {"provider": "deepseek", "env": "QQBOT_JUDGE_API_KEY", "fallback": MAIN_KEY},
     "memory": {"provider": "deepseek", "env": "QQBOT_MEMORY_API_KEY", "fallback": "judge"},

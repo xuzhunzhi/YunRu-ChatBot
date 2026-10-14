@@ -34,10 +34,14 @@ from qq_roleplay_bot.model_config import (
 #:
 #: `(用途, provider, base_url, 模型名, key 变量名)`
 EXPECTED: tuple[tuple[str, str, str, str, str], ...] = (
-    # 2026-10-09 用户拍板换回 ds：reply 不再用 reply 那条（mimo），改跟 **judge
-    # 那条 key**（deepseek / deepseek-flash）走，`QQBOT_REPLY_API_KEY` 因此闲置。
-    ("reply", "deepseek", "https://api.deepseek.com", "deepseek-flash",
-     "QQBOT_JUDGE_API_KEY"),
+    # 2026-10-14 用户改口径（原话："这里面有gemini flash模型，给云茹接上"）：回复那一路
+    # 换成 xkiro 的 Gemini Flash，并且用**自己那条 key**（`QQBOT_REPLY_API_KEY`）。
+    # 这一条推翻了 10-09 的"借 judge 那把 deepseek key"：换家时地址与 key 必须同源，
+    # 借来的 key 会被打到新地址上（实测：只填 `QQBOT_REPLY_API_BASE_URL` 时，
+    # 解析出来的 key 仍是 judge 那把——`QQBOT_REPLY_API_KEY` 被 `TASKS["reply"]["key"]`
+    # 架空）。选 `google/gemini-2.5-flash` 是实测过的：首字 1.77s、总 1.77s。
+    ("reply", "xkiro", "https://api.xkiro.com/v1", "google/gemini-2.5-flash",
+     "QQBOT_REPLY_API_KEY"),
     # 2026-10-12 用户拍板"信用v4pro写"：letter 与 reply 同一个形状——要的模型挂在
     # 哪一家就借哪家的 key，`QQBOT_LETTER_API_KEY`（mimo 那把）因此在正常路径上
     # 闲置，只在"主家余额耗尽切兜底"那条链上被借走（见 `FALLBACK_TASKS`）。
@@ -497,8 +501,9 @@ def test_the_self_check_prints_names_not_values() -> None:
 def test_the_self_check_marks_the_missing_purposes() -> None:
     """缺 key 的用途要在自检里带 `**缺**`（今晚那种事一眼看得出来）。
 
-    2026-10-12 起"只配 judge 那一把"的机器上**六个用途全都有值**（reply 与 letter
-    都借 judge 那条），所以要看 `**缺**` 得把 judge 也清掉——两半都钉在下面。
+    2026-10-14 起 reply 走**自己那条 key**（`QQBOT_REPLY_API_KEY`，xkiro / Gemini Flash），
+    不再借 judge 那条（见 `EXPECTED` 的第一行）——所以"只配 judge 那一把"的机器上
+    reply 会如实报缺。letter 仍然借 judge 那条。
     """
 
     with _env(env_file_key=""):
@@ -511,9 +516,12 @@ def test_the_self_check_marks_the_missing_purposes() -> None:
         blob = "\n".join(model_config.self_check_lines())
         # judge 有自己的 key；memory / review / vision 回落到 judge 那把（同家）
         assert "judge: provider=deepseek" in blob
-        # reply / letter 都借 judge 那条，因此这一把 key 就够六个用途跑起来
-        assert "**缺**" not in blob, "reply 与 letter 借的都是 judge 那条，不该报缺"
-        assert "letter: " in blob
+        # letter 借 judge 那条（有值，地址/供应商跟着 judge 走）；reply 有自己的
+        # provider 与 key，这一把管不着它
+        assert "letter: provider=deepseek" in blob and "letter: " in blob
+        assert "reply: provider=xkiro" in blob and "**缺**" in blob, (
+            "reply 不再借 judge 那条，缺的是它自己那条 key"
+        )
 
 
 def test_the_runtime_self_check_hook_returns_those_lines() -> None:

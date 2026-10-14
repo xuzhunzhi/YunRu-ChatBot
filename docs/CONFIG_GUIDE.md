@@ -51,7 +51,7 @@ OneBot 已连接
 | `QQBOT_API_KEY` | **必填**。回复用的 key |
 | `QQBOT_REPLY_API_BASE_URL` | 可选。**只给回复 agent** 的地址（2026-10-05 起可以有）；不配回落全局地址 |
 | `QQBOT_REPLY_API_MODEL` | 可选。只给回复 agent 的模型；不配回落全局模型 |
-| `QQBOT_REPLY_API_KEY` | 可选。只给回复 agent 的 key；不配回落主 key |
+| `QQBOT_REPLY_API_KEY` | 可选。**只给回复 agent** 的 key；不配回落主 key。**2026-10-14 起回复那一路走 xkiro 中转的 `google/gemini-2.5-flash`**（`model_config.TASKS["reply"]`），用的就是这一把 |
 | `QQBOT_JUDGE_API_KEY` | 可选，判定用；不配回落主 key |
 | `QQBOT_MEMORY_API_KEY` | 可选，记忆维护用；不配回落主 key |
 | `QQBOT_REVIEW_API_KEY` | 可选，风格审核用；**配了它就自动开**（也可回落主 key） |
@@ -60,6 +60,28 @@ OneBot 已连接
 client），判定 / 记忆 / 审核 / 写信仍然走全局那一套。所以"把回复换到别家模型、
 判定继续用便宜的那家"是填三个键的事，不用改代码。这三项在面板上也是 live 的，
 留空 = 清掉覆盖、回落全局。
+
+⚠️ **上面那句话里的"key"那一项有前提**（2026-10-14 实测踩到，别再踩）：
+`QQBOT_<用途>_API_KEY` 只有在 `model_config.TASKS[用途]["key"]` 指向**该用途自己那条
+key 条目**时才真的生效。10-09 → 10-14 之间 reply 借的是 `judge` 那条 key（那段时间
+`QQBOT_REPLY_API_KEY` 是**闲置**的）；那状态下只填 `QQBOT_REPLY_API_BASE_URL` +
+`QQBOT_REPLY_API_MODEL`，解析出来的 key **仍然是 judge 那把**——等于把 deepseek 的
+key 递给了新地址。**换家时地址与 key 必须同源**：`TASKS` 那一行的 `key` 与
+`QQBOT_<用途>_API_KEY` 要一起改。
+
+**2026-10-14 这一笔的实际形状**（用户："这里面有gemini flash模型，给云茹接上"）：
+
+| 层 | 内容 |
+| --- | --- |
+| `provider_registry.PROVIDERS` / `model_config.PROVIDERS` | 新增 `xkiro` → `https://api.xkiro.com/v1` |
+| `model_config.KEYS["reply"]` | provider 改 `xkiro`（地址跟着它走） |
+| `model_config.TASKS["reply"]` | `{"key": "reply", "model": "google/gemini-2.5-flash"}` |
+| `.env` | `QQBOT_REPLY_API_KEY=<xkiro 那把>`（原来那把 mimo key 与 `QQBOT_LETTER_API_KEY` 是同一把，没丢） |
+
+要换回 ds：把 `TASKS["reply"]` 改回 `{"key": "judge", "model": "deepseek-flash"}`，
+并把 `KEYS["reply"]` 的 provider 改回 `deepseek`（`.env` 里那条 key 留着不影响）。
+实测口径（同一条真实 prompt，走本仓库自己的 client）：`google/gemini-2.5-flash`
+首字/总 2.01s、2.88s、2.51s；`deepseek-flash` 4.35s、3.35s、2.63s。
 
 ⚠️ **同一个账号下的多把 key 不隔离并发限额与缓存容量**——那两样是账号级的。
 分 key 的意义是"出问题只吊销那一把"。想让账单彻底分开，得用**不同账号**的 key。
