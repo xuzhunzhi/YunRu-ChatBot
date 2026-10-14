@@ -242,6 +242,30 @@ def test_the_history_never_goes_below_fifty_messages() -> None:
     assert len(small.topic_history()) == 20, "窗口本身只有 20 条时，视图就是这 20 条"
 
 
+def test_a_persisted_anchor_is_pulled_back_to_the_floor_on_load() -> None:
+    """老状态里"切到只剩两三句"的起点，**载入时拉回下限之内**（一次性纠偏）。
+
+    不拉回来的话 `topic_history()` 只能靠"取最后 50 条"兜底，而那是**滑动**的——
+    每来一条新消息，历史块的头就往前挪一格，prompt 前缀每轮都变（缓存全废）。
+    往回挪这一次之后，视图又变回"从固定起点只追加"。
+    """
+
+    source = build_state(120)
+    source.advance_topic_start(10)
+    raw = source.as_state()
+    raw["topic_start_seq"] = 119          # 模拟老代码留下的、切到只剩 1 条的锚点
+    restored = ConversationState.from_state(raw, history_limit=120)
+    assert restored is not None
+    assert restored.topic_start_seq == 120 - MIN_HISTORY_MESSAGES, "拉回「还留 50 条」的位置"
+    assert len(restored.topic_history()) == MIN_HISTORY_MESSAGES
+    # 没有锚点的老状态不动它：那时视图本来就是整个窗口（可能比 50 条多得多）。
+    raw2 = source.as_state()
+    raw2["topic_start_seq"] = None
+    untouched = ConversationState.from_state(raw2, history_limit=120)
+    assert untouched is not None and untouched.topic_start_seq is None
+    assert len(untouched.topic_history()) == 120, "没锚点就是整窗，不许被缩到 50"
+
+
 def test_a_narrow_selection_does_not_starve_the_next_compaction() -> None:
     """视图很窄时，压缩照样覆盖整个窗口——不会因为"没给她看"就压不到。
 
