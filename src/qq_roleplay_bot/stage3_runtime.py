@@ -78,15 +78,6 @@ ALIAS_ALSO_LIMIT = 3
 # 对着 `group_roles` 逐字核这一份，改了一边而忘了另一边会红。
 ROSTER_ROLE_MEMBER_LABEL = "普通成员"
 
-#: 交给模型的历史**最少**这么多条（2026-10-14 用户："我早就说过历史最短50条"）。
-#:
-#: 由来：话题锚点（`topic_start_seq`）原来能把视图切到只剩几条——实测回复 prompt 里的
-#: `<history>` **中位只有 5 条**（最少 1、最多 98）。于是"那张图""绷不住""战地六79.2"
-#: 指什么的时候前文已经不在她眼前，她只能自己补（当天实测：她把 79.2 读成"分数"，被用户
-#: 当场纠正「是价格不是分数」）。锚点只决定"从哪儿算话题"，**不决定"最多能看多少"**。
-#: 见 `ConversationState.topic_history` 与 `advance_topic_start`。
-MIN_HISTORY_MESSAGES = 50
-
 
 @dataclass(slots=True)
 class ConversationState:
@@ -108,6 +99,13 @@ class ConversationState:
     # 于是话题内每一次请求都是**只追加**的。压缩后重置为新窗口的第一条；
     # 判定每轮可以把它往前推（话题换了），但**只许前进，不许后退**。
     topic_start_seq: int | None = None
+    #: "历史窗口下限"那次**一次性迁移**的标记（2026-10-14 的老状态遗留）。
+    #:
+    #: `from_state` 只在标记为假、且载荷里的锚点**比最旧一条还晚**（`> seq_range()[0]`）
+    #: 时把它拉到 `seq_range()[0]`，然后置真；`as_state` 把它作为 `anchor_floor_migrated`
+    #: 落盘，于是**迁过一次就再也不会动**——"只许前进"照旧是常态。
+    #: 锚点本来就落在载荷窗口内的状态永远走不到这一步，所以**一直**是假。
+    anchor_floor_migrated: bool = False
     # 人物别名表：QQ 号 → 短编号。**单调分配、只追加、不重排**。
     # 为什么要存在会话状态里而不是每轮从窗口重建：每轮重建会让编号漂移，
     # 模型会把 A 的话记到 B 头上，而且渲染每轮都变、前缀每轮都断。
@@ -245,48 +243,24 @@ class ConversationState:
         return f"；{escape(sanitize_chat_text(label, max_length=32), quote=False)}"
 
     def topic_history(self) -> list[IncomingMessage]:
-        """当前话题的消息：话题起点之后（含起点）的全部消息，**但不短于
-        `MIN_HISTORY_MESSAGES` 条**。
+        """当前话题的消息：话题起点之后（含起点）的全部消息。
 
-        2026-10-14（用户："我早就说过历史最短50条"）：原来只按起点切，实测回复 prompt
-        里的 `<history>` **中位只有 5 条**（1~98）——"那张图""绷不住""79.2"指什么的时候，
-        前文已经不在她眼前，她只能自己补（当天实测：她把"战地六79.2"读成分数，被当场纠正）。
-        **起点只决定"从哪儿算话题"，不决定"最多能看多少"**：不足就往前补到 50 条
-        （窗口本身不够 50 条时就是整个窗口）。
+        没有起点时（还没压缩过、判定也还没给过）就是整个窗口——与改动前一致。
         """
 
         messages = list(self.history)
         if self.topic_start_seq is None:
             return messages
-        visible = [m for m in messages if (self.seq_of(m) or 0) >= self.topic_start_seq]
-        if len(visible) < MIN_HISTORY_MESSAGES:
-            return messages[-MIN_HISTORY_MESSAGES:]
-        return visible
-
-    def _history_floor_seq(self) -> int | None:
-        """起点**最多**能推到哪个序号：再往后就剩不下 `MIN_HISTORY_MESSAGES` 条了。
-
-        窗口本身不足 50 条时返回 `None`（那时没有可夹的位置，视图就是整个窗口）。
-        """
-
-        span = self.seq_range()
-        if span is None or len(self.history) <= MIN_HISTORY_MESSAGES:
-            return None
-        return span[1] - MIN_HISTORY_MESSAGES + 1
+        return [m for m in messages if (self.seq_of(m) or 0) >= self.topic_start_seq]
 
     def advance_topic_start(self, seq: int | None) -> bool:
-        """把话题起点往前推（只许前进，**且不许推到"剩不到 50 条"的地方**）；
-        返回是否真的变了。
+        """把话题起点往前推（只许前进）；返回是否真的变了。
 
         **为什么保留"只许前进"**（2026-10-02 实测，`run/data/logs/judge.jsonl` 1464 条判定）：
         判定**一次都没请求过后退**——88% 原地确认、12% 前进、**0% 后退**。
         因为每一轮都把它当前的起点告诉它（"这段谈话目前的起点：第 N 条"），
         它照着确认就行。所以单向棘轮**没有代价**：它挡掉的那个动作根本不发生。
         而放开后退则会白送一份缓存风险（真退一次就换一次 prompt 前缀）。
-
-        **2026-10-14 加的下限**（用户："我早就说过历史最短50条"）：起点原来能把视图
-        切到只剩几条，现在夹在"还留 50 条"的位置。顺带这也让视图在稳态下**只追加**——
-        锚点不再一跳就砍掉历史前段，前缀缓存不因此断掉。
 
         要区分两件事：
 
@@ -297,9 +271,6 @@ class ConversationState:
 
         if seq is None:
             return False
-        floor_seq = self._history_floor_seq()
-        if floor_seq is not None and seq > floor_seq:
-            seq = floor_seq
         current = self.topic_start_seq
         if current is not None and seq <= current:
             return False
@@ -515,6 +486,11 @@ class ConversationState:
             # 别称也要持久化：摘要/记忆里的旧名在重启后仍然要能对得上人。
             "alias_also": {str(alias): list(names) for alias, names in self.alias_also.items()},
             "alias_names": {str(k): v for k, v in self.alias_names.items()},
+            # 锚点下限那次**一次性迁移**的标记（2026-10-14 老状态遗留）：落盘之后
+            # `from_state` 见到它就**不再动**锚点，"只许前进"照旧是常态。
+            # 为什么必须落盘：不落的话每次启动都会把锚点往回拉一次——那正是要避免的
+            # "锚点自己会动"（也是前缀每轮断的根子）。
+            "anchor_floor_migrated": self.anchor_floor_migrated,
         }
 
     @classmethod
@@ -575,15 +551,21 @@ class ConversationState:
             message = _message_from_state(item)
             if message is not None:
                 state.history.append(message)
-        # 2026-10-14（用户："我早就说过历史最短50条"）：老状态里那个"切到只剩两三句"的
-        # 起点在**载入时一次性拉回**下限之内。这是"只许前进"的唯一例外，理由：
-        # 不拉回来的话 `topic_history()` 只能靠"取最后 50 条"兜底，而那是**滑动**的——
-        # 每来一条新消息，历史块的头就往前挪一格，prompt 前缀每轮都变（缓存全废）。
-        # 往回挪这一次（结果会落回状态文件）之后，视图又变回"从固定起点只追加"。
-        floor_seq = state._history_floor_seq()
-        if (state.topic_start_seq is not None and floor_seq is not None
-                and state.topic_start_seq > floor_seq):
-            state.topic_start_seq = floor_seq
+        # 2026-10-14 老状态遗留的**一次性迁移**（见 `as_state` 里 `anchor_floor_migrated`
+        # 那一段）。只在**没有迁移标记**时做一次：把"锚点比载荷里最旧一条还晚"的起点
+        # 拉回 `seq_range()[0]`——那样视图至少包含载荷里的全部消息。拉完把标记落回状态，
+        # 之后 `from_state` 见到标记就不再动锚点，**只许前进**照旧是常态。
+        #
+        # 为什么当时需要它：老代码留下的锚点能把视图切到只剩几条，而 `topic_history()`
+        # 那时靠"取最后 50 条"兜底——**滑动的**：每来一条新消息，历史块的头就往前挪一格，
+        # prompt 前缀每轮都变（前缀复用白做）。
+        state.anchor_floor_migrated = bool(raw.get("anchor_floor_migrated"))
+        span = state.seq_range()
+        if (not state.anchor_floor_migrated and span is not None
+                and state.topic_start_seq is not None
+                and state.topic_start_seq > span[0]):
+            state.topic_start_seq = span[0]
+            state.anchor_floor_migrated = True
         return state
 
 
@@ -1787,9 +1769,7 @@ def build_dialogue_messages(
     3. **较早对话的摘要**（`summary`，几百轮不变）——这是长对话下前缀仍然
        可复用的关键：全量历史会让 prompt 持续增长，而只带最近若干条又会丢掉
        上下文，压缩把这两件事分开；
-    4. 当前话题的消息（`topic_history`）——话题内**只追加**（2026-10-14 起另有
-       `MIN_HISTORY_MESSAGES = 50` 的硬下限：起点只决定"从哪儿算话题"，不让视图
-       短于 50 条；锚点也被夹在"还留 50 条"的位置，所以稳态下这一块仍然只追加）。
+    4. 当前话题的消息（`topic_history`）——话题内**只追加**。
 
     易变段放在最后：当前状态、记忆检索结果、扩展材料与本次事件。
     这样整条消息的前缀是"群背景 + 名册 + 摘要 + 历史前段"，**逐轮一字不差**。
