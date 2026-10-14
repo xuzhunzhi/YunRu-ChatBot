@@ -16,7 +16,11 @@ from qq_roleplay_bot.dialogue_compaction import (
     split_compaction_batches,
 )
 from qq_roleplay_bot.stage3_main import COMPACT_KEEP, LIVE_TARGET, DialogueEngine
-from qq_roleplay_bot.stage3_runtime import ConversationState, _format_history
+from qq_roleplay_bot.stage3_runtime import (
+    MIN_HISTORY_MESSAGES,
+    ConversationState,
+    _format_history,
+)
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 
 GROUP = "717151356"
@@ -237,12 +241,25 @@ def test_topic_start_only_moves_forward() -> None:
     assert state.advance_topic_start(7) is True
 
 
-def test_topic_history_is_clamped_to_the_anchor() -> None:
+def test_topic_history_is_clamped_to_the_anchor_and_to_the_floor() -> None:
+    """锚点只许前移，而视图有 **50 条硬下限**（用户 2026-10-14："我早就说过历史最短50条"）。
+
+    小窗口（20 条）里锚点推到头，视图仍是整窗——保底就是这 20 条；
+    大窗口里锚点被夹在"还留 50 条"的位置。
+    """
+
     state = build_state(20)
     assert len(state.topic_history()) == 20, "没有锚点时就是整个窗口"
     state.advance_topic_start(15)
-    kept = state.topic_history()
-    assert [state.seq_of(item) for item in kept] == [15, 16, 17, 18, 19]
+    assert [state.seq_of(item) for item in state.topic_history()] == list(range(20)), (
+        "窗口不足 50 条时，锚点再推也看不见更少"
+    )
+
+    big = build_state(500)
+    big.advance_topic_start(499)
+    kept = big.topic_history()
+    assert len(kept) == MIN_HISTORY_MESSAGES
+    assert [big.seq_of(item) for item in kept] == list(range(500 - MIN_HISTORY_MESSAGES, 500))
 
 
 def test_compaction_resets_the_topic_start_to_the_new_window() -> None:

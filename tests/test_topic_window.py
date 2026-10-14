@@ -57,9 +57,25 @@
    `live_history()`（压缩的取数口）不按起点过滤。
 3. **消息本体只在满 500 条时被压缩收走**（进摘要、留最近 50 条）。
 4. **话题换了、摘要脱节 → 丢掉摘要**（判据：话题起点在 `summary_through` 之后）。
+
+## 2026-10-14 补的硬下限（用户："我早就说过历史最短50条"）
+
+上面四条哪一条都**没给"最少看得见几条"兜底**：起点仍是单向棘轮，判定一前进视图就缩。
+
+10-14 实测（`run/data/logs/reply.jsonl` 191 条）：`<history>` **中位 5 条**（1~98）。
+当天的实例——她把「战地六79.2」读成"分数"（判定的话题标签也写成了「战地六评分与秋促」），
+被用户当场纠正「是价格不是分数」。前文不在她眼前，她只能自己补。
+
+所以加一条硬下限 `MIN_HISTORY_MESSAGES = 50`：`topic_history()` 不足 50 条就往前补；
+`advance_topic_start` 也不许把起点推到"剩下不足 50 条"的位置——顺带让视图在稳态下
+仍然**只追加**，前缀缓存不因为锚点一跳就断。
 """
 from qq_roleplay_bot.stage3_main import COMPACT_KEEP, HISTORY_LIMIT, LIVE_TARGET
-from qq_roleplay_bot.stage3_runtime import ConversationState, _format_history
+from qq_roleplay_bot.stage3_runtime import (
+    MIN_HISTORY_MESSAGES,
+    ConversationState,
+    _format_history,
+)
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 
 GROUP = "717151356"
@@ -145,12 +161,20 @@ def test_the_roster_covers_every_visible_speaker_so_who_refs_always_resolve() ->
 
 
 def test_the_roster_can_list_someone_who_has_left_the_visible_window() -> None:
-    """名册是**整个窗口**的人，不随选择收缩——有意的不对称，为了让前缀稳定。"""
+    """名册是**整个窗口**的人，不随选择收缩——有意的不对称，为了让前缀稳定。
 
-    state = build_state(60)
+    2026-10-14：视图有 50 条下限，所以这里用 120 条的窗口——锚点推到 119 也被夹到
+    "还留 50 条"的位置（视图 = 最后 50 条：第 70~119 条），只说过**第一句**的人
+    照样落在视图之外，名册里仍有他。
+    """
+
+    state = ConversationState(history_limit=HISTORY_LIMIT)
+    state.add(message(0, speaker=0), 0.0)                  # 1001：只在最前面说过这一句
+    for index in range(1, 120):
+        state.add(message(index, speaker=1 + index % 3), 0.0)   # 1002~1004 反复说
     early = state.aliases[SPEAKERS[0]]
-    state.advance_topic_start(59)
-    assert len(visible_seqs(state)) == 1
+    state.advance_topic_start(119)
+    assert len(visible_seqs(state)) == MIN_HISTORY_MESSAGES
     assert early in roster_aliases(state), "早期那个人仍在名册里"
     assert state.alias_of(message(0)) not in who_aliases(state), "但他已经不在可见历史里"
 
@@ -172,15 +196,16 @@ def test_the_topic_start_only_moves_forward() -> None:
     assert lengths == sorted(lengths, reverse=True), f"视图应当只减不增：{lengths}"
 
     assert state.advance_topic_start(60) is False, "后退必须是无效的（判定也从没请求过）"
-    assert state.topic_start_seq == 199
-    assert state.advance_topic_start(199) is False, "同一个编号不算变化"
+    # 2026-10-14：起点被 `MIN_HISTORY_MESSAGES` 夹住，199 只推到"还留 50 条"的位置。
+    assert state.topic_start_seq == 200 - MIN_HISTORY_MESSAGES, "夹到留得住 50 条的地方"
+    assert state.advance_topic_start(199) is False, "同一个位置不算变化"
     assert state.advance_topic_start(None) is False, "没报就不动"
 
 
 # --- 选择不销毁消息；只有满 500 条压缩才动消息 ------------------------------
 
 def test_narrowing_the_view_never_removes_a_message_from_the_window() -> None:
-    """起点只裁剪**视图**：缩到只剩 1 条，消息本体一条都没少。
+    """起点只裁剪**视图**：缩到下限（50 条）为止，消息本体一条都没少。
 
     这是这一轮改动里最要紧的一条。我一度把"起点前移"讲成"消息丢了"——**那是错的**：
     `live_history()`（压缩的取数口）不按起点过滤，所以被排除在视图之外的消息
@@ -188,11 +213,33 @@ def test_narrowing_the_view_never_removes_a_message_from_the_window() -> None:
     """
 
     state = build_state(500)
-    state.advance_topic_start(state.seq_range()[1])        # 视图缩到最新 1 条
-    assert len(state.topic_history()) == 1, "视图只剩 1 条"
+    state.advance_topic_start(state.seq_range()[1])        # 想缩到只剩最新 1 条
+    assert len(state.topic_history()) == MIN_HISTORY_MESSAGES, "视图有下限，不再只剩 1 条"
     assert len(state.live_history()) == 500, "但窗口里 500 条一条没少"
     assert state.seq_range() == (0, 499)
     assert state.dropped == 0, "没有任何消息被丢掉"
+
+
+def test_the_history_never_goes_below_fifty_messages() -> None:
+    """**用户 2026-10-14 的原话："我早就说过历史最短50条"**。
+
+    实测代价（同一天）：`<history>` 中位只有 5 条，于是她把「战地六79.2」读成分数。
+    这条钉两件事：视图**保底 50 条**（窗口不够 50 条时就是整个窗口），
+    而且锚点**推不过去**那个下限。
+    """
+
+    state = build_state(500)
+    for start in (0, 1, 250, 499):
+        state.advance_topic_start(start)
+        visible = state.topic_history()
+        assert len(visible) >= MIN_HISTORY_MESSAGES, f"视图短于 50 条：{len(visible)}"
+        assert visible[-1] is state.recent()[-1], "视图总是带最新那条"
+        seqs = [state.seq_of(item) for item in visible]
+        assert seqs == list(range(seqs[0], seqs[0] + len(seqs))), "视图是一段连续的尾巴"
+
+    small = build_state(20)
+    assert small.advance_topic_start(19) is True, "小窗口里锚点照样能推"
+    assert len(small.topic_history()) == 20, "窗口本身只有 20 条时，视图就是这 20 条"
 
 
 def test_a_narrow_selection_does_not_starve_the_next_compaction() -> None:
