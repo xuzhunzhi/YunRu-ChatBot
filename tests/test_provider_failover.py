@@ -52,9 +52,12 @@ ALL_VARS: tuple[str, ...] = (
 
 #: 最常用的一份环境：judge 在主家（deepseek），letter 在兜底那一家（mimo），
 #: 兜底那条 key **不配**（于是落到 letter 那把实测活着的 key）。
+#: 2026-10-14 起 reply 也走**自己那条 key**（xkiro / Gemini Flash），所以这份环境里
+#: 必须给它一个值，否则 `require("reply")` 会如实报缺（那正是它该有的行为）。
 MAIN_ENV: dict[str, str] = {
     "QQBOT_JUDGE_API_KEY": "sk-fake-judge",
     "QQBOT_LETTER_API_KEY": "sk-fake-letter",
+    "QQBOT_REPLY_API_KEY": "sk-fake-reply",
 }
 
 
