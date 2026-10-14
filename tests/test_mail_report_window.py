@@ -38,6 +38,7 @@ from qq_roleplay_bot.plugins import ReportSeams
 from qq_roleplay_bot.plugins.mail import daily_report as dr
 from qq_roleplay_bot.plugins.mail.mail_state import (
     PENDING_REPORT_MAX_AGE,
+    MailState,
     MailStateStore,
 )
 from qq_roleplay_bot.prompt_guard import scan_persona_text
@@ -873,3 +874,33 @@ def test_the_stored_letters_are_loaded_oldest_first():
 
     assert built is not None
     assert seen == [1.0, 2.0, 3.0], "从早到晚灌，最新那封才落在最前面"
+
+
+def test_a_missed_night_is_sent_when_she_comes_back_after_midnight() -> None:
+    """23:00 关机、次日凌晨才开机 ⇒ **要补发**（用户 2026-10-14："昨晚云茹邮件我又没收到"）。
+
+    `report_due` 的 docstring 里一直写着这个场景（"23:00 关机、次日 01:00 才开机补发"），
+    但旧判据只看**今天**的目标时刻：跨过午夜之后，昨晚那一刻就永远不补了。
+    实测代价——`data/mail_state.json` 的 `last_report_at` 停在 10-12 23:02，
+    10-13 那封至今没发（`logs/mail.jsonl` 最后一条也是 10-12 23:00）。
+    """
+    import time as _time
+
+    def at(year: int, month: int, day: int, hour: int, minute: int) -> float:
+        return _time.mktime((year, month, day, hour, minute, 0, 0, 0, -1))
+
+    back_at = at(2026, 10, 14, 1, 16)
+    # 昨晚（10-13 23:00）那封漏了：上次成功是 10-12 23:02
+    missed = MailState(last_report_at=at(2026, 10, 12, 23, 2))
+    assert MailState.report_due(missed, back_at) is True, "昨晚漏了要补发"
+
+    # 昨晚正常发过：凌晨那次开机不许再写一封
+    sent_last_night = MailState(last_report_at=at(2026, 10, 13, 23, 2))
+    assert MailState.report_due(sent_last_night, back_at) is False
+
+    # 补发之后当天不重复；当天 23:00 仍照常（"每晚十一点"这条不被补发带偏）
+    caught_up = MailState(last_report_at=back_at)
+    assert MailState.report_due(caught_up, back_at) is False
+    assert MailState.report_due(caught_up, at(2026, 10, 14, 23, 1)) is True
+    # 当天 23:02 已经发过：23:30 再看也不该重复发
+    assert MailState.report_due(sent_last_night, at(2026, 10, 13, 23, 30)) is False

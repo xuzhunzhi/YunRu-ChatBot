@@ -86,20 +86,30 @@ class MailState:
 
     @classmethod
     def report_due(cls, state: "MailState", now: float, *, hour: int = 23, minute: int = 0) -> bool:
-        """今天的目标时刻到了、而且自那以后还没发过 → 该发。
+        """到点了（或**昨晚那一点漏了**）、而且自那以后还没发过 → 该发。
 
         **不能只看"距上次满 24 小时"**：那样一旦有一次发晚了（比如 23:00 关机、次日 01:00
         才开机补发），后面就会永久停在 01:00 发——"每晚十一点"这条要求就废了。
-        按"今天的目标时刻过了没有"判断，补发之后第二天仍然是 23:00。
+        按"目标时刻过了没有"判断，补发之后第二天仍然是 23:00。
+
+        **补发那一半原来没实现**（2026-10-14 用户："昨晚云茹邮件我又没收到"）：旧判据只看
+        **今天**的目标时刻，一旦跨过午夜（23:00 关机、次日 01:16 才开机），昨晚那一刻就
+        永远不补了——`data/mail_state.json` 的 `last_report_at` 停在 10-12 23:02，
+        10-13 那封至今没发（`logs/mail.jsonl` 最后一条也是 10-12 23:00）。现在多判一次
+        **昨天的目标时刻**：昨晚漏了就补一封（窗口由"距上次汇报到现在"自然拉长），
+        补完当天不再重复。
 
         窗口另算：素材覆盖"距上次汇报到现在"，所以 23:00–24:00 那段既不会被漏掉
         （它进的是第二天的汇报），也不会被重复计入。
         """
 
         target = cls.today_target(now, hour=hour, minute=minute)
-        if now < target:
-            return False
-        return float(state.last_report_at or 0.0) < target
+        if now >= target:
+            return float(state.last_report_at or 0.0) < target
+        # 还没到今天的目标时刻：**昨晚那一刻漏了没有？**
+        # `now - 86400` 落在昨天同一个钟点，`today_target` 于是给出"昨天 23:00"。
+        previous = cls.today_target(now - 86400.0, hour=hour, minute=minute)
+        return float(state.last_report_at or 0.0) < previous
 
     @classmethod
     def fresh_pending(cls, state: "MailState", now: float) -> dict:
