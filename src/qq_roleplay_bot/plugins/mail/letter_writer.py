@@ -173,17 +173,24 @@ CHECK_PROMPT = """你要给这封信做**逐句核对**。你**不写正文**，
 **被删掉的那件事留下的反应句也算它的一部分**，一起标掉（上面 `none` 那条）。
 反过来，纯心情句（"今晚没什么事""我还好""我记着"）一律 `self`，
 不要因为它们没有依据就贴 `none`：把那些删了，这封信就没了。
+"""
 
-只输出下面这些行，**不要正文、不要解释**：
+#: **怎么回**（输出格式）——2026-10-16 从 `CHECK_PROMPT` 里挪出来的。
+#:
+#: 为什么挪：三跑里有一跑它整段没按格式回（英文 meta 回复"你要我看的东西没给我"），
+#: 而"要它干什么"写在 system、"材料"在 user，中间隔着几千字的依据段——
+#: 用户 2026-10-16 批的是**「把'只回标签、不要写正文'这条要求挪到 user 段末尾、
+#: 紧贴编号段」**：让"要它回什么"和"它要回的那些句子"挨在一起。
+#: 它仍然是**常量**（进 user 段末尾，不进前缀，缓存那一条不受影响）。
+VERDICT_FORMAT = """只回下面这种行，**不要正文、不要解释、不要别的话**：
 
 <verdict n="1" kind="fact"/>
 <verdict n="2" kind="self"/>
 <verdict n="3" kind="none"/>
 
-一句一行，`n` 就是下面给你的那个编号，**每一句都要有一行**（漏掉的按"留着"处理）。
+一句一行，`n` 就是上面给你的那个编号，**每一句都要有一行**（漏掉的按"留着"处理）。
 要是主题本身与《已确定的事》冲突，可以多给一行 `<subject>改过的主题</subject>`；
-没冲突就别写这一行。
-"""
+没冲突就别写这一行。"""
 
 
 def parse_letter(raw: str, *, max_chars: int = 1500) -> tuple[str, str]:
@@ -390,7 +397,7 @@ class LetterWriter:
         self.max_chars = max(200, int(max_chars))
         self.clock = clock
         self.stats = {"drafts": 0, "checks": 0, "fixed": 0, "reverted": 0, "failed": 0,
-                      "lookups": 0, "skipped": 0}
+                      "lookups": 0, "skipped": 0, "retries": 0}
         self.last_diff = ""
         # 她翻过的那些（按顺序），以及"今晚不写"的那句原因（空=她没说不写）。
         self.lookups: list[str] = []
@@ -600,8 +607,32 @@ class LetterWriter:
         self._set_step_raw("daily_report_check", raw)
         self.stats["checks"] += 1
 
+        # **0 裁决就重试一次**（2026-10-16 用户批的抖动兜底）：实测三跑里有一跑它整段
+        # 不按格式回（英文 meta 回复）。同一份输入再问一次——**不换素材、不改问题**，
+        # 只换一次机会；仍然是 0 就按现状 fail-open 用草稿发。重试进日志（见下面 notes）。
+        retried = False
         verdicts = parse_verdicts(raw)
+        if not verdicts:
+            retried = True
+            self.stats["retries"] += 1
+            logger.info("letter_check_retry reason=no_verdicts")
+            self._add_step("daily_report_check_retry", request)
+            try:
+                second = await self.client.complete(request)
+            except Exception as exc:  # noqa: BLE001 - 重试失败就当它没给
+                second = ""
+                logger.warning("letter_check_retry_failed category=%s", type(exc).__name__)
+            self._set_step_raw("daily_report_check_retry", second)
+            second_verdicts = parse_verdicts(second)
+            if second_verdicts:
+                # 以**重试那一次**为准：它才是有效的那份输出。
+                raw, verdicts = second, second_verdicts
+                self.last_check_raw = raw
+
         graded, notes = apply_verdicts(body, verdicts, sources)
+        if retried:
+            # 让"重试过"这件事在 mail.jsonl 里看得见（notes 进 daily_report_grounding）。
+            notes = ("重试过 1 次",) + tuple(notes)
         self.last_grounding = "；".join(notes) if notes else "没删句"
         self._add_step("daily_report_grounding", [], self.last_grounding)
         if not graded:
@@ -710,6 +741,9 @@ def build_check_messages(subject: str, body: str, *, base_system: str = "",
     if numbered:
         parts.append("正文按句拆开、编好号了（**每一句都要有一行裁决**）：\n"
                      + "\n".join(numbered))
+        # **"怎么回"紧贴编号段**（2026-10-16 用户批的挪位）：原来是写在 system 的
+        # `CHECK_PROMPT` 里，与材料隔着几千字；现在贴着它要裁决的那些句子。
+        parts.append(VERDICT_FORMAT)
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": "\n".join(parts)},

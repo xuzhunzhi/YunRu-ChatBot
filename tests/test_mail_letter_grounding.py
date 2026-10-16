@@ -326,14 +326,17 @@ def test_no_verdicts_means_nothing_is_deleted() -> None:
     """它整段没按格式回（或者根本没标）⇒ **一句都不删**，覆盖度记进日志。
 
     这是 fail-open 的方向：判据宁可少删，也不许因为自己读不出来就删掉她的话。
+    2026-10-16 起这种输出会**先重试一次**（下面那几条专门钉重试）；
+    这里两次都不给裁决，所以还是"一句不删"，只是账上多一句"重试过 1 次"。
     """
 
-    writer, _client, (_subject, body) = _run(DRAFT, "嗯，我觉得这封信挺好的。")
+    writer, client, (_subject, body) = _run(DRAFT, "嗯，我觉得这封信挺好的。")
 
     assert "有人笑别人没本事" in body, "没人标 none ⇒ 原样留着"
-    assert writer.last_grounding == "判了 0/7 句", writer.last_grounding
+    assert client.calls == 3, "草稿 + 校对 + 校对重试"
+    assert writer.last_grounding == "重试过 1 次；判了 0/7 句", writer.last_grounding
     assert writer.stats["reverted"] == 0, "没人删就不该退回草稿（那样每封都会退）"
-    assert body == DRAFT.split("<body>\n", 1)[1].rsplit("\n</body>", 1)[0].strip()
+    assert body == _draft_body()
 
 
 def test_a_sentence_without_a_verdict_is_kept() -> None:
@@ -361,11 +364,75 @@ def test_unknown_labels_are_ignored_and_out_of_range_numbers_delete_nothing() ->
 
 def test_a_verdict_said_twice_takes_the_last_one() -> None:
     """同一个编号出现两次（它改口）⇒ 以**最后**一次为准。"""
-
     raw = ('<verdict n="2" kind="fact"/>'
            '<verdict n="2" kind="none"></verdict>')
 
     assert lw.parse_verdicts(raw) == {2: "none"}
+
+
+# --- 2b. 0 裁决就重试一次（2026-10-16 用户批的抖动兜底）----------------------
+#
+# 原话：*"重试兜底：0 裁决（或裁决解析不出来）时**重试一次**（同一输入）；
+# 仍然是 0 就按现状 fail-open 用草稿发。重试要进日志（可观察，例如
+# `daily_report_grounding` 那条里带'重试过 1 次'）"*。
+
+#: 三次里那一次"整段不按格式回"的真实形状（英文 meta 回复，实测抓到过一次）。
+META_REFUSAL = ("I need the actual letter content and the verdict request to proceed. "
+                "You've sent only \"assistant\" and \"thinking\" without the numbered "
+                "sentences or the instruction to output verdicts.")
+
+
+def test_a_check_without_verdicts_is_retried_once() -> None:
+    """第一次没给裁决 ⇒ 同一份输入再问一次；**以重试那一次为准**，并留下"重试过"。"""
+
+    writer, client, (_subject, body) = _run(DRAFT, META_REFUSAL, CHECKED)
+
+    assert client.calls == 3, "草稿 + 校对 + 校对重试"
+    assert writer.stats["retries"] == 1
+    triggers = [str(step["trigger"]) for step in writer.steps]
+    assert triggers == ["daily_report_draft", "daily_report_check",
+                        "daily_report_check_retry", "daily_report_grounding"], triggers
+    assert "有人笑别人没本事" not in body, "重试之后那份裁决照样生效"
+    assert writer.last_grounding.startswith("重试过 1 次"), writer.last_grounding
+
+
+def test_a_retry_that_is_also_empty_stays_fail_open() -> None:
+    """两次都没给裁决 ⇒ **一句都不删**（用草稿），并且账上仍记着"重试过 1 次"。"""
+
+    writer, client, (_subject, body) = _run(DRAFT, META_REFUSAL, META_REFUSAL)
+
+    assert client.calls == 3
+    assert writer.stats["retries"] == 1
+    assert "有人笑别人没本事" in body, "fail-open：没裁决就不删"
+    assert writer.last_grounding.startswith("重试过 1 次"), writer.last_grounding
+    assert writer.stats["reverted"] == 0, "这不是「内容站不住」，别退回草稿"
+
+
+def test_a_compliant_first_check_is_not_retried() -> None:
+    """第一次就给了裁决 ⇒ **不许**多问一次（重试只该花在没裁决那种情况上）。"""
+
+    writer, client, (_subject, _body) = _run(DRAFT, CHECKED)
+
+    assert client.calls == 2, "草稿 + 校对，没有第三次"
+    assert writer.stats["retries"] == 0
+    assert not writer.last_grounding.startswith("重试过")
+
+
+def test_the_how_to_reply_block_sits_at_the_end_of_the_user_message() -> None:
+    """**"怎么回"紧贴编号段**（用户 2026-10-16 批的挪位）：原来在 system 的
+    `CHECK_PROMPT` 里，与材料隔着几千字；现在在 user 段末尾。"""
+
+    draft = lw.build_draft_messages(_Materials(), persona=PERSONA, facts=FACTS,
+                                    closeness_names=(), guardedness_names=(),
+                                    now=1_800_000_000.0)
+    check = lw.build_check_messages("信", "第一句。第二句。", base_system=draft[0]["content"],
+                                    sources=MATERIALS, max_chars=1500)
+    system, user = check[0]["content"], check[1]["content"]
+
+    assert "只回下面这种行" in user, "格式要求要在 user 段里"
+    assert "只回下面这种行" not in system, "…而且不许再留在 system 里"
+    assert user.index("正文按句拆开") < user.index("只回下面这种行"), "紧贴编号段之后"
+    assert user.rstrip().endswith("没冲突就别写这一行。"), "就在 user 段末尾"
 
 
 # --- 3. 每步一条（`mail.jsonl`） ---------------------------------------------
@@ -462,6 +529,7 @@ def test_the_new_prompts_carry_no_mechanism_words() -> None:
 
     assert scan_persona_text(lw.GROUNDING_PROMPT) == []
     assert scan_persona_text(lw.CHECK_PROMPT) == []
+    assert scan_persona_text(lw.VERDICT_FORMAT) == []
     assert scan_persona_text(dr.REPORT_PROMPT) == []
 
 

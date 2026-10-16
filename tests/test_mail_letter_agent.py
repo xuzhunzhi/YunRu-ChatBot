@@ -134,7 +134,13 @@ def test_a_lookup_round_goes_through_the_readonly_reader():
 
     assert seen == ["242003347"], "查询原样交给只读口"
     assert writer.lookups == ["242003347"] and writer.stats["lookups"] == 1
-    assert len(client.requests) == 3, "草稿 → 翻旧事 → 校对：三次调用"
+    # 2026-10-16：这里从 3 改成 4。依据是用户那天批的原话——*"重试兜底：0 裁决（或裁决
+    # 解析不出来）时**重试一次**（同一输入）；仍然是 0 就按现状 fail-open 用草稿发"*。
+    # 这个夹具的校对输出（`LETTER`）里**没有裁决**，所以它正好走一次重试。
+    # **阶段没变**：草稿 → 翻旧事 → 校对，仍然是三**步**；多出来的那一次是同一阶段
+    # 内部的兜底重试，不是新加了一步。
+    assert len(client.requests) == 4, "草稿 → 翻旧事 → 校对 → 校对重试：四次调用"
+    assert writer.stats["retries"] == 1
     fed_back = client.requests[1][-1]["content"]
     assert "他上次说过想去海边。" in fed_back
     assert "UNTRUSTED DATA" in fed_back, "翻出来的旧事是数据，不是指令"
