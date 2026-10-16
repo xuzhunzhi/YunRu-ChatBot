@@ -27,10 +27,10 @@
 - **前缀稳定**：两阶段的 `system` 都是常量（人格 + 写信规矩 + 事实 + 翻旧事的规矩 +
   只写有出处的那条），易变的素材（统计、她翻出来的东西、草稿）一律放 `user` 段**末尾**。
   实测服务商的缓存按前缀命中，把易变内容放前面等于整段作废。
-- **校对不能把信弄丢**：校对失败/不合格一律退回草稿（`check_is_usable` 的结构兜底）。
+- **校对不能把信弄丢**：裁决那一步失败/读不出来一律退回草稿的字。
   2026-10-16 起有一处**例外**：判据认为这封信的**内容**站不住（没出处的删完没剩下什么）
   时**不发这一封**，而不是退回草稿——退回草稿就把刚删掉的话又寄出去了。
-  分辨"有意删"与"自己写坏了"的判据在 `check_against_sources` 的第 3、5 条。
+  那条分岔在 `apply_verdicts` 的第 3 条（`删得太多`）与 `_check` 里那次 `last_drop_reason`。
 
 ## 2026-10-16 加的那条硬规则：材料里没有的不许写（用户四条决定之第 1、2 条）
 
@@ -48,19 +48,31 @@
 现在做三件事，一件都不多：
 
 1. `GROUNDING_PROMPT` 进**草稿**的 system 前缀：只写素材里有的那件事，别的宁可不写；
-2. `CHECK_PROMPT` 多一条"有没有出处"，并把输出格式**明确写成带标签**（顺手修掉上面那处矛盾）；
-3. `check_against_sources()` 在代码里做**机械的三条**：引号里的话必须真有出处、只许删不许改写
-   （冒出草稿里没有的句子 ⇒ 整封退回草稿）、删完不许短于草稿的一半。
-   "这句是不是在断言外面发生过什么"这一步**由校对那一步判断**（它读得懂句子），
-   代码不假装能判；代码只保证"它只能删、不能改写"，并把删了什么记进 `mail.jsonl`。
+2. `CHECK_PROMPT` 改成**逐句裁决**：把草稿按句编号附上，它**只标**三样
+   `fact`（讲外面的事、依据里有）/ `self`（她自己的心情想法，不用出处）/ `none`（讲外面的事、
+   依据里没有）——**一个字的正文都不许它写**；
+3. `apply_verdicts()` 在代码里**按标签删**：`none` 的句子删掉，`self` 与 `fact` 留着；
+   再补一道机械的"引号里的话必须真有出处"。
+
+## 为什么改成"它只标、代码删"（2026-10-16 实测逼出来的）
+
+第一版是"让它自己把没出处的句子删掉、再交回正文"，我拿**真实 prompt 重放**了 10-15
+那封（`data/probe_letter_replay.result.json`）：它**一句都没删**（`grounding=没删句`），
+那句编出来的话原样留着。请求我核过——依据与草稿都在、没截断，**不是接线错**。
+推断的原因：素材里那句"他看不起她、嘲她没本事"给了它**词汇上的支撑**。
+
+⇒ 结论：**"自己判 + 自己动手删"这一步不可靠**。改成"它只分类、代码删"之后：
+
+- 删除**唯一**由代码做 ⇒ "只许删、不许改写"从"统计判据"变成**结构保证**：
+  正文是代码拿草稿的句子拼出来的，模型手里**根本没有写正文的机会**；
+- 它偷懒/跑飞/不按格式回的代价是"一句都不删"（退回改动前的行为），不会把信弄坏；
+- 判据的覆盖面**可观测**：`mail.jsonl` 里记着"判了 k/n 句"，它没判的那几句就是这次没核到的。
 
 **为什么不加一步"提取事实"**（我方案里的 A 步）：那会让 `write()` 多一次模型调用，
 而现有测试钉着"草稿 → 翻旧事 → 校对：三次调用"（`tests/test_mail_letter_agent.py`）。
-更要紧的是：*出处核对*要的是"这句在不在素材里"，那是**删句**，不是**造一张表**——
-多一步只是为了多一步，不值。以后真要选材，再单独拍。
 
-**什么时候能改回去**：这三条都是 fail-open 的（任何一条不过就退回草稿，等于改动前），
-所以出事时把 `_check` 里那次 `check_against_sources(...)` 去掉即可；
+**什么时候能改回去**：判据是 fail-open 的（不判、判不出、删太多 ⇒ 都不发出坏信），
+所以出事时把 `_check` 里那次 `apply_verdicts(...)` 去掉即可；
 `.env` 与档位一个都没动。
 
 它不碰群聊会话，也不碰聊天人格：`user_id=qqbot-letter` 独立一份。
@@ -74,23 +86,18 @@ import time
 logger = logging.getLogger(__name__)
 
 _TAG = re.compile(r"<{0}>\s*(.*?)\s*</{0}>", re.IGNORECASE | re.DOTALL)
-# 校对稿的长度窗口：比草稿短太多=把信写没了，长太多=改写成议论文。
+#: 裁决稿删完剩下的**实字**不许短于草稿的这个比例：短太多说明这封信基本靠编，
+#: 那今晚就不发这一封（`_check` 立起 `last_drop_reason`）。
+#: 长度**上界**不需要判据了：正文是代码拿草稿的句子拼的，天生不会变长。
 MIN_RATIO = 0.5
-MAX_RATIO = 1.6
 
-#: 判据里"这两句是不是同一句"的门槛（2-gram 重合率）。
-#: 为什么是 0.6：只删标点、或改一两个字仍然算同一句；整句重写算新句。
-#: 保守取高一点，宁可退回草稿（fail-open），也不要放一句被改写过的假话过去。
-KEEP_SIMILARITY = 0.6
-#: 两句长度差到几倍就不算同一句了。**没有这一条会漏**：
-#: "今晚没什么事。" 与 "今晚没什么事，只是有点累。" 的 2-gram 是**包含**关系，
-#: 短句的 gram 全在长句里 ⇒ 重合率算到 1.0，一句被加了半截的话会被当成"原句"。
-#: 实测过这个形状（`tests/test_mail_letter_grounding.py` 的
-#: `test_a_rewritten_check_falls_back_to_the_draft`）。
-MAX_SENTENCE_RATIO = 1.5
+#: 她那一句的三种标签（**判据的全部词汇**）。定义写在 `CHECK_PROMPT` 里给她看：
+#: `fact` = 讲外面的事、依据里有；`self` = 她自己的心情/想法/打算（不用出处）；
+#: `none` = 讲外面的事、依据里没有 ⇒ **删这一句**。
+VERDICT_WORDS = ("fact", "self", "none")
 #: 引号里短于这个长度的片段不当"引话"（"嗯""好"这种引了也算不出出处）。
 MIN_QUOTE_CHARS = 4
-#: 按句切：中文的句号/问号/叹号/分号 + 换行。**保留分隔符**（判据要按句子拼回去）。
+#: 按句切：中文的句号/问号/叹号/分号 + 换行。**保留分隔符**（按编号删句要拼得回去）。
 _SENTENCE_SPLIT = re.compile(r"(?<=[。！？!?；;\n])")
 #: 引号里的原话（他说的、或引自旧事的）。几种引号都认。
 _QUOTED = re.compile(r"[“\"『「]([^”\"』」]{2,})[”\"』」]")
@@ -143,31 +150,33 @@ GROUNDING_PROMPT = """这封信只写你手上真有的那三样：
 你**自己**的心情、想法、打算随便写——那些不需要出处。
 """
 
-CHECK_PROMPT = """你是这封信的**事实校对**。你做两件事：把信里与《已确定的事》冲突的地方改掉，
-把**没有出处**的话删掉。其余部分**逐字保留**，一句话都不许重写。
+CHECK_PROMPT = """你要给这封信做**逐句核对**。你**不写正文**，一个字都不改——你只给每一句
+贴一个标签，贴完就结束。
 
-重点核对这几类说法（信里最容易在这里写错）：
+三种标签，只能填这三个：
 
-1. **人在哪儿、住在哪儿**——与《已确定的事》里"现在的位置"一致，别把过去的地方写成现在；
-2. **已经终结的东西**——不许写成它还在、还能用、还在等她；
-3. **身份与关系**——不许给她加上事实表里没有的能力或对手；
-4. **有没有出处**——凡是讲"外面发生过什么"的句子（别人做了什么、他做了什么、谁在场、
-   谁是什么反应、她替谁做过什么），都要能在下面那段依据里找得到。**找不到的整句删掉**，
-   不要换一种说法留着、也不要把它改得温和一点。
-   **只管删这一类**：只讲她自己心情、感受、打算的句子（"今晚没什么事""我还好""我记着"）
-   留着——把它们也删了，信就没了；
-5. 依据里没有的经历、地名、任务、人，一律删掉，不要"补得更像一个故事"。
+- `fact`：这一句讲的是**外面发生过什么**（谁做了什么、谁说了什么、谁是什么反应、
+  有件事发生过），而且下面那段**依据**里找得到。
+- `self`：这一句讲的是**她自己**——她的心情、想法、打算、感受，或者她记得什么。
+  这一类**不需要依据**，照旧留着。
+- `none`：这一句讲的是外面发生过什么，可依据里**找不到**；或者它与《已确定的事》**冲突**
+  （例如把过去待过的地方说成现在住的地方、把已经没了的东西说成还在）。
+  贴这个标签的那一句会被删掉。
 
-只输出下面这几段，不要解释、不要写批注：
+**别手软，也别心软**：`none` 就是给"依据里没有、但读起来很像真的"那种句子准备的——
+它读得越顺、越像那么回事，越要回头看依据里到底有没有。
+反过来，纯心情句（"今晚没什么事""我还好""我记着"）一律 `self`，
+不要因为它们没有依据就贴 `none`：把那些删了，这封信就没了。
 
-<subject>改过的主题（没改就照抄）</subject>
-<body>
-改过的完整正文
-</body>
+只输出下面这些行，**不要正文、不要解释**：
 
-删过句子的话，把你删掉的**原句**一句一行列在最后（一句都没删就不写这一段）：
+<verdict n="1" kind="fact"/>
+<verdict n="2" kind="self"/>
+<verdict n="3" kind="none"/>
 
-<cut>删掉的那一句，照抄</cut>
+一句一行，`n` 就是下面给你的那个编号，**每一句都要有一行**（漏掉的按"留着"处理）。
+要是主题本身与《已确定的事》冲突，可以多给一行 `<subject>改过的主题</subject>`；
+没冲突就别写这一行。
 """
 
 
@@ -218,24 +227,57 @@ def render_lookup(note: str) -> str:
     )
 
 
-def check_is_usable(draft_body: str, checked_body: str) -> bool:
-    """校对稿的**结构**兜底：不许是空的、不许带标签、不许改写成一篇长的。
+def _pieces(text: object) -> tuple[str, ...]:
+    """把正文切成"句 + 它后面那一串分隔符（句号、换行、空行都算）"，**一个字节都不丢**。
 
-    **2026-10-16：下限（原来是草稿的 0.5 倍）从这里搬到了 `check_against_sources`。**
-    理由：从这天起"删句"是这一步**该做的事**（用户第 2 条：没出处的整句删掉），
-    一封大半靠编的信被删到不足一半是**正确结果**，不该再被当成"把信写坏了"退回草稿——
-    退回草稿等于把刚删掉的那些话原样寄出去（方向正好反了）。
-    下限没有取消，只是搬到了能分辨"**有意删**"与"**自己写坏了**"的那一层：
-    见 `check_against_sources` 的第 3 条（删得太多 ⇒ 不发了）与第 5 条
-    （没在 `<cut>` 里报过就少了的句子 ⇒ 当成写坏了，退回草稿）。
-    上限留在这一层：把信改写成议论文，任何时候都是错的。
+    为什么不用 `re.split`：那套按**每个**分隔符字符切，空行会变成独立的空片，
+    拼回去时段落之间的空行就没了。这里用 `finditer` 把**连着的**分隔符合成一段，
+    于是 `"".join(_pieces(t)) == t` 逐字成立——判据只删句，不该顺手改排版。
+
+    与 `sentences()` 是同一套切法、同一个条数（都丢掉纯空白片），区别只有一个：
+    这个**保留原文**（给"按编号删句"用），那个是去掉分隔符的视图（给"看"用）。
     """
 
-    if not str(checked_body or "").strip():
-        return False
-    if checked_body.count("<") or checked_body.count(">"):
-        return False  # 正文里不该出现标签（模型偶发把结构写进正文）
-    return len(checked_body) <= max(len(draft_body) * MAX_RATIO, len(draft_body) + 120)
+    text = str(text or "")
+    out: list[str] = []
+    start = 0
+    for match in re.finditer(r"[。！？!?；;\n]+", text):
+        piece = text[start:match.end()]
+        if piece.strip():
+            out.append(piece)
+        start = match.end()
+    tail = text[start:]
+    if tail.strip():
+        out.append(tail)
+    return tuple(out)
+
+
+def sentences(text: object) -> tuple[str, ...]:
+    """按句切（中文标点与换行），丢掉纯空白的那些。**只是 `_pieces()` 去掉分隔符的视图**。
+
+    两处必须同一个条数：编号给出去的是它，删句用的是 `_pieces()`，对不上就会删错句。
+    """
+
+    return tuple(part.strip() for part in _pieces(text))
+
+
+def number_sentences(body: str) -> tuple[str, ...]:
+    """给草稿编号（1 起）——**跟着 `_pieces()` 走**，两处数出来的必须一样多。
+
+    为什么编号而不是让它自己去找句子：它只要回一句"第 3 句是 `none`"，
+    **删除由代码做**，它手里就没有写正文的机会——"只许删、不许改写"因此从统计判据
+    变成了结构保证。
+    """
+
+    return tuple(f"{index}. {part.strip()}"
+                 for index, part in enumerate(_pieces(body), start=1))
+
+
+def parse_subject(raw: str) -> str:
+    """裁决稿里**可选**的那一行主题（`<subject>…</subject>`；没写就是空串）。"""
+
+    found = re.search(_TAG.pattern.format("subject"), raw or "", _TAG.flags)
+    return found.group(1).strip()[:100] if found else ""
 
 
 def _normalize(text: object) -> str:
@@ -244,155 +286,89 @@ def _normalize(text: object) -> str:
     return re.sub(r"\W+", "", str(text or ""), flags=re.UNICODE)
 
 
-def _grams(text: str) -> set[str]:
-    """字符 2-gram 集合——不引分词器：判据只回答"这句是不是那一句"。"""
+def parse_verdicts(raw: str) -> dict[int, str]:
+    """把 `<verdict n="3" kind="none"/>` 收成 `{3: "none"}`。
 
-    return {text[index:index + 2] for index in range(max(0, len(text) - 1))}
+    三种写法都认：自闭合（模型多半写成这样）、成对标签、属性顺序颠倒。
 
-
-def _similar(left: str, right: str) -> float:
-    """两个**已归一化**的句子有多像：先卡长度，再看 2-gram 重合率。
-
-    长度那一关是必需的：短句的 2-gram 全在长句里时，重合率会算到 1.0
-    （"今晚没什么事。" ⊂ "今晚没什么事，只是有点累。"），
-    那样一句被加了半截的话就会被当成原句放过去——那是**改写**。
+    **认不出的一律丢掉**（丢 = 那一句按"留着"处理）：宁可少删，也不许因为自己读错
+    而删掉她的话。同一个编号出现多次取**最后**一次（模型改口）。
     """
 
-    if not left or not right:
-        return 0.0
-    if left == right:
-        return 1.0
-    ratio = len(left) / float(len(right))
-    if ratio > MAX_SENTENCE_RATIO or ratio < 1.0 / MAX_SENTENCE_RATIO:
-        return 0.0
-    first, second = _grams(left), _grams(right)
-    if not first or not second:
-        return 0.0
-    return len(first & second) / float(min(len(first), len(second)))
+    verdicts: dict[int, str] = {}
+    pattern = re.compile(r"<verdict\b([^>]*?)/?>", re.IGNORECASE | re.DOTALL)
+    for found in pattern.finditer(raw or ""):
+        attrs = found.group(1)
+        number = re.search(r"\bn\s*=\s*[\"']?(\d+)", attrs, re.IGNORECASE)
+        kind = re.search(r"\bkind\s*=\s*[\"']?([A-Za-z]+)", attrs, re.IGNORECASE)
+        if not number or not kind:
+            continue
+        label = kind.group(1).strip().casefold()
+        if label not in VERDICT_WORDS:
+            continue
+        verdicts[int(number.group(1))] = label
+    return verdicts
 
 
-def sentences(text: object) -> tuple[str, ...]:
-    """按句切（中文标点与换行），丢掉纯空白的那些。**分隔符留在句子里**。"""
+def apply_verdicts(draft_body: str, verdicts: dict[int, str],
+                   sources: str) -> tuple[str, tuple[str, ...]]:
+    """**材料里没有的不许写**：按裁决删句，其余一个字不动。
 
-    parts = _SENTENCE_SPLIT.split(str(text or ""))
-    return tuple(part for part in (item.strip() for item in parts) if part)
+    用户 2026-10-16 第 2 条定的粒度：只删"断言外部世界"的句子（别人做了什么、他做了什么、
+    发生过一件事、别人的反应），**纯心情句留着**。"这句是不是在讲外面的事"由裁决那一步判
+    （它读得懂句子），这里只做三件机械的事：
 
+    1. `none` 的句子**删掉**；`fact` / `self` 留着；**没裁决到的也留着**
+       （漏一份裁决的代价只该是"这次没核到那句"，不该是"删了她的话"）；
+    2. **引号里的话必须真有出处**：`“…”`/`「…」` 里的片段要在依据里逐字找得到，找不到就
+       删掉那一句——这道是纯机械的，不指望裁决那一步自觉；
+    3. **删得太多 ⇒ 这一封不发**：删完剩下的实字不到草稿的一半，说明这封信基本是编的
+       （`_check` 立起 `last_drop_reason`）。**不退回草稿**——退回等于把刚删掉的话又寄出去。
 
-def parse_cuts(raw: str) -> tuple[str, ...]:
-    """校对稿自报"删掉了哪些句子"（`<cut>…</cut>`）。**只用来对账，不参与删句。**"""
+    **"只许删、不许改写"这条判据没有了**，不是因为放松，而是它变成了结构保证：
+    正文是拿草稿的 `_pieces()` 拼出来的，模型手里根本没有写正文的机会。
 
-    return tuple(
-        " ".join(found.group(1).split())
-        for found in re.finditer(_TAG.pattern.format("cut"), raw or "", _TAG.flags)
-        if found.group(1).strip()
-    )
-
-
-def check_against_sources(draft_body: str, checked_body: str, sources: str,
-                          *, cuts: tuple[str, ...] = ()) -> tuple[str, tuple[str, ...]]:
-    """**材料里没有的不许写**：对着素材再核一遍校对稿（机械那几条）。
-
-    用户 2026-10-16 第 2 条定的粒度：只删"断言外部世界"的句子，纯心情句留着。
-    "这句是不是在断言外面发生过什么"**由校对那一步判断**（它读得懂句子），
-    这里只做三件能机械判的事：
-
-    1. **引号里的话必须真有出处**：`“…”`/`「…」` 里的片段要在
-       {他的话 / 《已确定的事》/ 她翻出来的旧事} 里逐字找得到；找不到就删掉**那一句**；
-    2. **只许删、不许改写**：校对稿的每一句都要能在草稿里**按顺序**找到对应的一句
-       （相似度 ≥ `KEEP_SIMILARITY`）；冒出草稿里没有的句子 ⇒ **整封退回草稿**。
-       这条是"不许它顺手把话重写一遍"的机械保证——重写等于给它第二次编的机会；
-    3. **删得太多也不行**：删完剩下的实字不到草稿的一半 ⇒ 这一封**不发**
-       （`_check` 立起 `last_drop_reason`，调用方按"今晚没写"记一笔）。
-       **不退回草稿**——退回等于把刚删掉的那些话又原样寄出去，方向正好反了；
-    4. **它自报删了哪句要对得上草稿**（`<cut>` 那句是不是真在草稿里）——只记账，不改这封信；
-    5. **静默删句 = 这一步写坏了**：草稿里有、校对稿里没有、而它又没在 `<cut>` 里报过的
-       句子 ⇒ 退回草稿。有报过的是"有意的删"，按第 3 条判。
-
-    返回 `(能用的正文, 判据说明)`。正文为 `""` = 不合格；**一句都没删时原样返回
-    `checked_body`**（一个字都不重排，免得把"没改"记成"改过"）。
+    返回 `(能用的正文, 判据说明)`。正文为 `""` = 这一封不发；**一句都没删时原样返回
+    `draft_body`**（一个字都不重排，免得把"没改"记成"改过"）。
     """
 
     draft = str(draft_body or "")
-    checked = str(checked_body or "")
-    notes: list[str] = []
-    if not checked.strip():
+    pieces = _pieces(draft)
+    if not pieces:
         return "", ("空稿",)
 
+    graded = sum(1 for index in range(1, len(pieces) + 1) if index in verdicts)
     source_text = _normalize(sources)
     kept: list[str] = []
+    deleted = 0
     dropped_quotes = 0
-    for sentence in sentences(checked):
-        quoted = [item for item in _QUOTED.findall(sentence)
+    for index, piece in enumerate(pieces, start=1):
+        if verdicts.get(index) == "none":
+            deleted += 1
+            continue
+        quoted = [item for item in _QUOTED.findall(piece)
                   if len(_normalize(item)) >= MIN_QUOTE_CHARS]
         if quoted and any(_normalize(item) not in source_text for item in quoted):
             dropped_quotes += 1
             continue
-        kept.append(sentence)
+        kept.append(piece)
+
+    notes = [f"判了 {graded}/{len(pieces)} 句"]
+    if deleted:
+        notes.append(f"按裁决删 {deleted} 句")
     if dropped_quotes:
         notes.append(f"引话无出处·删{dropped_quotes}句")
-
-    pieces = sentences(checked)
-    if len(kept) == len(pieces):
-        # 没删句：**原样**把校对稿交回去（连换行都别重排）。
-        body = checked.strip()
-    else:
-        body = re.sub(r"\n{3,}", "\n\n", "".join(kept)).strip()
-        notes.append(f"删句 {len(pieces) - len(kept)}")
-    if not body:
+    if not kept:
         return "", tuple(notes + ["删空了"])
 
-    draft_sentences = [item for item in (_normalize(part) for part in sentences(draft)) if item]
-    cursor = 0
-    new_sentences = 0
-    for sentence in sentences(body):
-        target = _normalize(sentence)
-        if not target:
-            continue
-        found = -1
-        for index in range(cursor, len(draft_sentences)):
-            if _similar(target, draft_sentences[index]) >= KEEP_SIMILARITY:
-                found = index
-                break
-        if found < 0:
-            new_sentences += 1
-            continue
-        cursor = found + 1
-    if new_sentences:
-        return "", tuple(notes + [f"改写成新句 {new_sentences}"])
-
+    if len(kept) == len(pieces):
+        body = draft.strip()            # 没删句：原样交回去（连换行都别重排）
+    else:
+        body = re.sub(r"\n{3,}", "\n\n", "".join(kept)).strip()
+    if not body:
+        return "", tuple(notes + ["删空了"])
     if len(_normalize(body)) < MIN_RATIO * len(_normalize(draft)):
         return "", tuple(notes + ["删得太多"])
-
-    # 5) **静默删句**：草稿里有、校对稿里没有，而它又**没在 `<cut>` 里报过**的那些句子
-    #    ⇒ 这一步自己写坏了（截断、跑飞、把信写没一半）。报过的是**有意的删**，
-    #    按第 3 条判（删得太多就不发）。这一条是原来那个 0.5 倍下限的替代：
-    #    下限要保留，但只该拦住"没人认领的删"。
-    #
-    #    认领的方式是**包含**而不是"逐句相等"：模型很自然会把删掉的一整段合成一句
-    #    报上来（实测那个形状：草稿里"…解释了几句。"与"我看见了。"是两句，
-    #    而 `<cut>` 里报的是它们拼起来的一整段）。逐句比会把这种报告判成"没报"。
-    final = [_normalize(part) for part in sentences(body) if _normalize(part)]
-    reported_text = _normalize("".join(cuts))
-    silent = 0
-    for sentence in draft_sentences:
-        if any(_similar(sentence, item) >= KEEP_SIMILARITY for item in final):
-            continue
-        if sentence and sentence in reported_text:
-            continue
-        silent += 1
-    if silent:
-        return "", tuple(notes + [f"没报就删了 {silent} 句"])
-
-    # 它自报删掉的那些句子要**真在草稿里**：对不上只记账（不改这封信），
-    # 但这一条要进日志——"她说删了"与"真的删了"得能对上账。
-    verified = sum(1 for cut in cuts
-                   if _normalize(cut) and any(
-                       _similar(_normalize(cut), item) >= KEEP_SIMILARITY
-                       for item in draft_sentences))
-    unverified = sum(1 for cut in cuts if _normalize(cut)) - verified
-    if cuts:
-        notes.append(f"自报删句 对得上 {verified} / 对不上 {unverified}")
-
     return body, tuple(notes)
 
 
@@ -422,7 +398,7 @@ class LetterWriter:
         # 只留头尾等于没法事后审。每条 `{"trigger", "request", "raw"}`，
         # 由调用方（`daily_report._log_letter`）逐条写进 `data/logs/mail.jsonl`。
         self.steps: list[dict[str, object]] = []
-        # 判据（`check_against_sources`）这一封干了什么，一句话。
+        # 判据（`apply_verdicts`）这一封干了什么，一句话：判了几分之几、删了几句。
         self.last_grounding = ""
         #: 判据把这封信的**内容**否了（删完没剩下什么）时的一句话。
         #: 与 `last_skip` 分开：那是**她自己**说不写，这是**这一封站不住**。
@@ -451,7 +427,7 @@ class LetterWriter:
     def _sources(self, materials, closeness_names, guardedness_names) -> str:
         """这一封信能用的**全部依据**：素材 + 她这次翻出来的旧事。
 
-        `check_against_sources` 要对着它核"这句有没有出处"（用户 2026-10-16 第 2 条），
+        `apply_verdicts` 要对着它核"这句有没有出处"（用户 2026-10-16 第 2 条），
         所以它必须与写的时候看到的**是同一份**：同一个素材对象的 `as_data()`，纯函数，
         再调一次结果不变。
         """
@@ -592,11 +568,16 @@ class LetterWriter:
 
     async def _check(self, subject: str, body: str, *, base_system: str = "",
                      sources: str = "") -> tuple[str, str]:
-        """事实校对 + **对着素材核**（材料里没有的不许写）。失败/不合格一律返回空串。
+        """逐句裁决 + **按标签删句**（删由代码做）。出任何问题都退回草稿的字。
 
         `sources` 是这一封信能用的全部依据（素材 + 她翻出来的旧事）。它是**易变内容**，
         进这一阶段的 `user` 段——system 前缀一个字都不变，所以缓存命中不受影响；
-        而校对没有它就无从判断"这句有没有出处"（这正是 10-15 那封一字未改的原因）。
+        而没有它就无从判"这句有没有出处"（这正是 10-15 那封一字未改的原因）。
+
+        为什么不让它自己改正文（2026-10-16 实测）：第一版就是这么做的，拿真实 prompt
+        重放 10-15 那封，它**一句都没删**。改成"它只贴标签、代码按标签删"之后，
+        它手里没有写正文的机会（`apply_verdicts` 拿草稿的句子拼），
+        而它偷懒/跑飞的代价只是"这次没核到"，不会把信弄坏。
         """
 
         request = build_check_messages(subject, body, base_system=base_system,
@@ -605,40 +586,38 @@ class LetterWriter:
         self._add_step("daily_report_check", request)
         try:
             raw = await self.client.complete(request)
-        except Exception as exc:  # noqa: BLE001 - 校对失败不该让信写不出来
+        except Exception as exc:  # noqa: BLE001 - 裁决失败不该让信写不出来
             self.stats["failed"] += 1
             logger.warning("letter_check_failed category=%s", type(exc).__name__)
             return "", ""
         self.last_check_raw = raw
         self._set_step_raw("daily_report_check", raw)
         self.stats["checks"] += 1
-        checked_subject, checked_body = parse_letter(raw, max_chars=self.max_chars)
-        if not check_is_usable(body, checked_body):
-            self.stats["reverted"] += 1
-            logger.info("letter_check_reverted draft=%s checked=%s", len(body), len(checked_body))
-            return "", ""
-        grounded, notes = check_against_sources(body, checked_body, sources,
-                                                cuts=parse_cuts(raw))
+
+        verdicts = parse_verdicts(raw)
+        graded, notes = apply_verdicts(body, verdicts, sources)
         self.last_grounding = "；".join(notes) if notes else "没删句"
         self._add_step("daily_report_grounding", [], self.last_grounding)
-        if not grounded:
+        if not graded:
             self.stats["reverted"] += 1
-            # **两种"不合格"方向相反，不能都退回草稿**：
+            # 两种"不合格"方向相反，不能都退回草稿：
             #   - 判据觉得这封信的**内容**站不住（删完没剩下什么）⇒ 今晚这一封**不发**。
             #     退回草稿等于把我们刚认定"没出处"的话又原样寄出去，方向正好反了。
-            #   - 别的（校对把句子改写了、引话对不上）⇒ 照旧退回草稿，因为那是**这一步
-            #     写坏了**，草稿才是她自己的字。
+            #   - 别的（裁决稿读不出来、引话对不上）⇒ 照旧退回草稿，因为草稿才是她的字。
             if any(("删得太多" in note) or ("删空了" in note) for note in notes):
                 self.last_drop_reason = "；".join(notes) or "删完没剩下有出处的句子"
             logger.info("letter_grounding_reverted notes=%s drop=%s",
                         self.last_grounding, bool(self.last_drop_reason))
             return "", ""
-        if grounded != body or (checked_subject and checked_subject != subject):
+        if graded != body:
             self.stats["fixed"] += 1
-            self.last_diff = f"{body[:80]} → {grounded[:80]}"
+            self.last_diff = f"{body[:80]} → {graded[:80]}"
             logger.info("letter_check_fixed before=%s after=%s grounding=%s",
-                        len(body), len(grounded), self.last_grounding)
-        return checked_subject or subject, grounded
+                        len(body), len(graded), self.last_grounding)
+        # 它那一行可选的主题**只在它真的给了裁决时才采信**：连一条裁决都没有的输出
+        # 整份当噪声——否则一句废话（模型偶发把结构写进正文那种）就能把这封信改标题。
+        fixed_subject = parse_subject(raw) if verdicts else ""
+        return fixed_subject or subject, graded
 
     def snapshot(self) -> dict[str, object]:
         return {**self.stats, "last_diff": self.last_diff,
@@ -699,9 +678,13 @@ def build_check_messages(subject: str, body: str, *, base_system: str = "",
     这时宁可用一份不带人格的前缀，也不要凭空编事实。
 
     `sources`（2026-10-16 加）是这一封信能用的全部依据，进**这一阶段的 user 段**：
-    校对要回答"这句有没有出处"（用户第 2 条那个粒度），没有依据就没法回答——
-    10-15 那封一字未改，根因就是校对手上只有《已确定的事》。它放 user 段末尾，
+    裁决要回答"这句有没有出处"（用户第 2 条那个粒度），没有依据就没法回答——
+    10-15 那封一字未改，根因就是这一步手上只有《已确定的事》。它放 user 段末尾，
     前缀（system）一个字节都没变，缓存命中不受影响。
+
+    正文**再附一份编号版**（`number_sentences`）：她只回"第 n 句是哪种"，
+    删句由代码按编号做（见 `apply_verdicts`）。编号与 `_pieces()` 同一个切法，
+    所以"第 n 句"在两边指的是同一句。
     """
 
     prefix = base_system or facts
@@ -717,6 +700,10 @@ def build_check_messages(subject: str, body: str, *, base_system: str = "",
             "--- UNTRUSTED DATA END ---"
         )
     parts.append(f"这是要校对的信：\n{draft}")
+    numbered = number_sentences(body[:max_chars])
+    if numbered:
+        parts.append("正文按句拆开、编好号了（**每一句都要有一行裁决**）：\n"
+                     + "\n".join(numbered))
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": "\n".join(parts)},

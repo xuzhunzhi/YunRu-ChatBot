@@ -61,6 +61,15 @@ _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 # 引号就可能破坏引号边界，把"模型写的字符串"变成"本机命令"。**这是唯一一处会被
 # 外部文本碰到 argv 的地方**（正文走文件），所以这里直接按最严的规则卡掉。
 _ARGV_FORBIDDEN = frozenset('"\'`%&|<>^!()$')
+#: 那几个字符**发送前**换成什么（`sanitize_subject`）。换成全角：字符还在、意思还在，
+#: 但它不再是 cmd.exe 的元字符——"能保留原意就保留"落到具体字符上就是这个映射。
+_SUBJECT_FULLWIDTH = {
+    "`": "｀", "%": "％", "&": "＆", "|": "｜", "<": "＜", ">": "＞",
+    "^": "＾", "!": "！", "(": "（", ")": "）", "$": "＄",
+}
+#: 引号没有"全角版"可换，按**出现顺序**配成一对：第 1 个是左引号、第 2 个是右引号……
+#: 这样 `"你别掺和"` 出来就是 `“你别掺和”`，而不是两个一样的引号。
+_SUBJECT_QUOTES = {'"': ("“", "”"), "'": ("‘", "’")}
 _MAX_ARGV_CHARS = 500
 # 只挡"像凭据"的串。**刻意不复用 `memory_model.SENSITIVE`**：那一条还禁 `<`、邮箱地址
 # 和 Windows 路径（它是给记忆正文用的），拿来卡一封信会把正常内容也卡掉。
@@ -123,6 +132,48 @@ def clean_email(value: object) -> str:
     return text
 
 
+def sanitize_subject(value: object) -> tuple[str, tuple[str, ...]]:
+    """主题**发送前**的兜底清洗：把那几个不能进 argv 的字符换掉。
+
+    为什么要它（2026-10-16 的真事）：两级写信里**只有旧路**洗过主题
+    （`daily_report.parse_report_output` 那个 `re.sub`），而线上走的是两级那条路——
+    主题从 `letter_writer.parse_letter` / `parse_subject` 出来**一个字都没洗**
+    就进了 `clean_subject`。23:01 那封的主题是『上次没寄出去的信，和那句"你别掺和"』，
+    `mail_state.json` 的 `sends` 里于是躺了三条 `bad_subject`。
+
+    **清洗必须发生在 `clean_subject` 那道判之前**，否则白搭——那是唯一拒发的地方。
+    这里**换而不删**（尽量保住原意，也保住字数）：
+
+    - 引号按出现顺序配成全角引号：`"a"` → `“a”`（单引号同理 `'a'` → `‘a’`）；
+    - 其余那几个（`` ` `` `%` `&` `|` `<` `>` `^` `!` `(` `)` `$`）换成**全角**版本：
+      字符还在、意思还在，但它不再是 cmd.exe 的元字符（那才是这条规则的由来）。
+
+    返回 `(清洗后的主题, 换过哪些字符)`；第二个值给日志与状态用——**"标题被改过"要看得见**。
+    清洗后为空（原文只有空白/控制字符）时返回空串，**由调用方给兜底标题**：
+    编标题是内容的事，这里只管字符。**幂等**：洗过的再洗一次还是它、且报"没换"。
+    """
+
+    text = _CONTROL.sub("", str(value or "")).replace("\r", " ").replace("\n", " ").strip()
+    counts = {quote: 0 for quote in _SUBJECT_QUOTES}
+    seen: set[str] = set()
+    changed: list[str] = []
+    out: list[str] = []
+    for char in text:
+        if char in _SUBJECT_QUOTES:
+            pair = _SUBJECT_QUOTES[char]
+            out.append(pair[counts[char] % 2])
+            counts[char] += 1
+        elif char in _SUBJECT_FULLWIDTH:
+            out.append(_SUBJECT_FULLWIDTH[char])
+        else:
+            out.append(char)
+            continue
+        if char not in seen:
+            seen.add(char)
+            changed.append(char)
+    return "".join(out).strip(), tuple(changed)
+
+
 def clean_subject(value: object) -> str:
     text = _CONTROL.sub("", str(value or "")).replace("\r", " ").replace("\n", " ").strip()
     if not text:
@@ -132,6 +183,8 @@ def clean_subject(value: object) -> str:
     if _ARGV_FORBIDDEN & set(text):
         # 主题是**唯一会进 argv 的自由文本**。含引号/百分号这类字符时宁可拒发，
         # 也不去"转义一下试试"——Windows 的引号转义规则不是一个函数能说清的。
+        # 发送前那道兜底清洗是 `sanitize_subject`：它换掉这些字符，
+        # 于是正常路径根本走不到这条拒发上（2026-10-16 加，起因见那个函数）。
         raise MailError("主题里有不能用的符号（引号、百分号、&这类）", kind="bad_subject")
     return text
 

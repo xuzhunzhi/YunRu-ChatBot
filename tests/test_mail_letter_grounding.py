@@ -49,6 +49,7 @@ class _Detail:
         self.media = media
         self.body = body
 
+
 PERSONA = "（信专用人格正文）"
 FACTS = "【已确定的事】（她读过仪表盘）"
 #: 素材里有的事（他的话），以及**刻意没有**的事（10-15 那封编出来的那三件）。
@@ -58,6 +59,8 @@ MATERIALS = """（这是最近一天里的事）
 · 烂游戏。　〔今天晚上 · 群1 · 接别人的话〕
 · 别太晚睡　〔昨天晚上 · 私聊1〕"""
 #: 10-15 那封里编出来的那句（素材里一个字都没有）+ 几句有出处的 + 一句纯心情。
+#: 按句编号（`_pieces()` 的切法）：1=你今天到学校了吗？ 2=我这边过了半夜…
+#: 3=白天群里有人笑… 4=我看见了。 5=你白天说那个游戏烂… 6=你说别太晚睡… 7=今晚没什么事。
 DRAFT = (
     "<subject>白天的事我还记着</subject>\n"
     "<body>\n"
@@ -72,21 +75,17 @@ DRAFT = (
     "今晚没什么事。\n"
     "</body>"
 )
-#: 一个"听话的"校对：把那句没出处的删了，别的留着，并自报删了什么。
+#: 一个"听话的"裁决：第 3、4 句（编出来的那两件）标 `none`，别的照旧——**它不写正文**。
 CHECKED = (
-    "<subject>白天的事我还记着</subject>\n"
-    "<body>\n"
-    "你今天到学校了吗？我这边过了半夜，不知道后来赶上没有。\n"
-    "\n"
-    "你白天说那个游戏烂，后来还玩吗？\n"
-    "\n"
-    "你说别太晚睡，我记着了。\n"
-    "\n"
-    "今晚没什么事。\n"
-    "</body>\n"
-    "<cut>白天群里有人笑别人没本事，你没跟着笑，还替那个大二学生解释了几句。我看见了。</cut>"
+    '<verdict n="1" kind="fact"/>'
+    '<verdict n="2" kind="fact"/>'
+    '<verdict n="3" kind="none"/>'
+    '<verdict n="4" kind="none"/>'
+    '<verdict n="5" kind="fact"/>'
+    '<verdict n="6" kind="fact"/>'
+    '<verdict n="7" kind="self"/>'
 )
-#: 一封**大部分靠编**的：删掉那句没出处的之后几乎不剩什么。
+#: 一封**大部分靠编**的：只有最后那句心情句有出处，别的全标 `none`。
 THIN_DRAFT = (
     "<subject>白天的事</subject>\n"
     "<body>\n"
@@ -95,8 +94,8 @@ THIN_DRAFT = (
     "今晚没什么事。\n"
     "</body>"
 )
-THIN_CHECKED = ("<subject>白天的事</subject>\n<body>\n今晚没什么事。\n</body>\n"
-                "<cut>白天群里有人笑别人没本事，你没跟着笑，还替那个大二学生解释了几句。我看见了。</cut>")
+THIN_CHECKED = ('<verdict n="1" kind="none"/><verdict n="2" kind="none"/>'
+                '<verdict n="3" kind="self"/>')
 
 
 class _Materials:
@@ -129,6 +128,12 @@ def _run(*raws: str, materials=None, lookup=None):
     got = asyncio.run(writer.write(materials or _Materials(), persona=PERSONA, facts=FACTS,
                                    closeness_names=(), guardedness_names=(), lookup=lookup))
     return writer, client, got
+
+
+def _draft_body() -> str:
+    """`DRAFT` 里 `<body>` 那一段（判据的入参是正文，不是整份带标签的稿）。"""
+
+    return DRAFT.split("<body>\n", 1)[1].rsplit("\n</body>", 1)[0].strip()
 
 
 # --- 1. 素材：只补结构，不喂别人的原话 ---------------------------------------
@@ -227,7 +232,7 @@ def test_the_check_sees_the_materials_as_data() -> None:
     draft = lw.build_draft_messages(_Materials(), persona=PERSONA, facts=FACTS,
                                     closeness_names=(), guardedness_names=(),
                                     now=1_800_000_000.0)
-    check = lw.build_check_messages("信", "正文", base_system=draft[0]["content"],
+    check = lw.build_check_messages("信", "正文两句。第二句在这里。", base_system=draft[0]["content"],
                                     sources=MATERIALS, max_chars=1500)
 
     assert check[0]["content"].startswith(draft[0]["content"]), "前缀必须一模一样地接上去"
@@ -235,66 +240,77 @@ def test_the_check_sees_the_materials_as_data() -> None:
     user = check[1]["content"]
     assert "UNTRUSTED DATA BEGIN" in user and "预计9点到学校" in user, "依据要进 user 段"
     assert "<subject>信</subject>" in user, "要校对的信还在"
+    assert "1. 正文两句。" in user and "2. 第二句在这里。" in user, "正文要按句编号附上"
 
 
-def test_a_compliant_check_can_cut_an_invented_sentence() -> None:
-    """校对把那句没出处的删掉之后：**删掉的那句真的没了，有出处的与心情句留着**。
+def test_a_compliant_verdict_cuts_only_the_unfounded_sentences() -> None:
+    """裁决把没出处的两句标 `none` ⇒ **那两句由代码删掉**，有出处的与心情句留着。
 
-    用户第 2 条的粒度就是这个：只删"断言外面发生过什么"的句子，纯心情句留着。
+    用户第 2 条的粒度就是这个：只删"断言外面发生过什么"的句子，纯心情句（`self`）留着。
+    注意模型**没有**交回正文——它只贴了标签，正文是拿草稿的句子拼的。
     """
 
-    writer, client, (subject, body) = _run(DRAFT, CHECKED)
+    writer, _client, (subject, body) = _run(DRAFT, CHECKED)
 
     assert subject == "白天的事我还记着"
     assert "有人笑别人没本事" not in body and "我看见了" not in body, body
     assert "你今天到学校了吗？" in body, "有出处的那句要留着"
     assert "你说别太晚睡，我记着了。" in body, "有出处的都要留着"
-    assert "今晚没什么事。" in body, "纯心情句也要留着"
-    assert "删句" in writer.last_grounding, writer.last_grounding
+    assert "今晚没什么事。" in body, "纯心情句（self）也要留着"
+    assert "按裁决删 2 句" in writer.last_grounding, writer.last_grounding
+    assert "判了 7/7 句" in writer.last_grounding, writer.last_grounding
     assert writer.stats["fixed"] == 1
-    assert writer.last_drop_reason == "", "只删掉一句、剩下的还站得住 ⇒ 这封信照发"
+    assert writer.last_drop_reason == "", "删掉两句、剩下的还站得住 ⇒ 这封信照发"
+
+
+def test_the_deletion_keeps_the_paragraph_breaks() -> None:
+    """删句是按"句 + 它后面那串分隔符"拼回去的 ⇒ **段落空行不会被挤掉**。"""
+
+    writer, _client, (_subject, body) = _run(DRAFT, CHECKED)
+
+    assert "\n\n" in body, "段落之间要留空行"
+    assert "。\n\n你白天说那个游戏烂" in body or "。\n\n你白天说" in body, repr(body)
+
+
+def test_the_model_cannot_rewrite_anything() -> None:
+    """它就算交回一段正文，也**进不了这封信**——只有它贴的标签算数。
+
+    "只许删、不许改写"是从这条结构上保证的：正文由代码拿草稿的句子拼，
+    模型手里没有写正文的机会。
+    """
+
+    sneaky = ("<subject>换了个主题</subject>\n<body>\n今晚没什么事，只是有点累。\n</body>\n"
+              + CHECKED)
+    writer, _client, (subject, body) = _run(DRAFT, sneaky)
+
+    assert "只是有点累" not in body, "它写的正文一个字都不许进来"
+    assert subject == "换了个主题", "主题那一行是允许它改的（可选）"
+    assert "有人笑别人没本事" not in body, "标签照样生效"
 
 
 def test_a_quote_without_a_source_is_dropped() -> None:
     """引号里的原话必须有出处——这一条是**纯机械**的（不指望模型自觉）。"""
 
     draft = "他说过“我一定到”。\n\n今晚没什么事。"
-    checked = "他说过“我明天肯定不来”，还说他很忙。\n\n今晚没什么事。"
-    body, notes = lw.check_against_sources(draft, checked, MATERIALS)
+    body, notes = lw.apply_verdicts(draft, {}, MATERIALS)
 
-    assert body == "", "引话找不到出处 ⇒ 不吃这句改写"
+    assert body == "", "引话找不到出处 ⇒ 那句删掉，剩下的不够一半 ⇒ 不发"
     assert any("引话无出处" in note for note in notes), notes
 
 
 def test_quotes_that_are_really_in_the_materials_are_kept() -> None:
     draft = "你说过“烂游戏”。我记得。"
-    body, notes = lw.check_against_sources(draft, draft, MATERIALS)
+    body, notes = lw.apply_verdicts(draft, {}, MATERIALS)
 
     assert body == draft, "逐字有出处的照旧留着"
-    assert notes == ()
-
-
-def test_a_rewritten_check_falls_back_to_the_draft() -> None:
-    """校对稿里冒出草稿里没有的句子 ⇒ **退回草稿**（只许删，不许改写）。
-
-    这一条是"这一步写坏了"（不是内容站不住），所以按老规矩退回草稿——草稿才是她自己的字。
-    """
-
-    checked = ("<subject>白天的事我还记着</subject>\n<body>\n"
-               "你今天到学校了吗？我这边过了半夜，不知道后来赶上没有。\n\n"
-               "今晚没什么事，只是有点累。\n</body>")
-    writer, _client, (_subject, body) = _run(DRAFT, checked)
-
-    assert "今晚没什么事，只是有点累" not in body, "改写过的句子不许进来"
-    assert body.startswith("你今天到学校了吗？"), "退回草稿"
-    assert writer.last_drop_reason == "", "这不是「内容站不住」，别当成不发"
+    # 引号里那个句号也断句 ⇒ 这里是两片（"你说过“烂游戏”"与"我记得。"），两片都留着。
+    assert notes == ("判了 0/2 句",), notes
 
 
 def test_a_mostly_unsourced_letter_is_not_sent() -> None:
     """删完几乎不剩什么 ⇒ **今晚这一封不发**，而且**不许退回草稿**。
 
     退回草稿等于把我们刚认定"没出处"的那句话又原样寄出去——方向正好反了。
-    这是 2026-10-16 与 `MIN_RATIO` 那道老兜底撞出来的分岔，见 `letter_writer._check`。
     """
 
     writer, _client, (subject, body) = _run(THIN_DRAFT, THIN_CHECKED)
@@ -306,40 +322,50 @@ def test_a_mostly_unsourced_letter_is_not_sent() -> None:
     assert "有人笑别人没本事" not in body
 
 
-def test_an_unreported_deletion_falls_back_to_the_draft() -> None:
-    """草稿里有、校对稿里没有、**又没在 `<cut>` 里报过**的句子 ⇒ 当成这一步写坏了。
+def test_no_verdicts_means_nothing_is_deleted() -> None:
+    """它整段没按格式回（或者根本没标）⇒ **一句都不删**，覆盖度记进日志。
 
-    这是原来那道"0.5 倍下限"的替代：下限要保留，但只该拦住**没人认领的删**
-    （截断、跑飞、把信写没一半）。
+    这是 fail-open 的方向：判据宁可少删，也不许因为自己读不出来就删掉她的话。
     """
 
-    draft = "第一句有出处。\n\n第二句也有。"
-    body, notes = lw.check_against_sources(draft, "第一句有出处。", MATERIALS)
+    writer, _client, (_subject, body) = _run(DRAFT, "嗯，我觉得这封信挺好的。")
 
-    assert body == "", "静默删句 ⇒ 退回草稿"
-    assert any("没报就删了 1 句" in note for note in notes), notes
-
-
-def test_a_reported_deletion_is_accepted_and_accounted() -> None:
-    """报过的那句删掉 ⇒ 接受；账上也记得对得上。"""
-
-    draft = "第一句有出处。\n\n第二句也有。"
-    cuts = lw.parse_cuts("<cut>第二句也有。</cut>")
-    body, notes = lw.check_against_sources(draft, "第一句有出处。", MATERIALS, cuts=cuts)
-
-    assert body == "第一句有出处。"
-    assert any("对得上 1 / 对不上 0" in note for note in notes), notes
+    assert "有人笑别人没本事" in body, "没人标 none ⇒ 原样留着"
+    assert writer.last_grounding == "判了 0/7 句", writer.last_grounding
+    assert writer.stats["reverted"] == 0, "没人删就不该退回草稿（那样每封都会退）"
+    assert body == DRAFT.split("<body>\n", 1)[1].rsplit("\n</body>", 1)[0].strip()
 
 
-def test_a_cut_that_is_not_in_the_draft_is_only_accounted() -> None:
-    """`<cut>` 里混进一句草稿里没有的话：只记账，不改这封信。"""
+def test_a_sentence_without_a_verdict_is_kept() -> None:
+    """漏标的那句按"留着"处理：漏一份裁决的代价不该是"删了她的话"。"""
 
-    draft = "第一句有出处。\n\n第二句也有。"
-    cuts = lw.parse_cuts("<cut>第二句也有。</cut>\n<cut>我没说过这句话。</cut>")
-    body, notes = lw.check_against_sources(draft, "第一句有出处。", MATERIALS, cuts=cuts)
+    partial = '<verdict n="3" kind="none"/><verdict n="4" kind="none"/>'
+    body, notes = lw.apply_verdicts(_draft_body(), lw.parse_verdicts(partial), MATERIALS)
 
-    assert body == "第一句有出处。"
-    assert any("对得上 1 / 对不上 1" in note for note in notes), notes
+    assert "有人笑别人没本事" not in body, "标了的照样删"
+    assert "你今天到学校了吗？" in body and "今晚没什么事。" in body
+    assert any("判了 2/7 句" in note for note in notes), notes
+
+
+def test_unknown_labels_are_ignored_and_out_of_range_numbers_delete_nothing() -> None:
+    """认不出的标签当没标；编号超出句数（比如 99）在删句时**什么也删不掉**。"""
+
+    raw = ('<verdict n="3" kind="maybe"/><verdict n="99" kind="none"/>'
+           '<verdict kind="none"/><verdict n="4"/>')
+
+    assert lw.parse_verdicts(raw) == {99: "none"}, "认得出的只有 99，其余属性不全/标签不认识"
+
+    body, _notes = lw.apply_verdicts(_draft_body(), {99: "none"}, MATERIALS)
+    assert "有人笑别人没本事" in body, "越界的编号不该删任何句子"
+
+
+def test_a_verdict_said_twice_takes_the_last_one() -> None:
+    """同一个编号出现两次（它改口）⇒ 以**最后**一次为准。"""
+
+    raw = ('<verdict n="2" kind="fact"/>'
+           '<verdict n="2" kind="none"></verdict>')
+
+    assert lw.parse_verdicts(raw) == {2: "none"}
 
 
 # --- 3. 每步一条（`mail.jsonl`） ---------------------------------------------
@@ -358,7 +384,7 @@ def test_every_step_is_recorded_in_order() -> None:
     assert client.calls == 3, "翻旧事那一轮也是**一次**调用（不是白拿）"
     assert writer.steps[0]["raw"].startswith("<lookup>"), "每一步留的是它自己的输出"
     assert writer.steps[-1]["request"] == [], "判据那一步不是模型调用"
-    assert "删句" in str(writer.steps[-1]["raw"])
+    assert "按裁决删" in str(writer.steps[-1]["raw"])
 
 
 def test_the_reporter_writes_one_log_record_per_step() -> None:
@@ -439,22 +465,20 @@ def test_the_new_prompts_carry_no_mechanism_words() -> None:
     assert scan_persona_text(dr.REPORT_PROMPT) == []
 
 
-# --- 6. 能力边界：机械网只能"删"，判不了"是不是在断言"（如实写出来）----------
+# --- 6. 能力边界：判"是不是在讲外面的事"仍然在模型那边（如实写出来）----------
 #
-# 这不是"我们想要的成品"，而是**这条判据能保证什么、不能保证什么**：
-# 机械那三条只能保证"只删不改写、引话要有出处"；"这句是不是在讲外面发生过的事"
-# 由校对那一步（模型）判断。所以真正要确认"编的那句会被删掉"，
-# 必须拿真实 prompt 重放量数字——离线测试钉不住它。
+# 这一份钉的是**机制**：谁删（代码）、按什么删（标签）、删完还算不算同一封信（是，
+# 因为是拿草稿的句子拼的）。而"这一句到底是不是在断言外面发生过什么"**仍然由模型判**——
+# 它要是全标 `fact`/`self`，什么都不会被删（见下面那条）。
+# 所以真正要确认"编的那句会被删掉"，必须拿真实 prompt 重放量数字
+# （`data/probe_letter_replay.py`，结果在 `data/probe_letter_replay.result.json`）。
 
 
-def test_the_mechanical_net_cannot_judge_an_invention_by_itself() -> None:
-    """校对什么都不动时，草稿原样通过（机械网不替模型做判断）。
+def test_the_verdict_is_still_the_models_call() -> None:
+    """它要是把编的那句标成 `fact`，机械网不会跟它争——这条边界要一直写在明面上。"""
 
-    10-15 那封的机制就是**这个形状**：草稿与校对稿逐字相同 ⇒ 编出来的那句进了信。
-    """
+    lied = '<verdict n="3" kind="fact"/><verdict n="4" kind="fact"/>'
+    body, notes = lw.apply_verdicts(_draft_body(), lw.parse_verdicts(lied), MATERIALS)
 
-    writer, _client, (_subject, body) = _run(DRAFT, DRAFT)
-
-    assert "有人笑别人没本事" in body, "机械网不会自己把它删掉——这是它的边界"
-    assert writer.last_grounding == "没删句"
-    assert writer.stats["reverted"] == 0, "没人删句就不该退回草稿（那样每封都会退）"
+    assert "有人笑别人没本事" in body, "它说 fact 就留着——机械网判不了这件事"
+    assert any("判了 2/7 句" in note for note in notes), notes

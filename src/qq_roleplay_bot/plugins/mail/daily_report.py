@@ -69,6 +69,9 @@ REPORT_PROMPT = """你要给一直照看你的人写封信。他不在你眼前�
   你只说你记得发生过什么、你有什么想法和感受，不要复述别人怎么说的。
 - 别谈你自己是怎么运作的，也别提"数据""档案""记录""库"这类词——
   就当那些事本来就在你脑子里。你是云茹，不是别的什么。
+- **主题那一行别用引号**（`"` `'`），也别用 `%` `&` `|` `<` `>` `!` `(` `)` `$` 这些符号：
+  带上去寄不出去，会被换成别的字符再发（2026-10-16：那封『…和那句"你别掺和"』
+  就是这么连着三次没寄成的）。想引谁的话就写成"他说……"，不用引号。
 - 落款就写你自己的名字。
 
 写的时候留意这几件事（都是"别像机器写的"那一条）：
@@ -342,10 +345,9 @@ def parse_report_output(raw: str, *, max_chars: int = 1500) -> ReportDraft:
     body = body_match[-1].group(1).strip() if body_match else ""
     if not subject or not body:
         return ReportDraft()
-    # 主题不能带那些会在 Windows 上被 cmd 二次解析的符号（见 mail_client.clean_subject）。
-    subject = re.sub(r'["\'`%&|<>^!()$]', "", subject).strip()
-    if not subject:
-        subject = "给你的信"
+    # 主题不能带那些会在 Windows 上被 cmd 二次解析的符号——**走同一个兜底**
+    # （`_safe_subject` → `mail_client.sanitize_subject`），不再自己写一套正则。
+    subject = _safe_subject(subject)
     return ReportDraft(subject=subject[:100], body=body[:max_chars])
 
 
@@ -366,6 +368,36 @@ def next_due_at(now: float, *, hour: int, minute: int) -> float:
 
     target = MailState.today_target(now, hour=hour, minute=minute)
     return target if target > now else target + 86400
+
+
+#: 清洗后一个可用字符都不剩时用的标题。**两条路共用这一个常量**（旧路原来自己写死
+#: 一个"给你的信"，两级那条路没有兜底——2026-10-16 合成一处）。
+DEFAULT_SUBJECT = "给你的信"
+
+
+def _safe_subject(subject: object) -> str:
+    """发送前的主题兜底：不能进 argv 的字符换掉；换完一个字符都不剩就用兜底标题。
+
+    2026-10-16 修的那件事：两级那条路**从来没洗过**主题（只有旧路洗过），
+    23:01 那封的主题是『上次没寄出去的信，和那句"你别掺和"』，
+    `mail_state.json` 的 `sends` 里于是连着三条 `bad_subject`。
+
+    清洗放在 `_stash_pending` 与 `_send_draft` 这两处——**都在
+    `mail_client.clean_subject` 那道判之前**（那才是唯一拒发的地方），而且
+    `sanitize_subject` 是幂等的：第二次调用一个字都不换、也不会再打一行日志。
+    """
+
+    from .mail_client import sanitize_subject
+
+    cleaned, changed = sanitize_subject(subject)
+    if changed:
+        # 这一行就是"标题被改过"的观测点：改了哪几个字符、改前改后多长。
+        logger.info("mail_subject_sanitized chars=%s before_len=%s after_len=%s",
+                    "".join(changed), len(str(subject or "")), len(cleaned))
+    if not cleaned:
+        logger.warning("mail_subject_empty_after_sanitize chars=%s", "".join(changed))
+        return DEFAULT_SUBJECT
+    return cleaned
 
 
 class _EmptySnapshot:
@@ -843,12 +875,17 @@ class DailyReporter:
 
         顺序是故意的：存下来再发，那么"发信那一刻断电/发信失败"都不会把信弄丢——
         下一次起来重发这一封就行。发成了 `mail_state.record(ok=True)` 会顺手清掉它。
+
+        2026-10-16：**存之前先把主题洗一遍**（`_safe_subject`）。存的是"要发的那一份"，
+        所以它必须与真正发出去的一致——重发那一路（`_resend_pending`）是**原样再发**，
+        存的要是没洗过的主题，那一封会照样撞 `bad_subject`。
         """
 
+        subject = _safe_subject(draft.subject)
         try:
             self.state_store.save_pending_report(
                 day=time.strftime("%Y-%m-%d", time.localtime(now)),
-                subject=draft.subject,
+                subject=subject,
                 body=draft.body,
                 now=now,
             )
@@ -911,7 +948,17 @@ class DailyReporter:
 
     async def _send_draft(self, draft: ReportDraft, *, now: float,
                           report) -> ReportDraft | None:
-        """把一封信寄出去并留档（两条写信路径共用）。"""
+        """把一封信寄出去并留档（两条写信路径共用）。
+
+        **主题在这里过最后一道**（2026-10-16）：这是两条路唯一的出口，也是
+        `mail_client.clean_subject` 之前最后能动手的地方——不在这里洗，
+        『…和那句"你别掺和"』那种主题就会连着三次 `bad_subject`（实测）。
+        洗完的主题同时用于发送、留档与"告诉她"：**发出去的那份与记下来的那份必须是同一个**。
+        """
+
+        subject = _safe_subject(draft.subject)
+        if subject != draft.subject:
+            draft = ReportDraft(subject=subject, body=draft.body)
         try:
             result = await self.mail.send(
                 to=self.recipient, subject=draft.subject, body=draft.body,
