@@ -178,6 +178,13 @@ class DayMaterials:
     # 收信人自己说过的话（从早到晚，最多 8 句）。**只有他一个人的**：信只寄给他，
     # 别人的话一句都不给（边界写在 `letter_context.py` 开头）。
     his_lines: tuple[str, ...] = ()
+    # 与 `his_lines` **同序等长**的结构（`letter_context.HisLine`：时间/会话/引用链/图）。
+    # 2026-10-16 用户四条决定之第 1 条：*"素材：先甲案 + 判据。只补结构（时间说人话、
+    # 会话标号、引用链、has_media），**不喂别人的原话**"*。起因是 10-15 那封真信
+    # （`data/logs/mail.jsonl` 里 `at=1792076506.413`）：8 条光秃秃的句子被读成了一个
+    # 素材里根本没有的场景（"有人笑别人没本事 / 你没跟着笑 / 还替那个大二学生解释了
+    # 几句"）。**缺省空元组 = 没有结构可给**，按老样子渲染裸句（老形状的替身对象走这条）。
+    his_details: tuple[object, ...] = ()
     # 上一封信的一句人话，例如"你上一次写信是 3 天前，主题是「没别的，说件事」。"。
     # 由 `collect_materials()` 渲染（只有它知道"现在"几点）：素材里要的是这句话，
     # 不是时间戳。没寄过信就是空串。
@@ -198,6 +205,50 @@ class DayMaterials:
             return "这段时间群里有人说话。"
         return "这段时间群里挺安静的。"
 
+    def _his_marks(self) -> list[str]:
+        """他的话每一条的**结构标记**：`今天下午 · 群1 · 接别人的话 · 带图或表情`。
+
+        三件事说清：
+
+        - **只有结构，没有别人的话**：时间她本来就知道；会话是"群1"这种本封信内稳定的
+          标号（不是群名、不是群号）；引用链只说"在接谁的话"，被引用那句的正文一个字
+          都不带（用户 2026-10-16 第 1 条：不喂别人的原话）。
+        - **对不上就一条都不给**：`his_details` 与 `his_lines` 长度不等时返回空列表，
+          宁可退化成裸句，也不能把"今天下午/接别人的话"钉到错的那句话上。
+        - **这个标记没有编号、也没有出处串**：素材是给她写信用的，不是给她填表的；
+          写进 `M3` 这类记号只会被她抄进信里。
+        """
+
+        details = self.his_details or ()
+        if len(details) != len(self.his_lines):
+            return []
+        marks: list[str] = []
+        for item in details:
+            parts: list[str] = []
+            for name in ("when", "session", "reply"):
+                value = str(getattr(item, name, "") or "").strip()
+                if value:
+                    parts.append(value)
+            if bool(getattr(item, "media", False)):
+                parts.append("带图或表情")
+            marks.append(" · ".join(parts))
+        return marks
+
+    def _his_lines_rendered(self) -> list[str]:
+        """他的话逐条渲染：**正文照旧在前，结构附在正文后面**。
+
+        标记接在正文后面、用一个全角空格隔开，是因为正文仍是这一行的开头：
+        `tests/test_mail_report_window.py` 钉着"原样给，不改字"那种断言，
+        而那样也真的更好读。结构一样都没有时，这一行与加结构之前**逐字相同**。
+        """
+
+        marks = self._his_marks()
+        rendered: list[str] = []
+        for index, line in enumerate(self.his_lines):
+            mark = marks[index] if index < len(marks) else ""
+            rendered.append(f"· {line}　〔{mark}〕" if mark else f"· {line}")
+        return rendered
+
     def as_data(self, closeness_names: tuple[str, ...], guardedness_names: tuple[str, ...]) -> str:
         """渲染成 DATA 段。用交谈视角写，不出现系统与机制的说法。
 
@@ -215,8 +266,10 @@ class DayMaterials:
         if self.his_lines:
             # 他本人的原话。这是素材里**唯一**一件真事（2026-10-13 之前一件都没有）。
             # 逐条给、不改一个字：她要不要接、接哪一句是她的事。
+            # 2026-10-16 起每条后面多一段**结构**（时间/会话/引用链/图），见
+            # `_his_lines_rendered()`：只补结构，不带别人的话。
             lines.append("他这段时间说过的话（从早到晚）：")
-            lines.extend(f"· {line}" for line in self.his_lines)
+            lines.extend(self._his_lines_rendered())
         if self.people:
             described = "；".join(
                 f"{qq}（亲近 {level(closeness_names, c)}，防备 {level(guardedness_names, g)}）"
@@ -384,6 +437,13 @@ def _letter_note_line(context, *, now: float | None) -> str:
 
     素材里写"你上一次写信是 3 天前，主题是「…」"而不是给一个时间：她要在信里
     自然地说出"隔了几天"，一个 epoch 数字帮不上忙，还会引她去念机器话。
+
+    **2026-10-16 修**：原来算的是 `(now - at) // 86400`（按秒数整除），于是
+    **跨了午夜但不满 24 小时**的两封信会被写成"今天"。实测那一封：上一封
+    `at=1791992478`、这一封 `at=1792076506`，差 84028 秒＝23.34 小时 ⇒ `days=0`
+    ⇒ 素材里写着"你上一次写信是今天"——那封信其实是**昨晚**发的。
+    现在按**日历日**算（今天/昨天/前天/N 天前），跨午夜就跨一天。
+    改这个的理由与 `letter_context._when_text()` 那条一样：时间要说人话。
     """
 
     try:
@@ -393,15 +453,31 @@ def _letter_note_line(context, *, now: float | None) -> str:
     if at <= 0.0:
         return ""
     subject = str(getattr(context, "last_letter_subject", "") or "").strip()
-    days = int((float(now or time.time()) - at) // 86400.0)
+    days = _calendar_days_between(at, float(now or time.time()))
     if days <= 0:
         when = "今天"
     elif days == 1:
         when = "昨天"
     else:
+        # 两天以上照旧写"N 天前"（`tests/test_mail_report_window.py` 钉着这一句的措辞，
+        # 而"2 天前"本来也比"前天"更不容易读错是哪一天）。
         when = f"{days} 天前"
     tail = f"，主题是「{subject}」" if subject else ""
     return f"你上一次写信是{when}{tail}。"
+
+
+def _calendar_days_between(earlier: float, later: float) -> int:
+    """两个墙上时间差**几个日历日**（按本地日期算，不按秒数除）。
+
+    跨午夜就算一天：23 小时前是"昨天"，25 小时前也是"昨天"，而 47 小时前是"前天"。
+    秒数除法给出的 0/1/1 与这里给出的 1/1/2，差的就是跨午夜那一段。
+    """
+
+    import datetime
+
+    first = datetime.datetime.fromtimestamp(float(earlier))
+    second = datetime.datetime.fromtimestamp(float(later))
+    return (second.date() - first.date()).days
 
 
 def collect_materials(
@@ -451,6 +527,7 @@ def collect_materials(
     people: tuple[tuple[str, int, int], ...] = ()
     changes: tuple[str, ...] = ()
     his_lines: tuple[str, ...] = ()
+    his_details: tuple[object, ...] = ()
     last_letter_note = ""
     try:
         his_context = getattr(report, "his_context", None)
@@ -466,11 +543,17 @@ def collect_materials(
             logger.exception("daily_report_letter_context_failed")
             context = None
         if context is not None:
+            raw_lines = tuple(getattr(context, "his_lines", ()) or ())
+            raw_details = tuple(getattr(context, "his_details", ()) or ())
             his_lines = tuple(
                 str(line).strip()
-                for line in getattr(context, "his_lines", ()) or ()
+                for line in raw_lines
                 if str(line).strip()
             )
+            # 结构只在**同序等长**时才收：钉错一句话比没有结构更糟（她会照着错的
+            # "今天下午/接别人的话"把归属再编一遍，那正是 10-15 那封的错）。
+            if len(raw_details) == len(raw_lines) == len(his_lines):
+                his_details = raw_details
             last_letter_note = _letter_note_line(context, now=now)
     try:
         reader = getattr(report, "memory_read", None)
@@ -520,6 +603,7 @@ def collect_materials(
         focus_switches=delta["focus_switches"],
         last_failure=last_failure,
         his_lines=his_lines,
+        his_details=his_details,
         last_letter_note=last_letter_note,
     )
 
@@ -678,11 +762,19 @@ class DailyReporter:
                 self._record(ok=False, detail=f"写信失败：{detail}")
                 return None
             if not body:
-                # 两个空串有两种意思：**她自己说不写**（不是故障：不发、记一句原因），
-                # 或者写失败了。以前这里要求必须交出一封信，"没什么想说的"只能硬凑一篇。
+                # 两个空串有三种意思（2026-10-16 起多了一种）：
+                #   ① **她自己说不写**（不是故障：不发、记一句原因）；
+                #   ② **判据把这封信的内容否了**（删完没剩下有出处的句子）——也不发，
+                #      但原因要写对：那不是她的意思，是这一封站不住（用户 10-16 第 1、2 条）；
+                #   ③ 写失败了。
+                # 以前这里要求必须交出一封信，"没什么想说的"只能硬凑一篇。
                 reason = str(getattr(self.writer, "last_skip", "") or "")
                 if reason:
                     self._record_skipped(f"她自己写的：{reason}")
+                    return None
+                dropped = str(getattr(self.writer, "last_drop_reason", "") or "")
+                if dropped:
+                    self._record_skipped(f"没出处、不发了：{dropped}")
                 else:
                     self._record(ok=False, detail="信没写成（输出解析不了）")
                 return None
@@ -779,14 +871,35 @@ class DailyReporter:
         return await self._send_draft(draft, now=now, report=report)
 
     def _log_letter(self, report, draft: ReportDraft) -> None:
-        """把两阶段的结果记进功能日志（feature=mail，与单 agent 路径同一条）。
+        """把这封信**每一步**记进功能日志（feature=mail，与单 agent 路径同一条）。
 
-        两次调用各记一条：草稿用 `trigger=daily_report_draft`，事实校对用
-        `trigger=daily_report_check`——事后要核对"校对到底改了哪句"，看这里就够。
+        2026-10-16 改（用户四条决定之第 2 条"每步一条 `mail.jsonl`"）：以前只留
+        **最终**草稿与校对两条，中间"她自己翻旧事"那几轮只在 `logger.info` 里——
+        一封最多 9 次调用的流水线，事后只能看到头尾，等于没法审。现在
+        `LetterWriter.steps` 每调一次模型就追加一条，`trigger` 说清是哪一步：
+
+        | trigger | 那一步 |
+        | --- | --- |
+        | `daily_report_draft` | 第一次起草（人设 + 规矩 + 事实 + 素材） |
+        | `daily_report_lookup1..N` | 她要求翻旧事之后的**每一次**续写 |
+        | `daily_report_lookup_stop` | 翻到上限之后那次"别再翻了，把信交出来" |
+        | `daily_report_check` | 事实校对（现在会拿到素材，见 `letter_writer`） |
+        | `daily_report_grounding` | **代码**侧那几条判据干了什么（删了哪句、为什么） |
+
+        最后一条不是模型调用：`raw` 放的是判据自己写的说明。**没有它，前面那些调用的
+        效果就没有观测量**——"有没有把编的那句删掉"只能靠翻正文看运气。
         """
 
         writer = self.writer
         try:
+            steps = list(getattr(writer, "steps", ()) or ())
+            if steps:
+                for step in steps:
+                    report.log_io("mail", step.get("request") or [], step.get("raw") or "",
+                                  session_id="report",
+                                  trigger=str(step.get("trigger") or "daily_report_step"))
+                return
+            # 老形状（writer 没有 `steps`，例如测试里的替身）：按改动前那样记两条。
             if getattr(writer, "last_draft_request", None):
                 report.log_io("mail", writer.last_draft_request, writer.last_draft_raw,
                               session_id="report", trigger="daily_report_draft")

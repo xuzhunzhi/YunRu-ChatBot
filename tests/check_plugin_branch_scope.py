@@ -115,6 +115,15 @@ WHITELIST = {
         "按次递进来、旧事她自己翻（`<lookup>`，翻到上限就收手）、`<skip>` 就是今晚不写。"
         "整份 import `plugins.mail.letter_writer` / `plugins.mail.daily_report`，还直接读"
         "插件包源码文本核对“不再自己找人格”——本体侧没有这些模块，搬过去只会收集失败。",
+    "tests/test_mail_letter_grounding.py":
+        "写信那条路的**判据**那一半（2026-10-16 用户：「材料里没有的不许写」）："
+        "`letter_writer.check_against_sources`（只许删不许改写、引话要有出处、静默删句退回"
+        "草稿、删得太多就不发这一封）、每步一条 `mail.jsonl`、以及素材里那几样结构怎么"
+        "渲染（`daily_report._his_marks` / `_his_lines_rendered`）。整份 import "
+        "`plugins.mail.letter_writer` / `plugins.mail.daily_report`，还直接调 "
+        "`DailyReporter._log_letter`——本体侧没有 `plugins/mail/`，在那边根本收集不起来。"
+        "（**结构从哪来**那一半是核心的 `letter_context.py`，不在这一份里："
+        "`data/letter_context_structure.patch` 落到本体线上，这一份只钉插件侧的接口。）",
     "tests/test_mail_report_window.py":
         "日报那条接缝（`ReportSeams.facts` / `window_facts`：「这一窗里群里发生了什么」）"
         "从核心递到插件、再落进日报正文的过程。第 37-39 行 import `plugins` / "
