@@ -1,13 +1,18 @@
 """判定 agent 的离线覆盖。
 
-它回答两个问题：云茹此刻该不该开口、眼下这段谈话是从哪一条开始的。
-第二个答案是一个**编号**（输出很短，几乎不花钱），"回复段带哪一段"由它决定——
-这样回复段与判定段的前缀都是"话题内只追加"。
+它只回答一个问题：云茹此刻该不该开口。
+
+**这里原来还有第二个问题**——"眼下这段谈话是从哪一条开始的"（`<topic_start>`）。
+2026-10-15 删掉：用户原话 *"我还要说几次，不切话题"*，给模型的历史一刀都不切，
+回复段与判定段都直接读活窗口（`ConversationState.live_history()`），判定回报的
+起点没有任何消费者。所以这个文件的期望值跟着收窄，**不是因为测试难写**，
+是因为被钉的那条口径被用户推翻了。
 
 回落到 NO_REPLY 的路径要测死：判定坏了应当表现为"不出声"，
 而不是让回复段在缺少语境时硬说一句。
 """
 from qq_roleplay_bot.dialogue_judge import (
+    JUDGE_ROUTING_PROMPT,
     JUDGE_SYSTEM_PROMPT,
     build_judge_messages,
     parse_judge_output,
@@ -136,19 +141,22 @@ def test_judge_gates_the_knowledge_base() -> None:
     assert "只是在议论她本人" in JUDGE_SYSTEM_PROMPT or "议论她本人" in JUDGE_SYSTEM_PROMPT
 
 
-def test_judge_outputs_route_topic_and_topic_start() -> None:
-    """判定输出必须很小，但要多一个话题起点编号。
+def test_judge_outputs_route_and_topic() -> None:
+    """判定输出必须很小：只要一个结论 + 一个话题标签。
 
-    让它把对话吐出来等于花"输出 token"（贵得多）买本地已有的东西；
-    而"这段谈话从哪条开始"只是一个数字，输出代价可忽略，换来的是
-    回复段与判定段都能按话题只追加。
+    让它把对话吐出来等于花"输出 token"（贵得多）买本地已有的东西。
+    **这里原来还断言 `<topic_start>` 在 prompt 里**（判定每轮回报话题起点）。
+    2026-10-15 删掉，依据是用户原话 *"我还要说几次，不切话题"*：给模型的历史
+    一刀都不切，起点没有消费者了。下面是**反向断言**——那个提问一旦回来，
+    就说明有人又给"按话题裁历史"接了入口。
     """
 
     assert "<from>" not in JUDGE_SYSTEM_PROMPT
     assert "<her_recent>" not in JUDGE_SYSTEM_PROMPT
     assert "<context>" not in JUDGE_SYSTEM_PROMPT
     assert "<route>" in JUDGE_SYSTEM_PROMPT
-    assert "<topic_start>" in JUDGE_SYSTEM_PROMPT
+    assert "<topic_start>" not in JUDGE_SYSTEM_PROMPT, "话题锚 2026-10-15 停用，别再问起点"
+    assert "<topic_start>" not in JUDGE_ROUTING_PROMPT, "judge' 同一口径"
 
 
 # --- 请求构造 ---------------------------------------------------------------
@@ -393,41 +401,26 @@ def test_describe_is_log_friendly() -> None:
     assert "REPLY" in described and "甲" in described
 
 
-# --- 话题起点：解析与校验 ---------------------------------------------------
+# --- 话题起点（2026-10-15 停用） --------------------------------------------
+#
+# 这里原有四条用例：`topic_start` 在可见范围内被解析、越界时回落 None、
+# 缺省/垃圾值回落 None、NO_REPLY 也照样带起点。**四条一起删掉**，依据是用户
+# 2026-10-15 的原话 *"我还要说几次，不切话题"*：判定不再回报起点，
+# `JudgeVerdict` 里没有这个字段，`known_seqs` / `_parse_seq` 也一并删了。
+# 这不是"改期望值"，是**被钉的那条口径被用户推翻了**。
+#
+# 留下一条反向断言：模型就算学舌吐出 `<topic_start>`，它也不该进任何地方
+# （解析器不认识它，判决里只该有 route 与 topic）。
 
 
-def test_topic_start_is_parsed_when_visible() -> None:
-    verdict = parse_judge_output(
-        "<route>REPLY</route><topic>甲</topic><topic_start>12</topic_start>",
-        known_seqs=frozenset({10, 11, 12}),
-    )
-    assert verdict.topic_start == 12
-
-
-def test_topic_start_is_rejected_when_out_of_view() -> None:
-    """模型乱填一个看不见的编号时，必须回落到 None（调用方保留原起点）。"""
-
-    verdict = parse_judge_output(
-        "<route>REPLY</route><topic_start>999</topic_start>",
-        known_seqs=frozenset({10, 11, 12}),
-    )
-    assert verdict.topic_start is None
-
-
-def test_topic_start_missing_or_garbage_is_none() -> None:
-    for raw in ("<route>REPLY</route>", "<route>REPLY</route><topic_start></topic_start>",
-                "<route>REPLY</route><topic_start>稍等</topic_start>",
-                "<route>REPLY</route><topic_start>-3</topic_start>"):
-        assert parse_judge_output(raw, known_seqs=frozenset({1, 2})).topic_start is None, raw
-
-
-def test_no_reply_still_carries_the_topic_start() -> None:
-    """不接话时也要给起点：话题边界与"接不接"是两件事。"""
+def test_a_stale_topic_start_tag_from_the_model_is_ignored() -> None:
+    """模型学舌吐出 `<topic_start>` 不再有任何效果（话题锚 2026-10-15 停用）。"""
 
     verdict = parse_judge_output(
-        "<route>NO_REPLY</route><topic_start>7</topic_start>",
-        known_seqs=frozenset({7, 8}),
+        "<route>REPLY</route><topic>甲</topic><topic_start>12</topic_start>"
     )
-    assert verdict.should_reply is False
-    assert verdict.topic_start == 7
+    assert verdict.should_reply is True
+    assert verdict.topic == "甲"
+    assert not hasattr(verdict, "topic_start"), "字段本身必须已经删掉"
+    assert "start=" not in verdict.describe(), "日志里也不许再印起点"
 

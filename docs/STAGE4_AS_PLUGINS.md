@@ -90,8 +90,19 @@ def build_background_plugins(engine)      # 只从 registry.backgrounds 里拿�
 ## 四、验收判据（硬，缺一不可）
 
 1. **Stage 3 行为一行都不回退**：`stage3-core-fixes` 的 23 个提交全部在祖先里；
-   今晚那批（`alias_also` / `ALIAS_ALSO_LIMIT` / `card_from_sender` /
-   `drop_summary_if_stale`）在新基底的 `src/` 里**存在且有测试**。
+   今晚那批（`alias_also` / `ALIAS_ALSO_LIMIT` / `card_from_sender`）在新基底的
+   `src/` 里**存在且有测试**。
+   > **2026-10-15 更正——这条判据里原来还有第四个名字 `drop_summary_if_stale`，
+   > 方向已经反了**：它当时要求"在 `src` 里**存在且有测试**"，而现在
+   > `ConversationState.drop_summary_if_stale()` **已经被删掉**（用户 2026-10-15 原话
+   > *"我还要说几次，不切话题"*：判定不再回报话题起点，那条"起点跑到 `summary_through`
+   > 之后就把摘要丢掉"的判据无从计算，函数与调用点一起删）。
+   > 所以现在的判据是**反向**的：它**必须不在** `src/` 里——
+   > `tests/test_topic_window.py` 的
+   > `test_the_removed_topic_anchor_api_stays_removed` 逐个钉着
+   > `topic_history` / `advance_topic_start` / `drop_summary_if_stale` 三个名字
+   > **不许回来**（回来就等于历史又多了一个裁切入口）。
+   > 前三个名字照旧"存在且有测试"；`drop_summary_if_stale` 这一项按上面的反向判据读。
 2. **插件零改动**：`git diff stage4-plugins -- src/qq_roleplay_bot/plugins/` 为空。
 3. **模块摘除判据**：`tests/check_module_removal.py` 退出码 0
    （"删掉插件，核心照样 `build_engine`"）——这条是"插件没拴住本体"的机器证明。

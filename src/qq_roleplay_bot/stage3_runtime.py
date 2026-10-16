@@ -95,17 +95,41 @@ class ConversationState:
     summary: str = ""
     # 摘要覆盖到哪个 seq（含）。None 表示还没压缩过。
     summary_through: int | None = None
-    # 当前话题的起点 seq（含）。回复段与判定段都只带"起点之后"的消息，
-    # 于是话题内每一次请求都是**只追加**的。压缩后重置为新窗口的第一条；
-    # 判定每轮可以把它往前推（话题换了），但**只许前进，不许后退**。
-    topic_start_seq: int | None = None
-    #: "历史窗口下限"那次**一次性迁移**的标记（2026-10-14 的老状态遗留）。
-    #:
-    #: `from_state` 只在标记为假、且载荷里的锚点**比最旧一条还晚**（`> seq_range()[0]`）
-    #: 时把它拉到 `seq_range()[0]`，然后置真；`as_state` 把它作为 `anchor_floor_migrated`
-    #: 落盘，于是**迁过一次就再也不会动**——"只许前进"照旧是常态。
-    #: 锚点本来就落在载荷窗口内的状态永远走不到这一步，所以**一直**是假。
-    anchor_floor_migrated: bool = False
+    # **这里原来有一个 `topic_start_seq`（话题起点）与一个 `anchor_floor_migrated`
+    # （锚点下限迁移标记），2026-10-15 一起删掉了**——用户当天的口径是
+    # *"我还要说几次，不切话题"*，也就是"给模型的历史**一刀都不切**"：
+    # 2026-10-02 定的"话题锚只裁剪视图"作废，视图与窗口从此是同一段
+    # （`live_history()`），判定也不再回报起点。
+    #
+    # ⚠️ **别把"不切话题"读成"历史只会因为满 500 条压缩而变短"**（2026-10-15 复核
+    # 实测，这一条曾经被写成"唯一还会动历史的地方只剩满 500 条压缩"，是**说过头了**）。
+    # 按话题切的那条路确实已经删掉（视图不再按起点裁），但下面三条仍然会动历史：
+    #
+    #   ① **焦点交接不看门槛地强制压缩**：`stage3_main.py` 的
+    #      `tick()` 在"真的要切走当值群"时调 `_force_compact()` →
+    #      `_maybe_compact(force=True)` → `compact_pending_all`——它**不看 500 条门槛**，
+    #      只要还有可压的就压（切走时窗口留着没意义，压进摘要下次回来才有上下文）。
+    #   ② **压缩关掉或连续失败时，deque 会静默丢最旧的消息，而它们从未进过摘要**：
+    #      `QQBOT_COMPACTION=0` 或面板闸门关掉时 `_maybe_compact` 直接返回
+    #      （注释见 `stage3_main.py` 那一处），连续失败时那一批也保持原样；
+    #      两种情况下历史只靠 `history_limit=HISTORY_LIMIT=2000` 的 deque 滚动，
+    #      满了就 popleft——**丢掉的条数计进 `dropped`，但没有任何摘要覆盖它们**。
+    #      另有**会话 LRU（默认 200 个会话）**淘汰时整段历史一起丢。
+    #   ③ **压缩那一轮里，判定比回复早看到历史**：`_judge`（约 :5132）→
+    #      `_maybe_compact`（约 :5171）→ 回复取数（约 :5197）是同一个异步函数里的
+    #      **三个时刻**；压缩一发生，判定看的是压缩前的整窗（可到 501 条）、
+    #      回复看的是压缩后的保留段（约 51 条）。同源不等于同一刻。
+    #
+    # **为什么不是"留着字段但不再读"**：留着它就等于留着一个"还有一个裁切入口"
+    # 的形状，下一个人很容易再把它接上；而它现在没有任何消费者（回复段、判定段、
+    # 判定 prompt、判定解析四处已全部改口）。
+    # **老状态文件里这两个键还在**，`from_state` 按"读不懂就当没写"处理，
+    # 不许因此报错（见 `from_state` 的兼容说明与 `tests/test_topic_window.py`）。
+    #
+    # 什么时候能改回去：只有用户重新定一条"按话题裁历史"的口径时。改回去要同时
+    # 恢复 `topic_history()`、判定 prompt 里的 `<topic_start>` 与
+    # `docs/MULTI_GROUP_FOCUS.md` 第五节——缺一处就是两套口径并存。
+    # （上面三条不是"待修的问题"，是**现在的实际形状**；要动它们得先有用户口径。）
     # 人物别名表：QQ 号 → 短编号。**单调分配、只追加、不重排**。
     # 为什么要存在会话状态里而不是每轮从窗口重建：每轮重建会让编号漂移，
     # 模型会把 A 的话记到 B 头上，而且渲染每轮都变、前缀每轮都断。
@@ -242,62 +266,25 @@ class ConversationState:
             return ""
         return f"；{escape(sanitize_chat_text(label, max_length=32), quote=False)}"
 
-    def topic_history(self) -> list[IncomingMessage]:
-        """当前话题的消息：话题起点之后（含起点）的全部消息。
-
-        没有起点时（还没压缩过、判定也还没给过）就是整个窗口——与改动前一致。
-        """
-
-        messages = list(self.history)
-        if self.topic_start_seq is None:
-            return messages
-        return [m for m in messages if (self.seq_of(m) or 0) >= self.topic_start_seq]
-
-    def advance_topic_start(self, seq: int | None) -> bool:
-        """把话题起点往前推（只许前进）；返回是否真的变了。
-
-        **为什么保留"只许前进"**（2026-10-02 实测，`run/data/logs/judge.jsonl` 1464 条判定）：
-        判定**一次都没请求过后退**——88% 原地确认、12% 前进、**0% 后退**。
-        因为每一轮都把它当前的起点告诉它（"这段谈话目前的起点：第 N 条"），
-        它照着确认就行。所以单向棘轮**没有代价**：它挡掉的那个动作根本不发生。
-        而放开后退则会白送一份缓存风险（真退一次就换一次 prompt 前缀）。
-
-        要区分两件事：
-
-        * 这是**视图**：哪一段交给回复段看。它**不销毁任何消息**。
-        * 消息本体只在**满 500 条**时被压缩收走（进摘要、留最近 50 条）——
-          `live_history()`（压缩的取数口）**不按起点过滤**。
-        """
-
-        if seq is None:
-            return False
-        current = self.topic_start_seq
-        if current is not None and seq <= current:
-            return False
-        self.topic_start_seq = seq
-        return True
-
-    def drop_summary_if_stale(self, topic_start: int | None) -> bool:
-        """话题换了之后，摘要若已与当前话题脱节就丢掉；返回是否丢了。
-
-        **判据**（用户 2026-10-02 的设计："话题换了是清空压缩"）：摘要覆盖到
-        `summary_through` 为止。若新的话题起点**比它还晚**，说明摘要里全是更早
-        话题的内容、与当前话题没有一脉相承的东西——留着只会把旧话题拖进新话题。
-
-        反过来，话题起点落在摘要覆盖范围之内、或摘要还没建，说明这个话题是
-        **跨过压缩边界延续下来的**，摘要里就有它的前文——**留着**。
-
-        频率自限：丢过一次之后要等下一次压缩才会再产生摘要，所以最多一个压缩
-        周期丢一次。丢的只是**摘要那段文字**；消息从来不在它管辖范围内。
-        """
-
-        if not self.summary or self.summary_through is None:
-            return False
-        if topic_start is None or topic_start <= self.summary_through:
-            return False
-        self.summary = ""
-        self.summary_through = None
-        return True
+    # **`topic_history()`（按话题起点裁出来的视图）2026-10-15 删掉了**，
+    # 连同 `advance_topic_start()`（起点棘轮）与 `drop_summary_if_stale()`（摘要脱节就丢）。
+    # 依据是用户当天的原话 *"我还要说几次，不切话题"*：给模型的历史**一刀都不切**，
+    # 2026-10-02 的"话题锚只裁剪视图"作废。两个取数口（回复段、判定段）现在都读
+    # `live_history()`——即"摘要之后累积的全部消息"，只有满 `LIVE_TARGET = 500` 条
+    # 压缩时它才变短（留 `COMPACT_KEEP = 50` 条）。"最短 50 条"因此自动满足。
+    #
+    # **为什么不是"保留 `topic_history()` 但让它返回整窗"**：那会留下一个
+    # 名字在说"按话题切"、行为却不切的接口，下一个人照名字就能再把裁切接回来；
+    # 文档（`ARCHITECTURE.md` §话题锚、`docs/MULTI_GROUP_FOCUS.md` 第五节）也说不清。
+    #
+    # **为什么"丢摘要"也跟着删**：它的判据（话题起点在 `summary_through` 之后）只有
+    # 判定回报起点时才存在。起点没了，这条判据无从计算；而删掉它换来的是
+    # "摘要只在压缩时被替换"——历史材料的变动点只剩一个，前缀稳定性反而更强。
+    # 旧依据原文保留在 `ARCHITECTURE.md` 与 `docs/MULTI_GROUP_FOCUS.md` 里，没有删。
+    #
+    # 什么时候能改回去：用户重新定一条"按话题裁历史"的口径时。要恢复的不止这三个
+    # 函数——判定 prompt 的 `<topic_start>` 与 `parse_judge_output` 的解析、
+    # `stage3_main` 那两处取数口、以及两份文档要一起回来。
 
     def recent(self) -> list[IncomingMessage]:
         return list(self.history)
@@ -433,8 +420,8 @@ class ConversationState:
         刚好带得住压缩之后的整段活窗口。
 
         切片**不动恢复语义**靠的是 `dropped` 跟着一起前移：`seq = dropped + 位置`，
-        留下的那一截消息读回来之后绝对序号逐条不变，`summary_through` 与
-        `topic_start_seq` 指的还是原来那一条（见 `from_state`）。
+        留下的那一截消息读回来之后绝对序号逐条不变，`summary_through`（压缩边界）
+        指的还是原来那一条（见 `from_state`）。
         """
 
         limit = persisted_history_limit()
@@ -472,30 +459,35 @@ class ConversationState:
                 for m in history
             ],
             # 绝对序号的基准必须持久化：否则重启后 seq 会从头开始，
-            # 判定 agent 上一轮标记的起点就指向了错误的对话。
+            # 而 `summary_through`（压缩边界）就是拿这个绝对序号指认的，
+            # 错位会让"哪些消息已经进摘要"整个读错。
             # 上面切掉的那几条已计入这里，所以留下的消息 seq 不变。
             "dropped": dropped,
             # 摘要同样要持久化：它是回复段的稳定前缀，丢了就等于压缩白做，
             # 而且重启后前缀会突然变，缓存全断。
             "summary": self.summary,
             "summary_through": self.summary_through,
-            # 话题起点与别名表也要持久化：起点丢了就等于话题锚白设（前缀会突然变），
-            # 别名表丢了会让同一个人拿到新编号（模型张冠李戴）。
-            "topic_start_seq": self.topic_start_seq,
+            # 别名表要持久化：丢了会让同一个人拿到新编号（模型张冠李戴）。
             "aliases": dict(self.aliases),
             # 别称也要持久化：摘要/记忆里的旧名在重启后仍然要能对得上人。
             "alias_also": {str(alias): list(names) for alias, names in self.alias_also.items()},
             "alias_names": {str(k): v for k, v in self.alias_names.items()},
-            # 锚点下限那次**一次性迁移**的标记（2026-10-14 老状态遗留）：落盘之后
-            # `from_state` 见到它就**不再动**锚点，"只许前进"照旧是常态。
-            # 为什么必须落盘：不落的话每次启动都会把锚点往回拉一次——那正是要避免的
-            # "锚点自己会动"（也是前缀每轮断的根子）。
-            "anchor_floor_migrated": self.anchor_floor_migrated,
+            # **不再写 `topic_start_seq` / `anchor_floor_migrated`**（2026-10-15 删，
+            # 见本类字段区那一段）。两个键从这一刻起只出不进：老状态文件里还有它们，
+            # `from_state` 读到时当没写（**不许报错**），写回去的状态里就没有了。
         }
 
     @classmethod
     def from_state(cls, raw: object, *, history_limit: int = 50) -> ConversationState | None:
-        """从持久化数据恢复会话；数据不完整时返回 None，由调用方按新会话处理。"""
+        """从持久化数据恢复会话；数据不完整时返回 None，由调用方按新会话处理。
+
+        **老状态文件里的 `topic_start_seq` / `anchor_floor_migrated` 一律忽略**：
+        2026-10-15 把话题锚整个删掉了（用户原话 *"我还要说几次，不切话题"*），
+        而这两个键还留在磁盘上已经写好的状态文件里。读的时候**当它们没写**，
+        既不报错也不影响视图——视图就是整个活窗口（`live_history()`）。
+        兼容方式刻意选"忽略"而不是"读到就抹掉重写"：重写要碰 `data/` 下正在
+        被运行进程使用的状态文件，而忽略是纯读侧的、无副作用的。
+        """
 
         if not isinstance(raw, dict):
             return None
@@ -521,8 +513,10 @@ class ConversationState:
         )
         through = raw.get("summary_through")
         state.summary_through = int(through) if isinstance(through, int) and through >= 0 else None
-        start = raw.get("topic_start_seq")
-        state.topic_start_seq = int(start) if isinstance(start, int) and start >= 0 else None
+        # 这里原来读 `topic_start_seq`、并做一次"锚点下限"迁移（没有
+        # `anchor_floor_migrated` 标记就把高锚点拉回 `seq_range()[0]`）。
+        # 字段没了，迁移也就没有对象了——**不读、不报错**（老状态里那两个键仍在，
+        # 见本方法的 docstring）。
         aliases = raw.get("aliases")
         if isinstance(aliases, dict):
             state.aliases = {
@@ -551,21 +545,13 @@ class ConversationState:
             message = _message_from_state(item)
             if message is not None:
                 state.history.append(message)
-        # 2026-10-14 老状态遗留的**一次性迁移**（见 `as_state` 里 `anchor_floor_migrated`
-        # 那一段）。只在**没有迁移标记**时做一次：把"锚点比载荷里最旧一条还晚"的起点
-        # 拉回 `seq_range()[0]`——那样视图至少包含载荷里的全部消息。拉完把标记落回状态，
-        # 之后 `from_state` 见到标记就不再动锚点，**只许前进**照旧是常态。
+        # 这里原来是"锚点下限一次性迁移"（2026-10-14；没有 `anchor_floor_migrated`
+        # 标记就把比载荷最旧一条更晚的起点拉回 `seq_range()[0]`）。起点字段本身
+        # 2026-10-15 已删（用户原话 *"我还要说几次，不切话题"*），迁移随之作废：
+        # 视图就是整个活窗口，没有什么可拉的。
         #
-        # 为什么当时需要它：老代码留下的锚点能把视图切到只剩几条，而 `topic_history()`
-        # 那时靠"取最后 50 条"兜底——**滑动的**：每来一条新消息，历史块的头就往前挪一格，
-        # prompt 前缀每轮都变（前缀复用白做）。
-        state.anchor_floor_migrated = bool(raw.get("anchor_floor_migrated"))
-        span = state.seq_range()
-        if (not state.anchor_floor_migrated and span is not None
-                and state.topic_start_seq is not None
-                and state.topic_start_seq > span[0]):
-            state.topic_start_seq = span[0]
-            state.anchor_floor_migrated = True
+        # **不采用"读到老键就顺手删掉并重写状态"**：重写要碰 `data/` 下正被运行
+        # 进程持有的状态文件，收益只是文件干净一点，风险却是多一个写入口。
         return state
 
 
@@ -1511,7 +1497,7 @@ def _format_history(
     `alias_of` 给出"这条是谁说的"（会话里单调分配的短编号，见 `<people>` 名册）。
 
     `lookup` 是**查引用目标**用的更大范围消息（默认就是 `messages` 自己）。
-    渲染的仍然只有 `messages`，但引用可能指向话题起点之前、或已经被摘要盖住的消息：
+    渲染的仍然只有 `messages`，但引用可能指向**已经被摘要盖住**的消息：
     那些消息还在会话窗口里时，用 `lookup=完整窗口` 就能把"谁/第几条 + 前几个字"
     写出来，而不是一句"（不在当前上下文里）"。
 
@@ -1769,7 +1755,9 @@ def build_dialogue_messages(
     3. **较早对话的摘要**（`summary`，几百轮不变）——这是长对话下前缀仍然
        可复用的关键：全量历史会让 prompt 持续增长，而只带最近若干条又会丢掉
        上下文，压缩把这两件事分开；
-    4. 当前话题的消息（`topic_history`）——话题内**只追加**。
+    4. 摘要之后累积的全部消息（`live_history()`，调用方传进来的 `history`）——
+       压缩之间**只追加**，谁也不按话题裁它（2026-10-15：用户
+       *"我还要说几次，不切话题"*，原来的"按话题起点裁视图"作废）。
 
     易变段放在最后：当前状态、记忆检索结果、扩展材料与本次事件。
     这样整条消息的前缀是"群背景 + 名册 + 摘要 + 历史前段"，**逐轮一字不差**。

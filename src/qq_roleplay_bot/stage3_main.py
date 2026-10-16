@@ -5169,8 +5169,32 @@ class DialogueEngine:
                 return None
         # 历史达到上限时先把旧对话压成摘要——它是回复段的稳定前缀。
         await self._maybe_compact(state, session_id=message.session_id)
-        # 回复段带的是**当前话题**的消息（起点之后、只追加），有摘要时接在摘要后面。
-        history = state.topic_history()
+        # 回复段带的是**活窗口的全部消息**（摘要之后累积的那一段，只追加）。
+        #
+        # 2026-10-15 从 `state.topic_history()` 改成 `live_history()`：用户原话
+        # *"我还要说几次，不切话题"*——给模型的历史**一刀都不切**，2026-10-02 那条
+        # "话题锚只裁剪视图"作废。为什么不是"把判定回报的起点夹到窗口下限"（2026-10-14
+        # 试过的方向）：那仍然是一个按话题动的裁切入口，只是把下限抬到 50 条——
+        # 用户否掉的是"切"这件事本身。视图与窗口从此是同一段。
+        #
+        # ⚠️ 但**"视图与窗口同一段"不等于"这是引擎喂给模型的唯一历史来源"**，
+        # 更不等于"历史只会因为满 500 条压缩而变短"（那句曾经写在这里，2026-10-15
+        # 复核实测**说过头了**）。按话题切的那条路已经删掉，可是还有三条会动历史：
+        #   ① **下一行的 `_maybe_compact` 里就有"不看 500 门槛"的那一支**：焦点交接时
+        #      `tick()` 调 `_force_compact()` → `_maybe_compact(force=True)` →
+        #      `compaction_pending_all`，只要还有可压的就压；
+        #   ② **压缩关掉（`QQBOT_COMPACTION=0` / 面板闸门）或连续失败时**，这里
+        #      `_maybe_compact` 直接返回，历史只靠 `deque(maxlen=HISTORY_LIMIT=2000)`
+        #      滚动——满了**静默丢最旧的消息，而它们从未进过摘要**；会话 LRU
+        #      （默认 200）淘汰时整段丢；
+        #   ③ **这一轮里判定比回复早看到历史**：`_judge` 在 `:5132`、`_maybe_compact`
+        #      在 `:5171`、回复取数就是这里（`:5197`）——压缩一发生，判定看的是压缩前
+        #      的那一段（可到 501 条），回复看的是压缩后的保留段（约 51 条）。
+        # 这三条现在没有对应的用户口径，**不是"待修的问题"**，是实际形状；
+        # 它们会被 `tests/test_history_wiring.py` 的对照用例钉住。
+        # 什么时候能改回去：用户重新定一条"按话题裁历史"的口径时——那时要连判定
+        # prompt 与 `docs/MULTI_GROUP_FOCUS.md` 第五节一起恢复。
+        history = state.live_history()
         try:
             prompt_material = await asyncio.wait_for(
                 self.prompt_sources.collect(prompt_context, knowledge_enabled=lore_wanted),
@@ -5250,9 +5274,10 @@ class DialogueEngine:
             alias_of=state.alias_of,
             aliases=state.aliases,
             roster=roster,
-            # 引用可能指向话题起点之前、甚至已经被摘要盖住的消息：渲染的仍是本话题，
-            # 但**查引用目标**要拿完整窗口，否则只能写一句"看不见"（实测 686 次引用里
-            # 218 次如此；其中一次真的让她把邦邦说的"我电脑没电了"算到了另一个人头上）。
+            # 引用可能指向**已经被摘要盖住**、或已经不在活窗口里的消息：渲染的仍是
+            # 活窗口那一段，但**查引用目标**要拿完整窗口，否则只能写一句"看不见"
+            # （实测 686 次引用里 218 次如此；其中一次真的让她把邦邦说的"我电脑没电了"
+            # 算到了另一个人头上）。
             lookup=state.recent(),
             # 双 agent 模式：要不要回已经由判定定了，回复 agent 的 prompt 里
             # 没有 `<decision>`——它在结构上就没有否决权。
@@ -5834,9 +5859,6 @@ class DialogueEngine:
             # 把已摘要的消息移出窗口。不移除的话下一轮会认为"还有可压缩的"，
             # 于是每轮都压缩一次——既浪费调用，又让摘要每轮都变（前缀永远不稳）。
             state.mark_compacted(boundary)
-            # 压缩之后启用**新的话题起点**：旧起点已经在摘要里了，锚点必须落到
-            # 保留窗口的第一条。这就是"压缩会切进话题"的正式说法。
-            state.topic_start_seq = state.seq_range()[0] if state.seq_range() else None
             self.metrics.compaction_latency.observe(self.clock() - started_at)
             compressed_batches += 1
             compressed_messages += len(batch)
@@ -5911,7 +5933,7 @@ class DialogueEngine:
 
         `must_reply=True` 走 **judge'**（`JUDGE_ROUTING_PROMPT`）：给积压消息用。
         她已经答应过人家"稍等"，"要不要回"不再由判定决定，所以那一版连 route 都不输出，
-        只回答话题起点与"还在不在同一条线上"。
+        只回答"还在不在同一条线上"。
         """
 
         identity = ""
@@ -5924,7 +5946,18 @@ class DialogueEngine:
             # 而"她答应过回头问一句"正是这条线上的一件事）。
             own_notes = await self.memory_service.own_notes(message)
         request = build_judge_messages(
-            state.topic_history(),
+            # 判定与回复段看**同一段活窗口**（2026-10-15：用户 *"我还要说几次，不切话题"*，
+            # 原来这里是 `state.topic_history()`——按判定自己回报的起点裁出来的视图）。
+            # "同一段"说的是**取数口**，不是"同一刻"（这句话原来写成"两边看到的历史
+            # **永远一致**"，2026-10-15 复核纠正：**不成立**）。
+            # 次序是同一个异步函数里的三个时刻：这里 → `_maybe_compact`（约 :5171）
+            # → 回复取数（约 :5197）。压缩那一轮里判定看的是压缩**前**的整窗
+            # （可到 `LIVE_TARGET + 1 = 501` 条），回复看的是压缩**后**的保留段
+            # （`COMPACT_KEEP = 50`，约 51 条）——所以"判定按窄视图判、回复按宽窗说"
+            # 这个具体隐患没了，但"两处永远同刻"这种说法从来不对。
+            # 这条不同刻由 `tests/test_history_wiring.py` 的对照用例钉住（它同时钉住
+            # "同一轮不压缩时两处确实同源"，两条一起才说得准）。
+            state.live_history(),
             current=message,
             trigger=trigger,
             addressed=addressed,
@@ -5938,7 +5971,6 @@ class DialogueEngine:
             summary=state.summary,
             # 判定也看得到被引用的那句是谁说的（判断"还在不在同一条线上"要靠它）。
             lookup=state.recent(),
-            current_start=_effective_topic_start(state),
             must_reply=must_reply,
             # 判定读的是**写入之前**的分寸：它这一轮报 UP，变化要下一句才体现在
             # 它自己看到的数据里（回复段则当场就用新值）。
@@ -5975,31 +6007,20 @@ class DialogueEngine:
         self._log_model_io("judge", request, raw, session_id=message.session_id,
                            trigger=trigger, must_reply=must_reply,
                            elapsed=round(self.clock() - started_at, 2))
-        # 只接受"判定这次真的看得见"的编号；看不懂就保留原来的起点。
-        visible = frozenset(
-            seq for seq in (state.seq_of(m) for m in state.topic_history()) if seq is not None
-        )
-        verdict = parse_judge_output(raw, known_seqs=visible, must_reply=must_reply)
-        # 判定这一轮说了两件事：**回不回**（route）+ **把哪一段交给回复段**（话题起点）。
+        # 判定这一轮只说一件事：**回不回**（route）。
         #
-        # ⚠️ 这个起点**只裁剪视图，不销毁消息**：`topic_history()` 只是给模型的视图，
-        # `live_history()`（压缩的取数口）**不按起点过滤**——被排除在视图之外的消息
-        # 仍在窗口里，下一次满 500 条压缩时照旧进摘要。
-        #
-        # "只许前进"保留（2026-10-02 实测 1464 条判定：88% 原地确认、12% 前进、
-        # **0% 后退**——所以这条限制挡掉的动作根本不发生，没有代价）。
-        if state.advance_topic_start(verdict.topic_start):
-            logger.info(
-                "Stage 3 topic start advanced: session=%s start=%s",
-                message.session_id,
-                state.topic_start_seq,
-            )
-            # 话题往前挪了（= 换话题了）→ 摘要若已与当前话题脱节就丢掉，
-            # 别把旧话题拖进新话题。话题起点落在摘要覆盖范围内时不丢
-            # （那是跨压缩边界延续下来的同一个话题，摘要里有它的前文）。
-            if state.drop_summary_if_stale(state.topic_start_seq):
-                logger.info(
-                    "Stage 3 旧摘要已丢弃（与当前话题脱节）: session=%s", message.session_id)
+        # 2026-10-15 删掉了它原来回报的第二件事——"把哪一段交给回复段"（话题起点）。
+        # 依据是用户原话 *"我还要说几次，不切话题"*：给模型的历史**一刀都不切**，
+        # 2026-10-02 的"话题锚只裁剪视图"作废。一起走的还有三样：
+        #   ① `visible`/`known_seqs`（校验起点编号在不在可见范围内）——没有起点可校验；
+        #   ② `state.advance_topic_start(...)`（起点棘轮）与它的日志行——没有起点可推；
+        #   ③ `state.drop_summary_if_stale(...)` 与"旧摘要已丢弃"那条日志——它的判据
+        #      正是"起点跑到 `summary_through` 之后"，起点没了判据就无从计算。
+        # 为什么不是"继续解析但不使用"：留着解析就等于留着"还有一个裁切入口"的形状，
+        # 下一个人照 `JudgeVerdict.topic_start` 就能把裁切接回来。判定 prompt 里的
+        # `<topic_start>` 提问与 `parse_judge_output` 的解析也一并删了（同一个提交）。
+        # 什么时候能改回去：用户重新定一条"按话题裁历史"的口径时。
+        verdict = parse_judge_output(raw, must_reply=must_reply)
         logger.info(
             "Stage 3 judge: session=%s trigger=%s verdict=%s",
             message.session_id, trigger, verdict.describe(),
@@ -6053,20 +6074,6 @@ class DialogueEngine:
                 self.log_cache_report("dialogue_end")
             except Exception:  # noqa: BLE001 - 对账失败不该影响结束对话
                 logger.exception("Stage 3 cache check failed")
-
-
-def _effective_topic_start(state: ConversationState) -> int | None:
-    """当前话题起点；还没定过就用窗口第一条。
-
-    为什么要给个默认值而不是让判定从零猜：**判定的任务是"确认或前移"，不是"重新找"**。
-    实测不告诉它当前起点时，它每轮都挑最新那条，起点一格一格往前爬，
-    回复段最后只剩一条历史（见 `docs/MULTI_GROUP_FOCUS.md` 第十节）。
-    """
-
-    if state.topic_start_seq is not None:
-        return state.topic_start_seq
-    span = state.seq_range()
-    return span[0] if span else None
 
 
 def _as_outgoing_list(reply: object) -> list[OutgoingMessage]:

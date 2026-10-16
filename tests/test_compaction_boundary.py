@@ -216,42 +216,42 @@ def test_compact_rendering_keeps_the_bot_marker() -> None:
     assert 'speaker="yunru"' in rendered
 
 
-# --- 话题锚点 ---------------------------------------------------------------
+# --- 话题锚点（2026-10-15 停用） --------------------------------------------
+#
+# 这一段原来钉着话题起点棘轮（`advance_topic_start`）、起点对视图的夹取、
+# 以及"压缩后起点落到新窗口第一条"三条。**三条断言一起删掉**，依据是用户
+# 2026-10-15 的原话 *"我还要说几次，不切话题"*：给模型的历史**一刀都不切**，
+# 2026-10-02 定的"话题锚只裁剪视图"作废——`ConversationState` 里不再有
+# `topic_start_seq`，视图与窗口是同一段（`live_history()`）。
+# 这不是"期望值变了"，是**被钉的那条口径被用户推翻了**。
+#
+# ⚠️ 这个"唯一"是错的（2026-10-15 复核）：焦点交接的强制压缩
+# （`_force_compact` → `_maybe_compact(force=True)` → `compaction_pending_all`）
+# **不走 500 门槛**；压缩关掉/连续失败时 deque 还会静默丢最旧的消息（且它们从未进摘要），
+# 会话 LRU 会整段丢。逐条见 `ARCHITECTURE.md` 的"话题锚已停用"。
+# 下面这条用例钉的是**压缩与话题锚无关**（不再顺手重置一个起点）。
 
 
-def test_topic_start_only_moves_forward() -> None:
-    """话题起点只许前进。
+def test_compaction_no_longer_resets_any_topic_anchor() -> None:
+    """压缩之后状态里不再有"话题起点"这个字段（话题锚 2026-10-15 停用）。
 
-    2026-10-02 一度改成"往前往后都允许"，随后从 `judge.jsonl` 的 1464 条判定里
-    数出：88% 原地确认、12% 前进、**0% 后退**——判定从不请求后退，
-    所以"只许前进"挡掉的动作根本不发生，而放开它会白送一份缓存风险。
-    改回单向。理由与实测数字写在 `stage3_runtime.advance_topic_start` 的 docstring 里。
+    老代码在这里断言 `state.topic_start_seq == 520 - COMPACT_KEEP`。现在正确
+    的期望是**这个属性根本不存在**——留着属性就等于留着一个裁切入口。
+    压缩本身照旧（边界推进、窗口留 50 条），见本文件上面那一组用例。
+
+    注意这是**构造出来的**状态（`build_state(520)` + 直接调 `compress()`），
+    它证明的是"这条路径不碰话题锚"，**不是**"压缩只会由 500 门槛触发"——
+    焦点交接那条强制压缩不在这个用例里。
     """
 
-    state = build_state(20)
-    assert state.advance_topic_start(5) is True
-    assert state.topic_start_seq == 5
-    assert state.advance_topic_start(3) is False, "不许后退"
-    assert state.topic_start_seq == 5
-    assert state.advance_topic_start(5) is False, "同一个编号不算变化"
-    assert state.advance_topic_start(7) is True
-
-
-def test_topic_history_is_clamped_to_the_anchor() -> None:
-    state = build_state(20)
-    assert len(state.topic_history()) == 20, "没有锚点时就是整个窗口"
-    state.advance_topic_start(15)
-    kept = state.topic_history()
-    assert [state.seq_of(item) for item in kept] == [15, 16, 17, 18, 19]
-
-
-def test_compaction_resets_the_topic_start_to_the_new_window() -> None:
-    """压缩之后起点必须落到保留窗口的第一条——"压缩会切进话题"的正式说法。"""
-
     state = build_state(520)
+    assert not hasattr(state, "topic_start_seq"), (
+        "话题起点字段必须已经删掉；它一回来，「不切话题」就没有机械保障了"
+    )
+    assert not hasattr(state, "advance_topic_start")
     compress(state, ScriptedCompactor())
-    assert state.topic_start_seq == state.seq_range()[0]
-    assert state.topic_start_seq == 520 - COMPACT_KEEP
+    assert state.summary_through == 520 - COMPACT_KEEP - 1, "压缩边界照旧推进"
+    assert len(state.live_history()) == COMPACT_KEEP, "窗口照旧留 50 条"
 
 
 def test_aliases_are_monotonic_and_survive_persistence() -> None:
