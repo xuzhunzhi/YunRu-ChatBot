@@ -370,8 +370,8 @@ def next_due_at(now: float, *, hour: int, minute: int) -> float:
     return target if target > now else target + 86400
 
 
-#: 清洗后一个可用字符都不剩时用的标题。**两条路共用这一个常量**（旧路原来自己写死
-#: 一个"给你的信"，两级那条路没有兜底——2026-10-16 合成一处）。
+#: 清洗后一个可用字符都不剩时用的标题。**各处共用 `mail_client.DEFAULT_SUBJECT`**
+#: （旧路原来自己写死一个"给你的信"，两级那条路没有兜底——2026-10-16 合成一处）。
 DEFAULT_SUBJECT = "给你的信"
 
 
@@ -383,21 +383,14 @@ def _safe_subject(subject: object) -> str:
     `mail_state.json` 的 `sends` 里于是连着三条 `bad_subject`。
 
     清洗放在 `_stash_pending` 与 `_send_draft` 这两处——**都在
-    `mail_client.clean_subject` 那道判之前**（那才是唯一拒发的地方），而且
-    `sanitize_subject` 是幂等的：第二次调用一个字都不换、也不会再打一行日志。
+    `mail_client.clean_subject` 那道判之前**（那才是唯一拒发的地方）。
+    实现与那两条日志只有一份（`mail_client.safe_subject`）：回信与 mail 放出去的两条
+    窄口现在也走同一道（2026-10-16 用户："其它调用者也走 sanitize_subject"）。
     """
 
-    from .mail_client import sanitize_subject
+    from .mail_client import safe_subject
 
-    cleaned, changed = sanitize_subject(subject)
-    if changed:
-        # 这一行就是"标题被改过"的观测点：改了哪几个字符、改前改后多长。
-        logger.info("mail_subject_sanitized chars=%s before_len=%s after_len=%s",
-                    "".join(changed), len(str(subject or "")), len(cleaned))
-    if not cleaned:
-        logger.warning("mail_subject_empty_after_sanitize chars=%s", "".join(changed))
-        return DEFAULT_SUBJECT
-    return cleaned
+    return safe_subject(subject, where="daily_report")
 
 
 class _EmptySnapshot:

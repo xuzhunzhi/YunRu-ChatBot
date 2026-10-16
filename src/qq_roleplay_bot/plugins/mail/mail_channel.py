@@ -443,7 +443,21 @@ class MailChannel:
 
     @staticmethod
     def _reply_subject(subject: str) -> str:
-        clean = " ".join(str(subject or "").split())[:160]
+        """回信的主题：`Re: ` + 来信主题。
+
+        来信主题是**陌生人递来的文本**（`item["subject"]`，调用点在 `_handle_one`），
+        所以这里必须洗一道（2026-10-16 用户："其它调用者也走 sanitize_subject"）：
+        对方在主题里写一个引号，原来会让**我们这封回信**撞 `bad_subject` 寄不出去。
+        洗在 `clean_subject` 之前，用的是发信那一路的同一道。
+        """
+
+        from .mail_client import safe_subject
+
+        # `default=""`：回信那一路**自己有措辞**（下面那个 `Re: 你的信`），
+        # 不要把它变成写信那一路的"给你的信"。
+        clean = safe_subject(" ".join(str(subject or "").split())[:160],
+                             where="reply", default="")
+        clean = " ".join(clean.split())
         if not clean:
             return "Re: 你的信"
         return clean if clean.lower().startswith("re:") else f"Re: {clean}"

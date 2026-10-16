@@ -174,6 +174,40 @@ def sanitize_subject(value: object) -> tuple[str, tuple[str, ...]]:
     return "".join(out).strip(), tuple(changed)
 
 
+#: 清洗后一个可用字符都不剩时用的标题。**各处共用这一个常量**
+#: （`daily_report` 那个 `DEFAULT_SUBJECT` 就是它，两条路不再各写一个字面量）。
+DEFAULT_SUBJECT = "给你的信"
+
+
+def safe_subject(value: object, *, where: str = "",
+                 default: str = DEFAULT_SUBJECT) -> str:
+    """**发送前统一走的那一道**：清洗 + 兜底标题 + 留一行日志。
+
+    2026-10-16 从 `daily_report._safe_subject` 提到这里：要洗主题的地方不止写信一条
+    （还有回信、以及 mail 放出去的两条窄口 `registry.mail.notify` / `send_to`），
+    口径与那两条日志只留一份。
+
+    `where` 只进日志，用来指认是哪一处洗的（`daily_report` / `reply` / `operator` /
+    `send_to`）。`default` 是"清完一个字符不剩"时给的兜底：写信那一路用
+    `DEFAULT_SUBJECT`（"给你的信"）；**回信那一路自己有措辞**（`Re: 你的信`），
+    所以它传 `""`，由它自己补前缀（那时也不打"用了兜底"那条 warning）。
+
+    **它必须在 `clean_subject` 那一道判之前调**——那是唯一拒发的地方；
+    而且是幂等的：洗过的再洗一次一个字都不换、也不会再打一行日志。
+    """
+
+    cleaned, changed = sanitize_subject(value)
+    if changed:
+        logger.info("mail_subject_sanitized where=%s chars=%s before_len=%s after_len=%s",
+                    where or "-", "".join(changed), len(str(value or "")), len(cleaned))
+    if not cleaned:
+        if default:
+            logger.warning("mail_subject_empty_after_sanitize where=%s chars=%s",
+                           where or "-", "".join(changed))
+        return default
+    return cleaned
+
+
 def clean_subject(value: object) -> str:
     text = _CONTROL.sub("", str(value or "")).replace("\r", " ").replace("\n", " ").strip()
     if not text:

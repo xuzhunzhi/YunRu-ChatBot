@@ -169,9 +169,19 @@ def build_operator_mail_sender(seams):
     client = MailClient(dev_config.MAIL_CLI, workdir=mail_workdir())
 
     async def send_operator_mail(subject: str, body: str) -> dict:
-        """给操作者发一封**普通邮件**（不是日报、不是回信）。收件人由上面那个闭包定。"""
+        """给操作者发一封**普通邮件**（不是日报、不是回信）。收件人由上面那个闭包定。
 
-        return await client.send(to=recipient, subject=str(subject), body=str(body))
+        **主题在这里洗一道**（2026-10-16）：这个函数的 `subject` 是**调用方给的自由文本**
+        （接口上就是），所以不指望每个调用方自己记得——今天两位调用方
+        （`outage_notice.SUBJECT` / `timeout_alert.SUBJECT`）都是常量文案，
+        这一道对它们是空操作（洗不出改动就不打日志）。清洗在 `clean_subject` 之前。
+        """
+
+        from .mail_client import safe_subject
+
+        return await client.send(to=recipient,
+                                 subject=safe_subject(subject, where="operator"),
+                                 body=str(body))
 
     seams.provide(send_operator_mail)
     logger.info("邮件能力已开放给别的插件：收件人=%s", recipient)
@@ -214,9 +224,18 @@ def build_address_mail_sender(seams):
     client = MailClient(dev_config.MAIL_CLI, workdir=mail_workdir())
 
     async def send_to(address: str, subject: str, body: str) -> dict:
-        """寄给**一个**地址（"是不是一个合法地址"由接缝那一侧把关，这里只执行）。"""
+        """寄给**一个**地址（"是不是一个合法地址"由接缝那一侧把关，这里只执行）。
 
-        return await client.send(to=str(address), subject=str(subject), body=str(body))
+        **主题也在这里洗一道**（2026-10-16），理由同上：`subject` 由调用方给。
+        今天唯一的调用方（到点提醒）用的是固定文案 `MAIL_SUBJECT = "到点提醒"`
+        （`what` 只进正文），所以对它是空操作。
+        """
+
+        from .mail_client import safe_subject
+
+        return await client.send(to=str(address),
+                                 subject=safe_subject(subject, where="send_to"),
+                                 body=str(body))
 
     seams.provide_address_sender(send_to)
     logger.info("邮件能力已开放给别的插件：可以寄给指定的一个地址")

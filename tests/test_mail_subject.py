@@ -216,3 +216,106 @@ def test_a_very_long_subject_is_still_left_to_clean_subject() -> None:
 def test_the_draft_rules_tell_her_not_to_use_quotes_in_the_subject() -> None:
     assert "主题那一行别用引号" in dr.REPORT_PROMPT
     assert "落款就写你自己的名字。" in dr.REPORT_PROMPT, "原来那条别被挤掉"
+
+
+# --- 6. 其它调用点也走同一道（用户 2026-10-16："其它调用者也走 sanitize_subject"）--
+#
+# 全仓会走到 `MailClient.send` 的地方就这几处，逐个交代：
+#
+# | 调用点 | 标题从哪来 | 结论 |
+# | --- | --- | --- |
+# | `daily_report._send_draft`（写信） | 她自己写的（模型产出） | **洗**（第 1、3 节那些用例） |
+# | `mail_channel._reply_subject`（回信） | **来信主题**：陌生人递来的自由文本 | **洗** |
+# | `wire.send_operator_mail`（窄口一） | 调用方给；接口上是自由文本 | **洗** |
+# | `wire.send_to`（窄口二） | 同上 | **洗** |
+# | `outage_notice` / `timeout_alert` / `remind` | 常量文案 | 空操作（最后一条钉住） |
+#
+# 清洗**没有**放进 `MailClient.send`：`mail_client.py` 那处注释把"宁可拒发、也不去
+# 转义一下试试"写成了原则（用户 2026-10-16 也明确"不放进 MailClient.send"）。
+
+
+class _RecordingMail:
+    """假的 MailClient：**照线上那道判拒发**，并记下真正要发出去的主题。"""
+
+    def __init__(self, *args, **kwargs) -> None:
+        self.sent: list[dict] = []
+
+    async def send(self, *, to: str, subject: str, body: str) -> dict:
+        clean_subject(subject)          # 与线上同一道判；它拒就等于那天 23:01 的形状
+        self.sent.append({"to": to, "subject": subject, "body": body})
+        return {"message_id": "mid-seam"}
+
+
+def test_the_operator_seam_washes_a_free_text_subject() -> None:
+    """`registry.mail.notify` 那条窄口的主题是调用方给的 ⇒ 它自己洗一道。"""
+
+    from unittest import mock
+
+    from qq_roleplay_bot.plugins import MailSeams
+    from qq_roleplay_bot.plugins.mail import mail_client as mail_client_module
+    from qq_roleplay_bot.plugins.mail import wire
+
+    seams = MailSeams()
+    fake = _RecordingMail()
+    with mock.patch.object(mail_client_module, "MailClient", lambda *a, **k: fake):
+        sender = wire.build_operator_mail_sender(seams)
+
+    assert sender is not None, "收件人没配才会是 None（本机 .env 配了）"
+    asyncio.run(sender('他说"你别掺和"', "正文"))
+
+    assert fake.sent and fake.sent[0]["subject"] == "他说“你别掺和”"
+    assert not (_ARGV_FORBIDDEN & set(fake.sent[0]["subject"]))
+
+
+def test_the_address_seam_washes_a_free_text_subject() -> None:
+    """`registry.mail.send_to` 那条窄口同理（今天那个调用方给的是常量，接口上是自由文本）。"""
+
+    from unittest import mock
+
+    from qq_roleplay_bot.plugins import MailSeams
+    from qq_roleplay_bot.plugins.mail import mail_client as mail_client_module
+    from qq_roleplay_bot.plugins.mail import wire
+
+    seams = MailSeams()
+    fake = _RecordingMail()
+    with mock.patch.object(mail_client_module, "MailClient", lambda *a, **k: fake):
+        sender = wire.build_address_mail_sender(seams)
+
+    assert sender is not None
+    asyncio.run(sender("someone@example.com", "进度 100% & 完成", "正文"))
+
+    assert fake.sent and fake.sent[0]["subject"] == "进度 100％ ＆ 完成"
+    assert not (_ARGV_FORBIDDEN & set(fake.sent[0]["subject"]))
+
+
+def test_the_reply_subject_is_washed() -> None:
+    """回信主题来自**对方的来信主题**（陌生人递来的文本）⇒ 洗过之后这一封能寄出。"""
+
+    from qq_roleplay_bot.plugins.mail.mail_channel import MailChannel
+
+    quoted = '关于"那件事"的回复'
+    subject = MailChannel._reply_subject(quoted)
+
+    assert subject == 'Re: 关于“那件事”的回复'
+    clean_subject(subject)          # 不抛 = 这一封真能寄出去
+    assert not (_ARGV_FORBIDDEN & set(subject))
+
+    assert MailChannel._reply_subject("") == "Re: 你的信", "空主题那条老规矩不动"
+    assert MailChannel._reply_subject("Re: 已经带前缀") == "Re: 已经带前缀"
+
+
+def test_the_subjects_we_write_ourselves_are_constants_and_never_need_washing() -> None:
+    """三处**常量**标题逐个交代：它们本来就没有自由文本，清洗对它们是空操作。
+
+    （到点提醒那个是 2026-10-08 特意从 `"到点提醒：{what}"` 改成固定文案的，
+    原因写在 `remind.py` 那段注释里——`what` 只进正文。清洗只是兜底。）
+    """
+
+    from qq_roleplay_bot.plugins.outage_notice.outage_notice import SUBJECT as OUTAGE_SUBJECT
+    from qq_roleplay_bot.plugins.remind.remind import MAIL_SUBJECT
+    from qq_roleplay_bot.plugins.timeout_alert.alert import SUBJECT as ALERT_SUBJECT
+
+    for constant in (OUTAGE_SUBJECT, ALERT_SUBJECT, MAIL_SUBJECT):
+        cleaned, changed = sanitize_subject(constant)
+        assert cleaned == constant and changed == (), f"{constant!r} 是常量，不该被改"
+        clean_subject(constant)     # 它一直在那道判上是通过的
