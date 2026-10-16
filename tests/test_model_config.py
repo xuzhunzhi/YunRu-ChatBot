@@ -20,10 +20,13 @@ key 去打 mimo，**全 401**。根因不是"谁配错了"，是**形状**——
 4. key 缺失 / 变量为空 → **明确报出来**（而不是静默拿一把别的 key 去打）;
 5. 启动自检那一行**不含 key 值**（只出现变量名与"有值没有"）。
 
-> ⚠️ **2026-10-14 的如实交代（用户原话："你把这个也换成gemini flash吧"）**：
-> 判定（judge）从"用自己那条 deepseek key"改成**借 `reply` 那条 key**（xkiro /
-> `google/gemini-2.5-flash`）——与 letter 借 judge 那条同一个做法：**要的模型挂在
-> 哪一家就借哪家的 key**。
+> ⚠️ **2026-10-16 的如实交代（用户原话："切换回ds。gemini好蠢。"，同日早先那句是
+> "都改ds"）**：判定与回复两路**都回到 deepseek**——`TASKS["reply"]` 与
+> `TASKS["judge"]` 都改成 `{"key": "judge", "model": "deepseek-flash"}`，也就是
+> 2026-10-14 那两笔（1834fce / d62446a）**之前**的形状；那两笔之后加进来的
+> "借 `reply` 那条 key（xkiro）"的期望值因此一并回退。依据除了这句口径，还有两条
+> 实测（记在 `model_config.TASKS` 的注释里）：中继的 Google 上游整段 503，且
+> `provider=xkiro` 时 `reasoning_effort` 发不出去 ⇒ 首字压不到闸以下。
 >
 > 本文件因此要分清两类东西，改的时候别混：
 >
@@ -32,9 +35,8 @@ key 去打 mimo，**全 401**。根因不是"谁配错了"，是**形状**——
 >   明确报错，不许拿别的 key 顶上）；自检那一行不含 key 值。
 > - **随路由更新的期望值**（跟着 `TASKS` / `KEYS` 走）：`EXPECTED` 里每个用途的
 >   `(provider, base_url, model, key 变量名)`，以及"哪一路在用哪条 key 条目"。
->   这些值**移了就要跟着改**，但驱动那条不变式时要用**仍然住在那一家上的用途**
->   （判定的 provider 从 deepseek 变成 xkiro 之后，"deepseek 那一路"的例子改用
->   `letter` / `memory`），别改成"哪家都行"。每一处都写清了为什么换驱动。
+>   这些值**移了就要跟着改**；判定的家回到 deepseek 之后，"deepseek 那一路"的例子
+>   也回到 **`judge`**——2026-10-14～10-16 那段它住 xkiro 时才需要绕开。
 
 （测试里用的都是**假 key**：真实值由部署方写在 `run/.env` 里，不进任何仓库文件。）
 """
@@ -50,35 +52,31 @@ from qq_roleplay_bot.model_config import (
 #:
 #: `(用途, provider, base_url, 模型名, key 变量名)`
 EXPECTED: tuple[tuple[str, str, str, str, str], ...] = (
-    # 2026-10-14 用户改口径（原话："这里面有gemini flash模型，给云茹接上"）：回复那一路
-    # 换成 xkiro 的 Gemini Flash，并且用**自己那条 key**（`QQBOT_REPLY_API_KEY`）。
-    # 这一条推翻了 10-09 的"借 judge 那把 deepseek key"：换家时地址与 key 必须同源，
-    # 借来的 key 会被打到新地址上（实测：只填 `QQBOT_REPLY_API_BASE_URL` 时，
-    # 解析出来的 key 仍是 judge 那把——`QQBOT_REPLY_API_KEY` 被 `TASKS["reply"]["key"]`
-    # 架空）。模型名 2026-10-14 当天定过两轮：用户先说"用最新的 flash"，实测之后
-    # **退回 `google/gemini-2.5-flash`**——因为"首字 3 秒"那道闸（`STREAM_STALL_SECONDS`）
-    # 在**她真实的判定 prompt 上**量出来是这样（system 2469 / user 16688 字，流式）：
-
-    #   gemini-3.8-flash 首字 11.69s ／ 3.7-flash 6.02s ／ 3.5-flash 11.35s  ← 过不了闸
-    #   gemini-3-flash   首字 2.21s（贴线，抖动一下就变成"她不回话"）
-    #   gemini-2.5-flash 首字 1.99s（留余量）← 选它
-    #
-    # 实测代价（19:04~19:53 那一小时）：3.8-flash 上**每一次**判定都在 3.15~3.24s
-    # 上 `transport_error`，于是**艾特她也不回**（`trigger=mention` 那几条同样失败）。
-    # 教训：换模型必须在**真实 prompt** 上量首字，裸"你好"量不出这个问题。
-    ("reply", "xkiro", "https://api.xkiro.com/v1", "google/gemini-2.5-flash",
-     "QQBOT_REPLY_API_KEY"),
+    # 2026-10-16（用户原话："切换回ds。gemini好蠢。"，同日早先那句是"都改ds"）：
+    # 回复那一路**从 xkiro 改回 deepseek** —— 借 `judge` 那条 key（deepseek /
+    # `deepseek-flash`）。这一条推翻 2026-10-14 的"自己那条 key（xkiro）"，依据是
+    # 用户这句口径**加上两条实测**（2026-10-16）：①中继的 Google 上游整段 503
+    # （`/v1/models` 通、`chat/completions` 全 503，25 分钟探针全挂）；
+    # ②`reasoning_effort` 只在 provider ∈ {"", "deepseek"} 时才发（`llm_client` 的
+    # `deepseek_fields`），provider=xkiro 时发不出去 ⇒ 只能吃默认档，正文最慢实测
+    # 13.9s；回到 ds 之后 `reasoning_effort=none` 能把"第一个 content"从 1.1~14.5s
+    # 压到 0.51~1.13s、过闸（第一条完整响应行）0.15~0.31s。
+    # `KEYS["reply"]` 那条 xkiro 条目**保留**（闲置，将来一键切回要用）。
+    ("reply", "deepseek", "https://api.deepseek.com", "deepseek-flash",
+     "QQBOT_JUDGE_API_KEY"),
     # 2026-10-12 用户拍板"信用v4pro写"：letter 与 reply 同一个形状——要的模型挂在
     # 哪一家就借哪家的 key，`QQBOT_LETTER_API_KEY`（mimo 那把）因此在正常路径上
     # 闲置，只在"主家余额耗尽切兜底"那条链上被借走（见 `FALLBACK_TASKS`）。
     ("letter", "deepseek", "https://api.deepseek.com", "deepseek-v4-pro",
      "QQBOT_JUDGE_API_KEY"),
-    # 2026-10-14（用户："你把这个也换成gemini flash吧"）：**判定也上 xkiro 的 Gemini Flash**。
-    # 它借 reply 那条 key（xkiro 那家）——要的模型挂在哪一家就借哪家的 key（letter 借
-    # judge 那条是同一个做法）。`QQBOT_JUDGE_API_KEY`（deepseek 那把）仍然被 letter 借走、
-    # 被 memory/review/vision 回落，所以 `KEYS["judge"]` 的 provider **不能**跟着改。
-    ("judge", "xkiro", "https://api.xkiro.com/v1", "google/gemini-2.5-flash",
-     "QQBOT_REPLY_API_KEY"),
+    # 2026-10-16（同一条口径："切换回ds。gemini好蠢。"）：判定**也回到 deepseek**，
+    # 用它自己那条 key（`QQBOT_JUDGE_API_KEY`）与 `deepseek-flash`——即 2026-10-14
+    # 之前那一版。依据同 reply 那条（上游 503 + `reasoning_effort` 发不出去 ⇒
+    # 首字撞"3 秒"的闸）。⚠️ `KEYS["judge"]` 的 provider 仍然**不能**改成 xkiro：
+    # letter 借它、memory/review/vision 回落到它，一改就会把 `deepseek-v4-pro` /
+    # `deepseek-flash` 这些模型名打到 xkiro 上。
+    ("judge", "deepseek", "https://api.deepseek.com", "deepseek-flash",
+     "QQBOT_JUDGE_API_KEY"),
     ("memory", "deepseek", "https://api.deepseek.com", "deepseek-flash",
      "QQBOT_MEMORY_API_KEY"),
     ("review", "deepseek", "https://api.deepseek.com", "deepseek-flash",
@@ -198,7 +196,15 @@ def test_the_letter_purpose_uses_the_pro_model_through_the_judge_key() -> None:
     letter = model_config.KEYS["letter"]
     assert letter["provider"] == "mimo"
     assert letter["env"] == "QQBOT_LETTER_API_KEY"
-    assert letter["fallback"] == "reply", "回落规则要写清：先自己的，再 reply 那把 mimo key"
+    assert letter["fallback"] == "reply", \
+        "回落规则要写清：先自己那条（mimo），再沿 `reply` 那条借"
+    # ⚠️ 已知的**跨家**之处（2026-10-16 如实记下，没有顺手"修"）：`KEYS["reply"]`
+    # 自 2026-10-14 起 provider = xkiro，而这条回落说的是 letter（mimo）→ reply。
+    # 也就是说：letter 自己那条与主 key 都没配、而 `QQBOT_REPLY_API_KEY` 有值时，
+    # 信会拿 xkiro 的 key 去打 xkiro 的地址（模型名仍是 `deepseek-v4-pro`）——
+    # 这正是本模块要根治的"A 家 key 打 B 家模型"的形状。它今天走不到（生产 `.env`
+    # 里 `QQBOT_LETTER_API_KEY` 与主 key 都在）。这是"`TASKS` 回退、`KEYS["reply"]`
+    # 按用户口径留在 xkiro"两件事并存的代价，改回 Gemini 之前要先看它一眼。
 
 
 def test_the_letter_key_entry_still_serves_the_mimo_fallback() -> None:
@@ -229,23 +235,21 @@ def test_changing_a_key_provider_moves_the_address_with_it() -> None:
     把 judge 那条 key 的 provider 从 deepseek 换成 mimo，**借它的那一路**的地址
     必须跟着换；换回去也要跟着回去。写死地址、或从全局读地址的实现会在这里红。
 
-    ⚠️ **2026-10-14 换了驱动用的用途（如实交代）**：用户当天说 *"你把这个也换成
-    gemini flash吧"*，判定改成借 `reply` 那条 key（xkiro，见 `EXPECTED` 的 judge 行），
-    于是 `KEYS["judge"]` 的 provider 与**判定的地址**不再有任何关系——再拿 judge
-    当驱动，这条用例就退化成"测一条没人用的 key 条目"，不变式还在、证据却没了。
-    仍然借 `judge` 那条的是 **`letter`**（要的 `deepseek-v4-pro` 只挂在那一家），
-    它才是这条不变式现在的活证据。
+    驱动用的用途是 **`judge`**（借自己的那条）。2026-10-14～10-16 那段判定借 `reply`
+    那条 key（xkiro）、`KEYS["judge"]` 与它无关，所以那时这条用例改用 `letter` 驱动；
+    2026-10-16 用户「切换回ds」之后判定回到 deepseek、又借 `judge` 那条，驱动随之回到
+    判定本人（这次回退**不是**为了让用例变绿，是因为它重新成为这条不变式的直接证据）。
     """
 
     with _env(QQBOT_JUDGE_API_KEY="sk-fake-judge"):
-        before = model_config.resolve("letter")
-        assert before.key_name == "judge", "letter 借的就是 judge 那条 key"
+        before = model_config.resolve("judge")
+        assert before.key_name == "judge", "judge 借的就是自己那条 key"
         assert before.base_url == "https://api.deepseek.com"
 
         original = model_config.KEYS["judge"]["provider"]
         try:
             model_config.KEYS["judge"]["provider"] = "mimo"
-            after = model_config.resolve("letter")
+            after = model_config.resolve("judge")
             assert after.base_url == "https://api.xiaomimimo.com/v1", \
                 "换了 key 的 provider，地址没跟着走——base 与 key 不成对了"
             assert after.provider == "mimo"
@@ -253,7 +257,7 @@ def test_changing_a_key_provider_moves_the_address_with_it() -> None:
         finally:
             model_config.KEYS["judge"]["provider"] = original
 
-        assert model_config.resolve("letter").base_url == "https://api.deepseek.com"
+        assert model_config.resolve("judge").base_url == "https://api.deepseek.com"
 
 
 def test_the_address_never_comes_from_a_second_place() -> None:
@@ -262,41 +266,34 @@ def test_the_address_never_comes_from_a_second_place() -> None:
     这条正面打今晚那个形状：`QQBOT_API_BASE_URL` 指着 mimo、判定拿的是 deepseek 的
     key。判定的地址必须是 deepseek。
 
-    ⚠️ **2026-10-14 换了举例子那一路（如实交代）**：判定借 `reply` 那条 key 之后
-    住在 **xkiro**（见 `EXPECTED`），"该钉在 deepseek 上"的例子换成 **`letter`**
-    （它还借 `judge` 那条 deepseek key）。判定那一路同时钉住：它的地址必须留在
-    **自己的新家**上，同样不听全局地址——口径移了，不是"哪家都行"。
+    2026-10-14～10-16 之间判定借 `reply` 那条 key（xkiro），那段时间"该钉在 deepseek
+    上"的例子换成了 `letter`；2026-10-16 用户「切换回ds」把判定送回 deepseek 之后，
+    例子回到 **`judge`**（它重新是这条不变式的直接证据，不是因为用例要变绿）。
     """
 
     with _env(QQBOT_API_BASE_URL="https://api.xiaomimimo.com/v1",
               QQBOT_JUDGE_API_KEY="sk-fake-judge",
-              QQBOT_MEMORY_API_KEY="sk-fake-memory",
-              QQBOT_REPLY_API_KEY="sk-fake-reply"):
+              QQBOT_MEMORY_API_KEY="sk-fake-memory"):
         # 这个用例模拟的正是今晚那份 `.env` 的形状：全局地址指着 mimo，
         # 而判定 / 记忆各自拿 deepseek 的 key。
-        letter = model_config.resolve("letter")
-        memory = model_config.resolve("memory")
-        assert letter.base_url == "https://api.deepseek.com"
-        assert memory.base_url == "https://api.deepseek.com"
-        assert letter.key_env == "QQBOT_JUDGE_API_KEY"
-        assert memory.key_env == "QQBOT_MEMORY_API_KEY"
-        # 判定 2026-10-14 起借 reply 那条 key（xkiro）：地址钉在它自己那条来源上
         judge = model_config.resolve("judge")
-        assert (judge.provider, judge.base_url) == (
-            "xkiro", "https://api.xkiro.com/v1"), "判定的地址只跟它借的那条 key 走"
-        assert judge.key_env == "QQBOT_REPLY_API_KEY"
+        memory = model_config.resolve("memory")
+        assert judge.base_url == "https://api.deepseek.com"
+        assert memory.base_url == "https://api.deepseek.com"
+        assert judge.key_env == "QQBOT_JUDGE_API_KEY"
+        assert memory.key_env == "QQBOT_MEMORY_API_KEY"
         # 全局地址只出现在"这一趟用的就是兼容档那一对"的时候
-        for endpoint in (letter, memory, judge):
+        for endpoint in (judge, memory):
             assert endpoint.key_env != model_config.COMPAT_KEY_ENV
 
 
 def test_the_pairing_survives_a_panel_provider_switch() -> None:
     """面板"换供应商"不许把有自己 key 的用途搬走（热更路径上的同一条保证）。
 
-    ⚠️ **2026-10-14 换了驱动的那一路（如实交代）**：判定借 `reply` 那条 key 之后
-    住在 xkiro 上，不再是"deepseek 那把 key"的例子，所以"deepseek 那一路"改用
-    **`memory`**（它仍然用自己的 deepseek key）；判定那一路一并钉住——面板换全局
-    供应商之后它的地址必须还在 **xkiro**（它自己那条 key 的家）。
+    驱动用的是 **`judge`** 那一路（它从 2026-10-16 用户「切换回ds」起又用自己的
+    deepseek key）。2026-10-14～10-16 那段它借 `reply` 那条 key（xkiro），
+    那段时间这条用例由 `memory` 驱动——回退是因为判定重新属于 deepseek，
+    不是因为用例要变绿。
     """
 
     import tempfile
@@ -310,23 +307,16 @@ def test_the_pairing_survives_a_panel_provider_switch() -> None:
         group_roles = None
 
     with tempfile.TemporaryDirectory() as tmp, _env(
-            env_file_key="", QQBOT_MEMORY_API_KEY="sk-fake-memory",
-            QQBOT_REPLY_API_KEY="sk-fake-reply"):
-        memory = OpenAICompatibleClient("https://old.example", "sk-fake-memory",
-                                        "deepseek-flash", user_id="u", usage_role="memory")
-        judge = OpenAICompatibleClient("https://old.example", "sk-fake-reply",
-                                       "google/gemini-2.5-flash", user_id="u",
-                                       usage_role="judge")
+            QQBOT_JUDGE_API_KEY="sk-fake-judge"):
+        judge = OpenAICompatibleClient("https://old.example", "sk-fake-judge",
+                                       "deepseek-flash", user_id="u", usage_role="judge")
         try:
             runtime.apply_overrides(
                 _Engine(), {"provider": "mimo"},
                 store=OperatorConfig(Path(tmp) / "operator_config.json"))
-            assert memory.base_url == "https://api.deepseek.com", \
-                "记忆那把 key 属于 deepseek，换全局供应商不该把它搬走"
-            assert judge.base_url == "https://api.xkiro.com/v1", \
-                "判定借的是 xkiro 那条 key（2026-10-14 起），同样不该被搬走"
+            assert judge.base_url == "https://api.deepseek.com", \
+                "判定那把 key 属于 deepseek，换全局供应商不该把它搬走"
         finally:
-            memory.base_url = "https://old.example"
             judge.base_url = "https://old.example"
 
 
@@ -402,13 +392,12 @@ def test_the_compat_layer_matches_the_old_accessors() -> None:
         assert isinstance(dev_config.API_BASE_URL, str) and dev_config.API_BASE_URL
         assert isinstance(dev_config.API_MODEL, str) and dev_config.API_MODEL
         # 判定"有自己的 key 就用自己那条"（模型名被全局覆盖了，key 不受影响）
-        # ⚠️ 2026-10-14：判定**借的是 `reply` 那条 key**（xkiro / Gemini Flash，
-        # 见 `EXPECTED`）——报出来的 key 条目因此是 `reply`、值是 reply 那把。
-        # `KEYS["judge"]`（deepseek）还在服役，只是服务对象换成了 letter 与
-        # memory / review / vision 的回落。
+        # 2026-10-16 用户「切换回ds」之后判定回到 deepseek、重新用 `judge` 那条 key；
+        # 2026-10-14～10-16 那段它借 `reply` 那条（xkiro），那段时间这里报的是
+        # `reply` / `sk-fake-reply`——期望值跟着 `TASKS` 回退，不是为了让用例变绿。
         judge = model_config.resolve("judge")
-        assert judge.key_name == "reply"
-        assert judge.api_key == "sk-fake-reply"
+        assert judge.key_name == "judge"
+        assert judge.api_key == "sk-fake-judge"
 
 
 def test_the_compat_bundle_is_used_as_a_pair_when_the_main_key_exists() -> None:
@@ -501,23 +490,23 @@ def test_an_empty_variable_counts_as_missing() -> None:
 def test_require_names_the_missing_variable_instead_of_using_another_key() -> None:
     """缺 key 时**明确报出来**，而不是"静默拿一把别的 key 去打"。
 
-    ⚠️ **2026-10-14 换了驱动用的用途（如实交代）**：判定现在借 `reply` 那条 key
-    （xkiro，见 `EXPECTED` 的 judge 行），"只配了 reply 那把"的机器上它**有** key
-    了——再拿判定测 fail-closed 就测不到东西。仍然借 `judge` 那条（deepseek）的
-    **`letter`** 才是"一条 key 都没有"的那一路，用它驱动，这条不变式原样保留。
+    驱动用的是 **`judge`**：2026-10-16 用户「切换回ds」之后它又用自己的那条 deepseek
+    key（`QQBOT_JUDGE_API_KEY`），而这段环境里那条没配 —— 正好是"这一路一条 key
+    都没有"的形状。2026-10-14～10-16 那段判定借 `reply` 那条 key（xkiro），配了
+    reply 那把它就有 key 了，所以那时这条用例改用 `letter` 驱动。
     """
 
     with _env(env_file_key="", QQBOT_REPLY_API_KEY="sk-fake-reply"):
-        # letter 的 key 来源是 judge 那条（没配），同家回落链上也没有别的
+        # reply 那把（xkiro）在，但它与 judge 无关：判定要的是 `QQBOT_JUDGE_API_KEY`
         try:
-            model_config.require("letter")
+            model_config.require("judge")
         except MissingCredential as exc:
-            assert exc.task == "letter"
+            assert exc.task == "judge"
             # 报的是"这个用途该配的那一项"，并说清它是怎么回落的
             assert exc.env == "QQBOT_JUDGE_API_KEY", exc.env
             assert "回落" in str(exc), str(exc)
         else:
-            raise AssertionError("letter 没有 key 时 `require` 却给了个客户端")
+            raise AssertionError("judge 没有 key 时 `require` 却给了个客户端")
 
 
 def test_the_runtime_refuses_to_build_a_client_without_a_key() -> None:
@@ -573,9 +562,10 @@ def test_the_self_check_prints_names_not_values() -> None:
 def test_the_self_check_marks_the_missing_purposes() -> None:
     """缺 key 的用途要在自检里带 `**缺**`（今晚那种事一眼看得出来）。
 
-    2026-10-14 起 reply 走**自己那条 key**（`QQBOT_REPLY_API_KEY`，xkiro / Gemini Flash），
-    不再借 judge 那条（见 `EXPECTED` 的第一行）——所以"只配 judge 那一把"的机器上
-    reply 会如实报缺。letter 仍然借 judge 那条。
+    2026-10-16 用户「切换回ds」之后 reply 与 judge **都借 judge 那条 key**（deepseek），
+    所以"只配 judge 那一把"的机器上**六个用途全都有值**（要看 `**缺**` 得把 judge 也
+    清掉——两半都钉在下面）。2026-10-14～10-16 那段 reply 走自己那条（xkiro），
+    那时这一段钉的是"只配 judge 那把 ⇒ reply 与 judge 都报缺"。
     """
 
     with _env(env_file_key=""):
@@ -586,15 +576,12 @@ def test_the_self_check_marks_the_missing_purposes() -> None:
 
     with _env(env_file_key="", QQBOT_JUDGE_API_KEY="sk-fake-judge"):
         blob = "\n".join(model_config.self_check_lines())
-        # ⚠️ 2026-10-14：判定借 `reply` 那条 key（xkiro），所以"只配 judge 那把"的
-        # 机器上它**如实报缺**（缺的是它借的那一条）；letter 仍然借 judge 那条
-        # （有值，地址与供应商跟着它走）；memory / review / vision 回落到 judge 那把。
-        assert "judge: provider=xkiro" in blob and "**缺**" in blob, (
-            "判定的 key 来源已经换成 reply 那条（xkiro），缺的就是那一条"
-        )
-        assert "letter: provider=deepseek" in blob, "letter 仍然借 judge 那条 deepseek key"
-        assert "memory: provider=deepseek" in blob, "memory 回落到 judge 那把（同家）"
-        assert "reply: provider=xkiro" in blob, "reply 用自己那条 key"
+        # judge 有自己的 key；reply / letter 都借 judge 那条，memory / review / vision
+        # 回落到它（同家）——所以这一把 key 就够六个用途跑起来，一个 `**缺**` 都不该有。
+        assert "judge: provider=deepseek" in blob
+        assert "**缺**" not in blob, "reply 与 letter 借的都是 judge 那条，不该报缺"
+        assert "letter: " in blob
+        assert "reply: provider=deepseek" in blob, "reply 回到借 judge 那条（deepseek）"
 
 
 def test_the_runtime_self_check_hook_returns_those_lines() -> None:

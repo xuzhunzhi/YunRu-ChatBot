@@ -51,37 +51,83 @@ OneBot 已连接
 | `QQBOT_API_KEY` | **必填**。回复用的 key |
 | `QQBOT_REPLY_API_BASE_URL` | 可选。**只给回复 agent** 的地址（2026-10-05 起可以有）；不配回落全局地址 |
 | `QQBOT_REPLY_API_MODEL` | 可选。只给回复 agent 的模型；不配回落全局模型 |
-| `QQBOT_REPLY_API_KEY` | 可选。**只给回复 agent** 的 key；不配回落主 key。**2026-10-14 起回复那一路走 xkiro 中转的 `google/gemini-2.5-flash`**（`model_config.TASKS["reply"]`），用的就是这一把 |
-| `QQBOT_JUDGE_API_KEY` | 可选，判定用；不配回落主 key |
+| `QQBOT_REPLY_API_KEY` | 可选。**只给回复 agent** 的 key。**2026-10-16 起回复那一路住在 deepseek**（借 `QQBOT_JUDGE_API_KEY` 那条，见下面"手动切档"），所以这一项**现在闲置**——2026-10-14～10-16 那段它承载的是中转 xkiro 那把 Gemini key；那把 key 与 `model_config.KEYS["reply"]`（provider = `xkiro`）都**保留**，将来切回 Gemini 要用 |
+| `QQBOT_JUDGE_API_KEY` | 可选，判定用；不配回落主 key。**2026-10-16 起判定与回复两路都借这一条**（两路都是 `deepseek-flash`），所以它现在是"判定 + 回复"两路共用的那把 |
 | `QQBOT_MEMORY_API_KEY` | 可选，记忆维护用；不配回落主 key |
 | `QQBOT_REVIEW_API_KEY` | 可选，风格审核用；**配了它就自动开**（也可回落主 key） |
 
 **每个 agent 各用各的地址**：`QQBOT_REPLY_API_*` 只影响回复那一路（含按会话新建的
-client），判定 / 记忆 / 审核 / 写信仍然走全局那一套。所以"把回复换到别家模型、
-判定继续用便宜的那家"是填三个键的事，不用改代码。这三项在面板上也是 live 的，
+client），判定 / 记忆 / 审核 / 写信仍然走全局那一套。这三项在面板上也是 live 的，
 留空 = 清掉覆盖、回落全局。
 
-⚠️ **上面那句话里的"key"那一项有前提**（2026-10-14 实测踩到，别再踩）：
+⚠️ **"换家"不是只填三个键**（2026-10-14 与 2026-10-16 各踩过一次"换了一半"）：
 `QQBOT_<用途>_API_KEY` 只有在 `model_config.TASKS[用途]["key"]` 指向**该用途自己那条
-key 条目**时才真的生效。10-09 → 10-14 之间 reply 借的是 `judge` 那条 key（那段时间
-`QQBOT_REPLY_API_KEY` 是**闲置**的）；那状态下只填 `QQBOT_REPLY_API_BASE_URL` +
-`QQBOT_REPLY_API_MODEL`，解析出来的 key **仍然是 judge 那把**——等于把 deepseek 的
-key 递给了新地址。**换家时地址与 key 必须同源**：`TASKS` 那一行的 `key` 与
-`QQBOT_<用途>_API_KEY` 要一起改。
+key 条目**时才真的生效。2026-10-16（用户原话："切换回ds。gemini好蠢。"，同日早先
+那句是"都改ds"）之后 `TASKS` 是这样：
 
-**2026-10-14 这一笔的实际形状**（用户："这里面有gemini flash模型，给云茹接上"）：
+| 用途 | `TASKS` 那一行 | key 从哪来 | 地址 / 模型 |
+| --- | --- | --- | --- |
+| reply | `{"key": "judge", "model": "deepseek-flash"}` | `QQBOT_JUDGE_API_KEY` | `deepseek` / `deepseek-flash` |
+| judge | `{"key": "judge", "model": "deepseek-flash"}` | `QQBOT_JUDGE_API_KEY` | `deepseek` / `deepseek-flash` |
+| letter | `{"key": "judge", "model": "deepseek-v4-pro"}` | `QQBOT_JUDGE_API_KEY` | `deepseek` / `deepseek-v4-pro` |
+| memory | `{"key": "memory", "model": "deepseek-flash"}` | `QQBOT_MEMORY_API_KEY`（不配回落 `QQBOT_JUDGE_API_KEY`） | `deepseek` |
+| review | `{"key": "review", "model": "deepseek-flash"}` | `QQBOT_REVIEW_API_KEY`（同上回落） | `deepseek` |
+| vision | `{"key": "vision", "model": "deepseek-flash"}` | `QQBOT_VISION_API_KEY`（同上回落） | `deepseek` |
 
-| 层 | 内容 |
-| --- | --- |
-| `provider_registry.PROVIDERS` / `model_config.PROVIDERS` | 新增 `xkiro` → `https://api.xkiro.com/v1` |
-| `model_config.KEYS["reply"]` | provider 改 `xkiro`（地址跟着它走） |
-| `model_config.TASKS["reply"]` | `{"key": "reply", "model": "google/gemini-2.5-flash"}` |
-| `.env` | `QQBOT_REPLY_API_KEY=<xkiro 那把>`（原来那把 mimo key 与 `QQBOT_LETTER_API_KEY` 是同一把，没丢） |
+所以换家时**必须连 `TASKS` 那一行一起改**（地址、key、模型三样同源）。只填
+`QQBOT_<用途>_API_BASE_URL` / `_API_MODEL` 只会换掉地址与模型名、**key 还是原来那把**
+——那就是"A 家 key 打 B 家地址"的形状。这是实测过的：10-09～10-14 之间 reply 借的
+是 `judge` 那条 key，那时只填 `QQBOT_REPLY_API_BASE_URL` + `_API_MODEL`，解析出来的
+key **仍然是 judge 那把**（等于把 deepseek 的 key 递给新地址）。
 
-要换回 ds：把 `TASKS["reply"]` 改回 `{"key": "judge", "model": "deepseek-flash"}`，
-并把 `KEYS["reply"]` 的 provider 改回 `deepseek`（`.env` 里那条 key 留着不影响）。
-实测口径（同一条真实 prompt，走本仓库自己的 client）：`google/gemini-2.5-flash`
-首字/总 2.01s、2.88s、2.51s；`deepseek-flash` 4.35s、3.35s、2.63s。
+**手动切档：deepseek ⇄ xkiro（中转的 Gemini Flash）**
+
+`xkiro`（`https://api.xkiro.com/v1`）现在是**闲置档**：`model_config.PROVIDERS["xkiro"]`、
+`model_config.KEYS["reply"]`（provider = `xkiro`、env = `QQBOT_REPLY_API_KEY`）与
+`.env` 里那把 key 都**保留着**（没删，将来一键切回要用）。
+
+| 层 | 切回 Gemini Flash | 切回 deepseek（现状） |
+| --- | --- | --- |
+| `model_config.TASKS["reply"]` | `{"key": "reply", "model": "google/gemini-2.5-flash"}` | `{"key": "judge", "model": "deepseek-flash"}` |
+| `model_config.TASKS["judge"]` | `{"key": "reply", "model": "google/gemini-2.5-flash"}` | `{"key": "judge", "model": "deepseek-flash"}` |
+| `model_config.KEYS["reply"]["provider"]` | `xkiro` | 不动（**别**跟着改成 deepseek——`KEYS["letter"]["fallback"]` 还指它） |
+| `.env` 的 `QQBOT_REPLY_API_KEY` | xkiro 那把 | 留着不管（闲置） |
+
+切到中继时会**丢掉 `reasoning_effort`**：那一项只在 `provider ∈ {"", "deepseek"}`
+时才发（`llm_client._complete_sync` 里的 `deepseek_fields`），provider 是 `xkiro` 时
+发不出去 ⇒ 只能吃 DeepSeek 自己的默认档。这是 2026-10-16 回退的两条依据之一；
+另一条是中继的 Google 上游当时整段 503（`/v1/models` 通、`chat/completions` 全 503，
+25 分钟探针全挂）。
+
+⚠️ **一个从来没生效过的键：`QQBOT_REPLY_REASONING_EFFORT`（死键）**
+
+思考深度那一项不是"用途名 → 变量名"的映射表，而是**直接拿 client 的 `usage_role`
+当键名拼**：`llm_client` 里那句是 `reasoning_effort(self.usage_role)`，展开就是
+`QQBOT_<USAGE_ROLE>_REASONING_EFFORT`，**中间不做任何映射**。而回复那一路的
+`usage_role` 历史名是 **`dialogue`**（那张对照表见 `llm_client._SAMPLING_ROLE_TO_TASK`），
+所以真正要写的是：
+
+| 想改哪一路 | **真正生效的键** | 写了没用（死键） |
+| --- | --- | --- |
+| 回复 | `QQBOT_DIALOGUE_REASONING_EFFORT` | `QQBOT_REPLY_REASONING_EFFORT` |
+| 判定 | `QQBOT_JUDGE_REASONING_EFFORT` | —— |
+| 写信 / 记忆 / 审核 / 识图 | `QQBOT_LETTER_...` / `QQBOT_MEMORY_...` / `QQBOT_REVIEW_...` / `QQBOT_VISION_REASONING_EFFORT` | —— |
+
+对比一下**采样参数那一处是有映射的**：`_sampling_params_for` 先过
+`_SAMPLING_ROLE_TO_TASK = {"dialogue": "reply"}`，再去读 `QQBOT_REPLY_TEMPERATURE`
+那一族。两套名字不一致是历史遗留（回复的账本角色叫 dialogue、配置键叫 reply），
+不是笔误。**写错的那个键既不报错也不打日志，只是永远不生效**——动它之前先确认键名。
+
+**实测口径（2026-10-16，`deepseek` / `deepseek-flash`，走本仓库自己的 client，流式）**：
+
+| 口径 | 指的是什么 | 实测 |
+| --- | --- | --- |
+| 第一条完整响应行（闸） | 首字闸（`llm_client.STREAM_STALL_SECONDS`，3 秒）盯的那个事件：服务端吐回**第一整行** SSE | **0.15~0.31s** |
+| 第一个 content | 真正吐出第一段正文的时刻 | `reasoning_effort=none` 档 **0.51~1.13s**；`low` / `high` 档 **1.87~17.03s** |
+
+（这两个数**不是一个东西**：撞 3 秒那道闸看的是"第一条完整响应行"，不是"第一个
+content"。以前这里只写"首字/总"两个词，读的人拿哪个数去对闸都不知道；那一版 A/B
+数字因此作废，以这张表为准。）
 
 ⚠️ **同一个账号下的多把 key 不隔离并发限额与缓存容量**——那两样是账号级的。
 分 key 的意义是"出问题只吊销那一把"。想让账单彻底分开，得用**不同账号**的 key。
