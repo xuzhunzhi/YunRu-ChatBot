@@ -675,7 +675,7 @@ def test_reference_block_frames_the_material_as_past() -> None:
         state = ConversationState()
         state.add(message, 1000.0)
         request = build_dialogue_messages(
-            state.topic_history(), current=message, mode=ConversationMode.ACTIVE,
+            state.live_history(), current=message, mode=ConversationMode.ACTIVE,
             trigger="mention", context=state.context, group_chat=True,
             prompt_material=material,
         )

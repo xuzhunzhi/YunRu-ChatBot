@@ -72,9 +72,17 @@ def sanitize_reply_text(text: str) -> str:
 #:
 #: * 回复 agent 的信封（`stage3_runtime` 解析）：`decision` / `dialogue` / `reply` /
 #:   `reply_to` / `context`；
-#: * 判定 agent 的信封（`dialogue_judge` 解析）：`route` / `topic` / `topic_start` /
-#:   `related` / `lore` / `understood` / `specialist` / `guard` / `guard_reason` /
-#:   `remind`；
+#: * 判定 agent 的信封（`dialogue_judge` 解析）：`route` / `topic` / `related` /
+#:   `lore` / `understood` / `specialist` / `guard` / `guard_reason` / `remind`；
+#:   **`topic_start` 现在只剩防御性**（2026-10-15 复核实测）：判定**不再**回报话题起点，
+#:   `dialogue_judge` 里已经**没有任何代码解析它**（用户原话 *"我还要说几次，不切话题"*，
+#:   给模型的历史一刀都不切）。名字留在名单里的理由是**出站方向**：它曾经是我们自己的
+#:   信封标签，模型学舌或历史残留都可能把它吐回正文，而**出站正文里不该出现它**——
+#:   剥它的成本是零（少剥一个已知标签只会让正文更脏），删它的风险是"下次它真漏出去
+#:   就没人拦"。**这不是"解析还在"**，别照这一行去 `dialogue_judge` 里找消费者。
+#:   什么时候能改回去：要么用户重新定一条"按话题裁历史"的口径（那时解析会回来），
+#:   要么确认这段历史残留彻底不可能再出现在出站正文里（那时可以连名字一起删）。
+#:   ⚠️ 名单本身**一个字都不许动**：`tests/test_reply_tag_scrub.py:148-154` 逐字钉着它。
 #: * 我们往 prompt 里放的 DATA 分块（模型学舌时会连标签一起吐回来）：`people` /
 #:   `history` / `message` / `text` / `earlier_summary` / `current_event` /
 #:   `current_message` / `extra_prompt` / `plugin` / `knowledge` / `memory`。

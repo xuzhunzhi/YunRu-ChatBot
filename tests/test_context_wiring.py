@@ -82,7 +82,7 @@ def test_seeded_messages_get_a_roster_slot() -> None:
         state = engine.sessions.state(f"group:{GROUP}")
         assert set(state.aliases) == {"100", "200", "300"}, state.aliases
         rendered = build_dialogue_messages(
-            state.topic_history(), current=state.recent()[-1],
+            state.live_history(), current=state.recent()[-1],
             mode=ConversationMode.ACTIVE, trigger="mention", context=state.context,
             group_chat=True, alias_of=state.alias_of, aliases=state.aliases,
             roster=tuple(state.roster_lines()),

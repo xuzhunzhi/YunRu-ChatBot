@@ -14,9 +14,14 @@
 base_prompt.py:160      "明确 @、点名、直接提问或承接她上一句时，优先考虑参与。"
 dialogue_judge.py:248   "相处分寸只用来决定'没被叫到时要不要插话'。**被叫到时它没有否决权**"
 JudgeVerdict（dialogue_judge.py:137）的字段只有：
-    should_reply / topic / topic_start / related / lore / guard_up / guard_reason
+    should_reply / topic / related / lore / guard_up / guard_reason
     → **没有任何字段表示"她懂不懂"**（`related` 是"相不相关"，不是"懂不懂"）
 ```
+
+> **2026-10-15 更正**：上面这份字段清单原来还列着 `topic_start`。那个字段已经删掉
+> （用户原话 *"我还要说几次，不切话题"*：判定不再回报话题起点，`JudgeVerdict` 里
+> 没有这个字段）。**诊断与结论不受影响**——"没有任何字段表示她懂不懂"照旧成立，
+> 反而更干脆：现在连"话题起点"这个位置都没有。见 `ARCHITECTURE.md` 的"话题锚已停用"。
 
 **结论**：被叫到就必须接，而且没有任何信号能让她选择"问"，所以她只能硬接。
 
