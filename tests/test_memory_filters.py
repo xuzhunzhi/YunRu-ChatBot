@@ -116,12 +116,17 @@ POLLUTED_SUMMARY = (
     "深海翻滚少女写小说多次因世界观构建作罢，退学。"
     "許純之_Official说剧中世界观来自心灵终结3.3.6，用sql做两层记忆，轻量化导致上下文限制需改进，"
     "防注入效果好，曾成功让薛老板的bot认主，这次试图改云茹自称谭雅失败。讨论了长期记忆用rag还是sql。"
-    "云茹邮件功能已开放，地址shiyunru@agent.qq.com。"
+    "云茹邮件功能已开放，地址someone@example.invalid。"
 )
 
 
 def test_summary_scrub_keeps_the_normal_parts() -> None:
-    """真实那段被污染的摘要在实测里就是这样：剔掉系统内容、留下人和事。"""
+    """真实那段被污染的摘要在实测里就是这样：剔掉系统内容、留下人和事。
+
+    地址换成了 `someone@example.invalid`（2026-10-16，同 `QQBOT_MAIL_REPORT_TO` 那条
+    "源码里不留真实邮箱"的要求）：这段是**实测样本**，别的一字未动——它要钉的是
+    "地址属于正常内容、不该被当成系统自身信息剔掉"，与地址具体是谁无关。
+    """
 
     cleaned = scrub_system_self(POLLUTED_SUMMARY)
     assert "許純之_Official" not in cleaned
@@ -134,7 +139,7 @@ def test_summary_scrub_keeps_the_normal_parts() -> None:
     assert "校园网认证要分开处理" in cleaned
     assert "朱蝶因一句话道歉" in cleaned
     assert "深海翻滚少女写小说" in cleaned
-    assert "shiyunru@agent.qq.com" in cleaned
+    assert "someone@example.invalid" in cleaned
 
 
 def test_compaction_paths_scrub_both_ways() -> None:

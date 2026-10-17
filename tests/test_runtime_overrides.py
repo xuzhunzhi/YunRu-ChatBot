@@ -199,12 +199,13 @@ def test_explicit_url_wins_over_provider() -> None:
 def test_a_global_address_change_only_moves_purposes_without_their_own_key() -> None:
     """**成对取自同一条**：全局改地址不许把"有自己那条 key"的用途搬走。
 
-    这是 2026-10-06 那个 401 的回归：全局地址指向 mimo、而这一路的 key 属于
-    deepseek —— 全局一动，它就会拿着 deepseek 的 key 去打 mimo。
+    这是 2026-10-06 那个 401 的回归：全局地址指向 mimo、而判定那把 key 属于
+    deepseek —— 全局一动，判定就会拿着 deepseek 的 key 去打 mimo。
 
-    ⚠️ **2026-10-14 换了举例那一路（如实交代）**：判定改成借 reply 那条 key（xkiro）
-    之后，它不再"属于 deepseek"，所以这里换成仍然绑在 deepseek 上的 **`letter`**
-    （它借 `judge` 那条 key）。不变式一个字没动，只是证据换成还成立的那一路。
+    驱动用的是 **`judge`**：2026-10-16 用户「切换回ds。gemini好蠢。」之后判定又用自己的
+    那条 deepseek key（`TASKS["judge"]` = `{"key": "judge", ...}`）。2026-10-14～10-16
+    那段它借 `reply` 那条 key（xkiro）、不再"属于 deepseek"，所以那时这条改用 `letter`
+    （借 `judge` 那条）——回退是因为判定重新属于 deepseek，不是因为用例要变绿。
     （"回复那一趟该不该跟着走"由 `test_reply_endpoint.py` 那条覆盖。）
     """
 
@@ -212,14 +213,14 @@ def test_a_global_address_change_only_moves_purposes_without_their_own_key() -> 
         runtime_flags.install(runtime_flags.build_flags())
         saved = os.environ.get("QQBOT_JUDGE_API_KEY")
         os.environ["QQBOT_JUDGE_API_KEY"] = "sk-judge-fake"
-        letter = _client("letter")
+        judge = _client("judge")
         try:
             apply_overrides(_Engine(), {"api_base_url": "https://api.xiaomimimo.com/v1"},
                             store=_operator(tmp))
-            assert letter.base_url == "https://api.deepseek.com", \
-                "letter 借的那把 key 属于 deepseek，地址不该被全局改成 mimo"
+            assert judge.base_url == "https://api.deepseek.com", \
+                "判定那把 key 属于 deepseek，地址不该被全局改成 mimo"
         finally:
-            letter.base_url = "https://old.example"
+            judge.base_url = "https://old.example"
             if saved is None:
                 os.environ.pop("QQBOT_JUDGE_API_KEY", None)
             else:
@@ -230,19 +231,20 @@ def test_a_global_address_change_only_moves_purposes_without_their_own_key() -> 
 def test_switching_the_global_provider_does_not_move_a_bound_purpose() -> None:
     """换供应商同理：它只影响"按兼容档那一对在走"的用途。
 
-    2026-10-14：与上一条同一个理由，驱动换成 `letter`（判定已不住在 deepseek）。
+    2026-10-16：与上一条同一个理由，驱动回到 `judge`（用户「切换回ds」之后判定又住在
+    deepseek；2026-10-14～10-16 那段驱动是 `letter`）。
     """
 
     with tempfile.TemporaryDirectory() as tmp, _clean_addresses():
         runtime_flags.install(runtime_flags.build_flags())
         saved = os.environ.get("QQBOT_JUDGE_API_KEY")
         os.environ["QQBOT_JUDGE_API_KEY"] = "sk-judge-fake"
-        letter = _client("letter")
+        judge = _client("judge")
         try:
             apply_overrides(_Engine(), {"provider": "mimo"}, store=_operator(tmp))
-            assert letter.base_url == "https://api.deepseek.com"
+            assert judge.base_url == "https://api.deepseek.com"
         finally:
-            letter.base_url = "https://old.example"
+            judge.base_url = "https://old.example"
             if saved is None:
                 os.environ.pop("QQBOT_JUDGE_API_KEY", None)
             else:

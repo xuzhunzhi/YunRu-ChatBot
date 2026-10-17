@@ -32,28 +32,30 @@
 > **照旧生效**；**key 跟 judge 那条走**，`QQBOT_REPLY_API_KEY`（mimo 那把）在解析里
 > **闲置**。本文件的期望值已按新路由更新。
 
-> ⚠️ **2026-10-14 又改了 reply 那条 key 的指向（如实交代）**：用户给了新地址与 key
-> （*"这里面有gemini flash模型，给云茹接上"*）——`tasks["reply"]` 从"借 judge 那条"
-> 改成 **reply 自己那条**，`KEYS["reply"]` 的 provider 改成 `xkiro`。于是：
-> 地址 / key / 模型**三样同源**（`QQBOT_REPLY_API_KEY` 不再闲置），
-> 任务级覆盖（`QQBOT_REPLY_API_BASE_URL` / `QQBOT_REPLY_API_KEY` / `QQBOT_REPLY_API_MODEL`）
-> 照旧生效；**judge 那条 key 从此与 reply 无关**（10-09 的形状作废）。
-> 为什么必须这样改：只填 `QQBOT_REPLY_API_BASE_URL` 时解析出来的 key 仍是 judge 那把
-> ——等于把 deepseek 的 key 递给新地址（实测过）。本文件的期望值已按新路由更新。
+> ⚠️ **2026-10-16 又改了 reply 那条 key 的指向（如实交代，用户原话："切换回ds。
+> gemini好蠢。"，同日早先那句是"都改ds"）**：`tasks["reply"]` 从"reply 自己那条"
+> （xkiro / Gemini Flash）**改回借 `judge` 那条**（deepseek / `deepseek-flash`）——
+> 与 2026-10-09 那一版逐字相同，也就是 2026-10-14 那笔（1834fce）**之前**的形状。
+> 依据是用户这句口径 **加上两条实测**（2026-10-16）：①中继的 Google 上游整段 503
+> （`/v1/models` 通、`chat/completions` 全 503，25 分钟探针全挂）；②`reasoning_effort`
+> 只在 provider ∈ {"", "deepseek"} 时才发（`llm_client` 的 `deepseek_fields`），
+> provider=xkiro 时发不出去 ⇒ 只能吃默认档，正文最慢实测 13.9s。于是：地址 / 模型的
+> 任务级覆盖（`QQBOT_REPLY_API_BASE_URL` / `QQBOT_REPLY_API_MODEL`）**照旧生效**；
+> **key 跟 judge 那条走**，`QQBOT_REPLY_API_KEY`（xkiro 那把）在解析里**再次闲置**
+> ——但**保留**：`.env` 里那把 key 与 `KEYS["reply"]` 那条条目都没删，中继恢复后
+> "一键切回"要用它们。本文件的期望值已按新路由回退。
 >
-> ⚠️ 同一天留下的一个**休眠的坑**（写在这里，别当它不存在）：如果哪天
-> `QQBOT_REPLY_API_KEY` 被删掉，reply 会按 `fallback` 回落到"主 key 那一对"，
-> 而**模型名仍然跟着 `tasks` 走**（`google/gemini-2.5-flash`）——那就成了
-> "主家的 key + 主家的地址 + gemini 的模型名"。生产 `.env` 里那条 key 在，
-> 所以这条路现在走不到；自检那一行会同时印 provider / model，真踩到了看得出来。
+> ⚠️ 同一天顺手记下**休眠的坑**（方向与 10-14 那版相反）：reply 借 judge 那条 key、
+> 而**模型名仍然跟着 `tasks` 走**——谁要是只把模型名换成 Gemini 的（或让
+> `QQBOT_REPLY_API_MODEL` 指着别家的模型），就会出现"deepseek 的 key + 别家的模型名"。
+> 自检那一行同时印 provider / model，真踩到了看得出来。
 
-> ⚠️ **同一天同一条指令还动了判定（如实交代，用户原话："你把这个也换成gemini flash吧"）**：
-> `tasks["judge"]` 改成**借 `reply` 那条 key**（xkiro / `google/gemini-2.5-flash`）。
-> 于是**判定那条 key（`QQBOT_JUDGE_API_KEY`，deepseek）与 reply 彻底无关**，
-> 而 `QQBOT_REPLY_API_KEY` 同时服务 reply 与 judge（judge 是借它）。
-> 本文件里凡是"判定那把 key 属于 deepseek"的断言都因此换了对象：**仍然名副其实的
-> 两路是 `letter`（借 judge 那条 deepseek key）与 `memory`（自己那条）**，
-> 每一处都写清了为什么，别把它读成"随便换一路都行"。
+> ⚠️ **2026-10-14 那一天的判定改动也一并回退了（同一条口径："切换回ds"）**：
+> `tasks["judge"]` 曾改成**借 `reply` 那条 key**（xkiro / `google/gemini-2.5-flash`），
+> 2026-10-16 起回到 **`{"key": "judge", "model": "deepseek-flash"}`**。于是
+> **判定那条 key（`QQBOT_JUDGE_API_KEY`，deepseek）与 reply 的关系回到"reply 借它"**，
+> 而 `QQBOT_REPLY_API_KEY` 谁都不借了。本文件里"判定那把 key 属于 deepseek"的断言
+> 因此回到以**判定本人**为例——那正是它 2026-10-16 之后的真实身份。
 > （判定那一行自己的期望值在 `tests/test_model_config.py` 的 `EXPECTED` 里钉着。）
 
 （测试里用的都是**假地址与假 key**：目标值由部署方写在 `run/.env` 里，
@@ -78,12 +80,10 @@ REPLY_VARS = ("QQBOT_REPLY_API_BASE_URL", "QQBOT_REPLY_API_KEY", "QQBOT_REPLY_AP
 # 它会写这个变量；不跟着管起来，跑完就会留给后面的文件。
 GLOBAL_VARS = ("QQBOT_API_BASE_URL", "QQBOT_API_KEY", "QQBOT_API_MODEL",
                "QQBOT_API_PROVIDER")
-# `QQBOT_JUDGE_API_KEY` 也要管起来，但**理由与 10-09 那版相反**：
-# 那时 reply 借的是 judge 那条 key（所以它有值会改变 reply 的解析）；
-# 2026-10-14 起 reply 用**自己那条**（`QQBOT_REPLY_API_KEY`，已在 REPLY_VARS 里），
-# 而**判定借的是 reply 那条**——本文件里比较判定 client 的用例仍然依赖"这台机器
-# 上的 judge 那把是什么"，不钉住就会跟着 `.env` 漂。
-# （两个变量都必须管：一个管 reply 自己，一个管借它的人。）
+# `QQBOT_JUDGE_API_KEY` 也要管起来：reply 的 key 来源自 2026-10-09 起（2026-10-16
+# 用户「切换回ds」之后再一次）是 **judge 那条**，所以这个文件里凡是钉 reply 解析的
+# 用例必须连它一起管起来——`.env` 带进来的真值会把"该走主 key 那对 / 该报缺"的
+# 用例全部带偏。
 JUDGE_VARS = ("QQBOT_JUDGE_API_KEY",)
 
 
@@ -165,10 +165,10 @@ def test_without_reply_overrides_the_reply_agent_uses_the_main_key_pair() -> Non
     "那一对" = `QQBOT_API_KEY` + `QQBOT_API_BASE_URL`：历史部署里它们本来就是
     **同一份配置**（只配一把 key 的机器），所以行为与改动前逐字相同。
 
-    ⚠️ 2026-10-14 起"没配专属值"的回落链只有一条：reply 的 key 来源是**它自己那条**
-    （`QQBOT_REPLY_API_KEY`，xkiro / Gemini Flash），没有就落"主 key 那一对"。
-    下面第二段钉住新形状：**判定的那把 key 搬不动 reply 了**（10-09 那种"借 judge"
-    的形状作废——它在换家时会造出"deepseek 的 key 打 xkiro 的地址"）。
+    2026-10-16 用户「切换回ds」之后，"没配专属值"的前提多了一条：reply 的 key 来源
+    现在是 **judge 那条**（deepseek），它有值时 reply 跟它走、不再走主 key 那一对
+    ——那个新默认在下面第二段钉住。（2026-10-14～10-16 那段 reply 用自己那条 key，
+    所以那时这一段是反过来的：判定那把 key 搬不动它。）
     """
 
     with _env(QQBOT_API_KEY="sk-main-fake"):
@@ -183,15 +183,13 @@ def test_without_reply_overrides_the_reply_agent_uses_the_main_key_pair() -> Non
             dev_config.reply_api_base_url(), dev_config.reply_api_key(),
             dev_config.reply_api_model())
 
-    # 2026-10-14：judge 那把 key 与 reply **无关**了——配上它也照样走主 key 那一对。
+    # 2026-10-16 用户「切换回ds」：judge 那条有值时，reply 跟它走（deepseek）。
     with _env(QQBOT_API_KEY="sk-main-fake", QQBOT_JUDGE_API_KEY="sk-judge-fake"):
         endpoint = model_config.resolve("reply")
-        assert (endpoint.key_name, endpoint.key_env, endpoint.api_key) == (
-            model_config.MAIN_KEY, "QQBOT_API_KEY", "sk-main-fake")
-        # 供应商仍按**本用途自带那家**算（reply 那条 key 绑的是 xkiro）——
-        # 兼容档那一对"是哪家"由这一条自己那家决定，见 `_main_provider`。
+        assert (endpoint.key_env, endpoint.api_key) == (
+            "QQBOT_JUDGE_API_KEY", "sk-judge-fake")
         assert (endpoint.provider, endpoint.base_url) == (
-            "xkiro", model_config.provider_base_url("xkiro"))
+            "deepseek", model_config.provider_base_url("deepseek"))
 
 
 def test_an_empty_reply_value_means_not_configured() -> None:
@@ -202,9 +200,9 @@ def test_an_empty_reply_value_means_not_configured() -> None:
     设了 `QQBOT_API_KEY` 而它属于别家时，reply 用它**那一对**，不再拼出
     "A 家的 key + B 家的地址"。见本文件头部那段交代。
 
-    ⚠️ 2026-10-14 起 `QQBOT_REPLY_API_KEY` **不再闲置**（reply 的 key 来源就是
-    它自己那条，xkiro / Gemini Flash）——所以这里"空串等于没配"验的正是它本身：
-    三个都设成空串时，回落的必须是**主 key 那一对**，而不是把 key 弄成空串。
+    ⚠️ 2026-10-16 用户「切换回ds」后，`QQBOT_REPLY_API_KEY` 本身在解析里
+    **又闲置**（reply 的 key 来源是 judge 那条）——这里要验的仍然是"空串等于
+    没配、不许把 key 弄成空串"；judge 那条也没配时，回落的是主 key 那一对。
     """
 
     with _env(QQBOT_REPLY_API_BASE_URL="", QQBOT_REPLY_API_MODEL="",
@@ -220,20 +218,21 @@ def test_an_empty_reply_value_means_not_configured() -> None:
 
 
 def test_without_any_key_the_reply_uses_its_own_provider() -> None:
-    """一条 key 都没有时：reply 报它自己那条，地址取那家的默认。
+    """一条 key 都没有时：reply 报它自己那条（= judge 那条），地址取那家的默认。
 
     成对的意思就是"有 key 才有那一对"——所以兼容档的地址（`QQBOT_API_BASE_URL`）
     在这里**不被采用**，用它就会造出"空 key + 别家的地址"。
-    （reply 自己那条自 2026-10-14 用户改口径起 = `QQBOT_REPLY_API_KEY`，
-    绑的是 **xkiro**；10-09 那版"自己那条 = judge 那条"已作废。）
+    （reply 自己那条自 2026-10-09 起就是 **judge 那条**：deepseek；2026-10-16 用户
+    「切换回ds」之后又回到这里——2026-10-14～10-16 那版"自己那条 = 回复那条（xkiro）"
+    已作废。）
     """
 
     with _env(env_file_key=""):
         endpoint = model_config.resolve("reply")
-        assert endpoint.key_env == "QQBOT_REPLY_API_KEY", \
-            "没有 key 时要报它自己那条（2026-10-14 起 = QQBOT_REPLY_API_KEY）"
+        assert endpoint.key_env == "QQBOT_JUDGE_API_KEY", \
+            "没有 key 时要报它自己那条（= judge 那条）"
         assert endpoint.key_present() is False, "没有 key 时要在自检里报出来"
-        assert endpoint.base_url == model_config.provider_base_url("xkiro")
+        assert endpoint.base_url == model_config.provider_base_url("deepseek")
         assert "**缺**" in endpoint.safe_summary()
 
     with _env(env_file_key="", QQBOT_API_KEY="",
@@ -242,7 +241,7 @@ def test_without_any_key_the_reply_uses_its_own_provider() -> None:
         # **有地址、没 key 的全局配置构成不了"兼容档那一对"**，所以 reply 用自己那条：
         # 一个空 key 配上一个别家地址，正是今晚那个 401 的形状，这里不许再出现。
         assert endpoint.key_present() is False
-        assert endpoint.base_url == model_config.provider_base_url("xkiro"), \
+        assert endpoint.base_url == model_config.provider_base_url("deepseek"), \
             "没有 key 的全局地址不该被采用（那会拼出'空 key + 别家地址'）"
         assert "**缺**" in endpoint.safe_summary()
 
@@ -253,24 +252,22 @@ def test_without_any_key_the_reply_uses_its_own_provider() -> None:
 def test_the_reply_agent_can_use_its_own_endpoint() -> None:
     reply_base, reply_key, reply_model = ("https://reply.example/v1", "sk-reply-fake",
                                           "reply-model-fake")
-    # 2026-10-14 用户改口径（"这里面有gemini flash模型，给云茹接上"）：reply 的 key
-    # 来源 = **它自己那条**（`QQBOT_REPLY_API_KEY`），与地址、模型**三样同源**；
-    # 任务级覆盖照旧只落在这一路。judge 那把 key 一并配上，专门钉住"它搬不动 reply"。
+    # 2026-10-16 用户「切换回ds」：reply 的 key 来源又回到 **judge 那条**。地址与模型的
+    # 任务级覆盖（QQBOT_REPLY_API_BASE_URL / QQBOT_REPLY_API_MODEL）照旧生效；
+    # QQBOT_REPLY_API_KEY（xkiro 那把）在解析里闲置——配了也不进客户端（下面钉住）。
     with _env(QQBOT_REPLY_API_BASE_URL=reply_base, QQBOT_REPLY_API_KEY=reply_key,
               QQBOT_REPLY_API_MODEL=reply_model, QQBOT_JUDGE_API_KEY="sk-judge-fake"):
         endpoint = model_config.resolve("reply")
-        assert endpoint.key_env == "QQBOT_REPLY_API_KEY", \
-            "reply 的 key 来源自 2026-10-14 起是它自己那条"
-        assert endpoint.api_key == "sk-reply-fake", \
-            "judge 那把（deepseek）不该再进 reply 客户端"
-        assert runtime._reply_endpoint() == (reply_base, "sk-reply-fake", reply_model)
+        assert endpoint.key_env == "QQBOT_JUDGE_API_KEY", \
+            "reply 的 key 来源自 2026-10-16 起又回到 judge 那条"
+        assert endpoint.api_key == "sk-judge-fake", \
+            "QQBOT_REPLY_API_KEY（xkiro 那把）已闲置，不该再进 reply 客户端"
+        assert runtime._reply_endpoint() == (reply_base, "sk-judge-fake", reply_model)
 
         client = runtime._dialogue_client_factory("group:1")
         assert (client.base_url, client.api_key, client.model) == (
-            reply_base, "sk-reply-fake", reply_model)
-        # 判定照旧走它自己那一条（专属值只给回复）。判定现在**借 reply 那条 key**
-        # （2026-10-14 起），所以这里用"与解析结果比"而不是写死一个值——写死就会
-        # 把"判定住哪家"再钉成一次会漂的期望。
+            reply_base, "sk-judge-fake", reply_model)
+        # 判定照旧走它自己的那一条（专属值只给回复）
         judge = runtime._judge_client_factory("group:1")
         assert judge.base_url == model_config.resolve("judge").base_url
         assert judge.api_key == _judge_key_now()
@@ -280,8 +277,8 @@ def test_the_reply_agent_can_use_its_own_endpoint() -> None:
 def test_build_engine_wires_the_reply_endpoint_into_the_dialogue_client() -> None:
     """装配点也要接上：`engine.client` 是回复那一趟真正用的 client。
 
-    key 是**回复自己那条**（2026-10-14 起，`QQBOT_REPLY_API_KEY`）；地址 / 模型的
-    任务级覆盖照旧生效、且只落在回复这一路。
+    key 跟 judge 那条走（2026-10-16 用户「切换回ds」后回到这一版）；地址 / 模型的任务级
+    覆盖照旧生效、且只落在回复这一路。
     """
 
     reply_base, reply_key, reply_model = ("https://reply.example/v1", "sk-reply-fake",
@@ -290,7 +287,7 @@ def test_build_engine_wires_the_reply_endpoint_into_the_dialogue_client() -> Non
               QQBOT_REPLY_API_MODEL=reply_model, QQBOT_JUDGE_API_KEY="sk-judge-fake"):
         engine = runtime.build_engine(_FakeTransport())
     assert (engine.client.base_url, engine.client.api_key, engine.client.model) == (
-        reply_base, "sk-reply-fake", reply_model)
+        reply_base, "sk-judge-fake", reply_model)
 
 
 # --- 面板那一层（白名单 + 热更） ---------------------------------------------
@@ -346,31 +343,29 @@ def test_a_global_change_does_not_clobber_the_reply_endpoint() -> None:
 
 
 def test_a_global_change_never_moves_a_task_that_has_its_own_key() -> None:
-    """**成对取自同一条**：某一路有自己的 key 时，改全局地址不该把它搬到别家去。
+    """**成对取自同一条**：判定有自己的 key 时，改全局地址不该把它搬到别家去。
 
-    这条是 2026-10-06 那个现场事故的回归：全局地址指向 mimo、而那一把 key 属于
-    deepseek —— 全局一动，那个子系统就会拿着 deepseek 的 key 去打 mimo。
+    这条是 2026-10-06 那个现场事故的回归：全局地址指向 mimo、而判定那把 key 属于
+    deepseek —— 全局一动，判定就会拿着 deepseek 的 key 去打 mimo。
 
-    ⚠️ **2026-10-14 换了举例子那两路（如实交代）**：用户当天说 *"你把这个也换成
-    gemini flash吧"*，判定的 key 来源在解析表里改成了**借 `reply` 那条**（xkiro），
-    判定因此不再是"deepseek 那一把 key"的例子。现在两侧用的是**仍然名副其实的
-    两路**：`memory`（自己那条 deepseek key）与 `reply`（自己那条 xkiro key）——
-    口径移了，不是"哪一路都行"。
+    驱动用的用途是 **`judge`**（2026-10-16 用户「切换回ds」之后它又借 `judge` 那条 key、
+    回到 deepseek）。2026-10-14～10-16 那段它借 `reply` 那条（xkiro）、不再"属于
+    deepseek"，所以那时这条用例由 `memory` + `reply` 驱动——回退是因为判定重新属于
+    deepseek，不是因为用例要变绿。
     """
 
     with tempfile.TemporaryDirectory() as tmp, _env(
-            env_file_key="", QQBOT_MEMORY_API_KEY="sk-memory-fake",
-            QQBOT_REPLY_API_KEY="sk-reply-fake", QQBOT_MEMORY_API_BASE_URL=None):
-        memory, dialogue = _client("memory"), _client("dialogue")
+            QQBOT_JUDGE_API_KEY="sk-judge-fake", QQBOT_JUDGE_API_BASE_URL=None):
+        judge = _client("judge")
         apply_overrides(_Engine(), {"api_base_url": "https://api.xiaomimimo.com/v1"},
                         store=_operator(tmp))
-        assert memory.base_url == model_config.provider_base_url("deepseek"), \
-            "记忆那把 key 属于 deepseek，地址不该被全局改成 mimo"
-        assert dialogue.base_url == model_config.provider_base_url("xkiro"), \
-            "回复那把 key 属于 xkiro，地址同样不该被全局改变"
+        assert judge.base_url == model_config.provider_base_url("deepseek"), \
+            "判定那把 key 属于 deepseek，地址不该被全局改成 mimo"
+        # reply 的 key 来源自 2026-10-16 起也是 judge 那条（此处有值），所以全局地址
+        # 同样搬不动它——它与判定同一家（deepseek）。
         assert model_config.resolve("reply").base_url == \
-            model_config.provider_base_url("xkiro")
-        assert model_config.resolve("memory").base_url == \
+            model_config.provider_base_url("deepseek")
+        assert model_config.resolve("judge").base_url == \
             model_config.provider_base_url("deepseek")
 
 

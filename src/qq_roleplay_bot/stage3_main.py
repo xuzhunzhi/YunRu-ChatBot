@@ -4032,11 +4032,20 @@ class DialogueEngine:
         return seams
 
     async def _mail_send_now(self) -> str:
-        """立刻写一封发出去。用来"跑通一次"，也给超管一个不等到 23:00 的办法。"""
+        """立刻写一封发出去。用来"跑通一次"，也给超管一个不等到 23:00 的办法。
+
+        **发之前先问收件人有没有**（2026-10-16）：`QQBOT_MAIL_REPORT_TO` 不再有代码
+        默认值，所以没配就是空串。这时**一封信都不发**（fail-closed），由
+        `dev_config.require_mail_report_to()` 记一条带键名的 WARNING，这里只把结论
+        说给按命令的人听——不拿"CLI 自己会报错"当兜底，那要看下游脸色。
+        """
 
         reporter = getattr(self, "daily_reporter", None)
         if reporter is None:
             return "每日汇报未启用，无法发送。"
+        if not dev_config.require_mail_report_to("super_mail_send"):
+            return ("没有配置收件人（.env 里 `QQBOT_MAIL_REPORT_TO` 是空的），这次不发。"
+                    "填上它再按一次。")
         seams = self._report_seams_for_mail()
         if seams is None:
             return "没有找到日报的接缝（插件装配没走到），这次不发。"

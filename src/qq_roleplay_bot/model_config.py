@@ -56,9 +56,11 @@
 | judge / memory / review / vision | `QQBOT_JUDGE_API_KEY` / `QQBOT_MEMORY_API_KEY` / `QQBOT_REVIEW_API_KEY` / `QQBOT_VISION_API_KEY` | `QQBOT_JUDGE_API_KEY` |
 
 这张表说的是 **key 条目**之间的回落；"哪个**用途**用哪条 key"由 `TASKS` 定。
-`reply` 与 `letter` 这两路现在都借 `judge` 那条（它们要的模型在 deepseek 上，而
-它们自己那把 key 是 mimo 的）——那两把 mimo key 因此在正常路径上闲置，只在
-"主家余额耗尽切兜底"那条链上被借走（见 `FALLBACK_TASKS`）。
+`reply` 与 `letter` 这两路现在都借 `judge` 那条（它们要的模型都在 deepseek 上）。
+`reply` 自己那条（`QQBOT_REPLY_API_KEY`）2026-10-14 被改成 xkiro 那把、2026-10-16
+用户拍板回 ds（原话："切换回ds。gemini好蠢。"，同日早先那句是"都改ds"）之后
+**闲置但保留**（将来一键切回 Gemini 要用，见 `KEYS`）；`letter` 自己那条是 mimo 的。
+两把在正常路径上都闲置，只在"主家余额耗尽切兜底"那条链上被借走（见 `FALLBACK_TASKS`）。
 
 回落到最后那一条（"主 key 那条"，`QQBOT_API_KEY`）时，**地址也一起用兼容档**
 （`QQBOT_API_BASE_URL`）——因为在历史部署里那个 key 与那个地址本来就是**同一份配置**：
@@ -94,9 +96,13 @@ PROVIDERS: dict[str, dict[str, str]] = {
         "client_type": "openai",
     },
     # 2026-10-14（用户给的地址 + key）：一个 OpenAI 兼容中转，里面有 Gemini Flash。
-    # 用户原话："这里面有gemini flash模型，给云茹接上" ⇒ 挂在**回复**那一路（见 `KEYS`
-    # 与 `TASKS` 的 reply 两条）。实测 `google/gemini-2.5-flash` 首字 1.77s、总 1.77s
-    # （同一句群聊 prompt，走本仓库自己的 client）；`google/gemini-3.8-flash` 首字超时。
+    # 用户原话："这里面有gemini flash模型，给云茹接上" ⇒ 当时挂在**回复**那一路。
+    # 实测 `google/gemini-2.5-flash` 首字 1.77s、总 1.77s（同一句群聊 prompt，走本仓库
+    # 自己的 client）；`google/gemini-3.8-flash` 首字超时。
+    # ⚠️ 2026-10-16（用户原话："切换回ds。gemini好蠢。"，同日早先那句是"都改ds"）：
+    # `TASKS` 里已经没有用途指向**这家**了——原因（整段 Google 上游 503、且这家发不出
+    # `reasoning_effort`）写在 `TASKS` 的 reply / judge 两条上。这条 `PROVIDERS` 条目
+    # 与 `KEYS["reply"]` 一起**保留**：将来中继恢复时，"一键切回"要用的就是这份连接信息。
     "xkiro": {
         "base_url": "https://api.xkiro.com/v1",
         "client_type": "openai",
@@ -107,27 +113,42 @@ PROVIDERS: dict[str, dict[str, str]] = {
 #:
 #: 模型名写**真名**，不写随时会没的别名：实测 deepseek 侧现在只有
 #: `deepseek-flash` 与 `deepseek-v4-pro`（`deepseek-chat` 是别名，已全部换掉）。
-#: reply 的钥匙从 2026-10-09 起用 judge 那条（deepseek）：mimo-v2.6-flash 自 10-05 起
-#: 同样提示词中位 10 秒（ds 1.1 秒），用户拍板换回。地址跟着钥匙走（judge → deepseek），
-#: `QQBOT_REPLY_API_KEY`（mimo 那把）因此闲置、原值保留在 .env 里。要换回 mimo：
-#: 把这一行改回 {"key": "reply", "model": "mimo-v2.6-flash"} 即可，其余不动。
+#: reply 的钥匙从 2026-10-09 起用 judge 那条（deepseek），2026-10-14 一度改成
+#: 自己那条（xkiro 的 Gemini Flash），2026-10-16 用户拍板"切换回ds"之后**又回到**
+#: 借 judge 那条（见这一行自己的注释）。地址跟着钥匙走（judge → deepseek），
+#: `QQBOT_REPLY_API_KEY`（现在是 xkiro 那把）因此再次闲置、原值保留在 `.env` 里。
+#: 要换回 Gemini：把这一行改回 {"key": "reply", "model": "google/gemini-2.5-flash"}。
 #: letter 是同一个形状（2026-10-12 用户拍板"信用v4pro写"）：`deepseek-v4-pro` 只挂在
 #: deepseek 那一家，所以借 `judge` 那条 key。它自己那条（`QQBOT_LETTER_API_KEY`）是
 #: mimo 的，因此闲置——但**没废**：主家余额耗尽时信会切回它（见 `FALLBACK_TASKS`）。
 #: 要换回去：把 letter 那一行改回 {"key": "letter", "model": "mimo-v2.6-pro"}。
 TASKS: dict[str, dict[str, str]] = {
-    # 2026-10-14（用户："这里面有gemini flash模型，给云茹接上"）：回复那一路换成
-    # xkiro 的 Gemini Flash。它**用自己的 key 条目**（`reply` → `QQBOT_REPLY_API_KEY`），
-    # 所以地址、key、模型三样同源（10-09 那种"借 judge 的 key"在换家时不成立）。
-    # 想换回 ds：把这一行改回 {"key": "judge", "model": "deepseek-flash"}（其余不动）。
-    "reply": {"key": "reply", "model": "google/gemini-2.5-flash"},
+    # 2026-10-16（用户原话："切换回ds。gemini好蠢。"，同日早先那句是"都改ds"）：
+    # 回复那一路从 xkiro 的 Gemini Flash **改回** deepseek——借 `judge` 那条 key
+    # （deepseek / `deepseek-flash`），与 2026-10-09 那一版逐字相同。为什么不是
+    # "用 .env 覆盖"：`QQBOT_REPLY_*` 只覆盖地址与模型名，**不改 provider**；而
+    # `reasoning_effort` 只在 provider ∈ {"", "deepseek"} 时才发（`llm_client._complete_sync`
+    # 的 `deepseek_fields`），provider 是 xkiro 时那一项根本发不出去 ⇒ 只能吃 DeepSeek
+    # 自己的默认档。依据（2026-10-16 实测）：中继的 Google 上游整段 503（`/v1/models`
+    # 通、`chat/completions` 全 503，25 分钟探针全挂）；`reasoning_effort=none` 把
+    # "第一个 content"从 1.1~14.5s 压到 0.51~1.13s、过闸（第一条完整响应行）
+    # 0.15~0.31s（`provider=xkiro` 时这档发不出去，正文最慢实测 13.9s）。
+    # 什么时候改回去：中继的 Google 恢复了就改回
+    # {"key": "reply", "model": "google/gemini-2.5-flash"}——`KEYS["reply"]` 那条
+    # xkiro 条目与 `.env` 里那把 key 都留着，其余不动。
+    "reply": {"key": "judge", "model": "deepseek-flash"},
     "letter": {"key": "judge", "model": "deepseek-v4-pro"},
-    # 2026-10-14（用户："你把这个也换成gemini flash吧"）：判定也上 xkiro 的 Gemini Flash。
-    # 它**借 reply 那条 key**（xkiro 那家），因为要的模型就挂在那一家——与 letter 借
-    # judge 那条同一个做法。⚠️ 注意别把 `KEYS["judge"]` 的 provider 改成 xkiro：
-    # 那条 key 是 deepseek 的，letter 借它、memory/review/vision 回落到它，
-    # 一改就会把 `deepseek-v4-pro` / `deepseek-flash` 这些模型名打到 xkiro 上。
-    "judge": {"key": "reply", "model": "google/gemini-2.5-flash"},
+    # 2026-10-16（同一条口径："切换回ds。gemini好蠢。"）：判定**也回到 deepseek**，
+    # 用它自己那条 key（`KEYS["judge"]`，deepseek）与 `deepseek-flash`——即 2026-10-14
+    # 之前那一版。依据与 reply 同一条，不是"顺带改的"：①中继的 Google 上游整段 503
+    # （实测 25 分钟探针全挂）；②provider=xkiro 时 `reasoning_effort` 发不出去
+    # （闸在 `llm_client`），只能吃默认档（实测"第一个 content" 1.1~14.5s、正文最慢
+    # 13.9s），最慢那几次直接撞"首字 3 秒"的闸；回到 ds 后 `none` 档把它压到
+    # 0.51~1.13s。⚠️ 仍然别把 `KEYS["judge"]` 的 provider 改成 xkiro：letter 借它、
+    # memory/review/vision 回落到它，一改就会把 `deepseek-v4-pro` / `deepseek-flash`
+    # 这些模型名打到 xkiro 上。什么时候改回去：中继 Google 恢复后改
+    # {"key": "reply", "model": "google/gemini-2.5-flash"}。
+    "judge": {"key": "judge", "model": "deepseek-flash"},
     "memory": {"key": "memory", "model": "deepseek-flash"},
     "review": {"key": "review", "model": "deepseek-flash"},
     "vision": {"key": "vision", "model": "deepseek-flash"},
@@ -179,6 +200,11 @@ KEYS: dict[str, dict[str, str]] = {
     # 否则就是把 deepseek 的 key 递给 xkiro（实测：只填 `QQBOT_REPLY_API_BASE_URL`
     # 时解析出来的 key 仍是 judge 那把——`QQBOT_REPLY_API_KEY` 被 `TASKS["reply"]["key"]`
     # 架空，`docs/CONFIG_GUIDE.md` 那句"填三个键就能换"因此只对地址与模型成立）。
+    # ⚠️ 2026-10-16（用户："切换回ds。gemini好蠢。"）：这一段历史**整条保留**，但这条
+    # 条目现在又**闲置**了——`TASKS["reply"]` 改回借 `judge` 那条，所以它在正常路径上
+    # 一分钱不算。**没删的理由**：将来中继的 Google 恢复、要"一键切回 Gemini"时，
+    # 要连同 `TASKS["reply"]["key"]` 一起指回这里（只改 `TASKS` 不改这里的 provider
+    # 就对了：地址与 key 必须同源，这是 10-14 实测过的坑）。
     "reply": {"provider": "xkiro", "env": "QQBOT_REPLY_API_KEY", "fallback": MAIN_KEY},
     "letter": {"provider": "mimo", "env": "QQBOT_LETTER_API_KEY", "fallback": "reply"},
     "judge": {"provider": "deepseek", "env": "QQBOT_JUDGE_API_KEY", "fallback": MAIN_KEY},
