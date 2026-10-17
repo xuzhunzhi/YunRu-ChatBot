@@ -42,6 +42,7 @@ from contextlib import contextmanager
 from unittest import mock
 
 from plugin_support import plugin_registry
+from qq_roleplay_bot import dev_config
 from qq_roleplay_bot import plugins as plugins_module
 from qq_roleplay_bot.metrics import RuntimeMetrics
 from qq_roleplay_bot.plugins import PluginRegistry, ReportSeams, discover
@@ -140,6 +141,34 @@ def _env(name: str, value: str):
             os.environ.pop(name, None)
         else:
             os.environ[name] = previous
+
+
+#: 收件人那个键名 / 假地址。`.invalid` 是 RFC 2606 留的"永远不存在"的顶级域。
+RECIPIENT_ENV = "QQBOT_MAIL_REPORT_TO"
+FAKE_RECIPIENT = "someone@example.invalid"
+
+
+@contextmanager
+def _recipient_configured():
+    """把"这个部署配了收件人"这个前提显式摆好，跑完原样（含环境变量）还回去。
+
+    与 `tests/test_outage_notice.py::_recipient_configured` 同法——为什么前提必须由
+    测试自己配、为什么环境变量与 `MAIL_REPORT_TO` 常量都要设、为什么不改回源码默认值
+    也不 reload，那份 docstring 写了完整理由（2026-10-16 用户："改成必须由 `.env` 给"，
+    于是源码里没有默认收件人了；本机 `.env` 也没填）。
+    """
+
+    saved_env = os.environ.get(RECIPIENT_ENV)
+    saved_constant = dev_config.MAIL_REPORT_TO
+    os.environ[RECIPIENT_ENV] = FAKE_RECIPIENT
+    dev_config.MAIL_REPORT_TO = FAKE_RECIPIENT
+    try:
+        yield FAKE_RECIPIENT
+    finally:
+        dev_config.MAIL_REPORT_TO = saved_constant
+        os.environ.pop(RECIPIENT_ENV, None)
+        if saved_env is not None:
+            os.environ[RECIPIENT_ENV] = saved_env
 
 
 @contextmanager
@@ -647,12 +676,16 @@ def test_the_real_assembly_hands_over_the_mails_own_sender() -> None:
     mail 自己那一侧由 `tests/test_mail_channel.py` / `test_mail_send_to.py` 覆盖。
     核心给快照那半由 `runtime.report_seams()` 装配（不在插件树里），这里用
     `ReportSeams(snapshot=...)` 扮演它——插件要的就是这个口，不是引擎。
+
+    收件人那个前提由 `_recipient_configured()` 显式配：源码里已经没有默认收件人了，
+    没配的话 mail 会**按设计**不开放发信能力，这条就变成在验"没配"而不是"接上了谁的"。
     """
 
     registry = plugin_registry()
     registry.report = ReportSeams(snapshot=_Snapshots())
-    with _discovery_state():
-        loaded = discover(registry)
+    with _recipient_configured():
+        with _discovery_state():
+            loaded = discover(registry)
 
     assert "timeout_alert" in loaded, loaded
     assert registry.mail.knows() is True, "真装配里 mail 该把发信能力放上来了"
@@ -717,7 +750,11 @@ def test_the_plugin_never_touches_the_dialogue_side_or_another_plugin() -> None:
 
 
 def test_removing_the_whole_plugin_package_keeps_core_and_mail_running() -> None:
-    """**判据**：拦掉整个插件包 → 核心与 mail 照跑（`check_module_removal.py` 的离线尺度）。"""
+    """**判据**：拦掉整个插件包 → 核心与 mail 照跑（`check_module_removal.py` 的离线尺度）。
+
+    收件人这个前提由 `_recipient_configured()` 显式配（源码已无默认收件人）：
+    没配的时候 mail **按设计**不开放能力，"mail 照跑"这条判据就验不到了。
+    """
 
     registry = plugin_registry()
     real_import = importlib.import_module
@@ -729,9 +766,10 @@ def test_removing_the_whole_plugin_package_keeps_core_and_mail_running() -> None
                 name="qq_roleplay_bot.plugins.timeout_alert")
         return real_import(name, package)
 
-    with mock.patch.object(plugins_module.importlib, "import_module", fake_import):
-        with _discovery_state():
-            loaded = discover(registry)
+    with _recipient_configured():
+        with mock.patch.object(plugins_module.importlib, "import_module", fake_import):
+            with _discovery_state():
+                loaded = discover(registry)
 
     assert "timeout_alert" not in loaded, loaded
     assert "mail" in loaded, loaded

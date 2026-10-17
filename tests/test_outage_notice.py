@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+import os
 import pathlib
 import re
 import types
@@ -133,6 +134,61 @@ def _flag(module, name: str, value):
         yield
     finally:
         setattr(module, name, previous)
+
+
+#: 收件人那个键名（`dev_config.MAIL_REPORT_TO_ENV` 的同一份；写在这里免得读插件源码）。
+RECIPIENT_ENV = "QQBOT_MAIL_REPORT_TO"
+#: 假收件人。`.invalid` 是 RFC 2606 留的"永远不存在"的顶级域，不会被误当成真地址。
+FAKE_RECIPIENT = "someone@example.invalid"
+
+
+@contextmanager
+def _recipient_configured():
+    """把"**这个部署配了收件人**"这个前提显式摆好，跑完原样（含环境变量）还回去。
+
+    ## 为什么前提得由测试自己配
+
+    2026-10-16 用户拍板：`QQBOT_MAIL_REPORT_TO` **必须由 `.env` 给**，源码里不留默认
+    地址（原来那行的默认值是个真实邮箱，而这仓库在 GitHub 上是公开的）。于是它默认
+    成了空串，本机 `.env` 也没填——**"收件人有值"不再是环境自带的前提**。
+    这几条用例验的是"**配了之后那条路对不对**"，不是"没配会怎样"（那是
+    `tests/test_mail_recipient.py` 的事）。把前提留给环境，等于让用例只在配过的机器上
+    才真的跑起来。
+
+    ## 为什么环境变量和常量**都要**设
+
+    两处读法并存：`dev_config.mail_report_to()` 现读 `os.environ`
+    （`require_mail_report_to` / 启动自检走它），而
+    `plugins/mail/wire.py::build_operator_mail_sender` 读的是 **import 期常量**
+    `dev_config.MAIL_REPORT_TO`。只设一个，另一条读法看不到，用例就会以
+    "收件人没配"的形状红（2026-10-18 实测：六条红的全是这个形状）。
+
+    ## 为什么不是改回源码默认值，也不是 reload `dev_config`
+
+    默认值是用户拍的（"必须由 `.env` 给"），不许改回去；reload 会把别的模块早已取走的
+    常量留在旧值上，还会重跑覆盖层注入与 `.env` 载入（`tests/test_mail_recipient.py`
+    的模块说明记了这条）。所以这里只改"这一刻"的两个读数，退出时**按原来的样子**
+    逐个还回去——环境变量按"原来有没有"还原，**不留进程级残留**（这个仓库为顺序污染
+    吃过亏）。
+
+    ## 为什么不动 `MAIL_OWNER_FROM`
+
+    它是**另一个**配置（`QQBOT_MAIL_OWNER_FROM`）：空着只是让"读信回信"那条通道不装配，
+    这几条用例用不到它。顺手设上会多装配一条后台通道，把"接缝装配顺序"这种无关变量
+    混进断言里。要让"主人地址"也有值，用 `_flag(dev_config, "MAIL_OWNER_FROM", …)`。
+    """
+
+    saved_env = os.environ.get(RECIPIENT_ENV)
+    saved_constant = dev_config.MAIL_REPORT_TO
+    os.environ[RECIPIENT_ENV] = FAKE_RECIPIENT
+    dev_config.MAIL_REPORT_TO = FAKE_RECIPIENT
+    try:
+        yield FAKE_RECIPIENT
+    finally:
+        dev_config.MAIL_REPORT_TO = saved_constant
+        os.environ.pop(RECIPIENT_ENV, None)
+        if saved_env is not None:
+            os.environ[RECIPIENT_ENV] = saved_env
 
 
 @contextmanager
@@ -420,6 +476,9 @@ def test_removing_the_whole_plugin_folder_keeps_core_and_mail_running() -> None:
     用**插件的名字**（`outage_notice`）拦掉它的模块——等价于那个文件夹不在
     （`discover()` 的 `ModuleNotFoundError` 分支，与真删掉走的是同一条路）。
     同时钉住另一件容易搞反的事：**mail 不依赖本插件**（它得照常装上、照常提供能力）。
+
+    收件人这个前提由 `_recipient_configured()` 显式配好：源码里已经没有默认收件人了，
+    没配的话 mail 会**按设计**不开放发信能力，这条判据就变成在验"没配"。
     """
 
     registry = plugin_registry()
@@ -432,9 +491,10 @@ def test_removing_the_whole_plugin_folder_keeps_core_and_mail_running() -> None:
                 name="qq_roleplay_bot.plugins.outage_notice")
         return real_import(name, package)
 
-    with mock.patch.object(plugins_module.importlib, "import_module", fake_import):
-        with _discovery_state():
-            loaded = discover(registry)
+    with _recipient_configured():
+        with mock.patch.object(plugins_module.importlib, "import_module", fake_import):
+            with _discovery_state():
+                loaded = discover(registry)
 
     assert "outage_notice" not in loaded, loaded
     assert "mail" in loaded, f"mail 不该依赖本插件：{loaded}"
@@ -572,27 +632,29 @@ def test_the_mail_plugin_provides_the_sender_and_the_outage_uses_it_end_to_end()
     证明不了 **mail 插件真的会把能力提供出来**。这里走
     `plugins/mail/plugin.py::register()` → `wire.build_operator_mail_sender` →
     `registry.mail` → 本插件的接收者，一条真链路。
-    收件人也一并钉住：它就是 mail 配置里那一个（`MAIL_REPORT_TO`），**没有新写一份**。
+    收件人也一并钉住：它就是 mail 配置里那一个（`MAIL_REPORT_TO`），**没有新写一份**
+    ——那个地址由 `_recipient_configured()` 显式配（源码已无默认值），断言直接用它。
     """
 
-    with _real_mail_plugin() as clients:
-        registry = PluginRegistry()
-        mail_plugin.register(registry)
-        assert registry.mail.knows() is True, "mail 插件该把发信能力提供出来"
-        assert clients, "mail 插件该真的造了一个 MailClient"
+    with _recipient_configured() as recipient:
+        with _real_mail_plugin() as clients:
+            registry = PluginRegistry()
+            mail_plugin.register(registry)
+            assert registry.mail.knows() is True, "mail 插件该把发信能力提供出来"
+            assert clients, "mail 插件该真的造了一个 MailClient"
 
-        with _discovery_state():
-            loaded = discover(registry, only=("outage_notice",))
-        assert "outage_notice" in loaded, loaded
-        assert registry.disconnect_receivers() != (), "本插件该登记了接收者"
+            with _discovery_state():
+                loaded = discover(registry, only=("outage_notice",))
+            assert "outage_notice" in loaded, loaded
+            assert registry.disconnect_receivers() != (), "本插件该登记了接收者"
 
-        _feed([False], _notifier(registry))
+            _feed([False], _notifier(registry))
 
-    sends = [item for client in clients for item in client.sends]
-    assert len(sends) == 1, f"该正好发一封，实际 {len(sends)}：{sends}"
-    assert sends[0]["to"] == dev_config.MAIL_REPORT_TO, sends[0]
-    assert sends[0]["subject"] == "云茹断线了"
-    assert "断的时候是" in sends[0]["body"] and "【" not in sends[0]["body"]
+        sends = [item for client in clients for item in client.sends]
+        assert len(sends) == 1, f"该正好发一封，实际 {len(sends)}：{sends}"
+        assert sends[0]["to"] == recipient, sends[0]
+        assert sends[0]["subject"] == "云茹断线了"
+        assert "断的时候是" in sends[0]["body"] and "【" not in sends[0]["body"]
 
 
 # --- 这个文件自己的守卫 -------------------------------------------------------

@@ -29,10 +29,12 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
+from qq_roleplay_bot import dev_config
 from qq_roleplay_bot.chat_window import ChatWindowFacts, collect_window_facts
 from qq_roleplay_bot.plugins import ReportSeams
 from qq_roleplay_bot.plugins.mail import daily_report as dr
@@ -47,6 +49,38 @@ from qq_roleplay_bot.prompt_guard import scan_persona_text
 SECRET = "我今晚打算去把他家那只猫偷走"
 
 NOW = 1_800_000_000.0
+
+
+#: 收件人那个键名 / 假地址。`.invalid` 是 RFC 2606 留的"永远不存在"的顶级域。
+RECIPIENT_ENV = "QQBOT_MAIL_REPORT_TO"
+FAKE_RECIPIENT = "someone@example.invalid"
+
+
+@contextlib.contextmanager
+def _recipient_configured():
+    """把"这个部署配了收件人"这个前提显式摆好，跑完原样（含环境变量）还回去。
+
+    与 `tests/test_outage_notice.py::_recipient_configured` 同法——为什么前提必须由
+    测试自己配、为什么环境变量与 `MAIL_REPORT_TO` 常量都要设、为什么不改回源码默认值
+    也不 reload，那份 docstring 写了完整理由（2026-10-16 用户："改成必须由 `.env` 给"，
+    于是源码里没有默认收件人；本机 `.env` 也没填）。
+
+    这个文件用它是因为 `/super mail send` 的**入口闸**就是收件人：没配的时候按设计
+    **一封都不发**、日报器一次都不被调用——那会让"递的是接缝不是引擎"这条断言以
+    "日报器根本没被叫"的形状红（2026-10-18 实测）。
+    """
+
+    saved_env = os.environ.get(RECIPIENT_ENV)
+    saved_constant = dev_config.MAIL_REPORT_TO
+    os.environ[RECIPIENT_ENV] = FAKE_RECIPIENT
+    dev_config.MAIL_REPORT_TO = FAKE_RECIPIENT
+    try:
+        yield FAKE_RECIPIENT
+    finally:
+        dev_config.MAIL_REPORT_TO = saved_constant
+        os.environ.pop(RECIPIENT_ENV, None)
+        if saved_env is not None:
+            os.environ[RECIPIENT_ENV] = saved_env
 
 
 @contextlib.contextmanager
@@ -513,6 +547,9 @@ def test_super_mail_send_now_hands_the_seams_not_the_engine():
     这条以前是坏的：`run_once` 张口就 `report.snap()`，而引擎上那个方法叫
     `snapshot()`、也没有 `remember_letter`（它叫 `note_letter`）——一按就
     `AttributeError`。修法是从装配点那份接缝上取（`registry.report`）。
+
+    前提（收件人配了）由 `_recipient_configured()` 显式摆好：`/super mail send` 的入口
+    闸就是收件人，源码里已经没有默认值了。
     """
 
     from qq_roleplay_bot.stage3_main import DialogueEngine
@@ -535,7 +572,8 @@ def test_super_mail_send_now_hands_the_seams_not_the_engine():
     fake.daily_reporter = _Reporter()
     fake.plugin_registry = _Registry()
 
-    text = asyncio.run(DialogueEngine._mail_send_now(fake))
+    with _recipient_configured():
+        text = asyncio.run(DialogueEngine._mail_send_now(fake))
 
     assert fake.daily_reporter.seen is _Registry.report, "递的必须是接缝，不是引擎自己"
     assert "已寄出：今天" in text

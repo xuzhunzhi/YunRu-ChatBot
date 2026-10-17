@@ -18,7 +18,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from contextlib import contextmanager
 
+from qq_roleplay_bot import dev_config
 from qq_roleplay_bot.plugins.mail import daily_report as dr
 from qq_roleplay_bot.plugins.mail.mail_client import (
     _ARGV_FORBIDDEN,
@@ -30,6 +33,36 @@ NOW = 1_800_000_000.0
 #: 回归样本：真寄不出去的那个主题。
 REAL_SUBJECT = '上次没寄出去的信，和那句"你别掺和"'
 BODY = "信里说的话。"
+
+#: 收件人那个键名 / 假地址。`.invalid` 是 RFC 2606 留的"永远不存在"的顶级域。
+RECIPIENT_ENV = "QQBOT_MAIL_REPORT_TO"
+FAKE_RECIPIENT = "someone@example.invalid"
+
+
+@contextmanager
+def _recipient_configured():
+    """把"这个部署配了收件人"这个前提显式摆好，跑完原样（含环境变量）还回去。
+
+    与 `tests/test_outage_notice.py::_recipient_configured` 同法——为什么前提必须由
+    测试自己配、为什么环境变量与 `MAIL_REPORT_TO` 常量都要设、为什么不改回源码默认值
+    也不 reload，那份 docstring 写了完整理由（2026-10-16 用户："改成必须由 `.env` 给"，
+    于是源码里没有默认收件人；本机 `.env` 也没填）。
+
+    这个文件用它是因为 `wire.build_operator_mail_sender` 在**没配收件人时返回 None**
+    （按设计不开放发信能力）——那会让"接缝自己洗一遍主题"这条断言在下一行就断掉。
+    """
+
+    saved_env = os.environ.get(RECIPIENT_ENV)
+    saved_constant = dev_config.MAIL_REPORT_TO
+    os.environ[RECIPIENT_ENV] = FAKE_RECIPIENT
+    dev_config.MAIL_REPORT_TO = FAKE_RECIPIENT
+    try:
+        yield FAKE_RECIPIENT
+    finally:
+        dev_config.MAIL_REPORT_TO = saved_constant
+        os.environ.pop(RECIPIENT_ENV, None)
+        if saved_env is not None:
+            os.environ[RECIPIENT_ENV] = saved_env
 
 
 class _Store:
@@ -247,7 +280,11 @@ class _RecordingMail:
 
 
 def test_the_operator_seam_washes_a_free_text_subject() -> None:
-    """`registry.mail.notify` 那条窄口的主题是调用方给的 ⇒ 它自己洗一道。"""
+    """`registry.mail.notify` 那条窄口的主题是调用方给的 ⇒ 它自己洗一道。
+
+    收件人这个前提由 `_recipient_configured()` 显式配：源码里已经没有默认收件人，
+    没配的话 `build_operator_mail_sender` 会**按设计**返回 None（这道窄口不存在）。
+    """
 
     from unittest import mock
 
@@ -257,10 +294,11 @@ def test_the_operator_seam_washes_a_free_text_subject() -> None:
 
     seams = MailSeams()
     fake = _RecordingMail()
-    with mock.patch.object(mail_client_module, "MailClient", lambda *a, **k: fake):
+    with _recipient_configured(), \
+            mock.patch.object(mail_client_module, "MailClient", lambda *a, **k: fake):
         sender = wire.build_operator_mail_sender(seams)
 
-    assert sender is not None, "收件人没配才会是 None（本机 .env 配了）"
+    assert sender is not None, "收件人配好了还拿不到发信函数，说明那道闸坏了"
     asyncio.run(sender('他说"你别掺和"', "正文"))
 
     assert fake.sent and fake.sent[0]["subject"] == "他说“你别掺和”"
