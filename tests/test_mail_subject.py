@@ -40,26 +40,43 @@ FAKE_RECIPIENT = "someone@example.invalid"
 
 
 @contextmanager
-def _recipient_configured():
+def _recipient_configured(value: str = FAKE_RECIPIENT):
     """把"这个部署配了收件人"这个前提显式摆好，跑完原样（含环境变量）还回去。
 
-    与 `tests/test_outage_notice.py::_recipient_configured` 同法——为什么前提必须由
-    测试自己配、为什么环境变量与 `MAIL_REPORT_TO` 常量都要设、为什么不改回源码默认值
-    也不 reload，那份 docstring 写了完整理由（2026-10-16 用户："改成必须由 `.env` 给"，
-    于是源码里没有默认收件人；本机 `.env` 也没填）。
+    `value` 给空串就是"**没配**收件人"（那个键一起清掉，不留空值残留）。
 
-    这个文件用它是因为 `wire.build_operator_mail_sender` 在**没配收件人时返回 None**
-    （按设计不开放发信能力）——那会让"接缝自己洗一遍主题"这条断言在下一行就断掉。
+    ## 为什么前提得由测试自己配
+
+    2026-10-16 用户拍板：`QQBOT_MAIL_REPORT_TO` **必须由 `.env` 给**，源码里不留默认
+    地址（原来那行的默认值是个真实邮箱，而这仓库在 GitHub 上是公开的）。于是它默认
+    成了空串，本机 `.env` 也没填——"收件人有值"不再是环境自带的前提。
+
+    ## 为什么只设环境变量、**不碰** `MAIL_REPORT_TO` 常量
+
+    这条是 2026-10-16 之后改的：`wire.build_operator_mail_sender` 原来读 **import 期
+    常量**，所以当时两个都要设；现在它改成了 `dev_config.mail_report_to()`（现读），
+    只设环境变量两边就都看得到。
+
+    而且这样顺手多一道守卫：谁把读数改回常量，这几条用例会以"收件人没配"的形状红
+    （常量在 import 那一刻是空的，本机 `.env` 也没填）。"两处都设"会把这道守卫糊掉——
+    所以这里**故意只设一半**，理由与 `wire.py` 那处注释同源（`mail_report_to()` 的
+    docstring："发信是**这一刻**要往哪寄的决定，所以现读"）。
+
+    ## 为什么不改回源码默认值、也不 reload `dev_config`
+
+    默认值是用户拍的（"必须由 `.env` 给"），不许改回去；reload 会把别的模块早已取走的
+    常量留在旧值上，还会重跑覆盖层注入与 `.env` 载入（`tests/test_mail_recipient.py`
+    的模块说明记了这条）。所以这里只改"这一刻"的环境读数，退出时按原来的样子还回去——
+    不留进程级残留（这个仓库为顺序污染吃过亏）。
     """
 
     saved_env = os.environ.get(RECIPIENT_ENV)
-    saved_constant = dev_config.MAIL_REPORT_TO
-    os.environ[RECIPIENT_ENV] = FAKE_RECIPIENT
-    dev_config.MAIL_REPORT_TO = FAKE_RECIPIENT
+    os.environ.pop(RECIPIENT_ENV, None)
+    if value:
+        os.environ[RECIPIENT_ENV] = value
     try:
-        yield FAKE_RECIPIENT
+        yield value
     finally:
-        dev_config.MAIL_REPORT_TO = saved_constant
         os.environ.pop(RECIPIENT_ENV, None)
         if saved_env is not None:
             os.environ[RECIPIENT_ENV] = saved_env
@@ -303,6 +320,75 @@ def test_the_operator_seam_washes_a_free_text_subject() -> None:
 
     assert fake.sent and fake.sent[0]["subject"] == "他说“你别掺和”"
     assert not (_ARGV_FORBIDDEN & set(fake.sent[0]["subject"]))
+
+
+def test_the_operator_seam_reads_the_recipient_when_it_is_built() -> None:
+    """收件人**在装配这一刻现读**：改完环境变量，下一次装配立刻看到新值。
+
+    钉的是"不许再回去读 import 期常量 `dev_config.MAIL_REPORT_TO`"。`mail_report_to()`
+    的 docstring 把口径写死了——**"发信是这一刻要往哪寄的决定，所以现读"**——而这条窄口
+    原来读的是常量（只在 import 那一刻有值），是同一套口径里的不一致（用户 2026-10-16
+    定的口径：收件人**"必须由 `.env` 给"**，环境才是"这一刻"的真相）。
+
+    断言分成两半、各装配一次：**每一次寄给的地址等于当时环境里那个**。只钉"有值"的话，
+    读常量也能过（常量在 import 时就 `.env` 取过值，非空照样"有值"）——那种断言挡不住
+    回归。两次装配用**不同的**环境值，所以"缓存了第一次的结果"也会被抓到。
+    """
+
+    from unittest import mock
+
+    from qq_roleplay_bot.plugins import MailSeams
+    from qq_roleplay_bot.plugins.mail import mail_client as mail_client_module
+    from qq_roleplay_bot.plugins.mail import wire
+
+    class _Recorder:
+        """假的 MailClient：只记"这一封寄给了谁"，不连 SMTP、不碰令牌。"""
+
+        instances: list = []
+
+        def __init__(self, *args, **kwargs) -> None:
+            self.sent: list = []
+            _Recorder.instances.append(self)
+
+        async def send(self, *, to: str, subject: str, body: str) -> dict:
+            self.sent.append(to)
+            return {"message_id": "mid-live-read"}
+
+    first, second = "first@example.invalid", "second@example.invalid"
+    with mock.patch.object(mail_client_module, "MailClient", _Recorder):
+        with _recipient_configured(first):
+            built_first = wire.build_operator_mail_sender(MailSeams())
+        with _recipient_configured(second):
+            built_second = wire.build_operator_mail_sender(MailSeams())
+
+    assert built_first is not None and built_second is not None, "收件人配了就该拿到发信函数"
+    asyncio.run(built_first("主题一", "正文"))
+    asyncio.run(built_second("主题二", "正文"))
+
+    sent = [client.sent for client in _Recorder.instances]
+    assert sent == [[first], [second]], (
+        f"两次装配该各自寄给**当时环境里**那个地址（读常量会两封都寄给旧值）：{sent}"
+    )
+
+
+def test_an_empty_recipient_is_still_no_sender_at_all() -> None:
+    """空 = 不发：两个来源都空时 `build_operator_mail_sender` 返回 `None`。
+
+    这是用户定的那一条（收件人**"必须由 `.env` 给"**，没有默认地址），**改现读不许
+    改掉它**。考的是"空"这个判断本身，所以把回落项 `MAIL_OWNER_FROM` 也临时清掉——
+    否则在 `.env` 里配了主人地址的机器上，这条会以"其实配了"的形状红（那不是这条要问的）。
+    """
+
+    from unittest import mock
+
+    from qq_roleplay_bot.plugins import MailSeams
+    from qq_roleplay_bot.plugins.mail import wire
+
+    with mock.patch.object(dev_config, "MAIL_OWNER_FROM", ""):
+        with _recipient_configured(""):
+            built = wire.build_operator_mail_sender(MailSeams())
+
+    assert built is None, "两个来源都没有地址，就不该开放发信能力"
 
 
 def test_the_address_seam_washes_a_free_text_subject() -> None:

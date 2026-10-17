@@ -155,13 +155,15 @@ def _recipient_configured():
     `tests/test_mail_recipient.py` 的事）。把前提留给环境，等于让用例只在配过的机器上
     才真的跑起来。
 
-    ## 为什么环境变量和常量**都要**设
+    ## 为什么只设环境变量（`MAIL_REPORT_TO` 常量不再碰）
 
-    两处读法并存：`dev_config.mail_report_to()` 现读 `os.environ`
-    （`require_mail_report_to` / 启动自检走它），而
-    `plugins/mail/wire.py::build_operator_mail_sender` 读的是 **import 期常量**
-    `dev_config.MAIL_REPORT_TO`。只设一个，另一条读法看不到，用例就会以
-    "收件人没配"的形状红（2026-10-18 实测：六条红的全是这个形状）。
+    两处读法已经归一（2026-10-16 之后）：`dev_config.mail_report_to()` 现读 `os.environ`
+    （`require_mail_report_to` / 启动自检走它），`plugins/mail/wire.py::build_operator_mail_sender`
+    也改成现读了——原来它读的是 **import 期常量** `dev_config.MAIL_REPORT_TO`，只设环境变量
+    时另一条读法看不到，用例就会以"收件人没配"的形状红（2026-10-18 实测：六条红的全是这个形状）。
+
+    现在只设环境变量这一半、**两边都看得到**；而且这样多一道守卫：谁把读数改回常量，这几条
+    用例会以同一个形状红（常量在 import 那一刻是空的——本机 `.env` 也没填）。
 
     ## 为什么不是改回源码默认值，也不是 reload `dev_config`
 
@@ -179,13 +181,10 @@ def _recipient_configured():
     """
 
     saved_env = os.environ.get(RECIPIENT_ENV)
-    saved_constant = dev_config.MAIL_REPORT_TO
     os.environ[RECIPIENT_ENV] = FAKE_RECIPIENT
-    dev_config.MAIL_REPORT_TO = FAKE_RECIPIENT
     try:
         yield FAKE_RECIPIENT
     finally:
-        dev_config.MAIL_REPORT_TO = saved_constant
         os.environ.pop(RECIPIENT_ENV, None)
         if saved_env is not None:
             os.environ[RECIPIENT_ENV] = saved_env

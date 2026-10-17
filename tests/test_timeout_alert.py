@@ -42,7 +42,6 @@ from contextlib import contextmanager
 from unittest import mock
 
 from plugin_support import plugin_registry
-from qq_roleplay_bot import dev_config
 from qq_roleplay_bot import plugins as plugins_module
 from qq_roleplay_bot.metrics import RuntimeMetrics
 from qq_roleplay_bot.plugins import PluginRegistry, ReportSeams, discover
@@ -153,19 +152,17 @@ def _recipient_configured():
     """把"这个部署配了收件人"这个前提显式摆好，跑完原样（含环境变量）还回去。
 
     与 `tests/test_outage_notice.py::_recipient_configured` 同法——为什么前提必须由
-    测试自己配、为什么环境变量与 `MAIL_REPORT_TO` 常量都要设、为什么不改回源码默认值
-    也不 reload，那份 docstring 写了完整理由（2026-10-16 用户："改成必须由 `.env` 给"，
-    于是源码里没有默认收件人了；本机 `.env` 也没填）。
+    测试自己配、为什么**只设环境变量**（`build_operator_mail_sender` 从 2026-10-16 起
+    改成现读 `dev_config.mail_report_to()`，`MAIL_REPORT_TO` 常量不再参与）、为什么不
+    改回源码默认值也不 reload，那份 docstring 写了完整理由（用户原话："改成必须由
+    `.env` 给"，于是源码里没有默认收件人了；本机 `.env` 也没填）。
     """
 
     saved_env = os.environ.get(RECIPIENT_ENV)
-    saved_constant = dev_config.MAIL_REPORT_TO
     os.environ[RECIPIENT_ENV] = FAKE_RECIPIENT
-    dev_config.MAIL_REPORT_TO = FAKE_RECIPIENT
     try:
         yield FAKE_RECIPIENT
     finally:
-        dev_config.MAIL_REPORT_TO = saved_constant
         os.environ.pop(RECIPIENT_ENV, None)
         if saved_env is not None:
             os.environ[RECIPIENT_ENV] = saved_env

@@ -125,6 +125,11 @@ def build_operator_mail_sender(seams):
     （它本身也默认等于 `MAIL_REPORT_TO`）只是"配了主人地址没配汇报地址"时少一条静默死路，
     不引入新配置项。
 
+    **读数在哪一刻发生**（2026-10-16 补）：主读数 `QQBOT_MAIL_REPORT_TO` 走
+    `dev_config.mail_report_to()`，也就是**装配这一刻现读**环境，不是 import 期常量——
+    与那个函数的 docstring 同一条纪律（原话："发信是**这一刻**要往哪寄的决定，所以现读"）。
+    空串 = 没配 = **不开放这个能力**（`return None`）；这一条是用户定的，别改成"猜一个默认地址"。
+
     ## 与开关的关系（刻意与 `MAIL_REPORT_ENABLED` **无关**）
 
     这个能力**不看 `MAIL_REPORT_ENABLED`**：那是"每天那封汇报发不发"的开关，
@@ -160,8 +165,18 @@ def build_operator_mail_sender(seams):
         logger.info("发信能力已经有人提供过，本次不覆盖")
         return existing
 
-    recipient = (dev_config.MAIL_REPORT_TO or "").strip()
+    # 收件人**在这一刻读**（2026-10-16 补的一致性）：`dev_config.mail_report_to()` 的
+    # docstring 把口径写死了——"发信是**这一刻**要往哪寄的决定，所以现读"——而这里原来读
+    # 的是 **import 期常量** `dev_config.MAIL_REPORT_TO`：面板 / 测试 / 干跑改完环境之后
+    # 常量还是旧值，于是"这一刻往哪寄"被一个 import 时的快照决定了。同一套口径里的不一致。
+    #
+    # 空串仍然 = **不开放发信能力**（用户 2026-10-16：收件人**"必须由 `.env` 给"**）。
+    # 宁可闭嘴，也不猜一个默认地址——猜错就是把信寄给陌生人，比不发严重得多。
+    recipient = (dev_config.mail_report_to() or "").strip()
     if not recipient:
+        # 回落到主人地址。**这一项仍然读 import 期常量**（`MAIL_OWNER_FROM` 在 dev_config 里
+        # 没有现读函数，它是 `MAIL_REPORT_TO` 的回落项）：本次只把"主读数"改成现读，
+        # 不顺手给这一项发明新接缝（见提交说明里列的"另外发现、只报告"）。
         recipient = (dev_config.MAIL_OWNER_FROM or "").strip()
     if not recipient:
         logger.warning("没有配收件人（QQBOT_MAIL_REPORT_TO），本次不开放发信能力")
