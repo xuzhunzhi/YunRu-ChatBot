@@ -571,6 +571,22 @@ def relationship_log_retention_days() -> int:
     return _int_clamped("QQBOT_RELATIONSHIP_LOG_RETENTION_DAYS", 365, 30, 3650)
 
 
+# --- 关系变动的**证据句**保留期（2026-10-16）--------------------------------
+# `relationship_evidence` 存的是"触发这次变冷的那一句原话"。**它和流水不是一回事**：
+# 流水是"档位怎么变"（365 天，用来算净变化与衰减），证据是"那段聊天原文"
+# （**30 天**，只在事后追问"她为什么对这个人生气"那几周有用）。
+# 为什么比流水短这么多：它含别人的原话，而这份数据的价值随时间掉得很快；
+# 留得跟流水一样久等于把聊天正文多存一年（AGENTS §2.1"不记录敏感内容"同一条方向）。
+# **调用时现读**、带钳制（下限 7 天，上限 365 天：证据不该活得比流水还久）。
+
+
+def relationship_evidence_retention_days() -> int:
+    """证据句保留多少天（`QQBOT_RELATIONSHIP_EVIDENCE_RETENTION_DAYS`，默认 30，
+    夹在 7..365）。超期的是**旧的**那些行，近期的一行不动。"""
+
+    return _int_clamped("QQBOT_RELATIONSHIP_EVIDENCE_RETENTION_DAYS", 30, 7, 365)
+
+
 # --- 墓碑（`tombstones`）的保留期（2026-10-08 隔离增长审计 [9]）--------------
 # 墓碑只记**键与时间判据**、不含内容（AGENTS §2.1），但它是"删掉的东西不许被写回来"
 # 的凭据：`_cleanup` 里从来没人删它，于是它也只会增。清理同样保守——只按时间删旧行，

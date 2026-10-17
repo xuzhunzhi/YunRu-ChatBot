@@ -273,8 +273,9 @@ SUPER_ADMIN_LIST_PATTERN = re.compile(
     re.IGNORECASE,
 )
 # `/super affinity @某人` 看关系；`... reset` 直接回默认档（人工纠正模型误判）。
+# `... evidence` 看**"到底是哪句话"**（2026-10-16）：只在私聊里显示，群里敲不显示。
 SUPER_AFFINITY_PATTERN = re.compile(
-    r"^[/#]super\s+(?:affinity|关系|好感度)(?:\s+(?P<action>reset|重置|清空))?(?:\s.*)?$",
+    r"^[/#]super\s+(?:affinity|关系|好感度)(?:\s+(?P<action>reset|重置|清空|evidence|证据|证据句))?(?:\s.*)?$",
     re.IGNORECASE,
 )
 # `/super permit`：超管**引用**那条被拒的 admin 命令再发这一句，我按原样执行那一条。
@@ -488,6 +489,8 @@ class SuperAction(str, Enum):
     ADMIN_LIST = "admin_list"
     AFFINITY = "affinity"
     AFFINITY_RESET = "affinity_reset"
+    # 「到底是哪句话」（2026-10-16）：只在私聊里显示，见 `_affinity_reply`。
+    AFFINITY_EVIDENCE = "affinity_evidence"
     MEMORY = "memory"
     MEMORY_ON = "memory_on"
     MEMORY_OFF = "memory_off"
@@ -527,6 +530,8 @@ def parse_super_command(text: str) -> SuperAction | None:
     affinity = SUPER_AFFINITY_PATTERN.fullmatch(stripped)
     if affinity:
         action = (affinity.group("action") or "").casefold()
+        if action in {"evidence", "证据", "证据句"}:
+            return SuperAction.AFFINITY_EVIDENCE
         return SuperAction.AFFINITY_RESET if action in {"reset", "重置", "清空"} else SuperAction.AFFINITY
     # permit 单独一条：它后面可以跟 @ 段和说明文字，塞不进共享的 topic 组——
     # 塞进去还会顺手让 `/super restart permit` 之类的组合变成合法命令（踩过）。
@@ -1393,7 +1398,11 @@ class DialogueEngine:
             # 关系：判定报了几次"这一句越界"、其中被机械上限拒了几次（应当很少）。
             # `guard_probe_held` 是"有人打探她怎么做出来的，所以这一轮不接"的次数
             # （2026-10-09 加）：它**不写关系轴**，只是"这一轮没开口"的出口。
+            # `quote_unverified` / `evidence_stored`（2026-10-16）：判定抄回来的
+            # "那一句原话"里，**核不过输入**的有几条（不存，只记数）、真正存下证据的
+            # 有几次。两个数一起看才知道"证据链有没有断"。
             "guard_raised", "guard_rejected", "guard_probe_held",
+            "quote_unverified", "evidence_stored",
             # 风格审核（只判不改）：被打回、要求重写的条数，"重写后仍被拒、
             # 照重写的那一版发出"的条数，以及"她把原来那句原样写回来 = 拒绝改"
             # 的条数（2026-10-11；没配审核时三者恒为 0）。
@@ -2173,7 +2182,8 @@ class DialogueEngine:
                         f"别再问一遍。）\n")
         return ""
 
-    def _apply_guard_signal(self, verdict: JudgeVerdict, message: IncomingMessage) -> bool:
+    def _apply_guard_signal(self, verdict: JudgeVerdict, message: IncomingMessage,
+                            *, seq=None, who_alias=None) -> bool:
         """把判定的结论落到这一个回合上——**在拼这一轮回复之前**。返回要不要压掉回复。
 
         **它只升不降**：`may_lower_guard` 不传。降交给维护 agent（7 天最多一档），
@@ -2192,6 +2202,17 @@ class DialogueEngine:
           **不写**，只加一个计数。**政策留在核心**，提示词漂了也拦得住。
 
         两者互斥：`PROBE` 先返回，所以探机制既不会压回复又顺手写防备这种事不会发生。
+
+        ## 证据句（2026-10-16）
+
+        `verdict.guard_quote` 是判定抄回来的"触发它的那一句"，**已经在 `_judge` 里核过**
+        "它真的在这一轮的输入里"。这里只把它连同定位信息（`seq` / 说话人别名）交给
+        `MemoryStore.apply_affinity(evidence=...)`，由存储那一侧做两级脱敏、截断、
+        落旁表（见 `MemoryStore._evidence_row`）。
+
+        为什么 `seq` / `who_alias` 由调用方递进来而不在这里算：只有调用方手里有
+        `ConversationState`（序号与名册别名都在那儿），这里只认识一条消息。
+        两者取不到时是空/0——证据照样存，"大概哪一句"仍然答得上。
         """
 
         user_id = message.user_id
@@ -2223,6 +2244,11 @@ class DialogueEngine:
                 # 不把判定可能写歪的自由文本原样落库。
                 user_id, guardedness=1, reason=OFFENSE_CODES.get(offense, offense),
                 source="judge",
+                # "到底是哪句话"（2026-10-16）：原话已在 `_judge` 核过，这里只递过去。
+                # 空串 = 判定没抄/核不过 → 不传（旁表一条都不写）。
+                evidence=({"quote": verdict.guard_quote,
+                           "who_alias": "" if who_alias is None else str(who_alias),
+                           "seq": seq} if verdict.guard_quote else None),
             )
         except Exception:  # noqa: BLE001 - 写不进去也不能打断这一轮回复
             logger.exception("Stage 3 guard write failed")
@@ -2233,6 +2259,8 @@ class DialogueEngine:
             logger.info("Stage 3 guard signal rejected: reason=%s user=%s", rejection, user_id)
         else:
             self._stats["guard_raised"] += 1
+            if verdict.guard_quote:
+                self._stats["evidence_stored"] += 1
             logger.info("Stage 3 guard raised: user=%s", user_id)
         return False
 
@@ -2608,8 +2636,13 @@ class DialogueEngine:
         if action is SuperAction.PERMIT:
             # 唯一一条不返回文本的超管命令：放行会**执行**那条命令，回复就是执行结果。
             return await self._permit_reply(message, now=self.clock())
-        if action in {SuperAction.AFFINITY, SuperAction.AFFINITY_RESET}:
-            return self._affinity_reply(message, reset=action is SuperAction.AFFINITY_RESET)
+        if action in {SuperAction.AFFINITY, SuperAction.AFFINITY_RESET,
+                      SuperAction.AFFINITY_EVIDENCE}:
+            return self._affinity_reply(
+                message,
+                reset=action is SuperAction.AFFINITY_RESET,
+                evidence=action is SuperAction.AFFINITY_EVIDENCE,
+            )
         if action is SuperAction.PROFILE:
             return self._profile_reply(message)
         if action is SuperAction.QUOTE:
@@ -3093,11 +3126,23 @@ class DialogueEngine:
             lines.append(f"… 还有 {hidden} 个群未显示")
         return "\n".join(lines)
 
-    def _affinity_reply(self, message: IncomingMessage, *, reset: bool) -> str:
-        """`/super affinity @某人 [reset]`：看关系，或把它按回默认档。
+    def _affinity_reply(self, message: IncomingMessage, *, reset: bool,
+                        evidence: bool = False) -> str:
+        """`/super affinity @某人 [reset|evidence]`：看关系、按回默认档、或看证据句。
 
         **只读或重置，没有逐档编辑**：可写的档位越少越安全，也免得"手刷好感"
         之后分不清哪些是真实互动攒出来的。
+
+        ## 证据句**只在私聊显示**（2026-10-16）
+
+        `/super affinity` 这条命令原本"敲哪儿显示哪儿"：群里敲，`reason`（那句固定说法）
+        就回到群里。档位理由是概括过的一句话，问题不大；**证据句是别人的原话**，
+        而且往往正是那句难听的、说她的——当众回一遍等于把那句话再发一次给全群看。
+        所以 `evidence` 这一支加了一道闸：**不是私聊就一个字都不给**（只说"去私聊看"）。
+
+        为什么不是"群里也显示、只是脱敏"：脱敏解决不了"当众重复一遍难听话"这件事，
+        而它才是这条闸的真正理由。私聊判据用 `target.group_id` 是否为空——与
+        `/super affinity` 其它分支无关，只影响这一支。
         """
 
         targets = tuple(qq for qq in message.mentioned_user_ids if qq.isdigit())
@@ -3106,6 +3151,11 @@ class DialogueEngine:
         store = getattr(self.memory_service, "store", None)
         if store is None:
             return "当前没有接入长期记忆，关系信息不可用。"
+        if evidence and message.target.group_id:
+            # 群里敲：**不显示内容**（也不显示"有没有证据"之外的东西）。
+            logger.info("affinity evidence 只在私聊显示，群里这条不展开 user=%s",
+                        message.user_id or "-")
+            return "证据句只在私聊里看（群里不显示）。私聊发 `/super affinity @某人 evidence`。"
         lines = []
         for user_id in targets:
             if reset:
@@ -3129,7 +3179,42 @@ class DialogueEngine:
                 )
             else:
                 lines.append("  还没有变化记录。")
+            if evidence:
+                lines.extend(self._evidence_lines(store, user_id))
         return "\n".join(lines)
+
+    @staticmethod
+    def _evidence_lines(store, user_id: str, *, limit: int = 5) -> list[str]:
+        """把这个人最近几次"哪句话触发"排成几行（只读）。
+
+        `quote` 为空 = 那句话**不许存原文**（命中机制类判据，或抹完太短）：
+        那时候如实说"原文不留"，并把规则码与字数给出来——**不许假装没有证据**，
+        也不许拿规则码冒充原话。
+        """
+
+        rows = store.relationship_evidence(user_id, limit=limit)
+        if not rows:
+            return ["  （还没有留过证据句。）"]
+        out = ["  触发过的话："]
+        for row in rows:
+            quote = str(row.get("quote") or "")
+            when = _format_clock(float(row.get("occurred_at") or 0))
+            where = f"第 {row.get('seq') or '-'} 条" if row.get("seq") else "序号不明"
+            who = str(row.get("who_alias") or "-")
+            if not quote:
+                out.append(
+                    f"  · {when} {where}（{who}）：原文不留"
+                    f"（{row.get('rule') or '规则'}，{row.get('quote_chars') or 0} 字）"
+                )
+                continue
+            marks = []
+            if int(row.get("quote_truncated") or 0):
+                marks.append(f"截断，原 {row.get('quote_chars') or 0} 字")
+            if str(row.get("verify") or "") == "verbatim_masked":
+                marks.append("已抹敏感词")
+            suffix = f"（{'；'.join(marks)}）" if marks else ""
+            out.append(f"  · {when} {where}（{who}）：{quote}{suffix}")
+        return out
 
     async def _help_reply(self, message: IncomingMessage, *, title: str, text: str):
         """把一份帮助发出去：**优先图片，失败退回文字**。
@@ -3755,6 +3840,13 @@ class DialogueEngine:
             lines.append(
                 f"关系：本次升防 {snapshot.guard_raised} 次"
                 + (f"（被上限拒 {snapshot.guard_rejected} 次）" if snapshot.guard_rejected else "")
+                # 证据链（2026-10-16）：存下几句。核不过的另起一行（它在"档位没升"
+                # 的那些轮里也会发生，不能只在升防那一行里露面）。
+                + (f"，留证 {snapshot.evidence_stored} 句" if snapshot.evidence_stored else "")
+            )
+        if snapshot.quote_unverified:
+            lines.append(
+                f"证据：判定抄回来的原话有 {snapshot.quote_unverified} 句核不过输入（没存）"
             )
         if snapshot.empty_forced_reply:
             lines.append(f"异常：判定说要回但回复空手 {snapshot.empty_forced_reply} 次")
@@ -5162,7 +5254,10 @@ class DialogueEngine:
             # 顺序就是这条需求本身：让她变冷的那句话，回复当场就是冷的。
             # 它同时回答"这一轮要不要接"：判定报 `PROBE`（有人打探她怎么做出来的）
             # 时返回 True，这一轮就不接（不写关系轴、也不调回复那一次）。
-            if self._apply_guard_signal(verdict, message):
+            # `seq` / `who_alias` 只用来给证据句定位（"是哪一条、谁说的"）。
+            if self._apply_guard_signal(verdict, message,
+                                       seq=state.seq_of(message),
+                                       who_alias=state.alias_of(message)):
                 return None
             # 「到点提醒我」（2026-10-08）：**同一次判定的返回**里就带着这个意图，
             # 这里只把它交给插件（没有插件就什么都不做）。放在回复之前：核心那部分
@@ -6059,11 +6154,57 @@ class DialogueEngine:
         # `<topic_start>` 提问与 `parse_judge_output` 的解析也一并删了（同一个提交）。
         # 什么时候能改回去：用户重新定一条"按话题裁历史"的口径时。
         verdict = parse_judge_output(raw, must_reply=must_reply)
+        # 「到底是哪一句话让她变冷的」（2026-10-16）：判定把那一句原话抄回来了，
+        # **先核它真的在这一轮的输入里**（`quote in rendered_input`，纯字符串包含）。
+        # 核不过就当场清掉，绝不带着"可能是模型编的"往后走——见 `_verify_guard_quote`。
+        verdict = self._verify_guard_quote(verdict, request)
         logger.info(
             "Stage 3 judge: session=%s trigger=%s verdict=%s",
             message.session_id, trigger, verdict.describe(),
         )
         return verdict
+
+    def _verify_guard_quote(self, verdict: JudgeVerdict, request) -> JudgeVerdict:
+        """核一遍判定抄回来的"那一句原话"**真的在这一轮的输入里**，核不过就清掉。
+
+        ## 为什么必须核（2026-10-16）
+
+        证据的全部价值是"到底是哪句话触发的"。模型会改写、会截断、会把自己的一句
+        概括当成原文抄回来——那样的东西存进去，比不存更坏：它看起来像聊天原文，
+        实际是模型写的，事后拿它解释"她为什么变冷"就是拿假证据结案。
+
+        判据只有一条、而且刻意简单：`quote in rendered_input`（纯字符串包含）。
+        为什么不是"归一化之后再比"（去空白/去标点/模糊匹配）：那等于承认"差不多就是
+        原文"，而这一层的承诺是**逐字**——`quote` 存进去之后必须能在日志那一段里
+        一字不差地搜到。判据越硬，"存进去的一定是真出现过的一行"这句话才立得住。
+
+        ## 核不过怎么办
+
+        **不存**：`guard_quote` 清成空串（`apply_affinity` 拿到空证据就不写旁表），
+        只把 `quote_unverified` 计数 +1 并记一条日志（只记长度，不记内容）。
+        档位照升——**证据存不下来不该改变她的态度**，那是两件事。
+
+        ## 非 UP 的抄回也丢掉
+
+        `HOLD` / `PROBE` 时模型偶尔也会填这一段（学舌），一律清空：那两种没有"变冷"
+        可解释，存下来只会让旁表混进无关句子。
+        """
+
+        quote = (verdict.guard_quote or "").strip()
+        if not quote:
+            return verdict
+        if not verdict.guard_up:
+            return replace(verdict, guard_quote="")
+        rendered = ""
+        for part in reversed(list(request or ())):
+            if isinstance(part, dict) and part.get("role") == "user":
+                rendered = str(part.get("content") or "")
+                break
+        if quote in rendered:
+            return verdict
+        self._stats["quote_unverified"] += 1
+        logger.info("Stage 3 guard quote 校验不过，不存证据: chars=%s", len(quote))
+        return replace(verdict, guard_quote="")
 
     @staticmethod
     def _trigger_kind(trigger: str) -> str:

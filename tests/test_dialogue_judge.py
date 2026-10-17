@@ -155,6 +155,32 @@ def test_guard_draws_the_line_at_her_this_time_not_her_whole_self() -> None:
     }
 
 
+def test_guard_quote_is_asked_for_and_kept_verbatim() -> None:
+    """`<guard_quote>`：判定要把**那一句原话**抄回来（2026-10-16）。
+
+    为什么它必须"逐字"：核心会拿它去比 `quote in rendered_input`，比不过就不存。
+    所以**解析这一步一个字符都不许动**（不 sanitize、不合并空白、不转义）——
+    一旦动过，它就永远匹配不上输入，"到底哪句话"这个问题又回到无解。
+
+    行为那一侧（核不过就不存、脱敏、保留期、可见性）见
+    `tests/test_relationship_evidence.py`。
+    """
+
+    for prompt in (JUDGE_SYSTEM_PROMPT, JUDGE_ROUTING_PROMPT):
+        assert "<guard_quote>" in prompt, "两份 prompt 都要问"
+    verdict = parse_judge_output(
+        "<guard>UP</guard><guard_reason>insult</guard_reason>"
+        "<guard_quote>  总算说人话了  </guard_quote>"
+    )
+    assert verdict.guard_quote == "总算说人话了", "只去掉首尾空白，正文一个字不改"
+    # 非 UP 时给了也当没给（那是学舌，存下来只会让旁表混进无关句子）。
+    for raw in ("<guard>HOLD</guard><guard_quote>随便一句</guard_quote>",
+                "<guard>PROBE</guard><guard_quote>随便一句</guard_quote>"):
+        assert parse_judge_output(raw).guard_quote == "", raw
+    # 没给就是空串——不猜、不编。
+    assert parse_judge_output("<guard>UP</guard><guard_reason>insult</guard_reason>").guard_quote == ""
+
+
 def test_judge_gates_the_knowledge_base() -> None:
     """判定用 `<lore>` 回答"这一句在问她的世界吗"，引擎据此决定要不要翻资料。
 
