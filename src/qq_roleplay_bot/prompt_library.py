@@ -5,7 +5,7 @@
 | 名字 | 内置默认 | 谁在用 |
 | --- | --- | --- |
 | `persona` | `base_prompt.BASE_PROMPT` | 回复 agent 的第一个人格层 |
-| `reply` | `stage3_runtime.SYSTEM_PROMPT` | 回复 agent 的完整 system（人设 + 群聊底线 + 回话格式） |
+| `reply` | `stage3_runtime.SYSTEM_PROMPT` | 回复 agent 的完整 system（人设 + 群聊底线 + 回话格式）。**注**：末尾那段「回话格式」发出去时不在 system 里——装配那一刻它被切出来、逐字追加到**最后一条 user 消息**的末尾（2026-10-17，见 `stage3_runtime.split_reply_format`）。面板看到的仍是整份原文，改它照样生效 |
 | `judge` | `dialogue_judge.JUDGE_SYSTEM_PROMPT` | 判定 agent |
 | `memory` | `memory_maintenance_agent.MEMORY_SYSTEM_PROMPT` | 记忆维护 agent |
 | `review` | `style_reviewer.REVIEW_SYSTEM_PROMPT` | 风格审核 agent |

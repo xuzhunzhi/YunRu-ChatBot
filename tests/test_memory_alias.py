@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 from qq_roleplay_bot.memory_model import InboxEvent
-from qq_roleplay_bot.memory_store import MemoryStore, MemoryValidationError
+from qq_roleplay_bot.memory_store import SCHEMA_VERSION, MemoryStore, MemoryValidationError
 
 GROUP = "800000001"
 OTHER_GROUP = "717151356"
@@ -280,7 +280,12 @@ def test_claim_reports_canonical_user(tmp: str) -> None:
 
 @with_tmp
 def test_alias_table_survives_schema_upgrade(tmp: str) -> None:
-    """v5 库升到 v6：别名表建出来，且既有数据不动。"""
+    """v5 库升到**当前版本**：别名表建出来，且既有数据不动。
+
+    （断言的是 `SCHEMA_VERSION` 而不是写死一个数：这一条问的是"迁移把库带到了
+    当前这一版"，不是"当前恰好是第几版"——每加一张表都要来改一次字面量的话，
+    它挡不住任何真问题。2026-10-16 v7 加证据句旁表时踩到了这一点。）
+    """
 
     path = Path(tmp) / "memory.sqlite3"
     store = MemoryStore(path)
@@ -294,7 +299,7 @@ def test_alias_table_survives_schema_upgrade(tmp: str) -> None:
     with again.connection() as db:
         version = db.execute("PRAGMA user_version").fetchone()[0]
         rows = db.execute("SELECT COUNT(*) FROM memory_short").fetchone()[0]
-    assert version == 6
+    assert version == SCHEMA_VERSION
     assert rows == 1, "升级不该动记忆"
 
 

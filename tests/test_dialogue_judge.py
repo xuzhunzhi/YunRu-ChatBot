@@ -14,6 +14,7 @@
 from qq_roleplay_bot.dialogue_judge import (
     JUDGE_ROUTING_PROMPT,
     JUDGE_SYSTEM_PROMPT,
+    OFFENSE_CODES,
     build_judge_messages,
     parse_judge_output,
 )
@@ -110,24 +111,74 @@ def test_judge_does_not_wake_her_for_talk_about_her_machinery() -> None:
     assert "议论**别的**机器人" in JUDGE_SYSTEM_PROMPT
 
 
-def test_guard_only_rises_for_offense_toward_her() -> None:
-    """`guard` 的三个取值写清楚：只有**针对她本人的**贬损/阴阳/嘲弄才 UP。
+def test_guard_draws_the_line_at_her_this_time_not_her_whole_self() -> None:
+    """`guard` 的分界：**贬低她这个人** 才 UP；说她"这一句/这件事"不算。
 
-    2026-10-09 用户原话：*"戒备我认为只有冒犯性的话或者阴阳怪气才会提高"*。
-    提示词这里把那条分界写死，正反例（玩笑、口嗨、追问、跟她无关的话题）与
-    `PROBE` 都点名；行为那条分界由核心的 `GUARD_RAISING_OFFENSES` 机械执行
+    2026-10-16 改口径。依据是用户原话 *"至少要让云茹知道我很多时候是在教她而不是
+    对她有敌意"*：旧判据把"就你这点本事""嘲她没本事"（**评价能力**）写进 UP，同时
+    又要求"追问或质疑她的回答"一律 HOLD——能力正是被批评的东西，中间没有分界线，
+    实测把"教"记成 `belittle` 的比例是 **4/4**（可复算的那 4 条全错）。
+
+    所以这里钉两边：**新的分界句在**（两份 prompt 都要在，它们是两条独立的调用路），
+    **被删的旧句不在**。行为那一侧仍由核心的 `GUARD_RAISING_OFFENSES` 机械执行
     （见 `tests/test_guard_axis_sources.py`）。
     """
 
-    assert "只有**针对她本人的**才算数" in JUDGE_SYSTEM_PROMPT
-    assert "明确的贬损羞辱或阴阳怪气" in JUDGE_SYSTEM_PROMPT
-    # 探她的实现：说的是"这一轮不接"，不是"抬高戒备"。
-    assert "有人当面打探她是怎么做出来的" in JUDGE_SYSTEM_PROMPT
-    # 反例全在 HOLD 那一支里点名。
-    for negative in ("朋友式的调侃", "追问或质疑她的", "跟她无关的事", "拿不准就 HOLD"):
-        assert negative in JUDGE_SYSTEM_PROMPT, negative
-    # 判定的依据是**固定的词**，核心按同一张表核对。
-    assert "insult / sarcasm / belittle" in JUDGE_SYSTEM_PROMPT
+    # ① 新的分界句：两份 prompt 都换成"是不是在贬低她这个人"。
+    for prompt in (JUDGE_SYSTEM_PROMPT, JUDGE_ROUTING_PROMPT):
+        assert "这一句是不是在贬低她这个人？" in prompt
+        # "教她 vs 嫌她"这条分界要写出来，光有 UP 那几个例子不够。
+        assert "只要这句是" in prompt and "冲她说的" in prompt
+        # 探她的实现那条**不许被这次改动挤掉**：它不写关系轴。
+        assert "有人当面打探她是怎么做出来的" in prompt
+        assert "拿不准就 HOLD" in prompt
+        assert "insult / sarcasm / belittle" in prompt
+    # 主判定那版把两类例子列成两条清单，积压那版压成一段——各自都要有。
+    assert "这些是在教她、在纠正她，不是嫌她" in JUDGE_SYSTEM_PROMPT
+    assert "**都不算**贬低她这个人" in JUDGE_ROUTING_PROMPT
+    # 主判定那版还要有"分不清时只看两点"的自问，与"从这一句滑到这个人"那句分界。
+    assert "分不清时只看两点" in JUDGE_SYSTEM_PROMPT
+    assert "只有从\"她这一句\"滑到\"她这个人\"" in JUDGE_SYSTEM_PROMPT
+
+    # ② 被删的旧句**一个都不许回来**（回来就等于重新把"教"判成 UP）。
+    for gone in ("越过分寸了吗", "只有**针对她本人的**才算数",
+                 "明确的贬损羞辱或阴阳怪气", "嘲她没本事",
+                 "追问或质疑她的回答"):
+        for prompt in (JUDGE_SYSTEM_PROMPT, JUDGE_ROUTING_PROMPT):
+            assert gone not in prompt, gone
+
+    # ③ 由头那张表**一个字母都没动**：核心的白名单与它对齐，改这里等于悄悄换政策。
+    assert OFFENSE_CODES == {
+        "insult": "他当面贬损羞辱",
+        "sarcasm": "他阴阳怪气地挤兑",
+        "belittle": "他看不起她、嘲她没本事",
+    }
+
+
+def test_guard_quote_is_asked_for_and_kept_verbatim() -> None:
+    """`<guard_quote>`：判定要把**那一句原话**抄回来（2026-10-16）。
+
+    为什么它必须"逐字"：核心会拿它去比 `quote in rendered_input`，比不过就不存。
+    所以**解析这一步一个字符都不许动**（不 sanitize、不合并空白、不转义）——
+    一旦动过，它就永远匹配不上输入，"到底哪句话"这个问题又回到无解。
+
+    行为那一侧（核不过就不存、脱敏、保留期、可见性）见
+    `tests/test_relationship_evidence.py`。
+    """
+
+    for prompt in (JUDGE_SYSTEM_PROMPT, JUDGE_ROUTING_PROMPT):
+        assert "<guard_quote>" in prompt, "两份 prompt 都要问"
+    verdict = parse_judge_output(
+        "<guard>UP</guard><guard_reason>insult</guard_reason>"
+        "<guard_quote>  总算说人话了  </guard_quote>"
+    )
+    assert verdict.guard_quote == "总算说人话了", "只去掉首尾空白，正文一个字不改"
+    # 非 UP 时给了也当没给（那是学舌，存下来只会让旁表混进无关句子）。
+    for raw in ("<guard>HOLD</guard><guard_quote>随便一句</guard_quote>",
+                "<guard>PROBE</guard><guard_quote>随便一句</guard_quote>"):
+        assert parse_judge_output(raw).guard_quote == "", raw
+    # 没给就是空串——不猜、不编。
+    assert parse_judge_output("<guard>UP</guard><guard_reason>insult</guard_reason>").guard_quote == ""
 
 
 def test_judge_gates_the_knowledge_base() -> None:

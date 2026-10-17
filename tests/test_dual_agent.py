@@ -301,22 +301,37 @@ def test_reply_prompt_drops_the_decision_tag_in_dual_agent_mode() -> None:
     """双 agent 下，回复 prompt 里不该有 `<decision>`——它没有选择权。
 
     单 agent 模式（没有判定）必须保留：那一次调用确实要同时决定说不说。
+
+    2026-10-17 起**看的位置变了**：`<decision>` 与 `<reply>` 那几行都住在「回话格式」
+    那一段里，而这一段在装配那一刻被切出来、逐字追加到**最后一条 user 消息**末尾
+    （`stage3_runtime.split_reply_format`；依据是那四组实测：A 25.8% / B 3.3% / C 0/120）。
+    所以"回复 prompt 里有没有 decision"要按**整个请求**（system + 各段 user）来看，
+    只看 system 会把"挪了位置"误读成"少了那句话"。
     """
+
+    def whole_request(request: list[dict[str, str]]) -> str:
+        return "\n".join(item["content"] for item in request)
 
     judge = ScriptedJudge()
     reply = ScriptedReply()
     dual = DialogueEngine(reply, judge_client=judge)
     asyncio.run(dual.handle(msg(1, "@YunRu 在吗", mentioned=True)))
-    system = reply.requests[-1][0]["content"]
-    assert "<decision>" not in system
-    assert "这一轮必须填" in system
-    assert "不要空着不答" in system, "得有一句明确的话，告诉她这轮不能说空"
+    request = reply.requests[-1]
+    # 那几行确实在**最后一条 user 消息**里（不是 system 里）。
+    assert "回话格式（只输出下面这些标签" in request[-1]["content"]
+    assert "回话格式（只输出下面这些标签" not in request[0]["content"]
+    assert "<decision>" not in whole_request(request)
+    assert "这一轮必须填" in request[-1]["content"]
+    # 这一句在**人格那截**（`MUST_REPLY_ANCHORS` 第 3 条替换出来的），不属于被挪的
+    # 格式段，所以它照旧留在 system 里。
+    assert "不要空着不答" in request[0]["content"], "得有一句明确的话，告诉她这轮不能说空"
 
     single_reply = ScriptedReply()
     single = DialogueEngine(single_reply)
     asyncio.run(single.handle(msg(1, "@YunRu 在吗", mentioned=True)))
-    single_system = single_reply.requests[-1][0]["content"]
-    assert "<decision>REPLY|NO_REPLY|EXIT_DIALOGUE</decision>" in single_system
+    single_request = single_reply.requests[-1]
+    assert "<decision>REPLY|NO_REPLY|EXIT_DIALOGUE</decision>" not in single_request[0]["content"]
+    assert "<decision>REPLY|NO_REPLY|EXIT_DIALOGUE</decision>" in single_request[-1]["content"]
 
 
 def test_reply_agent_cannot_veto_a_reply_decision() -> None:

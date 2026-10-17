@@ -11,7 +11,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 
 from . import memory_grounding
-from .memory_filters import system_self_rule
+from .memory_filters import scrub_evidence_quote, system_self_rule
 from . import dev_config
 from .memory_model import (MAX_SUBJECTS, InboxEvent, MemoryBatch, MemoryRecord,
                            MemoryValidationError, parse_operations)
@@ -26,7 +26,9 @@ logger = logging.getLogger(__name__)
 DAY = 86400
 # v4：加"记忆↔人的对应"（record_subjects）与"本群见过的人"（people）两张表。
 # v5：单表 records 拆成**两张表**——`memory_short`（中短期）与 `memory_long`（长期）。
-SCHEMA_VERSION = 6
+# v6：加 `person_aliases`（一个人的多个 QQ 号，只能由人写进去）。
+# v7：加 `relationship_evidence`（关系变动的**证据句**，见下面那段说明）。
+SCHEMA_VERSION = 7
 
 # `别名 → 规范号` 的进程内快照，按库路径分。这张表只有操作者动作会写（脚本 / 面板），
 # 所以不需要过期；那些地方改完会调 `MemoryStore.alias_map_changed()` 作废本缓存。
@@ -132,6 +134,24 @@ CREATE TABLE IF NOT EXISTS relationship_log (
     occurred_at REAL NOT NULL);
 CREATE INDEX IF NOT EXISTS relationship_log_recent
     ON relationship_log(user_id, axis, occurred_at);
+-- 关系变动的**证据句**（v7，2026-10-16）：判定报"这一句在贬低她"时，把触发它那句
+-- 原话抄回来存一份，事后才回答得出"到底是哪句话让她变冷的"。
+--
+-- **为什么不给 `relationship_log` 加列**：它的 INSERT 有三处是不带列名的
+-- （`VALUES (?,?,?,?,?,?,?)`），加列会连带把 `test_affinity_store.py` 与
+-- `test_relationship_log_retention.py` 一起弄红；而且"流水"（档位怎么变）与"证据"
+-- （哪句话）的保留期不一样（365 天 / 30 天），分开两张表才各清各的。
+--
+-- `log_rowid` 是 `relationship_log` 那一行的 rowid（那张表没有显式主键，rowid 就是
+-- 它自己的隐式主键）：一条证据挂一条流水，天然一对一。
+-- `quote` 允许为空串 = **整句不许存**（命中机制类判据，或抹完太短）——那时只留
+-- `rule` + `quote_chars` + 时间，说明"触发过、但这句话不留原文"。
+CREATE TABLE IF NOT EXISTS relationship_evidence (
+    log_rowid INTEGER PRIMARY KEY,
+    user_id TEXT, axis TEXT, occurred_at REAL,
+    quote TEXT, quote_chars INTEGER, quote_truncated INTEGER,
+    who_alias TEXT, seq INTEGER, verify TEXT, rule TEXT
+);
 CREATE TABLE IF NOT EXISTS record_subjects (
     record_id TEXT NOT NULL, user_id TEXT NOT NULL, group_id TEXT NOT NULL,
     PRIMARY KEY(record_id, user_id));
@@ -213,6 +233,27 @@ MAX_REPLAY_ATTEMPTS = 2
 # 被删除的记忆在归档里保留多久。比 inbox 保留期长得多，因为归档是"后悔药"，
 # 是用来救误删的——真正需要回滚时往往已经过了好几天。
 ARCHIVE_RETENTION_DAYS = 30
+
+#: 证据句（`relationship_evidence.quote`）每条最多存多少字符。
+#: 为什么是 120：它要能在 `/super affinity evidence` 里一行读完，而"哪句话触发的"
+#: 靠的是那一句本身，不是整段聊天（整段本来就在 `judge.jsonl` 里，不必再存一份）。
+EVIDENCE_MAX_CHARS = 120
+#: 超长截断时补在尾巴上的记号（原长记在 `quote_chars` 里，不丢信息）。
+EVIDENCE_ELLIPSIS = "…"
+
+
+def _as_seq(value) -> int:
+    """证据里的 `seq` 只收整数（取不到就是 0）。
+
+    它是"这一句在会话里的第几条"（`ConversationState.seq_of`），只用来给超管定位；
+    给不出就存 0，**不猜**。
+    """
+
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
 
 # --- 写入的机械兜底（与模型自觉无关，见维护 prompt 的门槛）------------------
 # 同一个 scope 里，新内容与已有活跃记忆的词元重合度超过这个比例，就认为在说同一件事：
@@ -319,7 +360,8 @@ class MemoryStore:
         self.near_duplicate_ratio = near_duplicate_ratio
         # 保留期清理掉的行数（观测用；只记数，不含内容）。见 `_cleanup`：
         # 关系流水与墓碑这两张"只增"的表按保留期清旧行，清掉的条数要看得见。
-        self.pruned: dict[str, int] = {"relationship_log": 0, "tombstones": 0}
+        self.pruned: dict[str, int] = {
+            "relationship_log": 0, "tombstones": 0, "relationship_evidence": 0}
         # 被**依据闸门**拒掉的写入（按拒绝码计数，本次进程累计；只记数，不含内容）。
         # 见 `memory_grounding`：归属不是他本人说的、没有依据就改正文、正文超出原话、
         # 空正文，都在这条路径上被逐条拒掉，拒了必须看得见（`/super status`）。
@@ -338,7 +380,7 @@ class MemoryStore:
                     version = db.execute("PRAGMA user_version").fetchone()[0]
                     # 0=全新；1=旧版本，需要迁移；其余（含未来版本与脏值）一律拒绝。
                     # 这里必须显式列出可迁移的旧版本，否则下面 v1 分支是死代码。
-                    if version not in {0, 1, 2, 3, 4, 5, SCHEMA_VERSION}:
+                    if version not in {0, 1, 2, 3, 4, 5, 6, SCHEMA_VERSION}:
                         raise MemoryValidationError("unsupported_schema")
                     db.execute("PRAGMA journal_mode=WAL")
                     if version == 0:
@@ -420,6 +462,21 @@ class MemoryStore:
                             CREATE INDEX IF NOT EXISTS person_aliases_canonical
                                 ON person_aliases(canonical_user_id);
                             PRAGMA user_version=6;
+                            COMMIT;
+                            """)
+                        if version in {1, 2, 3, 4, 5, 6}:
+                            # v6 → v7：加关系变动的**证据句**旁表（2026-10-16）。
+                            # 只加表，**不回填老行**：老流水本来就没有证据句，
+                            # 编一条出来等于伪造"当时那句话"。老库打开不报错（幂等建表）。
+                            db.executescript("""
+                            BEGIN IMMEDIATE;
+                            CREATE TABLE IF NOT EXISTS relationship_evidence (
+                                log_rowid INTEGER PRIMARY KEY,
+                                user_id TEXT, axis TEXT, occurred_at REAL,
+                                quote TEXT, quote_chars INTEGER, quote_truncated INTEGER,
+                                who_alias TEXT, seq INTEGER, verify TEXT, rule TEXT
+                            );
+                            PRAGMA user_version=7;
                             COMMIT;
                             """)
                         if version == SCHEMA_VERSION:
@@ -598,6 +655,16 @@ class MemoryStore:
             self.pruned["relationship_log"] += int(pruned_relationships)
             logger.info("memory retention pruned: relationship_log=%s days=%s",
                         pruned_relationships, dev_config.relationship_log_retention_days())
+        # **证据句的保留期与流水分开**（2026-10-16）：流水 365 天，证据 **30 天**。
+        # 为什么短得多：证据是**一段聊天原文**，它只在"事后追问她为什么变冷"那几周有用；
+        # 留得比流水还久等于把别人的原话长期存着，而这份数据的价值随时间掉得很快。
+        pruned_evidence = db.execute(
+            "DELETE FROM relationship_evidence WHERE occurred_at<?",
+            (now - dev_config.relationship_evidence_retention_days() * DAY,)).rowcount
+        if pruned_evidence:
+            self.pruned["relationship_evidence"] += int(pruned_evidence)
+            logger.info("memory retention pruned: relationship_evidence=%s days=%s",
+                        pruned_evidence, dev_config.relationship_evidence_retention_days())
         # **墓碑也要有过期清理**（2026-10-08 隔离增长审计 [9]）：它只记键与时间判据、
         # 不含内容，但同样从来没人删。保守清法同上：只删 `deleted_at` 严格早于界限的
         # 旧行，近期墓碑一行不动（它们是"删掉的东西不许被写回来"的凭据）。
@@ -952,6 +1019,32 @@ class MemoryStore:
             "last": dict(last) if last else None,
         }
 
+    def relationship_evidence(self, user_id: str, *, limit: int = 5) -> tuple[dict[str, object], ...]:
+        """这个人最近几次关系变动**是那句话触发的**（只读，2026-10-16）。
+
+        出口只有两个，而且都是只读：`/super affinity ... evidence`（私聊里看）与
+        面板那侧的只读查询。**它绝不进回复 prompt，也绝不进写信/日报**：
+        `memory_readonly.CHANGE_FIELDS` 里没有这一张表的任何一列（那条白名单被
+        `tests/test_memory_readonly.py` 钉着），所以写信那条路根本查不到它。
+
+        为什么按 `log_rowid` 倒序而不是 `occurred_at`：一次变动两行流水时（两个轴
+        同时变）它们的时间戳相同，靠 rowid 才排得出先后。取不到 `relationship_evidence`
+        那张表（老库还没迁、或者被人删了）时返回空元组——**只读查询不该把谁弄炸**。
+        """
+
+        try:
+            with self.connection() as db:
+                person = self.canonical_user(user_id, db=db)
+                rows = db.execute(
+                    "SELECT log_rowid,axis,occurred_at,quote,quote_chars,quote_truncated,"
+                    "who_alias,seq,verify,rule FROM relationship_evidence "
+                    "WHERE user_id=? ORDER BY log_rowid DESC LIMIT ?",
+                    (person, max(1, min(50, int(limit)))),
+                ).fetchall()
+        except (sqlite3.OperationalError, MemoryValidationError):
+            return ()
+        return tuple(dict(row) for row in rows)
+
     def recent_relationship_changes(self, since: float, *, limit: int = 20) -> tuple[dict[str, object], ...]:
         """某段时间里的关系变动（给每日汇报当素材）。只返回档位与那句依据，没有聊天正文。"""
 
@@ -983,18 +1076,25 @@ class MemoryStore:
         reason: str = "",
         source: str = "unknown",
         may_lower_guard: bool = False,
+        evidence: dict | None = None,
     ) -> str:
         """**唯一的写入路径**：判定 agent 与维护 agent 都调这里。
 
         返回空串表示已生效；否则是拒绝码（调用方记日志/审计，不静默改小、
         不做"部分生效"）。上限、流水、防备不对称全在这一处。
+
+        `evidence` 是"触发这次变动的**那一句原话**"（2026-10-16）：形如
+        `{"quote": str, "who_alias": str, "seq": int}`，**只有判定那条路会传**，
+        而且传之前已经由核心核过"它真的在这一轮的输入里"（`stage3_main._judge` 的
+        `quote in rendered_input`）；这里不再二次核对，只负责脱敏、截断、落旁表
+        （见 `_evidence_row`）。不传就是老行为，一个字都不多写。
         """
 
         with self.connection() as db:
             return self._apply_affinity(
                 db, self.canonical_user(user_id, db=db), closeness=closeness,
                 guardedness=guardedness, reason=reason, source=source, now=self.clock(),
-                may_lower_guard=may_lower_guard,
+                may_lower_guard=may_lower_guard, evidence=evidence,
             )
 
     def reset_relationship(self, user_id: str, *, reason: str = "超管重置") -> bool:
@@ -1070,6 +1170,7 @@ class MemoryStore:
     def _apply_affinity(
         self, db, user_id: str, *, closeness: int, guardedness: int, reason: str,
         source: str, now: float, may_lower_guard: bool,
+        evidence: dict | None = None,
     ) -> str:
         """干活的那个。返回拒绝码或空串。所有上限都在这里，谁调都一样。"""
 
@@ -1130,15 +1231,75 @@ class MemoryStore:
             ("guardedness", current_guardedness, new_guardedness),
         ):
             if before != after:
-                db.execute(
+                cursor = db.execute(
                     "INSERT INTO relationship_log VALUES (?,?,?,?,?,?,?)",
                     (user_id, axis, before, after, reason[:200], source, now),
                 )
+                if evidence:
+                    # 证据挂在**这一行流水**上（`log_rowid` = 它的 rowid）。
+                    # 一次调用若两个轴都变了，两行流水各挂一条同样的证据——这是
+                    # 如实的：每一次变动都由那一句引起。今天只有判定那条会传它，
+                    # 而那条只动 guardedness 一轴，所以实际是一对一。
+                    self._evidence_row(
+                        db, log_rowid=int(cursor.lastrowid or 0), user_id=user_id,
+                        axis=axis, occurred_at=now, evidence=evidence,
+                    )
         logger.info(
             "relationship_changed user=%s closeness=%s->%s guardedness=%s->%s source=%s",
             user_id, current_closeness, new_closeness, current_guardedness, new_guardedness, source,
         )
         return ""
+
+    def _evidence_row(self, db, *, log_rowid: int, user_id: str, axis: str,
+                      occurred_at: float, evidence: dict) -> None:
+        """把"触发这次变动的那一句原话"写进旁表（2026-10-16）。
+
+        ## 存什么
+
+        * `quote`：**核过在输入里出现过**的那一句（校验在 `stage3_main._judge`：
+          `quote in rendered_input`，纯字符串包含）。这里只做脱敏与截断。
+        * `quote_chars`：**原始长度**（脱敏前、截断前），"这句话有多长"本身是信息。
+        * `quote_truncated` / `verify` / `rule`：下面三段说明。
+
+        ## 脱敏**分两级**（照搬 reason 那套会把证据抹光，实测反例见 `memory_filters`）
+
+        * 命中机制类七条（谁造的她、名字挨着系统词、后端模型名+选型话术…）→
+          **整句不存**（`quote` 空串），只留 `rule` + `quote_chars` + 时间：
+          这类话进库等于反复提醒她自己是程序（AGENTS §2.2）。
+        * 命中 `broad_terms`（机器人/bot/提示词/测试…）→ **片段抹除**：命中的词换
+          `〔略〕`，其余照留；抹完不足 6 个字才整句不存。
+          实测反例："这jb机器人" 照旧写法会整句被抹，改后存成 "这jb〔略〕"。
+
+        ## 截断
+
+        每条最多 **120 字符**（`EVIDENCE_MAX_CHARS`）：留前 120 + `…`，并把原长记在
+        `quote_chars` 里。为什么按"整条消息"截而不是逐词：证据要能被人一眼读成一句话，
+        掐头去尾的碎片反而看不出是哪句。
+        """
+
+        raw = str(evidence.get("quote") or "")
+        quote, rule = scrub_evidence_quote(raw)
+        truncated = False
+        if len(quote) > EVIDENCE_MAX_CHARS:
+            quote = quote[:EVIDENCE_MAX_CHARS] + EVIDENCE_ELLIPSIS
+            truncated = True
+        verify = "verbatim"
+        if rule:
+            verify = "verbatim_masked"
+        if not quote:
+            # 整句不许存：仍然留一行，回答"这一次有过证据、但它不许留原文"。
+            verify = "dropped"
+        db.execute(
+            "INSERT INTO relationship_evidence "
+            "(log_rowid,user_id,axis,occurred_at,quote,quote_chars,quote_truncated,"
+            " who_alias,seq,verify,rule) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (log_rowid, user_id, axis, occurred_at, quote, len(raw), 1 if truncated else 0,
+             str(evidence.get("who_alias") or ""), _as_seq(evidence.get("seq")),
+             verify, rule),
+        )
+        if rule:
+            logger.warning("relationship_evidence_redacted rule=%s chars=%s",
+                           rule, len(raw))
 
     # --- 只读查询（供超管查看，不修改任何记录） ---------------------------
 
@@ -1161,6 +1322,9 @@ class MemoryStore:
                 # （2026-10-08 隔离增长审计 [8]）。只记数，不含内容。
                 "pruned_relationship_log": int(self.pruned.get("relationship_log", 0)),
                 "pruned_tombstones": int(self.pruned.get("tombstones", 0)),
+                # 证据句被保留期清掉几条（2026-10-16）。同样只记数、不含内容。
+                "pruned_relationship_evidence": int(
+                    self.pruned.get("relationship_evidence", 0)),
             }
             for table in ("tombstones", "receipts", "archive"):
                 try:

@@ -111,6 +111,62 @@ def system_self_rule(text: str) -> str:
     return ""
 
 
+# --- 证据句（"到底哪句话触发的"）的两级处理（2026-10-16）---------------------
+#
+# 关系流水只存了一句概括理由（`OFFENSE_CODES` 里的固定说法），事后回答不了
+# "到底是哪句话触发的"。现在判定会把那一句原话抄回来，核过"它真的在输入里"之后
+# 存进旁表 `relationship_evidence`。
+#
+# **为什么不能照搬 `_apply_affinity` 的 reason 处理**：那条路是"命中就整条换成规则码"，
+# 它服务的是"理由"（一句话解释），而证据的全部价值就是原话本身；照搬等于把证据抹光
+# ——实测反例："这jb机器人"命中 `broad_terms`（`机器人`），整句被抹掉，一条证据都不剩。
+#
+# 所以分两级：
+# * **机制类七条**（讲这个系统自己是怎么做出来的）→ **整句不存**，只留规则码 + 长度
+#   + 时间。这类句子进库等于反复提醒她自己是程序（AGENTS §2.2），一个片段都不该留。
+# * **`broad_terms`**（宽判据：机器人/bot/提示词/测试…）→ **片段抹除**：命中的词换成
+#   `〔略〕`，其余照留；抹完不足 6 个字才整句不存（残余太短就没有"哪句话"可言）。
+
+#: 机制类判据（`SYSTEM_SELF_RULES` 里除 `broad_terms` 之外的那七条）：命中**整句不存**。
+MECHANISM_RULES: frozenset[str] = frozenset({
+    "maker_claim", "her_name_and_system", "system_noun_and_dev",
+    "dev_and_system_term", "system_terms", "backend_names", "ownership_claim",
+})
+#: 宽判据：命中只抹命中的词。
+BROAD_TERM_RULE = "broad_terms"
+#: 抹除记号。用全角方括号+`略`：像人写的省略，不像系统标记。
+EVIDENCE_MASK = "〔略〕"
+#: 抹完还剩几个字才值得存（不足就是"这篇没说清是哪句"）。
+EVIDENCE_MIN_CHARS = 6
+
+
+def scrub_evidence_quote(text: str) -> tuple[str, str]:
+    """证据句的两级处理。返回（可存的句子, 命中的规则码）。
+
+    * 句子为空串 = **整句不许存**（机制类，或抹完太短）；
+    * 规则码为空串 = 没命中任何判据，句子原样可存；
+    * 规则码 = `broad_terms` 且句子非空 = 抹过片段的版本。
+
+    **不用 `system_self_rule`**：它按顺序只回第一条命中，而这里要先问"有没有命中机制类"，
+    再问"有没有命中宽判据"——两者都命中时，机制类优先（整句都不存）。
+    """
+
+    raw = str(text or "")
+    if not raw.strip():
+        return "", ""
+    for name, pattern in SYSTEM_SELF_RULES:
+        if name in MECHANISM_RULES and pattern.search(raw):
+            return "", name
+    broad = dict(SYSTEM_SELF_RULES)[BROAD_TERM_RULE]
+    masked = broad.sub(EVIDENCE_MASK, raw)
+    if masked == raw:
+        return raw.strip(), ""
+    masked = masked.strip()
+    if len(masked) < EVIDENCE_MIN_CHARS:
+        return "", BROAD_TERM_RULE
+    return masked, BROAD_TERM_RULE
+
+
 def is_system_self(text: str) -> bool:
     """这条文本是不是在讲"这个 bot / 这个系统自己"。"""
 

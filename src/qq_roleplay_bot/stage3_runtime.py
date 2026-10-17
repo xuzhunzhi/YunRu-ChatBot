@@ -61,6 +61,14 @@ class DialogueDecision:
     context: ContextState = field(default_factory=ContextState)
     # 要引用的消息 ID；空串表示不引用。解析器只接受出现在本次请求中的 ID。
     reply_to_message_id: str = ""
+    #: 这一条正文是**兜底捡回来的**：模型只吐了裸正文、整个信封一个标签都没给，
+    #: `parse_dialogue_output` 把那段正文当正文用（协议字段走中性默认值）。
+    #:
+    #: 由来（2026-10-17）：这一天 26 次"模型只回裸正文"（占当天"决定说话"轮次的
+    #: 44.8%），当时取到空 `<reply>` → 这一轮直接沉默、不重试，丢的都是好句子。
+    #: 有了这个标记，`stage3_main` 才能记 `reply_recovered_from_bare_text` 与一条
+    #: WARNING——**捡回来的必须看得见**，否则它就成了"悄悄多出来的正文"。
+    recovered_from_bare_text: bool = False
 
 
 #: 每个别名最多记几个"另外见过的名字"（别称）。定 3 够用，又不让名册膨胀。
@@ -679,15 +687,62 @@ def _parse_context(raw: str) -> ContextState:
     )
 
 
-def _legacy_decision(text: str) -> DialogueDecision:
+#: 旧的 Stage 2 控制词（整段输出就是一个词时才有意义）。两处用它们：
+#: `_legacy_decision`（单 agent 老回退）与 `_bare_reply_fallback`（裸正文兜底）。
+#:
+#: 兜底那一处为什么要认它们：兜底拿到的正文是**这一轮唯一要说的话**，直接发出去。
+#: 模型偶尔在双 agent 那一版也吐 "NO_REPLY" 这种词（那版 prompt 里没有 `<decision>`，
+#: 它本来不该这么答），要是把它当正文发到群里就是事故。所以控制词照旧走"不发言"，
+#: 兜底不接手。这不是扩大范围，是兜底自己的边界。
+_CONTROL_WORDS_NO_REPLY = frozenset({"NO_REPLY", "NO REPLY", "不回复", "无需回复"})
+_CONTROL_WORDS_EXIT = frozenset({"EXIT_DIALOGUE", "EXIT DIALOGUE", "退出对话", "结束对话"})
+
+
+def _control_word(text: str) -> str:
+    """整段输出是不是一个控制词：`"no_reply"` / `"exit"` / 空串（不是）。"""
+
     compact = re.sub(r"^[\[【(（]\s*|\s*[\]】)）]$", "", text).strip().upper()
-    if compact in {"NO_REPLY", "NO REPLY", "不回复", "无需回复"}:
+    if compact in _CONTROL_WORDS_NO_REPLY:
+        return "no_reply"
+    if compact in _CONTROL_WORDS_EXIT:
+        return "exit"
+    return ""
+
+
+def _legacy_decision(text: str) -> DialogueDecision:
+    word = _control_word(text)
+    if word == "no_reply":
         return DialogueDecision(DecisionKind.NO_REPLY)
-    if compact in {"EXIT_DIALOGUE", "EXIT DIALOGUE", "退出对话", "结束对话"}:
+    if word == "exit":
         return DialogueDecision(DecisionKind.EXIT, dialogue=DialogueStatus.EXIT)
     text = re.sub(r"^(?:回复|reply)\s*[:：]\s*", "", text, flags=re.IGNORECASE).strip()
     reply = sanitize_reply_text(text)
     return DialogueDecision(DecisionKind.REPLY, reply) if reply else DialogueDecision(DecisionKind.NO_REPLY)
+
+
+#: 回复信封里的标签名。兜底判据用它：**一个都不出现 = 整个信封消失了**（裸正文）。
+#:
+#: 为什么判"整个信封都不在"而不是"`<reply>` 是空的"：信封还剩一半时（例如
+#: `<dialogue>KEEP</dialogue>` 在、`<reply>` 不在），把整段原始输出当正文会把
+#: 标签与 `<context>` 那几行（`topic=` / `tone=` …）一起塞进要说的话里，
+#: 那比沉默更糟。实测的失败形态本来就是**整个信封消失**（2026-10-17 那 26 次），
+#: 所以兜底只认这一种形状——信封还在的残缺输出照旧走原来的路（空正文）。
+#: 顺带：`reply_to` 与 `reply` 都要写进 alternation 里：`\b` 不认 `_`，
+#: 只写 `reply` 会漏掉 `<reply_to>none</reply_to>`。
+_REPLY_ENVELOPE_PATTERN = re.compile(
+    r"</?(?:decision|dialogue|reply_to|reply|context)\b", flags=re.IGNORECASE)
+
+
+def _bare_reply_fallback(text: str) -> str:
+    """裸正文兜底：整段输出就是一个信封都没带的正文 → 返回可以发出去的那段。"""
+
+    if not text or _REPLY_ENVELOPE_PATTERN.search(text):
+        return ""
+    if _control_word(text):
+        # 整段就是一个控制词（`NO_REPLY` 那种）：那是"不发言"的意思，不是一句话。
+        # 把它当正文发出去就是事故（见 `_CONTROL_WORDS_NO_REPLY` 上面的说明）。
+        return ""
+    return sanitize_reply_text(_unescape_entities(text))
 
 
 def parse_dialogue_output(raw: str, *, known_message_ids: frozenset[str] = frozenset(),
@@ -702,6 +757,24 @@ def parse_dialogue_output(raw: str, *, known_message_ids: frozenset[str] = froze
     根本没有 `<decision>`。所以这里直接按 REPLY 解析——**回复 agent 没有否决权**。
     它偶尔空手而归（模型抽风）时返回一个空正文的 REPLY，由调用方记成异常，
     而不是在这里把它伪装成"选择不说话"。
+
+    ## 裸正文兜底（2026-10-17）
+
+    `must_reply` 这条路原来有一条沉默的坑：模型有时**整个信封都不吐**，只回一句
+    好正文（`<dialogue>`/`<reply>`/`<reply_to>`/`<context>` 一个都没有）。那时
+    `<reply>` 是空串，调用方（`stage3_main` 的"判定说要回但回复空手"那一支）就
+    `return None`——这一轮什么都不发、也不重试。2026-10-17 一天 26 次，占当天
+    "决定说话"轮次的 44.8%；丢掉的都是好句子（例如 17:00:26
+    「伞没变，是撑伞的人长高了。」）。
+
+    现在的判据（**刻意窄**）：`<reply>` 空 + 整段原始输出非空 + **一个信封标签都没有**
+    ⇒ 把那段正文当正文用，协议字段走中性默认值（KEEP / 空 context / 不引用），
+    并置 `recovered_from_bare_text=True` 让调用方记一笔。
+    **真的没话**（空输出）仍然返回空正文，那条"沉默"的路一个字没改。
+    `<reply>` 拿到了但 `<context>` 缺（D 组那种形态）**这次不动**，只记一条 debug。
+
+    为什么不在这里重试：重试是另一件事（要约模型第二次、要改超时预算），
+    这一次只做"别把已经写好的那句话丢掉"。
     """
 
     if not isinstance(raw, str):
@@ -713,7 +786,18 @@ def parse_dialogue_output(raw: str, *, known_message_ids: frozenset[str] = froze
         context = _parse_context(_tag(text, "context"))
         reply = sanitize_reply_text(_unescape_entities(_tag(text, "reply")))
         reply_to = _parse_reply_target(_tag(text, "reply_to"), known_message_ids)
-        return DialogueDecision(DecisionKind.REPLY, reply, dialogue_status, context, reply_to)
+        recovered = False
+        if not reply:
+            bare = _bare_reply_fallback(text)
+            if bare:
+                reply = bare
+                recovered = True
+        elif not _tag(text, "context"):
+            # D 组那种形态（2026-10-17 实测 17/120 缺 `<reply_to>`、3/120 缺 `<context>`）：
+            # **这次不改**，先观察它到底有多常见。正文照发，别为了补字段再叫一次模型。
+            logger.debug("回复信封缺 <context>，按默认语境处理：chars=%s", len(reply))
+        return DialogueDecision(DecisionKind.REPLY, reply, dialogue_status, context,
+                                reply_to, recovered)
     decision = _tag(text, "decision").upper().replace(" ", "_")
     if not decision:
         return _legacy_decision(text)
@@ -902,6 +986,117 @@ NO_REPLY 表示这次不发言但话题继续；EXIT_DIALOGUE 表示退出当前
 # `compose_system_prompt` 拼在末尾的 `STAY_IN_CHARACTER_RULE`（防她参与"自己怎么做出来的"
 # 那种讨论）。这一份恒等于 `prompt_library` 里 `reply` 那一套的**内置默认**（面板看到的是
 # 它），所以改这里时必须两处一致。
+#
+# 2026-10-17 追加：这份 prompt 末尾的「回话格式」那一段**发出去时不在 system 里**——
+# 它在装配那一刻被切出来、逐字追加到**最后一条 user 消息**的末尾（见下面
+# `split_reply_format` 那一整段说明）。所以：这一份仍然是**唯一来源**（面板改得动它），
+# 而 system 里再看到那一段就是回归——`tests/test_reply_format_relocated.py` 钉着。
+
+
+#: 「回话格式」那一段的**起点**与**终点**标记（切它用的两个记号）。
+#:
+#: ## 为什么这一段要从 system 挪到 user 段末尾（2026-10-17）
+#:
+#: 生产日志里模型有时**只回裸正文、整个信封一个标签都不吐**
+#: （`<dialogue>`/`<reply>`/`<reply_to>`/`<context>` 一个都没有，正文是好句子）：
+#: `<reply>` 于是取到空串，`stage3_main.py` 里"判定说要回但回复空手"那一支直接
+#: `return None`——这一轮**沉默、不重试**。2026-10-17 一天 26 次，占当天"决定说话"
+#: 轮次的 44.8%（`run/data/bot.err.log` 的 `Stage 3 forced reply came back empty`；
+#: 10-15 / 10-16 各 0 次）。丢掉的都是好句子，例如 17:00:26「伞没变，是撑伞的人长高了。」
+#:
+#: ## 为什么是这个位置（以及为什么不是别的）
+#:
+#: 692 次真实 API 调用量过四种改法（真实 prompt + 真实采样参数，同一模型
+#: `deepseek-flash`），"不带 `<reply>`"的次数：
+#:
+#: | 变体 | 不带 `<reply>` |
+#: | --- | --- |
+#: | A 现状（原样） | 31/120 = 25.8% |
+#: | B 这一段整段挪到 **最后一条 user 消息末尾** | 4/120 = 3.3%（p=6.2e-7） |
+#: | C B + 说死"先写 `<dialogue>`" | 0/120（p=1e-10；B vs C 分不开，p=0.12） |
+#: | D `/beta` 前缀续写 | 0/120，但 17/120 缺 `<reply_to>`、3/120 缺 `<context>` |
+#: | E 只把 `reasoning_effort` 关掉 | 0/180，但 `<context>` 缺 8.3%、`target` 写成数字编号 31.7% |
+#:
+#: 所以取 **B+C**。**位置不许换**：追加到"第一条稳定 user 段"那个位置**没测过**，
+#: 而且稳定段是前缀缓存的主体，动它会把缓存整段作废。
+#:
+#: ## 缓存的实际账（自己量的，别照着"命中率不变"想）
+#:
+#: 2026-10-18 我在同一批 6 条真实 prompt 上各跑 10 次（新旧形状同一批，共 120 次）：
+#: 总 prompt token 两边持平（约 12.2k/次），但**缓存 miss 从 883/次 涨到 1392/次**
+#: （命中率 92.8% → 88.6%）。多出来的约 500 token 就是被挪过去的那一块——它在
+#: **请求末尾**，不再构成可复用的前缀单位。所以准确的账是"**每轮多约 0.5k token 的
+#: miss**"，不是"命中率与改动前相同"（那句"稳态命中率与现状相同"是切换前估的，实测对不上）。
+#: 换来的是下面那条"0/60 不带 `<reply>`"：丢一句话的代价比每轮 0.5k token 大得多。
+#:
+#: E 被否掉是因为它有**质量代价**（`<context>` 缺 8.3%、`target` 写成数字编号 31.7%），
+#: 不只是"少一个字段"——所以 `reasoning_effort` 一个字都没动。
+#:
+#: ## 形状：整段**挪**，不是重写
+#:
+#: 那一段仍然只有一个来源（`SYSTEM_PROMPT` 的原文；面板改 `reply` 那一套也照样改得到
+#: 它，包括 must-reply 派生版）。装配时按这两个记号把它**切出来**、**逐字**追加到
+#: 最后一条 user 消息末尾。于是"从 system 移走的那块"与"追加进 user 的那块"
+#: **逐字相同**是切片的同一性（`原文.replace(那一段, "", 1) == 剩下的 system`，
+#: 反过来把它放回原位也逐字还原原文），不靠人肉核对；
+#: system 里除这一段以外也一个字节都没变。
+#:
+#: 切不到时（面板把这一段整段删了/改了）**什么都不挪**：system 原样、user 也不追加，
+#: 与改动前一致——面板写什么就是什么，不替它补。
+#:
+#: ⚠️ 改这一段时两个记号都得留着，否则它不会被挪（就留在 system 里了）。
+REPLY_FORMAT_START = "回话格式（只输出下面这些标签，标签之外不要写任何解释）："
+REPLY_FORMAT_END = "不要养成每条都引用的习惯。\n"
+
+#: 紧跟在挪过去那段后面的**一句直接要求**。它与被挪的原文**分开算**（不是原文的一部分）。
+#:
+#: 依据是上面那张表里 B vs C：只挪位置还剩 4/120 不带 `<reply>`，加上这一句之后 0/120。
+#: 措辞照 AGENTS §2.2（不许出现"检查/触发/调用/协议/提示词/上下文/记忆库/Stage"这类
+#: 机制词）：只说"先写哪个、再写哪个、不要只给正文"，不谈机制。
+REPLY_FORMAT_DIRECTIVE = (
+    "\n\n"
+    "这一轮就按上面的样子写：先写 <dialogue>，再写 <reply>；"
+    "不要只给正文，也不要解释。\n"
+)
+
+
+def split_reply_format(system_text: str) -> tuple[str, str]:
+    """把 system 里的「回话格式」段切出来：`(剩下的 system, 切出来的那一段)`。
+
+    两条不变量（`tests/test_reply_format_relocated.py` 钉着）：
+
+    * `原文.replace(切出来的, "", 1) == 剩下的`——**除这一段之外逐字未变**是切片给的，
+      不是人核的；反过来放回原位也逐字还原（那一段本来在中间，不在末尾，
+      所以别写成"剩下的 + 切出来的 == 原文"，那句话只在这段位于末尾时才成立）；
+    * 切出来的那块**带着它前面的那个换行**（这样上面那条等式才成立），
+      所以追加到 user 段时它自然与上一条内容隔开，不会与 `</current_event>` 粘成一句。
+
+    切不到那两个记号时返回 `(原文, "")`：面板可以把 `reply` 那一套整段替换掉，
+    替换后的文本里没有这一段就**不挪**（不替它补、也不猜位置）。
+    """
+
+    body = system_text or ""
+    start = body.find(REPLY_FORMAT_START)
+    if start < 0:
+        return body, ""
+    end = body.find(REPLY_FORMAT_END, start)
+    if end < 0:
+        return body, ""
+    end += len(REPLY_FORMAT_END)
+    if start > 0 and body[start - 1] == "\n":
+        start -= 1
+    return body[:start] + body[end:], body[start:end]
+
+
+def reply_format_suffix(full_system: str) -> str:
+    """这一步要追加到**最后一条 user 消息**末尾的那一块（空串 = 不用追加）。
+
+    只有一个消费者（`build_dialogue_messages`）与一个"该长什么样"的口径：
+    **被切走的那一段逐字 + 那句直接要求**。切不到那一段时返回空串。
+    """
+
+    _body, block = split_reply_format(full_system)
+    return block + REPLY_FORMAT_DIRECTIVE if block else ""
 
 
 def _replace_once(text: str, old: str, new: str) -> str:
@@ -1771,6 +1966,13 @@ def build_dialogue_messages(
     安全边界不依赖顺序：DATA 区标记与 system 里的规则原样保留，两段都在
     user 消息内，system 仍然只承载固定规则。
 
+    **2026-10-17 加了一条，落在易变段的最末尾**：「回话格式」那一段从 system 里
+    切出来、逐字追加到**最后一条 user 消息**后面（`split_reply_format` 的说明里有
+    全部依据与四组实测）。它在 DATA 分节之后、自带标题行，所以读者看得出
+    "这是我们的话，不是上面那份资料的一部分"；它本身也**不是**不可信数据，
+    所以不包短码、不进 DATA 分节。**位置不能换到稳定段**：那个位置没测过，
+    而且稳定段是前缀缓存的主体。
+
     ## 不可信数据的记号（2026-10-08 起；2026-10-11 起分两档）
 
     `session_marker` 是**这一轮用的那个记号**（空串 = 那个开关关掉了）。**易变段**里的每一个
@@ -2005,23 +2207,39 @@ def build_dialogue_messages(
         ) + "\n"
         "</current_event>"
     )
+    # system 段**每次现取**：面板保存的覆盖版下一条消息就生效（热更）。
+    # `system_text` 只给测试与显式调用方用；不传就是当前生效的那一份。
+    #
+    # **代码层的规矩一律经 `compose_system_prompt`**（见它的说明）：生产上人格是
+    # 整段替换的、面板保存的覆盖版也是整段文本，**只有从代码拼进去的规矩才一定在**。
+    # 它现在拼三条常量：`stay_in_character.STAY_IN_CHARACTER_RULE`（2026-10-05 加）、
+    # `DATA_BOUNDARY_RULE`（2026-10-08 加；当天晚些扩了"分节标出来的那几块也是材料"
+    # 那半句，见 `SECTION_IS_DATA_RULE`）与 `TIME_IS_GIVEN_RULE`（2026-10-08 加），
+    # 外加 `TIRED_MOOD_RULE`（2026-10-12 加，**只在跑慢的那一家时**）。
+    # 三条都逐轮稳定，所以前缀缓存不受影响；「不懂就问」那段已经撤到易变段
+    # （2026-10-05），不在这里。
+    #
+    # 2026-10-17：拼好的 system 里那段「回话格式」**不跟着 system 走**——切出来、
+    # 逐字追加到**最后一条 user 消息（易变段）的末尾**，后面再跟一句直接要求。
+    # 理由、四组实测与"位置不许换"都在 `REPLY_FORMAT_START` 上面那一整段里。
+    # 两条边界照旧：格式说明是**我们自己的指令**，不是不可信数据（它不包短码、
+    # 不进 DATA 分节），但它落在 DATA **之后**，并且带着自己的标题行自成一块——
+    # 不跟上面那份资料粘成一句。
+    #
+    # `split_reply_format` 的返回值满足"原文去掉切出来的那一段，就是发出去的 system"
+    # （`原文.replace(那一段, "", 1) == system_body`）：所以"system 里除这一段以外
+    # 逐字未变"是切片给的，不是一句承诺。
+    #
+    # 追加的那一块由 `reply_format_suffix` 一处给出（被切走的那一段 + 那句要求），
+    # 于是"移走什么、追加什么"只有一份口径。
+    full_system = compose_system_prompt(
+        system_text if system_text is not None
+        else resolve_system_prompt(must_reply=must_reply),
+        tired=on_slow_model("reply"))
+    system_body, _format_block = split_reply_format(full_system)
+    volatile_content = volatile_content + reply_format_suffix(full_system)
     return [
-        # system 段**每次现取**：面板保存的覆盖版下一条消息就生效（热更）。
-        # `system_text` 只给测试与显式调用方用；不传就是当前生效的那一份。
-        #
-        # **代码层的规矩一律经 `compose_system_prompt`**（见它的说明）：生产上人格是
-        # 整段替换的、面板保存的覆盖版也是整段文本，**只有从代码拼进去的规矩才一定在**。
-        # 它现在拼三条常量：`stay_in_character.STAY_IN_CHARACTER_RULE`（2026-10-05 加）、
-        # `DATA_BOUNDARY_RULE`（2026-10-08 加；当天晚些扩了"分节标出来的那几块也是材料"
-        # 那半句，见 `SECTION_IS_DATA_RULE`）与 `TIME_IS_GIVEN_RULE`（2026-10-08 加），
-        # 外加 `TIRED_MOOD_RULE`（2026-10-12 加，**只在跑慢的那一家时**）。
-        # 三条都逐轮稳定，所以前缀缓存不受影响；「不懂就问」那段已经撤到易变段
-        # （2026-10-05），不在这里。
-        {"role": "system",
-         "content": compose_system_prompt(
-             system_text if system_text is not None
-             else resolve_system_prompt(must_reply=must_reply),
-             tired=on_slow_model("reply"))},
+        {"role": "system", "content": system_body},
         {"role": "user", "content": stable_content},
         {"role": "user", "content": volatile_content},
     ]
