@@ -294,10 +294,13 @@ Get-NetTCPConnection -LocalPort 8080 -State Listen |
    `yunru-stage4/src/.../plugins/`，要单独拷。今天实测 `run/src` 比 `dev/src` 多 46 个文件，
    全在 `plugins/` 下——这 46 个文件**永远不会**被部署脚本更新。
 2. **别整树拷插件分支。** 它的核心可能落后于 `main`，整树拷会把核心一起退回去。
-3. **`.env` 是四层，不是三层。** 优先级（`dev_config.py` 与 `operator_config.py` 里写着
-   同一句）：`data/operator_config.json（面板写的） > 真实环境变量 > .env > 代码默认`。
-   覆盖层抢在 `.env` 之前注入，四层都遵守"不覆盖已经存在的键"——**谁先进 `os.environ`
-   谁赢**。想把某一项退回去，要清掉覆盖层那一项，别指望在 `.env` 里写一句更大的。
+3. **`.env` 是四层，不是三层。** 优先级（2026-10-18 读实现核出来的，**不是**照抄注释）：
+   `真实环境变量 > data/operator_config.json（面板写的） > .env > 代码默认`。
+   覆盖层与 `.env` 都遵守"不覆盖已经存在的键"（`operator_config.py:216`、`dev_config.py:91`），
+   而真实环境变量在进程启动时就已在 `os.environ` 里 ⇒ **谁先进 `os.environ` 谁赢**，
+   真实环境变量永远最先。覆盖层在 `dev_config.py:113` 注入、`.env` 在 `:114` 读，所以覆盖层压住 `.env`。
+   想把某一项退回去：**清掉覆盖层那一项**，别指望在 `.env` 里写一句更大的。
+   （`dev_config.py:99-101` 与 `operator_config.py:9` 两处注释把顺序写反了，**以代码为准**。）
 4. **`QQBOT_ENV_FILE` 是整体替换，不是合并。** 只写一个 key 会让别的配置全退回默认值。
 5. **`run/.env` 与 `dev/.env` 是两份。** 部署脚本**绝不碰** `run/.env`；改线上配置只能改
    `run/.env`，改开发配置改 `dev/.env`，两边不会同步。
