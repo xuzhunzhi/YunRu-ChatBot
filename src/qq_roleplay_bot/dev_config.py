@@ -97,8 +97,20 @@ def load_env_file(path: Path | None = None) -> int:
 
 
 # 面板写的运行配置覆盖层要先于 `.env` 注入：两处都遵守"不覆盖已存在的 key"，
-# 所以谁先进 `os.environ` 谁赢。优先级（2026-10-01 用户定的）是
-# `operator_config.json > 真实环境变量 > .env > 代码默认`。
+# 所以谁先进 `os.environ` 谁赢。**但覆盖层赢不过真实环境变量**：真实环境变量在
+# 进程启动时就已经在 `os.environ` 里了，而覆盖层自己带一道"已存在的键就跳过"的守卫
+# ——`operator_config.OperatorConfig.inject()` 里那一行
+# `if not name or name in os.environ: continue`（`operator_config.py:221`，2026-10-16 的行号；
+# 行号会漂，认那句代码），于是 `os.environ[name] = value` 对真环境变量**根本执行不到**。
+#
+# 真实优先级（2026-10-01 用户定的口径，2026-10-16 按实现改正）：
+#
+#     真实环境变量 > operator_config.json > .env > 代码默认
+#
+# 原来这里写的是 `operator_config.json > 真实环境变量 > .env > 代码默认`——**与实现相反**。
+# 依据是调用顺序：`_inject_operator_config()`（`:125`）在前、`load_env_file()`（`:126`）在后
+# （2026-10-16 的行号），所以覆盖层只赢 `.env`（抢在它前面占位），赢不了真环境变量。
+#
 # 延迟导入：`operator_config` 不该依赖这个模块，反过来也不该在 import 期成环。
 def _inject_operator_config() -> int:
     try:
@@ -174,7 +186,7 @@ _ENV_API_KEY = get("QQBOT_API_KEY", os.environ.get("API_KEY", ""))
 # 把**主 key 那一对**所绑定/所用的值显式放进 `os.environ`：`model_config` 只从环境读，
 # 而"只配一把 key 的部署 / 只有 `.env` 的机器"必须能解析出那一对（改动前就是靠
 # `load_env_file` 填进环境的）。只补**没有**的键，绝不覆盖已有的值——
-# 优先级因此仍是 `运算符层 > 真实环境变量 > .env > 代码默认`。
+# 优先级因此仍是 `真实环境变量 > 覆盖层 > .env > 代码默认`。
 #
 # ⚠️ 为什么只补 key、不补地址与模型：地址与模型有"任务级覆盖"那一档，如果在这里
 # 把全局值写进环境，`_reapply_reply_overrides` 那种"看环境里有没有专属值"的判断
@@ -659,8 +671,20 @@ PRIVATE_DEBUG_USER_IDS = _csv_ids("QQBOT_PRIVATE_DEBUG_USER_IDS") or SUPER_ADMIN
 # 迁移要点：这三项全在配置里，**没有任何绝对路径**。换机器只要重装 CLI 并授权
 # （见 README「迁移」一节），代码与 data/ 一起搬过去就能继续跑。
 MAIL_CLI = get("QQBOT_MAIL_CLI", "agently-cli")
-# 收件人**写死在配置里**，不从对话、记忆或邮件内容里取。
-MAIL_REPORT_TO = get("QQBOT_MAIL_REPORT_TO", "xuzhunzhi@foxmail.com")
+#: 收件人那个**键名**。自检与告警都只打它，**绝不打地址本身**（日志里不留收件人）。
+MAIL_REPORT_TO_ENV = "QQBOT_MAIL_REPORT_TO"
+# 收件人**必须由 `.env` 给**，源码里**没有默认地址**（空串 = 没配）。
+#
+# 依据（2026-10-16 用户原话）：**"改成必须由 `.env` 给"**。这条仓库在 GitHub 上是
+# 公开的，而原来这一行的默认值是一个**真实邮箱**——等于把收件人随源码一起发布了。
+# 所以默认值改成空串，并把"没配"这件事做成**看得见**的两处（都不许静默）：
+#   ① `require_mail_report_to()`：真要发信之前过这一道，没配就返回空串（= 不发）
+#      并记一条带键名的 WARNING；
+#   ② `mail_report_self_check_lines()`：启动自检那一行，没配带 `**缺**`（形状照
+#      `model_config.self_check_lines()` 那一套）。
+# 为什么不是"就近发一个默认地址"：收件人是"她的信和日报交给谁"这个决策的一部分，
+# 猜错了就是**把信寄给陌生人**，比不发严重得多。宁可闭嘴，也不猜。
+MAIL_REPORT_TO = get(MAIL_REPORT_TO_ENV, "")
 # 每晚几点发（本地时间 HH:MM）。窗口 = 距上次汇报满 24 小时，不是日历日。
 MAIL_REPORT_AT = get("QQBOT_MAIL_REPORT_AT", "23:00")
 # 内联写法而不是用下面的 `_enabled`：那个函数定义在本文件更靠后的位置，
@@ -670,6 +694,60 @@ MAIL_REPORT_ENABLED = get("QQBOT_MAIL_REPORT", "1").lower() not in {"0", "false"
 MAIL_REPORT_MAX_CHARS = _int("QQBOT_MAIL_REPORT_MAX_CHARS", 1500)
 # 发送失败当天的重试次数上限。
 MAIL_REPORT_MAX_TRIES = _int("QQBOT_MAIL_REPORT_MAX_TRIES", 3)
+
+
+def mail_report_to() -> str:
+    """收件人（`QQBOT_MAIL_REPORT_TO`）：**调用时现读环境**，空串 = 没配。
+
+    为什么是函数而不是只读 `MAIL_REPORT_TO` 那个常量：与 `agent_api_key` /
+    `reply_api_base_url()` 同一条纪律——常量只在 import 那一刻有值，面板 / 测试 /
+    干跑改完环境就读不到新值。发信是"这一刻要往哪寄"的决定，所以现读。
+
+    返回值**不带默认地址**：源码里没有，环境里没有，就是没有。
+    """
+
+    return get(MAIL_REPORT_TO_ENV, "")
+
+
+def require_mail_report_to(where: str) -> str:
+    """**要发信之前必须过这一道**：没配收件人 → 记一条 WARNING 并返回空串。
+
+    调用方拿到空串就**不发**（fail-closed）。`where` 写"是哪条路要发"，只为了排查时
+    一眼看出是谁被拦下来的（例：`letter` / `daily_report` / `super_mail_send`）。
+
+    告警里**只出现键名，不出现地址**（这条仓库是公开的，日志也不该留收件人）。
+    用形如 `mail_recipient_missing key=…` 的可 grep 前缀，而不是一句散文——出事时要能
+    用一行命令把所有"因为没配收件人而没发出去"的现场捞出来。
+
+    为什么拦在这里而不是让 CLI 自己失败：CLI 拿到空收件人时的表现不由我们定
+    （可能报错、也可能退化成别的行为），而"收件人没配"必须是一个**我们说得出口**的
+    结论，不能寄希望于下游。
+    """
+
+    recipient = mail_report_to()
+    if recipient:
+        return recipient
+    logger.warning(
+        "mail_recipient_missing key=%s where=%s —— 没有配收件人，这次不发邮件",
+        MAIL_REPORT_TO_ENV, where,
+    )
+    return ""
+
+
+def mail_report_self_check_lines() -> list[str]:
+    """启动自检那一行：**只打键名与"有值没有"，绝不打地址**。
+
+    形状照 `model_config.self_check_lines()`（每个用途一行、缺的带 `**缺**`）——
+    那条自检是因为"看着像配好了其实没配"出过事故才有的，收件人是同一类风险：
+    空着的时候如果不打出来，表现就是"夜里那封信没来"，而这跟"她今晚没话说"长得一样。
+
+    单独一个函数、不并进 `model_config` 那份：那一份的条数被用例钉死
+    （`len(lines) == len(EXPECTED)`），混进去会让那条不变式不再成立。
+    """
+
+    mark = "有值" if mail_report_to() else "**缺**"
+    return [f"收件人: key={MAIL_REPORT_TO_ENV} {mark}"]
+
 
 # --- 写信 agent：独立 client / 独立 user_id（2026-09-30 用户要求）------------
 # 以前写信借用的是**回复 agent** 的 client（同一把 key、同一个 user_id），
@@ -688,6 +766,8 @@ MAIL_USER_ID = get("QQBOT_MAIL_USER_ID", "qqbot-letter")
 # --- 读信回信（2026-09-30 用户要求）-----------------------------------------
 # 她的邮箱会**收**信：只认下面这个主人地址，其余一律不进模型（fail-closed）。
 # 主人地址默认就是汇报的收件人——"她写给谁"与"她认谁的信"是同一个人才说得通。
+# 收件人没配（空串）时这里也是空串：**没有"主人"**，于是每封来信都按陌生人走判定。
+# 这是 fail-closed 的方向（认不出主人 ⇏ 把谁的信用主人的待遇处理），不是缺省失误。
 MAIL_OWNER_FROM = get("QQBOT_MAIL_OWNER_FROM", MAIL_REPORT_TO)
 # 邮件进来时用哪个 QQ 号当"说话的人"：决定会话、关系档位与私聊闸门是否放行。
 # 默认取超管第一个（就是用户本人），所以不用额外配置也能跑。
@@ -756,7 +836,8 @@ MAIL_POLL_SECONDS = _float("QQBOT_MAIL_POLL_SECONDS", 300.0)
 # 一天最多回几封：防"对面自动回复 → 她再回"这种来回刷。
 MAIL_MAX_REPLIES_PER_DAY = _int("QQBOT_MAIL_MAX_REPLIES_PER_DAY", 5)
 # 她自己的邮箱地址（`agently-cli +me` 里那个）。填了就**绝不回自己的地址**——
-# 那是死循环。查到过：shiyunru@agent.qq.com。
+# 那是死循环。实际地址**不进源码**（这条仓库是公开的，原来这里写过一个真实地址，
+# 2026-10-16 用户要求"必须由 `.env` 给"之后一并删掉）：要拦就写 QQBOT_MAIL_SELF_FROM。
 MAIL_SELF_FROM = get("QQBOT_MAIL_SELF_FROM", "")
 # 太旧的来信不回（小时）。理由：上限卡住的那几封会攒到第二天，
 # 隔了好几天再回一封"你好吗"很奇怪。

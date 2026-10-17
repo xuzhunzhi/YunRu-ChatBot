@@ -4,13 +4,18 @@
 其中包含"可以修改 api key、可以切换供应商"。这些改动必须**落盘**才有意义，
 而且**不能写 `.env`**（那里有真实凭据、注释与顺序，脚本改一次就可能写坏）。
 
-所以新增一层，优先级最高：
+所以新增一层，**排在真实环境变量之后、`.env` 与代码默认之前**：
 
-    operator_config.json（只由面板写） > 真实环境变量 > .env > 代码默认
+    真实环境变量 > operator_config.json（只由面板写） > .env > 代码默认
+
+（2026-10-16 按实现改正：这里原来写的是 `operator_config.json > 真实环境变量`，
+与下面的守卫相反——见 `inject()` 里 `if not name or name in os.environ: continue`
+那一行，真环境变量进不去这条赋值。）
 
 实现上刻意**不新造一套配置读取**：`dev_config` 用 `get()` 统一走 `os.environ`，
-（`load_env_file()` 也是把 `.env` 的值填进 `os.environ`）。那么在 `dev_config` 被
-import 之前，把覆盖层也填进 `os.environ` 就自动获得最高优先级——一处生效，不散落。
+（`load_env_file()` 也是把 `.env` 的值填进 `os.environ`）。那么在 `dev_config` 的
+常量被求值之前，把覆盖层也填进 `os.environ` 就自动赢过 `.env` 与代码默认——
+一处生效，不散落。
 
 **绝不覆盖真实环境变量**：与 `load_env_file` 同一条纪律。显式设过的环境变量是
 "这次运行的特殊要求"（测试、干跑、临时切换），面板的持久覆盖不该把它顶掉。

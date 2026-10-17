@@ -319,7 +319,7 @@ netstat -ano | findstr :8080     # 看是谁占了
 | `QQBOT_MAIL_REPLY` | `1` | `0` = 不读信、不回信 |
 | `QQBOT_MAIL_REPORT` | `1` | `0` = 关掉"每晚一封信"整条路 |
 | `QQBOT_MAIL_REPORT_AT` | `23:00` | 每晚几点发（按 `QQBOT_LOCAL_TZ_OFFSET_HOURS` 那个时区；窗口是"距上次满 24 小时"，不是日历日） |
-| `QQBOT_MAIL_REPORT_TO` | 代码里有一个默认收件人 | **收件人常量，不从对话 / 记忆 / 邮件内容里取**。换机器必须改这一行 |
+| `QQBOT_MAIL_REPORT_TO` | **空（源码里没有默认收件人）** | **收件人常量，不从对话 / 记忆 / 邮件内容里取**。换机器必须改这一行；**不填就不发信**（写信 / 日报都发不出去，启动自检那一行带 `**缺**`） |
 | `QQBOT_MAIL_OWNER_FROM` | 回落上面那个 | 她只认这个地址的信是"主人写的"，其余按陌生人走判定 |
 | `QQBOT_MAIL_SENDERS` | `any` | `any` = 谁都读、判定决定回不回；`owner` = 只读主人的；也可以给地址名单 |
 | `QQBOT_MAIL_MAX_REPLIES_PER_SENDER` | `3` | 同一天对同一个人最多回几封（防自动回复来回刷） |

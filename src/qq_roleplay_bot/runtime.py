@@ -219,6 +219,30 @@ def _log_model_config_self_check() -> list[str]:
     return lines
 
 
+def _log_mail_recipient_self_check() -> list[str]:
+    """启动自检：**收件人配了没有**——只打键名，绝不打地址。
+
+    为什么单开一条钩子而不是并进 `_log_model_config_self_check()`：那一份是
+    "每个用途一行"、条数被用例钉死（`test_the_self_check_prints_names_not_values`
+    断言 `len(lines) == len(EXPECTED)`），混进去会让那条不变式不再成立。
+
+    由来（2026-10-16 用户原话）：**"改成必须由 `.env` 给"**。收件人的默认值被拿掉之后，
+    "没配"就成了一个**必须说出口**的状态：夜里那封信没来，与"她今晚没话说"在日志上
+    长得一模一样，而这一行是唯一能分清的地方。形状照上面那份凭据自检：缺的带 `**缺**`，
+    再把缺的那几行汇总成一条 WARNING。
+    """
+
+    from .dev_config import mail_report_self_check_lines
+
+    lines = mail_report_self_check_lines()
+    for line in lines:
+        logger.info("邮件配置 %s", line)
+    missing = [line for line in lines if "**缺**" in line]
+    if missing:
+        logger.warning("邮件配置缺收件人（写信 / 日报不会发）：%s", "；".join(missing))
+    return lines
+
+
 # --- 面板接缝：配置 / prompt / 记忆 / 审计 -----------------------------------
 #
 # 面板（Stage 4 插件）不能自己碰引擎，只能调这里装配出来的那几个闭包。
@@ -574,6 +598,9 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
     # 一眼就能看出来——地址的来源就是 key 那条所绑的 provider，所以那一行里的
     # provider 名与 key 变量名必须同家；缺 key 的那一行带 `**缺**`。
     _log_model_config_self_check()
+    # **收件人自检**（2026-10-16）：`MAIL_REPORT_TO` 不再有代码默认值，所以"没配"
+    # 必须在这里说一句——否则表现只是"夜里那封信没来"，与"她今晚没话说"分不开。
+    _log_mail_recipient_self_check()
     client = OpenAICompatibleClient(
         *_reply_endpoint(),
         # 请求体里发不发 DeepSeek 专有字段（`user_id` / `reasoning_effort`）由它决定；
