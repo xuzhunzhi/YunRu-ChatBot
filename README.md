@@ -3,7 +3,7 @@
 > 一个跑在 QQ 群里的**人格化聊天机器人**：不是问答工具，是一个会判断"此刻该不该接话"的群成员。
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-771%20passing-4CC38A)](#测试)
+[![Tests](https://img.shields.io/badge/tests-1634%20passing-4CC38A)](#测试)
 [![NapCat](https://img.shields.io/badge/interface-NapCat%20%2F%20OneBot%20v11-3482FF)](#接口说明只适配-napcat)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-6E6E6E)](#安装)
 [![License](https://img.shields.io/badge/license-MIT-blue)](#许可)
@@ -47,7 +47,7 @@
 - [特性](#特性)
 - [接口说明（只适配 NapCat）](#接口说明只适配-napcat)
 - [架构](#架构)
-- [分支：main 与 stage4-plugins](#分支main-与-stage4-plugins)
+- [分支与目录：main / plugins](#分支与目录main--plugins)
 - [安装](#安装)
 - [配置](#配置)
 - [运行](#运行)
@@ -84,6 +84,16 @@
   每轮带上、不按词检索；知识库是按词检索的事实。
 - **只删不改。** 面板能删有问题的记忆，但不能手写一条——写入只走记忆维护 agent。
   删除**必须先归档**（保留 30 天），墓碑防旧证据复活。
+- **金句学习（她学"她怎么说才好听"）。** 素材只认一种：别人给她的话**贴了表情**。
+  贴的人、她当时说了什么、贴完群里怎么接的，一起交给一个专职 agent，产出**说话风格**与
+  **语境**两类笔记 + 一张**表情含义表**（按群）。被贴"不赞成"的那条是**反着标**的——
+  写成"她那样说被嫌了，别照这么做"。注入是材料、不是指令，命中率靠"只挑跟眼前这句相关
+  的几条"（上限 5 条）。
+- **黑话词条（她被动听来的）。** 群里有人解释一个词，她就记一条：谁在哪个群说的、**原话
+  证据**、被解释过几次。入口只有一个——**听着**；她不会主动去问（"不懂就问"那条路是
+  用户明确否掉的）。词条与证据落在 `data/` 下，面板与 `/super slang` 能看、能改、能标错。
+- **关系是两轴，不是好感度。** 亲近与防备各自有判据与上限，每次变动的依据、来源、时间都
+  落一条流水（保留 365 天，只清旧行）；`/super affinity` 看现状，能按回默认档。
 
 ### 防护
 
@@ -105,6 +115,23 @@
 - **能力闸门。** 所有出站动作过一张按用途分级的白名单，越权动作在核心就被挡回。
 - **可观测但不泄露。** 运行状态、用量账本、模型延迟；凭据只给掩码，脱敏后才出响应。
 - **状态跨重启。** 会话、关系档位、用量账本都落盘，重启不清零。
+
+### 扩展（Stage 4 插件，一个功能一个文件夹）
+
+这些都是**插件**：核心不认识它们，删掉整棵 `plugins/<名字>/` 也能跑（门槛脚本
+`tests/check_module_removal.py` 会验这一条）。它们**拿不到 `transport`、拿不到权限名单**，
+只产出"内容或意图"，发送与权限判定在核心。
+
+| 插件 | 干什么 |
+| --- | --- |
+| `mail/` | **邮件通道**：读信回信（认谁的信、每人每天最多回几封、太旧的不回）、**每晚一封信**（草稿 → 事实校对 → 逐句裁决，标题与正文都过清洗）、并把"发一封邮件"开放给别的插件 |
+| `outage_notice/` | **掉线通知**：`在线 → 掉线` 算一段，断一次给操作者发一封固定模板的邮件（边沿由核心判定，插件只是"被叫一次就发一封"） |
+| `timeout_alert/` | **超时报警**：5 分钟内够 5 次超时就写一封，写完之后 30 分钟内不再写第二封（数的是"超时的种类"，401 / 余额不足不混进来） |
+| `remind/` | **到点提醒**：她说"8 点提醒我交作业"就收下，到点由核心发出去；收的方式三选一（群里 @ / 私聊 / 邮箱），`/提醒` 看和删 |
+| `webui/` | **控制面板**：跑在 bot 进程里的 HTTP 服务，`local`（token）与 `remote`（口令换 cookie）两套接入；权限与超管一致（除不能改代码） |
+| `group_admin/` | **群管理**：踢 / 禁言 / 全员禁言 / 撤回 / 头衔 / 公告 / 改名片 |
+| `join_approval/` | **入群审批**：黑名单 → 白名单 → 正则 → 兜底，四道判据按固定优先级 |
+| `vision/` | **识图**：把图片消息换成一句描述再进判定 |
 
 ---
 
@@ -155,12 +182,12 @@ NapCat ──WS──▶ onebot_ws.py ──▶ runtime.serve ──┬─▶ �
 
 ---
 
-## 分支：main 与 stage4-plugins
+## 分支与目录：main / plugins
 
 这个仓库按**阶段**分成两条分支。`main` 只放"对话、记忆、防护、底层"，
-Stage 4 的功能扩展（插件）在另一条分支上。
+Stage 4 的功能扩展（插件）在**另一条分支**上，名字叫 **`plugins`**。
 
-| 内容 | `main` | `stage4-plugins` |
+| 内容 | `main` | `plugins` |
 | --- | :---: | :---: |
 | 对话 / 注意力判定 / 压缩 | ✅ | ✅ |
 | 记忆（两层、按人对应、归档） | ✅ | ✅ |
@@ -169,17 +196,30 @@ Stage 4 的功能扩展（插件）在另一条分支上。
 | **群管理**（踢 / 禁言 / 撤回 / 头衔 / 公告） | — | ✅ |
 | **入群审批**（自动批 / 白名单 / 判据） | — | ✅ |
 | **WebUI 控制面板**（本地与远程两套接入） | — | ✅ |
-| **邮件通道**（读信回信、每日汇报） | — | ✅ |
+| **邮件通道**（读信回信 / 每晚一封信 / 掉线通知 / 超时报警） | — | ✅ |
+| **到点提醒**（`/提醒`；核心听懂 + 算时间，插件到点发） | — | ✅ |
 | **识图**（图片描述） | — | ✅ |
-| 测试数 | 771 | 1114 |
+| 离线测试数 | 1634（2026-10-18 实测） | 2057（留痕里 2026-10-17 那次，我没重跑） |
 
-两条分支**共用同一套机制**：main 上是插件的**接口**（`command_plugins.py`、
-`background_plugins.py` 的协议与节拍循环），插件分支上是**实现**。
-所以你可以只 clone main，照 `docs/ADD_A_COMMAND.md` 加自己的插件。
+两条分支**共用同一套机制**：`main` 上是插件的**接口**（`command_plugins.py`、
+`background_plugins.py` 的协议与节拍循环），`plugins` 上是**实现**。
+所以你可以只 clone `main`，照 `docs/ADD_A_COMMAND.md` 加自己的插件。
+
+两条分支各有一个工作树（worktree），**平级**放着，仓库根在前者：
 
 ```powershell
-git switch stage4-plugins     # 看完整的插件实现
+git worktree list
+# <根>/dev          <sha> [main]      ← 仓库根、源码、测试、文档
+# <根>/yunru-stage4  <sha> [plugins]   ← 第二个工作树，装的是插件实现
 ```
+
+```powershell
+git switch plugins     # 在 dev 里切过去看完整的插件实现
+```
+
+**这两条分支会各自往前跑**：`plugins` 只在合并时同步一次 `main`，所以它上面的核心代码
+**可能落后**。要搬文件时别整树搬（`docs/DEPLOY.md` 第 4 节写了为什么）。
+
 
 ---
 
@@ -203,7 +243,9 @@ python3 -m venv .venv
 ```
 </details>
 
-依赖只有两个运行库：`websockets`（WS 传输）与 `pytest`（仅开发用，离线测试也可以直接跑）。
+依赖只有一个：`requirements.txt` 里的 `websockets`（WS 传输）。
+离线测试用标准库 `unittest` 就能跑，不需要 `pytest`；静态检查那一步要**另装** `pyflakes`
+（`pip install pyflakes`，它不在 `requirements.txt` 里）。
 
 ---
 
@@ -218,23 +260,27 @@ Copy-Item .env.example .env
 
 ```dotenv
 # --- 模型 ---
-QQBOT_API_KEY=sk-...              # 对话模型 key
+QQBOT_API_KEY=replace-me                  # 主 key：某个用途没配自己的 key 时回落到它
 QQBOT_API_BASE_URL=https://api.deepseek.com
-QQBOT_API_MODEL=deepseek-chat
+QQBOT_API_MODEL=deepseek-flash            # 写**真名**；deepseek-chat 是会消失的别名
+QQBOT_API_PROVIDER=deepseek               # 可选但建议：说清主 key 属于哪一家
 
 # --- 接 NapCat ---
 ONEBOT_WS_HOST=127.0.0.1
 ONEBOT_WS_PORT=8080
 QQBOT_SNOWLUMA_HTTP_BASE_URL=http://127.0.0.1:3000
 
-# --- 群 ---
-QQBOT_TARGET_GROUP_ID=800000001   # 主群
-QQBOT_ENABLED_GROUP_IDS=800000001,800000002
+# --- 权限 ---
 QQBOT_SUPER_ADMIN_USER_IDS=900000001
+QQBOT_ADMIN_USER_IDS=900000001
 ```
+
+**群不在配置里**：哪些群跟她说话是**运行期**的事——超管在哪个群发 `/admin enable`，
+就在哪个群开（记忆是**另一张**按群的名单：`/super enable memory`）。
 
 完整可配项见 `.env.example`。**`.env` 永不进仓库**（`.gitignore` 里挡着），
 运行期改的配置写到 `data/operator_config.json`，不碰 `.env`。
+哪些用途用哪家供应商、哪个模型，见 [`docs/CONFIG_GUIDE.md` §2](docs/CONFIG_GUIDE.md)。
 
 ---
 
@@ -251,7 +297,12 @@ QQBOT_SUPER_ADMIN_USER_IDS=900000001
 bash run_stage3.sh        # Linux / macOS
 ```
 
-启动后她会监听 `ws://127.0.0.1:8080`，等 NapCat 连上来。日志在 `data/` 下。
+启动后她会监听 `ws://127.0.0.1:8080`，等 NapCat 连上来。日志在 `data/` 下
+（`data/logs/` 里按功能分：`reply.jsonl` / `judge.jsonl` / `memory.jsonl` / `chat.jsonl` / …）。
+
+**真正"活了"的判据看她连上没有**：日志里出现 `OneBot 已连接` 才算；只有
+`server listening` 而没连上，她一个字的回复都不会有。生产上怎么部署、怎么重启、
+起来之后看哪几行，见 [`docs/DEPLOY.md`](docs/DEPLOY.md)。
 
 ---
 
@@ -277,21 +328,37 @@ bash run_stage3.sh        # Linux / macOS
 
 ## 测试
 
-**771 个离线测试，不依赖网络、不依赖模型、不依赖 NapCat。**
+**离线测试不依赖网络、不依赖模型、不依赖 NapCat。** 数字要报就报跑出来的：
 
 ```powershell
 .\.venv\Scripts\python.exe tests\run_offline.py
 # 期望输出：ALL_OFFLINE_TESTS_PASSED
+# 2026-10-18 在这棵树上实测：ran=1634 failed=0 errors=0 skipped=0（`verify_runs.log` 里那次）
 
 .\.venv\Scripts\python.exe -m pyflakes src tests
-# 期望：无输出
+# 期望：无输出（2026-10-18 实测无输出、退出码 0）
+
+.\.venv\Scripts\python.exe tests\check_module_removal.py
+# 期望：七项可插能力的 build_engine 那一列全是「能（已解耦）」、退出码 0
 ```
+
+> 跑的时候屏幕上可能闪过 `label=unit … ran=4242 …` 这种行——那是
+> `tests/test_verify_log.py` 写进**临时目录**的**合成**记录（它自己就在测"留痕"这个能力），
+> **不是**另有一套 4242 个测试。真数只认 `verify_runs.log` 里 `label=offline` 那一行。
+
+改插件那条分支时**再加一条**（在插件工作树里跑）：`tests\check_plugin_branch_scope.py`
+——它拦"改动跑到插件目录与测试之外去了"。
+
+`run_offline.py` 每次跑都会留痕（`data/logs/verify_runs.log` 一行、`data/logs/verify_last.txt`
+是最近一次的完整输出）。**报数请用 `ran=`，不要用 `grep -c "def test_"`** ——
+`TestCase` 里的方法不叫 `def test_`，两个数天然对不上。
 
 覆盖范围包括 OneBot 解析与 @ 精确匹配、表情包与图片的区分、注意力判定与冷却、
 压缩周期与缓存前缀复用、命令插件注册表与权限档位、能力闸门、fail-closed 边界、
 提示词注入与越权、长期记忆隔离与归档重放、记忆↔人的多对多、两层记忆库的晋升、
 墓碑与旧证据防复活、人物画像、风格审核的"只判不改 + 打回后重写一次"与说教语气判据、
-运行状态持久化、跨重启的用量账本、脱敏指标，以及 `archive/` 里归档实现的回归用例。
+金句学习与黑话词条的接缝、运行状态持久化、跨重启的用量账本、脱敏指标，
+以及 `archive/` 里归档实现的回归用例。
 
 **测试不碰真数据**：每个模块用带 pid 与 uuid 的独立临时目录，跑完自动回收。
 
@@ -316,22 +383,32 @@ src/qq_roleplay_bot/
 ├── memory_maintenance_agent.py  # 记忆维护 agent
 ├── memory_ops.py           # 人工清理（只删）
 ├── knowledge_base.py       # 知识库（按词检索）
+├── quote_learning.py       # 金句学习 agent（贴表情的样本 → 说话风格 / 语境 / 表情含义）
+├── slang_learning.py       # 黑话词条（被动听来的解释 + 原话证据）
+├── remind.py               # 到点提醒的**核心那一半**（听懂 + 算时间；发是插件的事）
+├── letter_context.py       # 写信素材（时间 / 会话 / 引用链 / 带图）
+├── letter_docs.py          # 写信要用的人设与事实表（读文件）
 ├── style_reviewer.py       # 风格审核 agent（只判不改；判不过由回复 agent 重写一次）
 ├── security.py             # 注入与敏感内容过滤
 ├── capabilities.py         # 出站能力闸门
 ├── command_plugins.py      # 命令插件协议
 ├── builtin_commands.py     # 内置命令（ping / help / 余额）
 ├── background_plugins.py   # 后台插件协议 + 节拍循环
+├── plugins/                # 插件发现与装配（只认契约；具体插件在 plugins 分支）
 ├── onebot_ws.py            # OneBot WS 传输
 ├── onebot_client.py        # OneBot HTTP 查询
-├── llm_client.py           # 模型客户端（错误分类与重试）
+├── llm_client.py           # 模型客户端（错误分类、首字闸、流式）
+├── model_config.py         # 用途 → 供应商 / key / 模型名（三层配置）
 ├── runtime.py              # 装配点
 ├── state_store.py          # 状态持久化
 └── metrics.py              # 脱敏指标
 
-tests/                      # 771 个离线测试
-docs/                       # 设计文档（见下）
+tests/                      # 离线测试（含三条门槛脚本）
+docs/                       # 设计文档 + 配置教程 + 部署教程（见下）
 ```
+
+**注意**：`dev/` 与线上的 `run/` 是两个目录，源码不共享；`run/` 里的插件比 `dev/src` 多。
+部署怎么做、插件为什么要单独拷，见 [`docs/DEPLOY.md`](docs/DEPLOY.md)。
 
 ---
 
@@ -349,6 +426,8 @@ docs/                       # 设计文档（见下）
 | [`docs/MULTI_GROUP_FOCUS.md`](docs/MULTI_GROUP_FOCUS.md) | 多群注意力怎么分开 |
 | [`docs/STYLE_REVIEW.md`](docs/STYLE_REVIEW.md) | 风格审核的判据（含"说教语气"） |
 | [`docs/ADD_A_COMMAND.md`](docs/ADD_A_COMMAND.md) | 加一个命令 / 后台插件的完整步骤 |
+| [`docs/CONFIG_GUIDE.md`](docs/CONFIG_GUIDE.md) | 配置教程：每个键干什么、模型怎么路由、常见坑 |
+| [`docs/DEPLOY.md`](docs/DEPLOY.md) | 部署与重启：三个目录的关系、更新与回滚、起来之后看什么 |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | 已完成与计划 |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | 模块划分与数据流 |
 | [`DEFECT_VERIFICATION.md`](DEFECT_VERIFICATION.md) | 一次系统性缺陷核实与修复的完整记录 |
