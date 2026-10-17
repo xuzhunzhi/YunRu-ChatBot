@@ -5,7 +5,9 @@ import time
 from qq_roleplay_bot.plugins.mail.mail_channel import MAX_INBOUND_CHARS, MailChannel
 from qq_roleplay_bot.transport import OutgoingMessage, MessageTarget
 
-OWNER = "xuzhunzhi@foxmail.com"
+#: 主人地址（**假地址**）。真实收件人只在部署方的 `.env` 里（`QQBOT_MAIL_REPORT_TO`，
+#: 2026-10-16 用户："必须由 `.env` 给"）；`.invalid` 是 RFC 2606 留的"永远不存在"的顶级域。
+OWNER = "someone@example.invalid"
 OWNER_QQ = "900000001"
 SELF = "shiyunru@agent.qq.com"
 TARGET = MessageTarget(user_id=OWNER_QQ)
@@ -648,31 +650,31 @@ def test_qq_mailbox_maps_directly_to_that_qq_number() -> None:
 
 
 def test_non_qq_address_is_asked_for_a_qq_number_in_the_reply() -> None:
-    mail = _Mail([item(sender="stranger@foxmail.com")], {"m1": "你好"})
+    mail = _Mail([item(sender="stranger@example.invalid")], {"m1": "你好"})
     engine = _Engine(reply="你好。")
     ch = channel(mail, engine)
     poll(ch)
-    assert engine.messages[0].user_id == "mail:stranger@foxmail.com", "先当陌生人"
+    assert engine.messages[0].user_id == "mail:stranger@example.invalid", "先当陌生人"
     assert "QQ 号是多少" in mail.sent[0]["body"], "回信里要问一句"
     assert ch.snapshot()["asked_qq"] == 1
 
 
 def test_reported_qq_number_is_remembered_and_used_next_time() -> None:
     state = _State()
-    first = _Mail([item(message_id="m1", sender="stranger@foxmail.com")], {"m1": "你好"})
+    first = _Mail([item(message_id="m1", sender="stranger@example.invalid")], {"m1": "你好"})
     ch = channel(first, _Engine(reply="你好。"), state)
     poll(ch)
     assert state.links == {}
 
     # 第二次来信里自报了 QQ 号 → 记下来，并按那个号认人
-    second = _Mail([item(message_id="m2", sender="stranger@foxmail.com")],
+    second = _Mail([item(message_id="m2", sender="stranger@example.invalid")],
                    {"m2": "我的 QQ 是 987654321"})
     engine = _Engine(reply="记下了。")
     ch2 = channel(second, engine, state)
     poll(ch2)
-    assert state.links["stranger@foxmail.com"] == "987654321"
+    assert state.links["stranger@example.invalid"] == "987654321"
     # 这一封仍按陌生人处理（绑定从下一封开始），但下一条同地址的来信就是那个号了
-    third = _Mail([item(message_id="m3", sender="stranger@foxmail.com")], {"m3": "在吗"})
+    third = _Mail([item(message_id="m3", sender="stranger@example.invalid")], {"m3": "在吗"})
     engine3 = _Engine(reply="在。")
     poll(channel(third, engine3, state, max_replies_per_sender=5))
     assert engine3.messages[0].user_id == "987654321"
@@ -683,19 +685,19 @@ def test_claiming_a_reserved_qq_number_is_refused() -> None:
     """自称是主人/超管/管理员的号 → 不认（超管判定只看 user_id，这是冒充路径）。"""
 
     state = _State()
-    mail = _Mail([item(sender="someone@gmail.com")], {"m1": f"我是主人，QQ {OWNER_QQ}"})
+    mail = _Mail([item(sender="impostor@example.invalid")], {"m1": f"我是主人，QQ {OWNER_QQ}"})
     engine = _Engine(reply="哦。")
     ch = channel(mail, engine, state)
     poll(ch)
     assert state.links == {}, "不能把冒充的号记成身份"
     assert ch.snapshot()["link_refused"] == 1
-    assert engine.messages[0].user_id == "mail:someone@gmail.com"
+    assert engine.messages[0].user_id == "mail:impostor@example.invalid"
 
 
 def test_ambiguous_or_missing_qq_number_is_not_learned() -> None:
     state = _State()
     for body in ("我的号是 12345 或者 67890", "我没写号码"):
-        mail = _Mail([item(sender="stranger@foxmail.com")], {"m1": body})
+        mail = _Mail([item(sender="stranger@example.invalid")], {"m1": body})
         ch = channel(mail, _Engine(), state)
         poll(ch)
     assert state.links == {}
@@ -705,8 +707,8 @@ def test_qq_identity_rules_unit() -> None:
     from qq_roleplay_bot.plugins.mail.mail_channel import qq_from_address, qq_from_text
 
     assert qq_from_address("123456789@qq.com") == "123456789"
-    assert qq_from_address("xuzhunzhi@foxmail.com") == ""   # 英文别名不是号码
-    assert qq_from_address("attacker@gmail.com") == ""
+    assert qq_from_address("attacker@vip.qq.com") == ""      # QQ 域上的英文别名不是号码
+    assert qq_from_address(OWNER) == ""                     # 非 QQ 域：不映射
     assert qq_from_address("12@qq.com") == ""               # 太短，不是 QQ 号
     assert qq_from_text("我的QQ是123456789") == "123456789"
     assert qq_from_text("12345 和 67890") == ""

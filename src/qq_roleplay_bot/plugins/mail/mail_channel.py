@@ -97,9 +97,11 @@ def is_privileged_command(text: str) -> bool:
 
 
 # --- 身份对应（2026-09-30 用户设计）----------------------------------------
-# 1. **QQ 邮箱直接映射**：`123456789@qq.com` 就是 QQ 123456789（本地部分全是数字才算，
-#    `attacker@gmail.com` 这种英文别名不算）。`@vip.qq.com` / `@foxmail.com` 同理；
-#    主人那个 `xuzhunzhi@foxmail.com` 不是数字，所以走配置里的对应。
+# 1. **QQ 邮箱直接映射**：QQ 系邮箱（域名单见下面的 `QQ_MAIL_DOMAINS`）里，本地部分是
+#    **纯数字**时那个数字就是这个 QQ 号；本地部分带字母的（英文别名）不算，照样按陌生人走。
+#    主人那个地址不是纯数字，所以主人身份走配置里的对应（`MAIL_OWNER_USER_ID`）——
+#    地址本身由 `.env` 的 `QQBOT_MAIL_REPORT_TO` 给，源码里不留任何地址
+#    （2026-10-16 用户：**"必须由 `.env` 给"**）。
 # 2. **非 QQ 邮箱**：先当陌生人（`mail:<地址>` 独立身份），回信里问一句他的 QQ 号；
 #    对方报号之后核实并记下来（`mail_state.links`），以后就按那个 QQ 号认人。
 QQ_MAIL_DOMAINS = ("qq.com", "vip.qq.com", "foxmail.com")
@@ -215,7 +217,7 @@ class MailChannel:
 
         顺序（2026-09-30 用户设计）：
         1. 主人地址 → 他的 QQ 号（跟群里是同一个人，关系与画像连续）；
-        2. **QQ 邮箱**（`123456789@qq.com` / `@vip.qq.com` / `@foxmail.com`）→ 直接就是那个 QQ 号；
+        2. **QQ 邮箱**（域名单见 `QQ_MAIL_DOMAINS`；本地部分是纯数字）→ 直接就是那个 QQ 号；
         3. 对方在以前的回信里自报过 QQ 号（`mail_state.links`）→ 用那个号；
         4. 都不行 → `mail:<地址>` 的独立身份（陌生人），回信里会问一句他的 QQ 号。
         """
