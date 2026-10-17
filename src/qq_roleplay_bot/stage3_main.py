@@ -1415,6 +1415,14 @@ class DialogueEngine:
             # 模型吐了半截协议/工具调用 XML，收尾标签留在正文里被发了出去。
             # 计的是**剥掉的标签个数**，日志里只写标签名——**不记正文**。
             "reply_tags_scrubbed",
+            # 裸正文兜底（2026-10-17）：模型**整个信封都没吐**（`<dialogue>`/`<reply>`/
+            # `<reply_to>`/`<context>` 一个都没有）、只回了一句好正文，于是把那段正文
+            # 当正文发了出去（`stage3_runtime.parse_dialogue_output` 的
+            # `_bare_reply_fallback`）。它顶掉的是原来那条"判定说要回但回复空手 →
+            # 这一轮沉默"的路：2026-10-17 一天 26 次、占当天"决定说话"轮次的 44.8%。
+            # **长期非零不是好事**：它说明模型又开始漏信封了，只是这次没把话丢掉。
+            # 只有计数，没有正文。
+            "reply_recovered_from_bare_text",
             # 判定/回复这两条路的模型调用失败（2026-10-08，失败降级审计 1）：失败时
             # **照样沉默**（那是刻意的，测试钉着），但"她突然不说话"必须看得见——
             # 只有计数与"连续几次"，没有正文。
@@ -3750,6 +3758,15 @@ class DialogueEngine:
             )
         if snapshot.empty_forced_reply:
             lines.append(f"异常：判定说要回但回复空手 {snapshot.empty_forced_reply} 次")
+        # 裸正文兜底（2026-10-17）：模型整个信封都没吐、只回了一句正文，于是把那段当
+        # 正文发了出去。这一行与上面那行是**同一件事的两头**——兜底生效的时候，
+        # `empty_forced_reply` 就不会涨了。**长期非零不是好消息**：它说明模型还在漏信封，
+        # 只是这次没把话丢掉；数字一直不下来就该去看 `reply_failed` 那几行与模型侧。
+        if snapshot.reply_recovered_from_bare_text:
+            lines.append(
+                f"兜底：模型只回了正文、没按格式写 {snapshot.reply_recovered_from_bare_text} 次"
+                "（那段正文照原样发出去了）"
+            )
         # 出站正文里剥掉的孤立标签片段（2026-10-09）：她在群里看不见它们了，
         # 但"模型又开始吐半截协议标签"这件事必须看得见——长期非零说明模型侧在退化。
         if snapshot.reply_tags_scrubbed:
@@ -5362,6 +5379,18 @@ class DialogueEngine:
             result, known_message_ids=frozenset(message_ids),
             must_reply=self._judge_on(message.session_id),
         )
+        # 裸正文兜底（2026-10-17）：**整个信封都没吐**、只回了一句正文时，解析器把那段
+        # 正文当正文用（协议字段走中性默认值），不再让这一轮掉进下面那条"回复空手 →
+        # 沉默"的路。捡回来的必须看得见：计数 + WARNING（都是**只有长度、没有正文**，
+        # 与这条路上其它日志同一条纪律）。为什么收窄成"整个信封都没了"见
+        # `stage3_runtime._REPLY_ENVELOPE_PATTERN` 的说明——信封还剩一半时把整段当正文
+        # 会把标签塞进要说的话里，那比沉默更糟。
+        if decision.recovered_from_bare_text:
+            self._stats["reply_recovered_from_bare_text"] += 1
+            logger.warning(
+                "Stage 3 reply was bare text (no envelope); using it as the reply: "
+                "session=%s trigger=%s chars=%s",
+                message.session_id, trigger_kind, len(decision.text))
         # 风格审核放在**解析之后、其它一切之前**：这样统计、语境、记忆与发送看到的
         # 都是最终稿。它**只判断、不改写**（2026-10-05）：不通过 → 把理由交回回复 agent
         # 在**同一轮**里重写一次（最多一次，不许循环）；重写后仍被拒 → **发重写的那一版**

@@ -683,10 +683,25 @@ def test_the_pushed_back_version_keeps_the_system_prompt_untouched() -> None:
     # （禁令 + 不可信数据的边界规则 + 时间以告诉你的为准）"：拿组装函数自己算一份来比
     # ——多一个字、少一个字都会红。
     # （不用 `BASE_PROMPT` 常量比：生产上人格是整段替换的，这里跟着本机解析走。）
-    from qq_roleplay_bot.stage3_runtime import DATA_BOUNDARY_RULE, TIME_IS_GIVEN_RULE
+    from qq_roleplay_bot.stage3_runtime import (
+        DATA_BOUNDARY_RULE, TIME_IS_GIVEN_RULE, split_reply_format,
+    )
 
-    expected_system = compose_system_prompt(resolve_system_prompt(must_reply=True))
+    # **2026-10-17 起这条断言要刨掉「回话格式」那一段**：那一段在装配那一刻被切出来、
+    # 逐字追加到**最后一条 user 消息**末尾（`stage3_runtime.split_reply_format`；
+    # 依据见那里引的四组实测：A 25.8% / B 3.3% / C 0/120，用户拍板取 B+C）。
+    # 所以"常驻 system 逐字未变"现在等于 `拼好的原文 - 那一段`——切片给的等式，
+    # 不是放宽：`body + block == 拼好的原文` 一个字都不许差（`split_reply_format` 保证）。
+    full_system = compose_system_prompt(resolve_system_prompt(must_reply=True))
+    expected_system, moved_block = split_reply_format(full_system)
+    # 那一段本来在**中间**（后面还接着三条代码规则），所以等式写成"删掉它 == 剩下的"，
+    # 而不是"剩下的 + 它 == 原文"（后面这种只在这段位于末尾时才成立）。
+    assert full_system.replace(moved_block, "", 1) == expected_system
+    at = full_system.index(moved_block)
+    assert expected_system[:at] + moved_block + expected_system[at:] == full_system
+    assert moved_block.startswith("\n回话格式（"), "挪走的正是那一段"
     assert first[0]["content"] == expected_system, "常驻 system 不是原来那一份了"
+    assert moved_block in first[-1]["content"], "那一段落在最后一条 user 消息里"
     assert expected_system.endswith(TIME_IS_GIVEN_RULE), "尾部那条时间规矩既有的"
     assert STAY_IN_CHARACTER_RULE in expected_system, "禁令还在（只是后面又接了一条）"
     assert DATA_BOUNDARY_RULE in expected_system, "不可信数据那条边界规则还在"

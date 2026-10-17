@@ -85,7 +85,18 @@ def test_parser_supports_stage2_fallback_and_bad_confidence() -> None:
 
 
 def test_request_separates_stable_prefix_from_volatile_state() -> None:
-    """稳定段必须可与易变状态分离，否则提示词缓存无法命中。"""
+    """稳定段必须可与易变状态分离，否则提示词缓存无法命中。
+
+    **2026-10-17 按新形状补了一条**：「回话格式」那一段不再跟着 system 走，
+    而是追加在**最后一条 user 消息（易变段）的末尾**。依据是用户原话与那四组实测
+    （`stage3_runtime.REPLY_FORMAT_START` 上面那张表：A 31/120 不带 `<reply>`、
+    B 4/120、C 0/120，取 B+C）——它**不能**放进稳定段（那个位置没测过，
+    而且稳定段是前缀缓存的主体，动它整段缓存作废）。
+    """
+
+    from qq_roleplay_bot.stage3_runtime import (
+        REPLY_FORMAT_DIRECTIVE, REPLY_FORMAT_START,
+    )
 
     current = message("1", "这只是开玩笑")
     requests = build_dialogue_messages(
@@ -104,13 +115,28 @@ def test_request_separates_stable_prefix_from_volatile_state() -> None:
     # 易变段：当前状态与本次事件。
     assert "SESSION CONTEXT" in requests[2]["content"]
     assert "<current_event>" in requests[2]["content"]
+    # 「回话格式」那一段：**system 里没有、稳定段里也没有**，它在易变段的最末尾
+    # （在 `<current_event>` 之后，自成一块、带着自己的标题行）。
+    assert REPLY_FORMAT_START not in requests[0]["content"]
+    assert REPLY_FORMAT_START not in requests[1]["content"]
+    assert REPLY_FORMAT_START in requests[2]["content"]
+    assert requests[2]["content"].index("</current_event>") < requests[2]["content"].index(
+        REPLY_FORMAT_START)
+    assert requests[2]["content"].endswith(REPLY_FORMAT_DIRECTIVE)
+
 
 
 def test_stable_prefix_is_identical_when_only_state_changes() -> None:
     """同样的历史 + 不同的会话状态，稳定段必须逐字节相同。
 
     这是缓存命中的前提：只要稳定段变了，命中率就会掉回 system prompt 的占比。
+
+    2026-10-17 追加：**挪过去的那一段在两条请求里也逐字相同、位置也一样**（都在易变段
+    末尾）。它逐轮不变，所以既不进稳定段、也不给易变段带来额外抖动——依据同
+    `test_request_separates_stable_prefix_from_volatile_state` 的 docstring。
     """
+
+    from qq_roleplay_bot.stage3_runtime import REPLY_FORMAT_DIRECTIVE
 
     current = message("1", "这只是开玩笑")
     first = build_dialogue_messages(
@@ -124,6 +150,12 @@ def test_stable_prefix_is_identical_when_only_state_changes() -> None:
     assert first[0]["content"] == second[0]["content"]
     assert first[1]["content"] == second[1]["content"]
     assert first[2]["content"] != second[2]["content"]
+    # 易变段的差别只在前面那一截：从「回话格式」那一段开始（含它后面那句要求）
+    # 两条请求**逐字相同**，且都在最末尾。
+    anchor = "回话格式（只输出下面这些标签"
+    tail = first[2]["content"][first[2]["content"].index(anchor):]
+    assert tail == second[2]["content"][second[2]["content"].index(anchor):]
+    assert tail.endswith(REPLY_FORMAT_DIRECTIVE)
 
 
 def test_chat_injection_is_data_inside_explicit_boundary() -> None:

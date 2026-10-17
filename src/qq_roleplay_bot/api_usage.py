@@ -52,6 +52,10 @@ COUNTER_NAMES = (
     # 出站正文里剥掉的孤立标签片段（`security.scrub_outbound_tags`，2026-10-09）：
     # 模型吐了半截协议/工具调用 XML，收尾标签本来会跟着正文发到群里。只记数。
     "reply_tags_scrubbed",
+    # 裸正文兜底（2026-10-17）：模型**整个信封都没吐**、只回了一句好正文，那段正文
+    # 被当正文发了出去（`stage3_runtime.parse_dialogue_output`）。它顶着的是
+    # "判定说要回但回复空手 → 沉默"那条路。只有计数，没有正文。
+    "reply_recovered_from_bare_text",
 )
 
 
