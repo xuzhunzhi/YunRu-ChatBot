@@ -584,6 +584,21 @@ class UiSeams:
     #: 也没有"顺手调个 action"的口子（字段白名单由 `tests/test_ui_groups_seam.py` 钉住）。
     #: 群名只能核心取（`get_group_list`），所以这一口必须是核心给的。
     groups: object = None
+    #: `(group_id, text, at_user_ids=()) -> dict`：面板往**已启用对话的群**里发一句
+    #: **操作者的话**（2026-10-18 用户要的「群聊」页那张卡片里的发送框）。
+    #:
+    #: **名字里不许出现 chat**：它不是她自由发言，也不是往对话里插话，是一条通知。
+    #: 它**不进她的对话历史**（与 `/admin relay` 同一条口径：这是操作者的话，不是
+    #: 她想说的）；**只允许 `enabled_group_ids` 里的群**（私聊一律不发）；同一个群 +
+    #: 完全相同的内容 3 秒内重复会被拦；空文本会被拦。四条守卫全在核心
+    #: （`DialogueEngine.notice_group`），接缝层就拒，**不留给界面层挡**。
+    #:
+    #: 投递**复用既有 relay 那条路**（`RelayDelivery` → `_relay_deliveries` →
+    #: `drain_relay_deliveries` → `_deliver_relay`），所以这一口**碰不到 transport、
+    #: 也拿不到引擎**：面板只能"把话交给核心"，发不发、怎么发由核心决定。
+    #: 返回结构化结果（`{"ok": True, ...}` / `{"ok": False, "reason": "…"}`）——
+    #: `reason` 要**原样**显示给操作者（用户：拒绝原因别吞成"操作失败"）。
+    notice: object = None
 
 
 @dataclass(frozen=True, slots=True)

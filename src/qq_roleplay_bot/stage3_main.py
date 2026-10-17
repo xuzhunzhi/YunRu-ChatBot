@@ -196,6 +196,20 @@ def _group_listen_enabled() -> bool:
 EXTENSION_TIMEOUT_SECONDS = 2.0
 RELAY_CONFIRMATION_TIMEOUT_SECONDS = 120.0
 RELAY_CONTENT_MAX_LENGTH = 1000
+# --- 面板「操作者的话」（`ui.notice`，2026-10-18 用户定的）--------------------
+#: 一条通知的正文上限。**与 `/admin relay` 同口径**：两者都是"人写的一段话"，
+#: 不是模型输出，所以不套回复那条 1000 字以外的规矩。
+NOTICE_CONTENT_MAX_LENGTH = RELAY_CONTENT_MAX_LENGTH
+#: 防手抖窗口：同一个群 + **完全相同**的内容，这么短时间内重复提交就拦回来。
+#: 为什么是 3 秒（用户原话："3 秒防误点"）：面板 = 超管权限，这不是限权，
+#: 只是挡住"手抖点了两下"——真人要再发一句同样的话，隔 3 秒早就隔过去了。
+NOTICE_DUPLICATE_WINDOW_SECONDS = 3.0
+#: 去重表最多记多少条。面板的操作频率下 256 条远远够；到顶就丢最旧的，
+#: 免得这张表被"每一条都不一样"的正文养成无上限的内存。
+NOTICE_DEDUPE_MAX_ENTRIES = 256
+#: 一条通知最多 @ 几个人。**现在是 1**：出站那边现成的只有 `send_at`（一次一个人），
+#: 多 @ 得改传输层 = 新写出站，这一笔不做（要几个人由用户另定）。
+NOTICE_MAX_AT_USERS = 1
 MAX_PERSISTED_SESSIONS = 200
 # 会话活跃时的持久化节流间隔，避免每条消息都写盘。
 PERSIST_MIN_INTERVAL_SECONDS = 10.0
@@ -782,7 +796,13 @@ def _set_public_help(commands) -> str:
 class RelayDelivery:
     target: MessageTarget
     text: str
-    admin_target: MessageTarget
+    #: 发完之后要给谁补一句回执。`/admin relay` 是**发起那条命令的管理员会话**；
+    #: 面板那条通知没有"发起它的 QQ 会话"（面板根本不在群里），所以是 `None`——
+    #: `_deliver_relay` 只在非 None 时才补"转告已发送"那句，否则会往目标群里
+    #: 多发一条"转告已发送：…"（那正是不能发生的事）。
+    admin_target: MessageTarget | None = None
+    #: 要在群里 @ 的人（面板那条通知用；默认不 @ 任何人）。
+    at_user_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -963,30 +983,51 @@ async def _deliver_relay(transport: QQTransport, delivery: RelayDelivery, *, out
 
     "确定没送出去"时不报失败——它没失败，是**晚一点**：排进补发队列，并且带一张
     便条（`note_target`），补发成功之后自动告诉发起人"已经发出去了"。
+
+    **两个可选项**（2026-10-18 面板那条通知加进来的，`/admin relay` 的行为一个字没变）：
+
+    * `admin_target is None` → **不发回执**。面板的通知没有"发起的 QQ 会话"，
+      回执只能发到群里，那就成了群里多一句"转告已发送：…"，绝不能发。
+    * `at_user_ids` 非空 → 用传输层**现成的**可选能力 `send_at`（一次 @ 一个人）。
+      没有这个能力（别的传输层 / 单测替身）就退回纯文本：**少一个 @ 可以接受，
+      消息发不出去不行**（与 `runtime._SeamBinder.remind_send` 同一条规矩）。
+      补发队列那条路只会发纯文本——`Outbox` 里没有 @ 这个概念，掉一个 @ 也算
+      "宁可少一句提醒，也别让她那句话消失"。
     """
 
+    admin = delivery.admin_target
+    at_user_ids = tuple(getattr(delivery, "at_user_ids", ()) or ())
+    note_text = f"转告已发送：{delivery.text}" if admin is not None else ""
+    send_at = getattr(transport, "send_at", None)
+
     try:
-        await transport.send(delivery.target, delivery.text)
+        if at_user_ids and callable(send_at):
+            await send_at(delivery.target, at_user_ids[0], delivery.text)
+        else:
+            await transport.send(delivery.target, delivery.text)
     except MessageNotDelivered as exc:
         logger.warning("Stage 3 relay not delivered (%s); queueing for resend", exc)
         queued = outbox is not None and outbox.enqueue(
             delivery.target, delivery.text,
-            note_target=delivery.admin_target, note_text=f"转告已发送：{delivery.text}",
+            note_target=admin, note_text=note_text,
         )
-        await _send_or_queue(
-            transport, outbox, delivery.admin_target,
-            "转告这次没送出去（对方连接不在），我已经记下了，接上就自动补发；发出去会再告诉你。"
-            if queued else "转告发送失败，请检查目标会话和 OneBot 连接。",
-        )
+        if admin is not None:
+            await _send_or_queue(
+                transport, outbox, admin,
+                "转告这次没送出去（对方连接不在），我已经记下了，接上就自动补发；发出去会再告诉你。"
+                if queued else "转告发送失败，请检查目标会话和 OneBot 连接。",
+            )
     except Exception:
         logger.exception("Stage 3 relay delivery failed")
-        await _send_or_queue(
-            transport, outbox, delivery.admin_target, "转告发送失败，请检查目标会话和 OneBot 连接。",
-        )
+        if admin is not None:
+            await _send_or_queue(
+                transport, outbox, admin, "转告发送失败，请检查目标会话和 OneBot 连接。",
+            )
     else:
-        await _send_or_queue(
-            transport, outbox, delivery.admin_target, f"转告已发送：{delivery.text}",
-        )
+        if admin is not None:
+            await _send_or_queue(
+                transport, outbox, admin, f"转告已发送：{delivery.text}",
+            )
 
 
 class DialogueSessions:
@@ -1449,6 +1490,11 @@ class DialogueEngine:
         self._pending_relays: dict[str, PendingRelay] = {}
         self._pending_relay_selections: dict[str, PendingRelaySelection] = {}
         self._relay_deliveries: deque[RelayDelivery] = deque()
+        # 「面板那条通知」的 3 秒防手抖表：`(群号, 完全相同的内容) -> 上次发出去的时刻`。
+        # 时刻用 `self.clock()`（单调时钟，只算"过了多少秒"），与焦点值班那套同一口径。
+        # 只在**真的排上队**时记一笔（被拒的那几次不占这个位置，理由见 `notice_group`）。
+        self._notice_recent: dict[tuple[str, str], float] = {}
+
         # 关系现状的小缓存：判定与回复在同一轮里各读一次，不该查两遍库。
         # 判定那条通道写入时主动失效（"立刻变冷"靠这个），TTL 是给维护 agent
         # 那条通道兜底的——它在别的线程改库，引擎收不到通知。
@@ -4553,9 +4599,168 @@ class DialogueEngine:
         }
 
     def drain_relay_deliveries(self) -> tuple[RelayDelivery, ...]:
-        deliveries = tuple(self._relay_deliveries)
-        self._relay_deliveries.clear()
-        return deliveries
+        """把排队等着发的那几条转告/通知**整个取走**（取走即清空）。
+
+        **为什么是逐条 `popleft` 而不是"`tuple()` + `clear()`"**（2026-10-18）：
+        从这一笔起，往这个队列里放的**还有另一个线程**——面板的 HTTP 线程
+        （`ui.notice` 是同步接缝，直接 `append`）。`tuple()` 与 `clear()` 之间
+        如果正好插进一条 append，它会被 clear 吃掉、**永远发不出去**（静默丢失）。
+        `deque.append` / `popleft` 各自是原子的，逐条取走就没有这个缝。
+        """
+        items: list[RelayDelivery] = []
+        while True:
+            try:
+                items.append(self._relay_deliveries.popleft())
+            except IndexError:
+                break
+        return tuple(items)
+
+    def notice_group(self, group_id: str, text: str, at_user_ids=()) -> dict[str, object]:
+        """面板往**已启用对话的群**里发一句操作者的话（`ui.notice` 的核心那一半）。
+
+        由来（2026-10-18 用户）：面板是超管权限（`AGENTS.md` §2.3 用户原话
+        *"面板权限除了不能动代码以外权限跟你是一致的"*），可是它以前只能开关群、
+        改配置，**不能替他说一句话**。
+
+        ### 为什么不进她的对话历史（与 `/admin relay` 同一条口径）
+
+        这是**操作者要群里看到的话**，不是她想说的话。所以这里：
+        **不碰 `sessions` / `ConversationState`**（她下一轮判定与回复都看不到这一句），
+        **不碰记忆收件箱**（`_absorb_without_reply` 那条路也不走）。
+        依据是 `/admin relay`（`_queue_pending_relay` → `RelayDelivery` →
+        `transport.send`）——它同样"以 bot 的身份往那边发消息"、同样不记历史。
+        用户 2026-10-18 原话：*"不进她的对话历史（跟 `/admin relay` 一致：这是操作者的
+        话，不是她想说的）"*。
+        什么时候能改回去：用户明确要"面板发的话也进她的上下文"时——那会改判定与回复
+        看到的历史，属于 Stage 3 口径变更，得先有那句话。
+
+        ### 投递：复用既有 relay 那条路，**不新写出站**
+
+        `RelayDelivery` → `self._relay_deliveries`（与 `/admin relay` 确认后入队**同一个
+        队列**）→ 运行时的 `drain_relay_deliveries()` → `_deliver_relay()`。
+        所以这一侧**一个字都不碰 `transport`**：拿不到、也不需要。
+        （只入队、不在这里 `await` 发送：面板是从自己的线程调进来的同步接缝，
+        "什么时候发"由运行时的那个循环决定，见 `runtime._message_loop`。）
+
+        ### 守卫（**就这四条**，判定顺序如下；每一条被拒都写审计）
+
+        1. 空文本 / 只有空白 → 拒；
+        2. 群号形状（ASCII 数字、5..12 位）→ 拒。**私聊一律不许发**：私聊本身在这条
+           接缝上表达不出来（`MessageTarget` 永远按 `group_id=` 造），这一条只是
+           把"看起来不像群号的东西"挡在门外；
+        3. `group_id` 不在 `enabled_group_ids` 里 → 拒（"只允许已启用对话的群"，
+           用户 2026-10-18：*"私聊一律不许发，其他群也不许"*）；
+        4. 同一个群 + **完全相同**的内容，`NOTICE_DUPLICATE_WINDOW_SECONDS` 内重复 → 拒
+           （防手抖，不是限权）。
+
+        `at_user_ids` 的清洗夹在 3 与 4 之间，**不是一条拒绝**：每个必须是纯数字
+        （`isdigit()` 对全角数字也返回真，那不是 QQ 号，所以要先 `isascii()`），
+        不合格的**丢掉并记账**，不整条拒。理由：@ 只是提醒，正文才是要送达的东西；
+        为了一个号码把整句话拦下来，操作者会以为"面板坏了"。整条拒只留给"这句根本
+        不该发"的那四种情况。
+
+        返回**结构化结果**（`{"ok": True, ...}` / `{"ok": False, "reason": "..."}`）
+        而不是抛异常：拒绝原因要原样显示给操作者（`要原样显示给操作者`，用户 2026-10-18），
+        异常穿过接缝只会在面板上变成一句笼统的 500。
+        """
+
+        # --- 1. 空文本 -----------------------------------------------------
+        cleaned = sanitize_chat_text(str(text or ""), max_length=NOTICE_CONTENT_MAX_LENGTH).strip()
+        if not cleaned:
+            return self._notice_rejected(group_id, 0, 0, "内容不能为空（只写了空白也算空）。")
+
+        # --- 2. 群号形状（私聊在这条接缝上根本表达不出来）--------------------
+        group_id = str(group_id or "").strip()
+        if not (group_id.isascii() and group_id.isdigit()) or not 5 <= len(group_id) <= 12:
+            return self._notice_rejected(group_id, len(cleaned), 0,
+                                         "只能往群聊里发：这个号码不像群号（私聊一律不发）。")
+
+        # --- 3. 必须是"已启用对话的群" --------------------------------------
+        if group_id not in self.enabled_group_ids:
+            return self._notice_rejected(
+                group_id, len(cleaned), 0,
+                f"群 {group_id} 没开对话，不能往那里发（只允许已启用对话的群）。",
+            )
+
+        # --- @ 清洗（不是拒绝，见 docstring）--------------------------------
+        at_ids: list[str] = []
+        at_dropped = 0
+        # 直接传一个字符串也认（当一个人），别把它按字符拆开——那是"123456"变成"1"的坑。
+        raw_at_ids = (at_user_ids,) if isinstance(at_user_ids, str) else (at_user_ids or ())
+        for raw in raw_at_ids:
+            candidate = str(raw or "").strip()
+            # 与 `onebot_ws.send_at` 同一条判据：ASCII 纯数字才算 QQ 号。
+            if candidate.isascii() and candidate.isdigit() and len(at_ids) < NOTICE_MAX_AT_USERS:
+                at_ids.append(candidate)
+            else:
+                at_dropped += 1
+
+        # --- 4. 3 秒防手抖 --------------------------------------------------
+        now = self.clock()
+        self._prune_notice_recent(now)
+        key = (group_id, cleaned)
+        last = self._notice_recent.get(key)
+        if last is not None and now - last < NOTICE_DUPLICATE_WINDOW_SECONDS:
+            return self._notice_rejected(
+                group_id, len(cleaned), len(at_ids),
+                "3 秒内重复提交了同一条内容，先等一下再发（防手抖）。",
+                at_dropped=at_dropped,
+            )
+
+        # --- 入队：与 `/admin relay` 确认后同一个队列、同一个投递函数 ----------
+        # `admin_target=None`：面板没有"发起它的 QQ 会话"，不能往群里发回执。
+        self._relay_deliveries.append(
+            RelayDelivery(target=MessageTarget(group_id=group_id), text=cleaned,
+                          admin_target=None, at_user_ids=tuple(at_ids)),
+        )
+        self._notice_recent[key] = now
+        self._log_notice(group_id, len(cleaned), len(at_ids), "queued",
+                         at_dropped=at_dropped)
+        return {"ok": True, "group_id": group_id, "at_user_ids": tuple(at_ids),
+                "at_dropped": at_dropped, "chars": len(cleaned)}
+
+    def _notice_rejected(self, group_id: str, chars: int, at_count: int, reason: str,
+                         *, at_dropped: int = 0) -> dict[str, object]:
+        """拒一次面板通知：**先写审计，再把原因原样交回去**（每次尝试都留痕）。"""
+
+        self._log_notice(group_id, chars, at_count, f"rejected: {reason}",
+                         at_dropped=at_dropped)
+        return {"ok": False, "reason": reason}
+
+    def _log_notice(self, group_id: str, chars: int, at_count: int, result: str,
+                    *, at_dropped: int = 0) -> None:
+        """面板通知进 `control_audit`（与面板改配置同一条只增流水）。
+
+        字段按用户 2026-10-18 点的来：**群号 / 字数 / @ 数量 / 结果**。
+        **不记正文**——审计流水只回答"谁在什么时候往哪个群发了一条多长的"，正文本身
+        属于群里的内容，不该在 `data/` 里再多留一份（`control_audit` 的纪律：
+        凭据与正文都不进这份流水）。
+        审计缺席（测试 / 裁掉审计能力的部署）绝不影响发送：整段兜住。
+        """
+
+        audit = getattr(self, "control_audit", None)
+        if audit is None:
+            return
+        try:
+            audit.record(
+                "panel_notice",
+                detail={"group_id": group_id, "chars": chars, "at": at_count,
+                        "at_dropped": at_dropped},
+                result=result, source="panel",
+            )
+        except Exception:  # noqa: BLE001 - 记账失败不该让这句话发不出去
+            logger.warning("panel_notice_audit_failed group=%s", group_id, exc_info=True)
+
+    def _prune_notice_recent(self, now: float) -> None:
+        """清掉过期的防手抖记录，并给这张表封顶（它按"正文"存键，不能无上限长）。"""
+
+        window = NOTICE_DUPLICATE_WINDOW_SECONDS
+        for key in [key for key, at in self._notice_recent.items() if now - at >= window]:
+            self._notice_recent.pop(key, None)
+        overflow = len(self._notice_recent) - NOTICE_DEDUPE_MAX_ENTRIES
+        if overflow > 0:
+            for key, _at in sorted(self._notice_recent.items(), key=lambda item: item[1])[:overflow]:
+                self._notice_recent.pop(key, None)
 
     def record_sent_reply(self, message: IncomingMessage, text: str) -> None:
         """Only a successful normal model reply may become YunRu inbox evidence."""

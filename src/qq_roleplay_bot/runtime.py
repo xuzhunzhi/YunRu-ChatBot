@@ -1414,6 +1414,9 @@ class _SeamBinder:
             learned=self.learned_seams(),
             # 「群聊」那一页：**只读**的群列表（名字 + 两个开关）。见 `ui_groups`。
             groups=self.ui_groups,
+            # 「群聊」页每张卡片里的发送框（**操作者的话**，不是她发言）：
+            # 见 `ui_notice` 与 `plugins.UiSeams.notice` 的说明。
+            notice=self.ui_notice,
         )
 
     async def ui_groups(self) -> tuple[dict[str, object], ...]:
@@ -1427,6 +1430,28 @@ class _SeamBinder:
         """
 
         return await self._require().list_groups()
+
+    def ui_notice(self, group_id: str, text: str, at_user_ids=()) -> dict[str, object]:
+        """面板那张卡片里的发送框：把**操作者的话**交给核心（`UiSeams.notice`）。
+
+        **只包一层**：转发到 `DialogueEngine.notice_group`——四条守卫（空文本 / 只许群 /
+        只许 `enabled_group_ids` / 3 秒同内容）与审计**全在引擎那一侧**，接缝层不做
+        第二套判断（两处各判一半，迟早会分叉）。
+
+        **为什么不在这里 `await` 发送**：这是面板 HTTP 线程直接调的**同步**闭包，
+        而发送是运行时那个循环的事。所以只把 `RelayDelivery` 放进 relay 那条队列，
+        由既有的 `drain_relay_deliveries()` → `_deliver_relay()` 投递（`_message_loop`
+        里每处理一条消息、以及每 5 秒那个焦点节拍各取一次）。面板拿到的 `ok` 是
+        "**已经交给核心、排上队**"，不是"对面已经收到"。
+
+        **接缝层拒掉的只有一种**：引擎没装上这个方法（旧核心 / 单测里直接造的引擎）。
+        那也如实说，不假装成功。
+        """
+
+        notifier = getattr(self._require(), "notice_group", None)
+        if not callable(notifier):
+            return {"ok": False, "reason": "这一版核心还没有面板通知这条路，先更新核心。"}
+        return dict(notifier(group_id, text, at_user_ids))
 
     # --- LearnedSeams（她学来的东西：金句 / 黑话）--------------------------
     #
@@ -2887,6 +2912,17 @@ async def _message_loop(
                     await _deliver_reply(transport, engine, source, outgoing, outbox=outbox)
             except Exception:
                 logger.exception("焦点时钟出错，继续")
+            # **转告/通知也要在这个节拍上取一次**（2026-10-18）：原来只有
+            # `_handle_one()`（收到一条消息）才 drain，于是"面板发的那句话"在
+            # **没人说话的群里会一直躺在队列里**——那正好是它要解决的场景。
+            # 这里复用同一个 `drain_relay_deliveries()` + `_deliver_relay()`：
+            # 不是第二条出站，只是第二个取件点；两个点都是"取走即清空"，
+            # 同一条不会被发两次。
+            try:
+                for delivery in engine.drain_relay_deliveries():
+                    await _deliver_relay(transport, delivery, outbox=outbox)
+            except Exception:
+                logger.exception("转告投递出错，继续")
 
     async def outbox_loop() -> None:
         if outbox is None:
