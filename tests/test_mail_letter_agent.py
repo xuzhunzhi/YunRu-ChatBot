@@ -134,13 +134,15 @@ def test_a_lookup_round_goes_through_the_readonly_reader():
 
     assert seen == ["242003347"], "查询原样交给只读口"
     assert writer.lookups == ["242003347"] and writer.stats["lookups"] == 1
-    # 2026-10-16：这里从 3 改成 4。依据是用户那天批的原话——*"重试兜底：0 裁决（或裁决
-    # 解析不出来）时**重试一次**（同一输入）；仍然是 0 就按现状 fail-open 用草稿发"*。
-    # 这个夹具的校对输出（`LETTER`）里**没有裁决**，所以它正好走一次重试。
-    # **阶段没变**：草稿 → 翻旧事 → 校对，仍然是三**步**；多出来的那一次是同一阶段
-    # 内部的兜底重试，不是新加了一步。
-    assert len(client.requests) == 4, "草稿 → 翻旧事 → 校对 → 校对重试：四次调用"
-    assert writer.stats["retries"] == 1
+    # 2026-10-17：这里从 4 改成 5。依据是那天定的第 3 层口径——*"本轮一句都没删 ⇒
+    # 再问一次"*、多轮上限 3 轮（`lw.MAX_CHECK_ROUNDS`）。这个夹具的校对输出（`LETTER`）
+    # 里**一条裁决都没有**，于是每一轮都是"0 删除"，三轮问满：
+    # 草稿 1 + 翻旧事 1 + 校对 3 = 5 次。
+    # **阶段没变**：草稿 → 翻旧事 → 校对，仍然是三**步**；多出来的两次是同一阶段
+    # 内部的重复问，不是新加了一步（`trigger` 是 `..._check` / `..._check_retry` /
+    # `..._check_retry2`）。
+    assert len(client.requests) == 5, "草稿 → 翻旧事 → 校对×3 轮：五次调用"
+    assert writer.stats["retries"] == 2, "3 轮 = 重问 2 次"
     fed_back = client.requests[1][-1]["content"]
     assert "他上次说过想去海边。" in fed_back
     assert "UNTRUSTED DATA" in fed_back, "翻出来的旧事是数据，不是指令"

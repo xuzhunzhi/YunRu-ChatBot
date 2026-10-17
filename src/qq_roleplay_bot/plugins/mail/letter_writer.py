@@ -76,6 +76,64 @@
 `.env` 与档位一个都没动。
 
 它不碰群聊会话，也不碰聊天人格：`user_id=qqbot-letter` 独立一份。
+
+## 2026-10-17：从"判有没有依据"改成"去依据里找出那一句"（判据稳不住）
+
+上一版把格式抖动压掉了（`PROBE_RUNS=6` 里 0 次整段不按格式），但**删句只有 3/6**：
+另外 3 跑把 10-15 那封里编出来的那句（"白天群里有人笑别人没本事，你没跟着笑，
+还替那个大二学生解释了几句。我看见了。"）标成了 `fact`，于是 12/12 全留、
+编的那句照样进信。取数口：`data/probe_letter_replay.result.json` 的 `runs`。
+
+根因（推断 + 有据）：素材里有"他看不起她、嘲她没本事""谁家好人大二学生…"这些**字面**
+支撑，于是"这句有没有依据"这种**评价式**问法总能答"有"——它答的其实是
+"这几个词素材里有"，而我们要问的是"**那件事**素材里写着吗"。
+评价可以含混，查找不能。所以这一轮把判据从"判断"降级成"核对"：
+
+1. **措辞**（`CHECK_PROMPT`）：拿这一句的**主语 + 那件事**，到依据里逐句**找写着同一件事
+   的那一句**；找不到一律 `none`。并点明"**印象不是事情**"：依据里"谁看不起谁"
+   是印象，顶不了"有人笑过谁""谁没跟着笑"这种发生过的事。
+   `VERDICT_FORMAT` 里多了 `cite`：标 `fact` 的每一句都要把那一句**逐字**抄出来。
+2. **代码先划候选 + 举证责任**（`candidate_sentences` / `citation_ok`）：用实词
+   （中文二元组，**零依赖**）跟依据求交，**零重叠**的句子是候选。候选标 `fact`
+   却没有一段依据里逐字有的 `cite` ⇒ 最后按 `none` 删。
+   只在零重叠时升级，是用户 2026-10-17 亲自划的口径：*"宁可这条路保守一点
+   （只在零重叠时启用），也不要大面积误删正常句子"*——实词重叠不等于有依据
+   （编的那句就重叠了一大片），但重叠了就不该由代码替它定罪。
+3. **多轮独立裁决取并集 + 0 删除就再问**（`MAX_CHECK_ROUNDS=3`）：实测的失败形态是
+   "一句都没删"，不是"格式全乱"，所以重试闸从"0 裁决"挪到"**本轮 0 删除**"。
+   任一轮判 `none` ⇒ 删；候选句"每轮都 fact、从未引出原文" ⇒ 确定性兜底删。
+   全轮一条裁决都没读出来 ⇒ fail-open 用草稿发，但日志里写"没读到任何裁决"。
+   某一轮**直接炸了**（限流/5xx）也照样再问——原来第一轮一炸就退回草稿，
+   等于"没校对就寄"（实测 6 跑里 2 跑撞上）。
+4. **连带规则照旧**：由头被判 `none`，跟着它的反应句也标 `none`（`CHECK_PROMPT` 里那条，
+   实测在触发时 3/3 干净，没动它）。另补两句（都是实测逼出来的）：**问句/叮嘱不算断言**
+   （不然它会把"你今天到学校了吗"判成"依据里没有这件事"⇒ 六句一删这一封就没了）；
+   **从感受写起的反应句也照样删**（"我太熟""旁边先有人踩一脚"是从那件事长出来的）。
+
+**重放实测**（`data/probe_letter_replay.py`，`PROBE_RUNS=6`，同一份输入、同一份素材；
+结果在 `data/probe_letter_replay.result.json`，改前的 6 跑留在
+`data/probe_letter_replay.result.before-1017.json`）：
+
+    改动前（上一版）：6 跑都有 12/12 裁决；**删句 3/6**；编的那句 3/6 留在信里。
+    改动后（这一版）：6 跑都是 12/12 裁决、**每跑正好删 4 句（第 3、4、5、6 句）**、
+                      **编的那句 0/6 漏放**、指向它的 3 句反应句也 0/6 残留、
+                      该留的两句（"你说预计九点""你白天说那个游戏烂"）6/6 都在、
+                      没有一跑被"删得太多"否掉（6/6 都发出去了）。
+
+**哪一层在起作用（如实说）**：6 跑里"0 删除重试"一次都没触发（第 1 轮就删对了），
+兜底命中也是 0（候选句 4、6 由它自己标成 `none`）——所以这次的 0/6 主要来自**第 1 层**
+（措辞改成"去找那一句" + `cite` 举证）；第 2、3 层在这份样本上**是没被走到的那两道网**，
+它们的覆盖目前只来自单测（`tests/test_mail_letter_grounding.py` 的 2c/2d）。
+别把这份重放当成"多轮已经验过"——样本只有一封信。
+
+**可观察性**（用户 2026-10-17 明确要求）：`last_grounding` 逐轮写"判了几句、删了几句、
+删了哪几句、是不是候选、有没有 0 删除重试、兜底命中了哪一句"，它进
+`data/logs/mail.jsonl` 的 `daily_report_grounding`；`stats` 里另有 `check_rounds` /
+`round_deletes` / `fallback_hits` / `candidates` / `deleted`（这几个是**这一封**的数，
+`_check` 开头清零）。别让"删了几句"这种事只能靠翻原始输出才知道。
+
+**怎么改回去**：判据仍然是 fail-open 的（全轮读不出裁决 ⇒ 用草稿发）。要退回上一版，
+把 `_check` 里的循环改回单次调用、`candidates` 传空即可；`.env` 与档位一个都没动。
 """
 from __future__ import annotations
 
@@ -97,6 +155,28 @@ MIN_RATIO = 0.5
 VERDICT_WORDS = ("fact", "self", "none")
 #: 引号里短于这个长度的片段不当"引话"（"嗯""好"这种引了也算不出出处）。
 MIN_QUOTE_CHARS = 4
+#: 校对最多问几轮（2026-10-17）。**实测的失败形态是"一句都没删"**（编的那句被标成
+#: `fact`），不是"格式全乱"，所以"0 删除就再问一次"要有额度可用：3 轮 = 同一份输入
+#: 三次独立的机会，取并集。用户 2026-10-17 给了口径：*"这一步不用考虑省 token、
+#: 不用考虑慢，怎么效果好怎么来"*——一天只跑 1–2 次，多问两轮的成本可以忽略。
+MAX_CHECK_ROUNDS = 3
+#: 候选句的"举证"至少要有这么长（规范化之后）：短于这个的片段不当原文引用
+#: （"我""就"这种在依据里出现一百次，引了等于没引）。
+MIN_CITE_CHARS = 3
+#: 太短的句子不划候选（规范化之后少于这么多字）：署名（"云茹"）这种两字片段
+#: 划成候选只会招来无谓的删句风险，而它本来也断言不了"外面发生过什么"。
+MIN_CANDIDATE_CHARS = 4
+#: **虚字**表（只用来给二元组降噪，不做分词）。两个字符**都**在这张表里的二元组
+#: 直接丢掉：`的是`、`了我`、`在的` 这种组合在任何两段中文里都重叠，留着会让
+#: "零重叠"这个判据永远不成立。只要有一个字是实字，这个二元组就保留。
+_FUNCTION_CHARS = frozenset(
+    "的了着过是在有和与就都也又还再才只把被给对从向于而及或个各每这那我你他她它们"
+    "一二三四五六七八九十百千两不没很太更最上下来去说想要会能可得地时里中下前后之间"
+    "吧啊呢吗哦嗯呀嘛么什怎多少些点儿然后所因为所以如若但而且却已经"
+)
+#: 中文连续段与西文/数字连续段——实词就从这两样里切（中文按二元组）。
+_CJK_RUN = re.compile(r"[\u4e00-\u9fff]+")
+_ASCII_RUN = re.compile(r"[0-9a-z]+")
 #: 按句切：中文的句号/问号/叹号/分号 + 换行。**保留分隔符**（按编号删句要拼得回去）。
 _SENTENCE_SPLIT = re.compile(r"(?<=[。！？!?；;\n])")
 #: 引号里的原话（他说的、或引自旧事的）。几种引号都认。
@@ -150,27 +230,54 @@ GROUNDING_PROMPT = """这封信只写你手上真有的那三样：
 你**自己**的心情、想法、打算随便写——那些不需要出处。
 """
 
+#: 2026-10-17 重写：从"**判**这句有没有依据"改成"**去依据里找**那一句"。
+#:
+#: 为什么改（实测，不是推断）：上一版 6 跑里删句只有 3/6，另 3 跑把编出来的那句标成
+#: `fact`（`data/probe_letter_replay.result.json` 的 `runs`）。素材里有"他看不起她、
+#: 嘲她没本事""谁家好人大二学生…"这些**字面**支撑，于是"有没有依据"这种**评价式**问法
+#: 总能答"有"——它其实在答"这几个词素材里有"，而我们要问的是"**那件事**素材里写着吗"。
+#: 评价可以含混，查找不能：查找的答案只有"找到某一句"与"没找到"，而且必须能把那一句
+#: 抄出来（`cite`）。这就是下面这条 prompt 与 `VERDICT_FORMAT` 的 `cite` 的分工：
+#: 话是模型找的，**"你抄的那一句到底在不在依据里"由代码查**（`citation_ok`）。
 CHECK_PROMPT = """你要给这封信做**逐句核对**。你**不写正文**，一个字都不改——你只给每一句
 贴一个标签，贴完就结束。
 
+每一句只做一件事：**到底下那段依据里去找**。不是评价，不是推测，不是看它像不像真的。
+
+1. 先看这一句讲的是**谁**、**发生了/做了什么**（主语 + 那件事）。
+2. 再拿这两样，把依据**一句一句往下对**：有没有哪一句，写的就是**同一件事**？
+3. 找到了：把那一句**原文照抄**进 `cite`，贴 `fact`。
+   找不到：贴 `none`。
+
+**"沾边"不算找到**：同一个词、同一个人、同一类态度、同一个群，都不算。
+要的是**写着那件事**的那一句原文。
+
 三种标签，只能填这三个：
 
-- `fact`：这一句讲的是**外面发生过什么**（谁做了什么、谁说了什么、谁是什么反应、
-  有件事发生过），而且下面那段**依据**里找得到。
-- `self`：这一句讲的是**她自己**——她的心情、想法、打算、感受，或者她记得什么。
-  这一类**不需要依据**，照旧留着。
-- `none`：这一句讲的是外面发生过什么，可依据里**找不到**；或者它与《已确定的事》**冲突**
-  （例如把过去待过的地方说成现在住的地方、把已经没了的东西说成还在）。
-  贴这个标签的那一句会被删掉。
-  **由头被删掉时，跟着它的反应句也要一起标 `none`**：那种"我看见了""那种笑法我太熟"
-  "我记了一晚上"讲的是你对那件事的反应——由头都不在了，这几句就是指着空气在说话，
-  留着比删掉更假（用户 2026-10-16 补的口径）。
+- `fact`：依据里**有一句原文**写着这件事 ⇒ **必须**带 `cite`（逐字照抄那一句）。
+- `self`：这一句只讲**她自己**——她的心情、想法、打算、感受、回忆；或者它**只是在问他**
+  （"你今天到学校了吗""到了就回我一句"这种问句、叮嘱）：问句与叮嘱**没有断言外面发生过
+  什么**，也不需要一个"发生过"的出处，这一类照旧留着。
+  （2026-10-17 补这半句，因为实测有一次它把两句话问句判成了 `none`，
+  六句一删这一封就没了——问句不是断言，别拿"依据里没有这件事"去删它。）
+- `none`：这一句讲的是外面发生过什么，而依据里**找不到写着那件事的那一句**；
+  或者它与《已确定的事》**冲突**（例如把过去待过的地方说成现在住的地方、
+  把已经没了的东西说成还在）。贴这个标签的那一句会被删掉。
+  **由头被标掉时，跟着它的反应句也要一起标 `none`**：那种"我看见了""那种笑法我太熟"
+  "旁边先有人踩一脚""我记了一晚上"讲的是你对那件事的反应——由头都不在了，这几句就是
+  指着空气在说话，留着比删掉更假（用户 2026-10-16 补的口径）。
+  **这类句子就算是从你的感受写起的，也照样标掉**："我太熟""我看见了"这种感受是从那件事
+  长出来的，那件事没发生，感受就没有着落；它描得越细（"旁边先有人踩一脚"），越要删。
   **但只删与那一件事直接相关的**：别借机把整段抹掉。跟她自己心情、想法、打算有关、
   和那件事没关系的句子（"今晚没什么事""我还好""有点累"）照旧标 `self`。
 
-**别手软，也别心软**：`none` 就是给"依据里没有、但读起来很像真的"那种句子准备的——
-它读得越顺、越像那么回事，越要回头看依据里到底有没有；
-**被删掉的那件事留下的反应句也算它的一部分**，一起标掉（上面 `none` 那条）。
+**印象不是事情**：依据里写着"某人对某人是什么态度、什么看法"（谁看不起谁、谁觉得谁
+没本事、谁对谁冷淡）——那是**印象**。而"有人笑过谁""谁没跟着笑""谁替谁解释了几句"
+"谁那天去了哪儿、几点到、有没有赶上"是**发生过一件事**。印象顶不了事情：
+要写后者，依据里必须有写着那一场的那一句；只有印象，就标 `none`，别替它补一个像样的场景。
+
+**别手软，也别心软**：`none` 就是给"依据里没有、读起来却很像真的"那种句子准备的——
+它写得越顺、越像那么回事，越要回去把依据逐句对一遍，确认真的没有那一句。
 反过来，纯心情句（"今晚没什么事""我还好""我记着"）一律 `self`，
 不要因为它们没有依据就贴 `none`：把那些删了，这封信就没了。
 """
@@ -182,15 +289,23 @@ CHECK_PROMPT = """你要给这封信做**逐句核对**。你**不写正文**，
 #: 用户 2026-10-16 批的是**「把'只回标签、不要写正文'这条要求挪到 user 段末尾、
 #: 紧贴编号段」**：让"要它回什么"和"它要回的那些句子"挨在一起。
 #: 它仍然是**常量**（进 user 段末尾，不进前缀，缓存那一条不受影响）。
+#:
+#: 2026-10-17 多了 `cite`：`fact` 的**举证**。`cite` 必须是依据里**逐字**有的一段——
+#: 这一条是代码查的（`citation_ok`），不是模型自己说了算：它要是真去找了，就有得抄；
+#: 要是没找到那一句，就抄不出来，只能标 `none`。**这就是"判断"变成"核对"的落点**。
 VERDICT_FORMAT = """只回下面这种行，**不要正文、不要解释、不要别的话**：
 
-<verdict n="1" kind="fact"/>
+<verdict n="1" kind="fact" cite="依据里写着这件事的那一句，逐字照抄"/>
 <verdict n="2" kind="self"/>
 <verdict n="3" kind="none"/>
 
-一句一行，`n` 就是上面给你的那个编号，**每一句都要有一行**（漏掉的按"留着"处理）。
-要是主题本身与《已确定的事》冲突，可以多给一行 `<subject>改过的主题</subject>`；
-没冲突就别写这一行。"""
+- 标 `fact` 的每一句**都要**带 `cite`，而且必须是依据里**逐字**有的一段：
+  不要改写、不要缩写、不要翻译、不要自己造句、不要拼接两处。
+  **抄不出来，就说明你没找到那一句** ⇒ 改标 `none`。
+- `self` 与 `none` 不用带 `cite`。
+- 一句一行，`n` 就是上面给你的那个编号，**每一句都要有一行**（漏掉的按"留着"处理）。
+- 要是主题本身与《已确定的事》冲突，可以多给一行 `<subject>改过的主题</subject>`；
+  没冲突就别写这一行。"""
 
 
 def parse_letter(raw: str, *, max_chars: int = 1500) -> tuple[str, str]:
@@ -323,8 +438,126 @@ def parse_verdicts(raw: str) -> dict[int, str]:
     return verdicts
 
 
+def parse_citations(raw: str) -> dict[int, str]:
+    """把 `cite="…"` 收成 `{3: "依据里那一句"}`（只有 `fact` 才该有它）。
+
+    与 `parse_verdicts` 分开的第二个函数，不是懒：**标签可以没有引文**（`self`/`none`
+    本来就不需要出处），而引文要不要采信是另一件事（`citation_ok` 去查它在不在依据里）。
+    混成一个返回值会让"这一句是 fact 但引文是假的"变成一次静默丢弃。
+
+    引号里的内容只在 `"…"` 或 `'…'` 两种写法里取；取不到就当没给（= 引不出来）。
+    """
+
+    cites: dict[int, str] = {}
+    pattern = re.compile(r"<verdict\b([^>]*?)/?>", re.IGNORECASE | re.DOTALL)
+    for found in pattern.finditer(raw or ""):
+        attrs = found.group(1)
+        number = re.search(r"\bn\s*=\s*[\"']?(\d+)", attrs, re.IGNORECASE)
+        if not number:
+            continue
+        cite = re.search(r"\bcite\s*=\s*\"([^\"]*)\"", attrs)
+        if not cite:
+            cite = re.search(r"\bcite\s*=\s*'([^']*)'", attrs)
+        if cite and cite.group(1).strip():
+            cites[int(number.group(1))] = cite.group(1).strip()
+    return cites
+
+
+def content_terms(text: object) -> frozenset[str]:
+    """一个句子的**实词近似**：中文按二元组、西文/数字按整串。**不新增第三方依赖**。
+
+    为什么不真分词：中文分词要么带词典（新的第三方包），要么自己写一套规则——
+    这一步要的只是"这句和依据**有没有字面上的交集**"，二元组够用且不会误判成"零重叠"：
+    只要有一个实词真的在两边都出现，就一定会有一个二元组撞上。
+
+    虚字降噪（`_FUNCTION_CHARS`）：两个字都是虚字的二元组（"的是""了我"）丢掉——
+    它们在任何两段中文里都重叠，留着等于"零重叠"永远不成立。
+    """
+
+    body = str(text or "").lower()
+    terms: set[str] = set()
+    for run in _CJK_RUN.findall(body):
+        if len(run) == 1:
+            if run not in _FUNCTION_CHARS:
+                terms.add(run)
+            continue
+        for start in range(len(run) - 1):
+            pair = run[start:start + 2]
+            if all(char in _FUNCTION_CHARS for char in pair):
+                continue
+            terms.add(pair)
+    for run in _ASCII_RUN.findall(body):
+        terms.add(run)
+    return frozenset(terms)
+
+
+def candidate_sentences(body: object, sources: object, facts: object = "") -> tuple[int, ...]:
+    """**候选句**：实词与依据**零重叠**的那些句子（编号与 `_pieces()` 一致）。
+
+    为什么要它（2026-10-17 第 2 层）：裁决那一步的措辞已经改成"去找"，但代码仍然只能
+    看它贴的标签。候选句是代码**自己**算出来的"它最可能没找到出处的地方"，
+    于是可以对这几句**升级举证要求**（`cite` 必须逐字出现在依据里，否则不算举证）。
+
+    为什么只在**零重叠**时启用（用户 2026-10-17 亲自划的口径：*"宁可这条路保守一点
+    （只在零重叠时启用），也不要大面积误删正常句子"*）：实词重叠**不等于**有依据
+    （10-15 那封编的那句就和素材重叠了一大片），但重叠了就不该由代码替它定罪——
+    那正是"大面积误删"的来源。零重叠是唯一一个**代码自己就能证明它可疑**的信号。
+
+    低于 `MIN_CANDIDATE_CHARS` 的片段不划候选（署名之类，断言不了外面的事）。
+    """
+
+    known = content_terms(sources) | content_terms(facts)
+    out: list[int] = []
+    for index, piece in enumerate(_pieces(body), start=1):
+        if len(_normalize(piece)) < MIN_CANDIDATE_CHARS:
+            continue
+        terms = content_terms(piece)
+        if not terms:               # 整句都是虚字：算不出交集，也不该拿来定罪
+            continue
+        if not (terms & known):
+            out.append(index)
+    return tuple(out)
+
+
+def citation_ok(cite: object, sources: object, facts: object = "") -> bool:
+    """引文算不算**举证**：它必须在依据里**逐字**找得到（规范化后是子串）。
+
+    规范化只吃空白与标点（`_normalize`），所以"· 预计9点到学校　〔今天上午〕"
+    抄成"预计9点到学校"照样算——那是**同一段原文**，不是改写。
+    但"预计九点到学校"（九/9 不同）**不算**：这一步宁可判它没举证，
+    也不替它把改写认成原文——认了的话，"引用"就不再是"去找到那一句"了。
+    """
+
+    text = _normalize(cite)
+    if len(text) < MIN_CITE_CHARS:
+        return False
+    return text in _normalize(f"{sources}\n{facts}")
+
+
+def _numbers(indices) -> str:
+    """`[3, 4, 12]` → `3、4、12`（进日志的一句话，方便人读）。"""
+
+    return "、".join(str(index) for index in indices)
+
+
+def _check_trigger(round_no: int) -> str:
+    """裁决第几轮在 `mail.jsonl` 里叫什么。
+
+    第 1 轮沿用老名字 `daily_report_check`：这个名字从 2026-10-16 起就写在日志里，
+    改名字会让已有的取数口（探针、按 trigger 汇总的脚本）一起失配。
+    第 2、3 轮是同一阶段的**重复问**，所以叫 `_retry` / `_retry2`。
+    """
+
+    if round_no <= 1:
+        return "daily_report_check"
+    if round_no == 2:
+        return "daily_report_check_retry"
+    return f"daily_report_check_retry{round_no - 1}"
+
+
 def apply_verdicts(draft_body: str, verdicts: dict[int, str],
-                   sources: str) -> tuple[str, tuple[str, ...]]:
+                   sources: str, reasons: dict[int, str] | None = None
+                   ) -> tuple[str, tuple[str, ...]]:
     """**材料里没有的不许写**：按裁决删句，其余一个字不动。
 
     用户 2026-10-16 第 2 条定的粒度：只删"断言外部世界"的句子（别人做了什么、他做了什么、
@@ -341,6 +574,11 @@ def apply_verdicts(draft_body: str, verdicts: dict[int, str],
     **"只许删、不许改写"这条判据没有了**，不是因为放松，而是它变成了结构保证：
     正文是拿草稿的 `_pieces()` 拼出来的，模型手里根本没有写正文的机会。
 
+    `reasons`（2026-10-17 加）是"第 n 句为什么被删"的一行说明（`_check` 那边按轮攒的：
+    依据里指不到 / 候选句引不出原文 / 候选句全轮 fact 却从未引出原文）。
+    **它不是判据**，只进日志——"删了哪句、为什么删"必须能直接从
+    `mail.jsonl` 的 `daily_report_grounding` 里读出来，不能只靠翻原始输出。
+
     返回 `(能用的正文, 判据说明)`。正文为 `""` = 这一封不发；**一句都没删时原样返回
     `draft_body`**（一个字都不重排，免得把"没改"记成"改过"）。
     """
@@ -355,14 +593,17 @@ def apply_verdicts(draft_body: str, verdicts: dict[int, str],
     kept: list[str] = []
     deleted = 0
     dropped_quotes = 0
+    removed: list[int] = []
     for index, piece in enumerate(pieces, start=1):
         if verdicts.get(index) == "none":
             deleted += 1
+            removed.append(index)
             continue
         quoted = [item for item in _QUOTED.findall(piece)
                   if len(_normalize(item)) >= MIN_QUOTE_CHARS]
         if quoted and any(_normalize(item) not in source_text for item in quoted):
             dropped_quotes += 1
+            removed.append(index)
             continue
         kept.append(piece)
 
@@ -371,6 +612,10 @@ def apply_verdicts(draft_body: str, verdicts: dict[int, str],
         notes.append(f"按裁决删 {deleted} 句")
     if dropped_quotes:
         notes.append(f"引话无出处·删{dropped_quotes}句")
+    if reasons and removed:
+        detail = "；".join(f"{index}：{reasons.get(index) or '依据里指不到（引话或裁决）'}"
+                          for index in removed)
+        notes.append(f"删句理由〔{detail}〕")
     if not kept:
         return "", tuple(notes + ["删空了"])
 
@@ -397,7 +642,11 @@ class LetterWriter:
         self.max_chars = max(200, int(max_chars))
         self.clock = clock
         self.stats = {"drafts": 0, "checks": 0, "fixed": 0, "reverted": 0, "failed": 0,
-                      "lookups": 0, "skipped": 0, "retries": 0}
+                      "lookups": 0, "skipped": 0, "retries": 0,
+                      # 2026-10-17：判据那一步的可观察量（用户要求"stats 里要能读到
+                      # 轮数、每轮删除数、兜底命中数"——别让"删了几句"这种事只能靠翻原始输出）。
+                      "check_rounds": 0, "round_deletes": [], "fallback_hits": 0,
+                      "candidates": 0, "deleted": 0}
         self.last_diff = ""
         # 她翻过的那些（按顺序），以及"今晚不写"的那句原因（空=她没说不写）。
         self.lookups: list[str] = []
@@ -516,7 +765,7 @@ class LetterWriter:
         self.stats["drafts"] += 1
 
         fixed_subject, fixed_body = await self._check(
-            subject, body, base_system=request[0]["content"],
+            subject, body, base_system=request[0]["content"], facts=facts,
             sources=self._sources(materials, closeness_names, guardedness_names))
         if self.last_drop_reason and not fixed_body:
             # 判据把这封信的**内容**否了：那今晚没有信。
@@ -580,59 +829,149 @@ class LetterWriter:
         return raw
 
     async def _check(self, subject: str, body: str, *, base_system: str = "",
-                     sources: str = "") -> tuple[str, str]:
-        """逐句裁决 + **按标签删句**（删由代码做）。出任何问题都退回草稿的字。
+                     sources: str = "", facts: str = "") -> tuple[str, str]:
+        """逐句核对 + **按标签删句**（删由代码做）。出任何问题都退回草稿的字。
 
         `sources` 是这一封信能用的全部依据（素材 + 她翻出来的旧事）。它是**易变内容**，
         进这一阶段的 `user` 段——system 前缀一个字都不变，所以缓存命中不受影响；
-        而没有它就无从判"这句有没有出处"（这正是 10-15 那封一字未改的原因）。
+        而没有它就无从核"这句在依据里指不指得到"（这正是 10-15 那封一字未改的原因）。
+        `facts`（《已确定的事》）也是依据的一部分，只是它在 system 前缀里：这里单独收一份，
+        只给**代码**用（候选句的实词交集、引文的逐字核对），不进请求。
 
         为什么不让它自己改正文（2026-10-16 实测）：第一版就是这么做的，拿真实 prompt
         重放 10-15 那封，它**一句都没删**。改成"它只贴标签、代码按标签删"之后，
         它手里没有写正文的机会（`apply_verdicts` 拿草稿的句子拼），
         而它偷懒/跑飞的代价只是"这次没核到"，不会把信弄坏。
+
+        ## 2026-10-17：多轮 + 举证（把"判断"改成"核对"的代码那一半）
+
+        实测（`data/probe_letter_replay.result.json`，6 跑）：格式抖动没了，但删句只有 3/6——
+        另 3 跑把编的那句标成 `fact`。所以"上一轮删了没有"比"上一轮格式对不对"更值得重问：
+
+        - **最多 `MAX_CHECK_ROUNDS` 轮**，同一份 request（不换素材、不改问题），每轮独立裁决；
+        - **本轮一句都没删 ⇒ 再问一轮**。有删除就停：它这次真的逐句找过了，
+          再问只会把额外的裁决风险摊到本来正常的句子上；
+        - **取并集**：任一轮判 `none` ⇒ 这句删（删除仍然只由 `apply_verdicts` 做）；
+        - **候选句的举证**（`candidate_sentences`：实词与依据零重叠）：
+          标 `fact` 就必须带一段**依据里逐字有**的 `cite`（`citation_ok`）；
+          每轮都判 `fact` 却从未引出原文 ⇒ **确定性兜底删**，不等它松口；
+        - **全轮一条裁决都没有**（解析全失败）⇒ fail-open 用草稿发，
+          但日志里要写得难看（`没读到任何裁决`），别让"这次其实没核到"静悄悄过去；
+        - **某一轮直接炸了（限流/超时/5xx）** ⇒ 记下这一轮、接着问下一轮。
+          原来第一轮一炸就 `return "", ""`，等于"校对一个字都没做就把草稿寄出去"——
+          实测 6 跑里 2 跑正好撞上（`letter_check_failed category=LLMError round=1`，1.5s 回来）。
+          既然"0 裁决"都要再问一次，"炸了"更该再问。
         """
 
+        # 这一封的数：每封开头清零（probe 会直接调 `_check`，所以清在这里而不是 `write`）。
+        self.stats["check_rounds"] = 0
+        self.stats["round_deletes"] = []
+        self.stats["fallback_hits"] = 0
+        self.stats["deleted"] = 0
+
+        candidates = candidate_sentences(body, sources, facts)
+        self.stats["candidates"] = len(candidates)
+        total = len(_pieces(body))
         request = build_check_messages(subject, body, base_system=base_system,
-                                       sources=sources, max_chars=self.max_chars)
+                                       sources=sources, facts=facts,
+                                       candidates=candidates, max_chars=self.max_chars)
         self.last_check_request = request
-        self._add_step("daily_report_check", request)
-        try:
-            raw = await self.client.complete(request)
-        except Exception as exc:  # noqa: BLE001 - 裁决失败不该让信写不出来
-            self.stats["failed"] += 1
-            logger.warning("letter_check_failed category=%s", type(exc).__name__)
-            return "", ""
-        self.last_check_raw = raw
-        self._set_step_raw("daily_report_check", raw)
-        self.stats["checks"] += 1
 
-        # **0 裁决就重试一次**（2026-10-16 用户批的抖动兜底）：实测三跑里有一跑它整段
-        # 不按格式回（英文 meta 回复）。同一份输入再问一次——**不换素材、不改问题**，
-        # 只换一次机会；仍然是 0 就按现状 fail-open 用草稿发。重试进日志（见下面 notes）。
-        retried = False
-        verdicts = parse_verdicts(raw)
-        if not verdicts:
-            retried = True
-            self.stats["retries"] += 1
-            logger.info("letter_check_retry reason=no_verdicts")
-            self._add_step("daily_report_check_retry", request)
+        merged: dict[int, str] = {}
+        reasons: dict[int, str] = {}
+        labels: dict[int, list[str]] = {}
+        cited: set[int] = set()
+        rounds: list[dict[str, object]] = []
+        raw = ""
+        for round_no in range(1, MAX_CHECK_ROUNDS + 1):
+            trigger = _check_trigger(round_no)
+            self._add_step(trigger, request)
             try:
-                second = await self.client.complete(request)
-            except Exception as exc:  # noqa: BLE001 - 重试失败就当它没给
-                second = ""
-                logger.warning("letter_check_retry_failed category=%s", type(exc).__name__)
-            self._set_step_raw("daily_report_check_retry", second)
-            second_verdicts = parse_verdicts(second)
-            if second_verdicts:
-                # 以**重试那一次**为准：它才是有效的那份输出。
-                raw, verdicts = second, second_verdicts
-                self.last_check_raw = raw
+                raw = await self.client.complete(request)
+            except Exception as exc:  # noqa: BLE001 - 裁决失败不该让信写不出来
+                # **一轮炸了不等于这一步别问了**（2026-10-17 实测踩到）：重放 6 跑里有 2 跑
+                # 第一轮吃了一个 `LLMError`（1.5s 就回来，像限流/5xx），而原来那一版
+                # 第一轮一炸就 `return "", ""`——校对的字一个都没有，调用方拿**草稿**发信，
+                # 编的那句照样寄出去。既然"0 裁决"都要再问一次，**炸了也该再问**：
+                # 记下这一轮失败、接着问下一轮；全轮都失败才走 fail-open（日志里写清楚）。
+                self.stats["failed"] += 1
+                logger.warning("letter_check_failed category=%s round=%s",
+                               type(exc).__name__, round_no)
+                rounds.append({"round": round_no, "graded": 0, "none": [], "unproven": [],
+                               "error": type(exc).__name__})
+                self.stats["round_deletes"] = [len(item["none"]) for item in rounds]
+                self.stats["check_rounds"] = round_no
+                continue
+            self.last_check_raw = raw
+            self._set_step_raw(trigger, raw)
+            self.stats["checks"] += 1
 
-        graded, notes = apply_verdicts(body, verdicts, sources)
-        if retried:
-            # 让"重试过"这件事在 mail.jsonl 里看得见（notes 进 daily_report_grounding）。
-            notes = ("重试过 1 次",) + tuple(notes)
+            verdicts = parse_verdicts(raw)
+            cites = parse_citations(raw)
+            deleted_now: list[int] = []
+            unproven: list[int] = []
+            for index, kind in sorted(verdicts.items()):
+                if not 1 <= index <= total:
+                    continue            # 越界编号：不采信，也不许它删到别人身上
+                labels.setdefault(index, []).append(kind)
+                if kind == "fact" and index in candidates:
+                    if citation_ok(cites.get(index, ""), sources, facts):
+                        cited.add(index)
+                    else:
+                        # **这一轮它说 fact 却没抄出依据里的原文**：先记下，不就地定罪——
+                        # 第 2 层那句"引不出来 ⇒ 判 none"由下面那段兜底统一执行
+                        # （它要的是"每一轮都没引出来"，一轮没引出来只说明这一轮没找着）。
+                        unproven.append(index)
+                if kind == "none":
+                    deleted_now.append(index)
+                    # 删句理由顺手带上"是不是候选句"（用户 2026-10-17 要的可观察量之一）：
+                    # 候选句是代码自己算出来的可疑句，普通句只靠模型那句 `none`——
+                    # 事后复盘这两者的可信度不一样，日志里必须分得开。
+                    reasons.setdefault(index, "依据里指不到·候选句" if index in candidates
+                                       else "依据里指不到")
+                    merged[index] = "none"
+                elif index not in merged:
+                    merged[index] = kind
+            # 候选句"这一轮没举证"也记下来（它跟模型自己说的 none 是两回事，
+            # 但删句方向一样；日志里要能分辨）。
+            for index in unproven:
+                reasons[index] = "候选句·引不出原文"
+            rounds.append({"round": round_no, "graded": len(verdicts),
+                           "none": deleted_now, "unproven": unproven})
+            self.stats["round_deletes"] = [len(item["none"]) for item in rounds]
+            self.stats["check_rounds"] = round_no
+            logger.info("letter_check_round round=%s graded=%s none=%s unproven=%s "
+                        "candidates=%s", round_no, len(verdicts), deleted_now,
+                        unproven, list(candidates))
+            if deleted_now:
+                break               # 有删除 ⇒ 重试闸不触发（"0 删除才再问"）
+
+        # **确定性兜底**（用户 2026-10-17 第 2、3 层）：某句是候选、每一轮都判 `fact`、
+        # 却从来没有引出一段依据里逐字有的原文 ⇒ 删。不靠模型自己松口。
+        #
+        # 为什么把"引不出来 ⇒ 判 none"放在**所有轮之后**而不是每一轮当场：
+        # 一轮引不出来只说明这一轮没找着（素材长、它抄漏了），三轮都没引出来才说明
+        # 它其实**没有那一句可抄**。当场定罪等于把"这一轮抄漏了"变成"删了她的话"，
+        # 那正是用户说的"别拿误删当代价"。
+        fallback: list[int] = []
+        for index in candidates:
+            history = labels.get(index) or []
+            if not history or index in cited or merged.get(index) == "none":
+                continue
+            if all(kind == "fact" for kind in history):
+                merged[index] = "none"
+                reasons[index] = "候选句·全轮 fact 却从未引出原文"
+                fallback.append(index)
+        self.stats["fallback_hits"] = len(fallback)
+        if fallback:
+            logger.warning("letter_check_fallback_deleted sentences=%s", fallback)
+
+        graded, apply_notes = apply_verdicts(body, merged, sources, reasons)
+        graded_any = any(item["graded"] for item in rounds)
+        notes = self._grounding_notes(rounds, candidates, fallback, total, graded_any)
+        notes += apply_notes
+        self.stats["retries"] = max(0, len(rounds) - 1)
+        self.stats["deleted"] = sum(1 for kind in merged.values() if kind == "none")
         self.last_grounding = "；".join(notes) if notes else "没删句"
         self._add_step("daily_report_grounding", [], self.last_grounding)
         if not graded:
@@ -653,8 +992,42 @@ class LetterWriter:
                         len(body), len(graded), self.last_grounding)
         # 它那一行可选的主题**只在它真的给了裁决时才采信**：连一条裁决都没有的输出
         # 整份当噪声——否则一句废话（模型偶发把结构写进正文那种）就能把这封信改标题。
-        fixed_subject = parse_subject(raw) if verdicts else ""
+        fixed_subject = parse_subject(raw) if any(merged) else ""
         return fixed_subject or subject, graded
+
+    def _grounding_notes(self, rounds: list[dict[str, object]], candidates: tuple[int, ...],
+                         fallback: list[int], total: int, graded_any: bool) -> list[str]:
+        """把"这一封的判据干了什么"写成**人能直接读**的一串（进 `mail.jsonl`）。
+
+        用户 2026-10-17：*"每一轮都要能在 `data\\logs\\mail.jsonl` 的
+        `daily_report_grounding` 里看见：第几轮、判了多少句、删了几句、是候选句还是普通句、
+        有没有触发'0 删除重试'、命中兜底的是哪一句"*——这几样逐条在这里：
+        `重试过 N 次`（只有第 2 轮起才有，N = 实际多问的次数）、`候选 k/n 句〔…〕`、
+        每轮一段 `轮i〔判 a/n · 删 b〕`、`兜底 m 句〔…〕`。
+        """
+
+        notes: list[str] = []
+        retries = max(0, len(rounds) - 1)
+        if retries:
+            notes.append(f"重试过 {retries} 次")
+        notes.append(f"候选 {len(candidates)}/{total} 句"
+                     + (f"〔{_numbers(candidates)}〕" if candidates else ""))
+        for item in rounds:
+            none = item["none"] or []
+            if item.get("error"):
+                # 这一轮**没有回来**（限流/超时/5xx）：与"它没给裁决"分开记。
+                notes.append(f"轮{item['round']}〔没回来·{item['error']}〕")
+                continue
+            segment = f"轮{item['round']}〔判 {item['graded']}/{total} 句 · 删 {len(none)}"
+            if none:
+                segment += f"〔{_numbers(none)}〕"
+            segment += "〕"
+            notes.append(segment)
+        notes.append(f"兜底 {len(fallback)} 句" + (f"〔{_numbers(fallback)}〕" if fallback else ""))
+        if not graded_any:
+            # 全轮一条裁决都没读出来：这一封是**按草稿原样发**的，谁都得一眼看见。
+            notes.append("没读到任何裁决·fail-open 按草稿发")
+        return notes
 
     def snapshot(self) -> dict[str, object]:
         return {**self.stats, "last_diff": self.last_diff,
@@ -704,24 +1077,30 @@ def build_draft_messages(materials, *, persona: str, facts: str, closeness_names
 
 
 def build_check_messages(subject: str, body: str, *, base_system: str = "",
-                         facts: str = "", sources: str = "", max_chars: int = 1500):
+                         facts: str = "", sources: str = "", candidates=(),
+                         max_chars: int = 1500):
     """第二阶段的请求：**沿用草稿阶段那套 system 前缀**，只在后面接校对规矩。
 
     为什么这么做（缓存）：一封信里两次调用前后只差几秒，前缀还热着。
     把校对规矩接在同一个前缀后面，第二次调用能直接命中第一次写下的那几千 token，
     而系统提示各自独立时它只能命中自己那 400 token。
 
-    `base_system` 缺省时用 `facts` 顶：**校对阶段没有事实表就没什么可校对的**，
+    `base_system` 缺省时用 `facts` 顶：**校对阶段没有事实表就没什么可核对的**，
     这时宁可用一份不带人格的前缀，也不要凭空编事实。
 
     `sources`（2026-10-16 加）是这一封信能用的全部依据，进**这一阶段的 user 段**：
-    裁决要回答"这句有没有出处"（用户第 2 条那个粒度），没有依据就没法回答——
+    核对要回答"这句在依据里指不指得到那一句"（用户第 2 条那个粒度），没有依据就没法回答——
     10-15 那封一字未改，根因就是这一步手上只有《已确定的事》。它放 user 段末尾，
     前缀（system）一个字节都没变，缓存命中不受影响。
 
     正文**再附一份编号版**（`number_sentences`）：她只回"第 n 句是哪种"，
     删句由代码按编号做（见 `apply_verdicts`）。编号与 `_pieces()` 同一个切法，
     所以"第 n 句"在两边指的是同一句。
+
+    `candidates`（2026-10-17 加）是代码算出来的**候选句**（实词与依据零重叠）。
+    它进 user 段、贴着编号段：这几句的举证要求是硬性的（`cite` 必须是依据里的原话，
+    而且最终由 `_check` 的兜底判），所以要先让它知道是哪几句——
+    不告诉它、只在事后按它没做到的事删它，等于拿沉默定罪。
     """
 
     prefix = base_system or facts
@@ -741,6 +1120,15 @@ def build_check_messages(subject: str, body: str, *, base_system: str = "",
     if numbered:
         parts.append("正文按句拆开、编好号了（**每一句都要有一行裁决**）：\n"
                      + "\n".join(numbered))
+        chosen = [index for index in (candidates or ()) if 1 <= index <= len(numbered)]
+        if chosen:
+            # 候选句的**举证责任**（第 2 层）：它们标 `fact` 必须有原文可抄。
+            # 话说到前面：这不是"这几句要删"，是"这几句要拿出那一句来"。
+            parts.append(
+                f"第 {_numbers(chosen)} 句，字面上跟依据一句都对不上（实词一个都没撞上）。"
+                "这几句要标 `fact`，就必须在 `cite` 里抄出依据里写着那件事的那一句；"
+                "抄不出来，就标 `none`。标 `self` 不受这一条影响。"
+            )
         # **"怎么回"紧贴编号段**（2026-10-16 用户批的挪位）：原来是写在 system 的
         # `CHECK_PROMPT` 里，与材料隔着几千字；现在贴着它要裁决的那些句子。
         parts.append(VERDICT_FORMAT)

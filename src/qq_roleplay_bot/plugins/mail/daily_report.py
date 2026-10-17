@@ -914,6 +914,7 @@ class DailyReporter:
         | `daily_report_lookup1..N` | 她要求翻旧事之后的**每一次**续写 |
         | `daily_report_lookup_stop` | 翻到上限之后那次"别再翻了，把信交出来" |
         | `daily_report_check` | 事实校对（现在会拿到素材，见 `letter_writer`） |
+        | `daily_report_check_retry` / `..._retry2` | 同一阶段**再问一次**（2026-10-17："本轮一句都没删 ⇒ 再问"，最多 `MAX_CHECK_ROUNDS` 轮；请求一模一样，只是多一次机会） |
         | `daily_report_grounding` | **代码**侧那几条判据干了什么（删了哪句、为什么） |
 
         最后一条不是模型调用：`raw` 放的是判据自己写的说明。**没有它，前面那些调用的

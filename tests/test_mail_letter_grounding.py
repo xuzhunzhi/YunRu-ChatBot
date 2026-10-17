@@ -12,6 +12,20 @@
 不假装能钉住"模型一定会把编的那句删掉"——那要靠拿真实 prompt 重放量数字
 （见本文件最后两条：能力边界如实写出来，不粉饰）。
 
+## 2026-10-17 加的那四层（用户："这一步不用考虑省 token、不用考虑慢，怎么效果好怎么来"）
+
+实测 6 跑里删句只有 3/6（编的那句被标成 `fact`，12/12 全留），所以这一份多了四组钉子：
+
+| 那一层 | 钉在哪 |
+| --- | --- |
+| 判据从"判断"改成"核对"（要求它去依据里**找那一句**原文） | `test_the_check_prompt_asks_it_to_look_one_up`（措辞）+ `VERDICT_FORMAT` 里的 `cite` |
+| 代码先划候选 + 举证责任 | 2c：`content_terms` / `candidate_sentences` / `citation_ok` / `parse_citations` / 兜底删 |
+| 多轮独立裁决、取并集、0 删除就再问 | 2d：并集、`round_deletes`、`MAX_CHECK_ROUNDS`、全轮 0 裁决的 fail-open |
+| 删句后的连带规则（由头没了，反应句一起删） | `CHECK_PROMPT` 里那条 + 重放里的观察量（`REACTIONS`） |
+
+**"模型会不会真的去核对"仍然在模型那边**：这一份只能钉住"它没举证的时候，代码一定会
+把候选句删掉"，钉不住它会去认真找依据——那是重放（`data/probe_letter_replay.py`）的事。
+
 ## 这一份为什么在**插件线**上（`check_plugin_branch_scope.py` 的口径）
 
 判据是那句"**这个文件在本体树上跑得起来吗？**"——跑不起来：
@@ -76,9 +90,13 @@ DRAFT = (
     "</body>"
 )
 #: 一个"听话的"裁决：第 3、4 句（编出来的那两件）标 `none`，别的照旧——**它不写正文**。
+#:
+#: 第 2 句是 `self` 而不是 `fact`：它是她自己那边的情形（"我这边过了半夜"），
+#: 实测 6 跑里也是 `self`。这一点在 2026-10-17 之后有了后果——第 2 句跟素材零重叠、
+#: 是**候选句**，标 `fact` 就必须给出原文（见 2c）；标 `self` 才不受那一条约束。
 CHECKED = (
     '<verdict n="1" kind="fact"/>'
-    '<verdict n="2" kind="fact"/>'
+    '<verdict n="2" kind="self"/>'
     '<verdict n="3" kind="none"/>'
     '<verdict n="4" kind="none"/>'
     '<verdict n="5" kind="fact"/>'
@@ -243,6 +261,27 @@ def test_the_check_sees_the_materials_as_data() -> None:
     assert "1. 正文两句。" in user and "2. 第二句在这里。" in user, "正文要按句编号附上"
 
 
+def test_the_check_prompt_asks_it_to_look_one_up() -> None:
+    """第 1 层：判据从"**判断**有没有依据"降级成"**去依据里找**那一句"（2026-10-17）。
+
+    为什么改（实测，不是推断）：素材里有"嘲她没本事""大二学生…"这种**字面**支撑，
+    "这句有没有依据"这种评价式问法总能答"有"——它答的其实是"这几个词素材里有"，
+    而我们要问的是"**那件事**素材里写着吗"。取数口：
+    `data/probe_letter_replay.result.json` 的 6 跑（改动前 3/6 把编的那句标成 `fact`）。
+    """
+
+    text = lw.CHECK_PROMPT
+
+    assert "到底下那段依据里去找" in text, "要它去找，不是去评价"
+    assert "一句一句往下对" in text
+    assert "**原文照抄**" in text, "找到就要把那句抄出来（举证）"
+    assert '**"沾边"不算找到**' in text, "同一个词/同一个人不算找到"
+    assert "印象不是事情" in text, "印象（谁看不起谁）顶不了事情（有人笑过谁）"
+    assert "问句" in text, "问句/叮嘱不是断言：别拿'依据里没有这件事'去删它"
+    # 输出格式里要点名 `cite`，它才是"核对"落到**可查**的那一步。
+    assert 'cite="' in lw.VERDICT_FORMAT and "逐字" in lw.VERDICT_FORMAT
+
+
 def test_a_compliant_verdict_cuts_only_the_unfounded_sentences() -> None:
     """裁决把没出处的两句标 `none` ⇒ **那两句由代码删掉**，有出处的与心情句留着。
 
@@ -326,15 +365,19 @@ def test_no_verdicts_means_nothing_is_deleted() -> None:
     """它整段没按格式回（或者根本没标）⇒ **一句都不删**，覆盖度记进日志。
 
     这是 fail-open 的方向：判据宁可少删，也不许因为自己读不出来就删掉她的话。
-    2026-10-16 起这种输出会**先重试一次**（下面那几条专门钉重试）；
-    这里两次都不给裁决，所以还是"一句不删"，只是账上多一句"重试过 1 次"。
+    2026-10-17 起这种输出**每一轮都算"0 删除"**，于是一路问满 `MAX_CHECK_ROUNDS` 轮
+    （重试闸从"0 裁决"挪到"0 删除"，见 2d）；全部读不出裁决时日志里还要有一句难看的
+    "没读到任何裁决"——别让"这次其实没核到"静悄悄过去。
     """
 
     writer, client, (_subject, body) = _run(DRAFT, "嗯，我觉得这封信挺好的。")
 
     assert "有人笑别人没本事" in body, "没人标 none ⇒ 原样留着"
-    assert client.calls == 3, "草稿 + 校对 + 校对重试"
-    assert writer.last_grounding == "重试过 1 次；判了 0/7 句", writer.last_grounding
+    assert client.calls == 4, "草稿 + 校对 3 轮（每轮都是 0 删除）"
+    assert writer.stats["check_rounds"] == lw.MAX_CHECK_ROUNDS
+    assert writer.stats["round_deletes"] == [0] * lw.MAX_CHECK_ROUNDS
+    assert writer.last_grounding.startswith("重试过 2 次"), writer.last_grounding
+    assert "没读到任何裁决" in writer.last_grounding, writer.last_grounding
     assert writer.stats["reverted"] == 0, "没人删就不该退回草稿（那样每封都会退）"
     assert body == _draft_body()
 
@@ -370,11 +413,13 @@ def test_a_verdict_said_twice_takes_the_last_one() -> None:
     assert lw.parse_verdicts(raw) == {2: "none"}
 
 
-# --- 2b. 0 裁决就重试一次（2026-10-16 用户批的抖动兜底）----------------------
+# --- 2b. 重试闸：从"0 裁决"挪到"0 删除"（2026-10-17 第 3 层）----------------
 #
-# 原话：*"重试兜底：0 裁决（或裁决解析不出来）时**重试一次**（同一输入）；
-# 仍然是 0 就按现状 fail-open 用草稿发。重试要进日志（可观察，例如
-# `daily_report_grounding` 那条里带'重试过 1 次'）"*。
+# 2026-10-16 那版的原话：*"重试兜底：0 裁决（或裁决解析不出来）时**重试一次**（同一输入）；
+# 仍然是 0 就按现状 fail-open 用草稿发"*。
+# 2026-10-17 实测改了闸的位置：格式抖动已经压掉（6 跑 0 次整段不按格式），**真正会失败的
+# 形态是"一句都没删"**（编的那句被标成 fact，12/12 全留）。所以现在"本轮 0 删除"就是
+# 再问一轮的理由，最多 `MAX_CHECK_ROUNDS` 轮；"0 裁决"只是它的一个特例。
 
 #: 三次里那一次"整段不按格式回"的真实形状（英文 meta 回复，实测抓到过一次）。
 META_REFUSAL = ("I need the actual letter content and the verdict request to proceed. "
@@ -383,12 +428,13 @@ META_REFUSAL = ("I need the actual letter content and the verdict request to pro
 
 
 def test_a_check_without_verdicts_is_retried_once() -> None:
-    """第一次没给裁决 ⇒ 同一份输入再问一次；**以重试那一次为准**，并留下"重试过"。"""
+    """第一次没给裁决（= 本轮 0 删除）⇒ 同一份输入再问一次；**以那一次为准**。"""
 
     writer, client, (_subject, body) = _run(DRAFT, META_REFUSAL, CHECKED)
 
     assert client.calls == 3, "草稿 + 校对 + 校对重试"
     assert writer.stats["retries"] == 1
+    assert writer.stats["round_deletes"] == [0, 2], "第一轮 0 删除 ⇒ 才问第二轮"
     triggers = [str(step["trigger"]) for step in writer.steps]
     assert triggers == ["daily_report_draft", "daily_report_check",
                         "daily_report_check_retry", "daily_report_grounding"], triggers
@@ -397,25 +443,80 @@ def test_a_check_without_verdicts_is_retried_once() -> None:
 
 
 def test_a_retry_that_is_also_empty_stays_fail_open() -> None:
-    """两次都没给裁决 ⇒ **一句都不删**（用草稿），并且账上仍记着"重试过 1 次"。"""
+    """三轮都没给裁决 ⇒ **一句都不删**（用草稿），账上记"重试过 2 次"，日志难看。"""
 
     writer, client, (_subject, body) = _run(DRAFT, META_REFUSAL, META_REFUSAL)
 
-    assert client.calls == 3
-    assert writer.stats["retries"] == 1
+    assert client.calls == 4, "草稿 + 校对 3 轮"
+    assert writer.stats["retries"] == 2
     assert "有人笑别人没本事" in body, "fail-open：没裁决就不删"
-    assert writer.last_grounding.startswith("重试过 1 次"), writer.last_grounding
+    assert writer.last_grounding.startswith("重试过 2 次"), writer.last_grounding
+    assert "没读到任何裁决·fail-open 按草稿发" in writer.last_grounding
     assert writer.stats["reverted"] == 0, "这不是「内容站不住」，别退回草稿"
 
 
 def test_a_compliant_first_check_is_not_retried() -> None:
-    """第一次就给了裁决 ⇒ **不许**多问一次（重试只该花在没裁决那种情况上）。"""
+    """第一次就删了句 ⇒ **不许**多问（重试只该花在"0 删除"那种情况上）。"""
 
     writer, client, (_subject, _body) = _run(DRAFT, CHECKED)
 
     assert client.calls == 2, "草稿 + 校对，没有第三次"
     assert writer.stats["retries"] == 0
+    assert writer.stats["round_deletes"] == [2]
     assert not writer.last_grounding.startswith("重试过")
+
+
+def test_a_round_that_blows_up_is_asked_again() -> None:
+    """某一轮**直接炸了**（限流/超时/5xx）也不算"这一步就这样了"：接着问下一轮。
+
+    为什么（2026-10-17 实测）：重放 6 跑里有 2 跑第一轮吃了一个 `LLMError`（1.5s 回来），
+    而改动前第一轮一炸就退回草稿——**校对一个字没做就把编的那句寄出去**。
+    既然"0 裁决"都要再问一次，"炸了"更该再问。
+    """
+
+    class _Flaky(_Client):
+        """第一次调用炸，之后按 `raws` 走（与真通道的抖动同形）。"""
+
+        async def complete(self, request):
+            self.requests.append([dict(item) for item in request])
+            self.calls += 1
+            if self.calls == 2:                  # 第 1 次是草稿，第 2 次就是校对第一轮
+                raise RuntimeError("rate limited")
+            if len(self.raws) > 1:
+                return self.raws.pop(0)
+            return self.raws[0]
+
+    client = _Flaky(DRAFT, CHECKED)
+    writer = lw.LetterWriter(client, clock=lambda: 1_800_000_000.0)
+    _subject, body = asyncio.run(writer.write(_Materials(), persona=PERSONA, facts=FACTS,
+                                              closeness_names=(), guardedness_names=()))
+
+    assert "有人笑别人没本事" not in body, "第二轮那份裁决照样生效（不是退回草稿）"
+    assert writer.stats["failed"] == 1, "炸了要记一笔"
+    assert "轮1〔没回来·RuntimeError〕" in writer.last_grounding, writer.last_grounding
+    assert writer.stats["round_deletes"][0] == 0
+
+
+def test_every_round_blowing_up_stays_fail_open() -> None:
+    """三轮全炸 ⇒ 退回草稿（fail-open），但日志里要能看出**一轮都没回来**。"""
+
+    class _Dead(_Client):
+        async def complete(self, request):
+            self.requests.append([dict(item) for item in request])
+            self.calls += 1
+            if self.calls == 1:
+                return DRAFT                    # 草稿那一次照常
+            raise RuntimeError("502 bad gateway")
+
+    client = _Dead("")
+    writer = lw.LetterWriter(client, clock=lambda: 1_800_000_000.0)
+    _subject, body = asyncio.run(writer.write(_Materials(), persona=PERSONA, facts=FACTS,
+                                              closeness_names=(), guardedness_names=()))
+
+    assert "有人笑别人没本事" in body, "fail-open：没裁决就按草稿发"
+    assert writer.stats["failed"] == lw.MAX_CHECK_ROUNDS
+    assert "没读到任何裁决·fail-open 按草稿发" in writer.last_grounding, writer.last_grounding
+    assert writer.last_grounding.count("没回来") == lw.MAX_CHECK_ROUNDS
 
 
 def test_the_how_to_reply_block_sits_at_the_end_of_the_user_message() -> None:
@@ -433,6 +534,204 @@ def test_the_how_to_reply_block_sits_at_the_end_of_the_user_message() -> None:
     assert "只回下面这种行" not in system, "…而且不许再留在 system 里"
     assert user.index("正文按句拆开") < user.index("只回下面这种行"), "紧贴编号段之后"
     assert user.rstrip().endswith("没冲突就别写这一行。"), "就在 user 段末尾"
+
+
+# --- 2c. 候选句 + 举证责任（2026-10-17 第 2 层）------------------------------
+#
+# 为什么有这一层（用户 2026-10-17 定的）：
+# *"候选句**不是直接删**，而是升级要求：模型必须**引用素材里支持它的那一句原文**；
+# 引不出来 ⇒ 判 `none`。宁可这条路保守一点（**只在零重叠时启用**），
+# 也不要大面积误删正常句子。"*
+#
+# 代码这边能**自己**证明的只有一件事：这句的实词跟依据一个都没撞上（`candidate_sentences`）。
+# 撞上了不等于有依据（10-15 那封编的那句就重叠了一大片），所以撞上了就**不由代码定罪**——
+# 那正是"大面积误删"的来源。
+
+#: 每一轮都说"留着"（没有一句 `none`）——实测 3/6 就跑成这个形状，编的那句照样进信。
+KEEPS_EVERYTHING = ('<verdict n="1" kind="fact"/><verdict n="2" kind="self"/>'
+                    '<verdict n="3" kind="fact"/><verdict n="4" kind="self"/>'
+                    '<verdict n="5" kind="self"/><verdict n="6" kind="fact"/>'
+                    '<verdict n="7" kind="self"/>')
+#: 第二次问它时改口：由头（3）与跟着它的反应句（4）都标 `none`。
+SECOND_ROUND_CUTS = ('<verdict n="1" kind="fact"/><verdict n="2" kind="self"/>'
+                     '<verdict n="3" kind="none"/><verdict n="4" kind="none"/>'
+                     '<verdict n="5" kind="self"/><verdict n="6" kind="fact"/>'
+                     '<verdict n="7" kind="self"/>')
+
+
+def test_content_terms_are_bigrams_so_no_tokenizer_is_needed() -> None:
+    """实词近似：中文按二元组（跨虚字的那一对也算，只要有一个实字）。**不加第三方依赖**。"""
+
+    terms = lw.content_terms("我看见了。")
+
+    assert "看见" in terms and "见了" in terms
+    assert "我看" in terms, "虚字+实字的一对留着（'看'是实字）"
+    assert lw.content_terms("我的是不了") == frozenset(), "整句都是虚字 ⇒ 算不出实词"
+    assert "的是" not in lw.content_terms("好的，是的。")
+
+
+def test_a_zero_overlap_sentence_is_a_candidate() -> None:
+    """实词**一个都没撞上** ⇒ 候选（"我看见了"在素材里没有对应的事）。"""
+
+    assert lw.candidate_sentences("我看见了。", MATERIALS) == (1,)
+
+
+def test_a_sentence_with_a_real_overlap_is_not_a_candidate() -> None:
+    """撞上了就不划候选——**实词重叠不等于有依据**，但重叠了就不该由代码定罪。
+
+    这条钉的是"别大面积误删"：编的那句（"有人笑别人没本事"）跟素材重叠一大堆，
+    所以它不是候选，只能靠模型自己判（见本文件最后那条能力边界）。
+    """
+
+    assert lw.candidate_sentences("你白天说那个游戏烂。", MATERIALS) == ()
+    assert lw.candidate_sentences("白天群里有人笑别人没本事。", MATERIALS) == ()
+
+
+def test_a_sentence_that_only_shares_function_words_does_not_count_as_overlap() -> None:
+    """只共用了虚字（"他"）**不算**交集：共用虚字没有证明力，仍然按零重叠算候选。"""
+
+    sources = "他说他累了。"
+
+    assert not (lw.content_terms("她的包里有一把伞。") & lw.content_terms(sources))
+    assert lw.candidate_sentences("她的包里有一把伞。", sources) == (1,)
+
+
+def test_a_sentence_made_only_of_function_words_is_not_a_candidate() -> None:
+    """全是虚字的句子（"我的是不了"）不划候选：算不出交集，也不该被拿来定罪。"""
+
+    assert lw.candidate_sentences("我的是不了。", MATERIALS) == ()
+
+
+def test_a_quote_only_counts_after_stripping_punctuation_and_spacing() -> None:
+    """引文核的是"依据里**逐字**有没有这一段"，不是"像不像"。"""
+
+    assert lw.citation_ok("预计9点到学校", MATERIALS)
+    assert lw.citation_ok("· 预计9点到学校　〔今天上午 · 群1〕", MATERIALS), "整行照抄也算"
+    assert not lw.citation_ok("预计九点到学校", MATERIALS), "改写（九/9）不算举证"
+    assert not lw.citation_ok("预计", MATERIALS), "太短的不算"
+    assert not lw.citation_ok("", MATERIALS)
+
+
+def test_citations_are_read_off_the_verdict_lines() -> None:
+    raw = ('<verdict n="1" kind="fact" cite="一 二 三"/>\n'
+           "<verdict n=\"2\" kind=\"fact\" cite='四五六'></verdict>\n"
+           '<verdict n="3" kind="self"/>')
+
+    assert lw.parse_citations(raw) == {1: "一 二 三", 2: "四五六"}
+    assert lw.parse_verdicts(raw) == {1: "fact", 2: "fact", 3: "self"}
+
+
+def test_a_candidate_without_a_quote_is_deleted_by_the_deterministic_backstop() -> None:
+    """候选句每轮都说 `fact`、却从没抄出依据里的原文 ⇒ **兜底删**，不等它松口。
+
+    第 3 句（编的那句由头）也判了 `fact`，但它**不是**候选（实词重叠一大堆）——
+    所以它留着。这条同时钉住两个方向：兜底会动手，而它**只管候选**。
+    """
+
+    lied = '<verdict n="2" kind="fact"/><verdict n="3" kind="fact"/>'
+    writer, client, (_subject, body) = _run(DRAFT, lied)
+
+    assert "我这边过了半夜" not in body, "候选句没有原文可抄 ⇒ 删"
+    assert "有人笑别人没本事" in body, "不是候选 ⇒ 机械网不跟它争（能力边界照旧）"
+    assert writer.stats["fallback_hits"] == 1
+    assert "兜底 1 句〔2〕" in writer.last_grounding, writer.last_grounding
+    assert "候选句·全轮 fact 却从未引出原文" in writer.last_grounding
+    assert client.calls == 1 + lw.MAX_CHECK_ROUNDS, "每轮都是 0 删除 ⇒ 问满三轮"
+
+
+def test_a_candidate_with_a_real_quote_is_kept() -> None:
+    """候选句给出了依据里逐字有的那一句 ⇒ **留**（举证成立）。"""
+
+    quoted = '<verdict n="2" kind="fact" cite="预计9点到学校"/>'
+    writer, _client, (_subject, body) = _run(DRAFT, quoted)
+
+    assert "我这边过了半夜" in body, "引得出原文就留"
+    assert writer.stats["fallback_hits"] == 0
+    assert "兜底 0 句" in writer.last_grounding, writer.last_grounding
+
+
+def test_a_fabricated_quote_does_not_count_as_evidence() -> None:
+    """它自己造一句"素材原文"不再管用：引文要在依据里查得到，查不到 ⇒ 没举证。"""
+
+    lied = '<verdict n="2" kind="fact" cite="他说他明天一早就到"/>'
+    writer, _client, (_subject, body) = _run(DRAFT, lied)
+
+    assert "我这边过了半夜" not in body
+    assert writer.stats["fallback_hits"] == 1
+
+
+def test_a_candidate_it_calls_a_feeling_is_kept() -> None:
+    """候选句标 `self`（只讲她自己）不受举证这一条约束——**别拿这条删心情句**。"""
+
+    said = '<verdict n="2" kind="self"/><verdict n="7" kind="self"/>'
+    writer, _client, (_subject, body) = _run(DRAFT, said)
+
+    assert "我这边过了半夜" in body and "今晚没什么事。" in body
+    assert writer.stats["fallback_hits"] == 0
+
+
+def test_the_candidates_are_named_in_the_request() -> None:
+    """候选是哪几句要在请求里说清：只在事后按它没做到的事删它，等于拿沉默定罪。"""
+
+    check = lw.build_check_messages("信", "我看见了。今晚没什么事。", sources=MATERIALS,
+                                    candidates=(1,))
+    user = check[1]["content"]
+
+    assert "第 1 句" in user and "实词一个都没撞上" in user, user
+    assert "标 `self` 不受这一条影响" in user
+    plain = lw.build_check_messages("信", "我看见了。", sources=MATERIALS, candidates=())
+    assert "实词一个都没撞上" not in plain[1]["content"], "没有候选就不冒这一段"
+
+
+# --- 2d. 多轮独立裁决、取并集（2026-10-17 第 3 层）---------------------------
+#
+# 用户口径：*"**本轮一句都没删 ⇒ 再问一次**（同一输入，独立机会）。多轮上限你自己定
+# （3 轮为起点）。每轮独立裁决，最终**取并集**：任一轮判 `none` ⇒ 删。"*
+
+
+def test_any_round_that_says_none_deletes_the_sentence() -> None:
+    """第一轮全留（fact/self）、第二轮标 `none` ⇒ **删**（并集，不是"看最后一轮"）。"""
+
+    writer, client, (_subject, body) = _run(DRAFT, KEEPS_EVERYTHING, SECOND_ROUND_CUTS)
+
+    assert client.calls == 3, "草稿 + 两轮校对（第一轮 0 删除 ⇒ 才问第二轮）"
+    assert writer.stats["round_deletes"] == [0, 2]
+    assert writer.stats["check_rounds"] == 2
+    assert "有人笑别人没本事" not in body, "第一轮留着、第二轮删掉 ⇒ 最终删"
+    assert "我看见了" not in body
+    assert "今晚没什么事。" in body, "两轮都是 self 的照旧留着"
+
+
+def test_the_grounding_line_shows_every_round() -> None:
+    """`daily_report_grounding` 那条要能直接读出：第几轮、判几句、删几句、哪几句、兜底几句。"""
+
+    writer, _client, (_subject, _body) = _run(DRAFT, KEEPS_EVERYTHING, SECOND_ROUND_CUTS)
+    note = writer.last_grounding
+
+    for piece in ("重试过 1 次", "候选 ", "轮1〔判 7/7 句 · 删 0〕",
+                  "轮2〔判 7/7 句 · 删 2〔3、4〕〕", "兜底 0 句", "按裁决删 2 句"):
+        assert piece in note, (piece, note)
+    # 删句理由里要能分出"普通句"与"候选句"：事后复盘时这两者的可信度不一样。
+    assert "3：依据里指不到；4：依据里指不到·候选句" in note, note
+    assert writer.stats["candidates"] == 3, "候选句数进 stats，不用翻原始输出"
+    assert writer.stats["deleted"] == 2
+
+
+def test_a_first_round_with_nothing_deleted_is_asked_again() -> None:
+    """"0 删除 ⇒ 再问一次"：这是**实测失败形态**（编的那句被标 fact），不是格式问题。"""
+
+    writer, client, (_subject, body) = _run(DRAFT, KEEPS_EVERYTHING)
+
+    assert client.calls == 1 + lw.MAX_CHECK_ROUNDS, "0 删除要问满三轮"
+    assert writer.stats["check_rounds"] == lw.MAX_CHECK_ROUNDS
+    assert writer.stats["retries"] == lw.MAX_CHECK_ROUNDS - 1
+    assert writer.last_grounding.startswith(f"重试过 {lw.MAX_CHECK_ROUNDS - 1} 次")
+    assert "没读到任何裁决" not in writer.last_grounding, "它给了裁决，只是没删——两回事"
+    assert "有人笑别人没本事" in body, "三轮都留着：fail-open 到草稿"
+    triggers = [str(step["trigger"]) for step in writer.steps]
+    assert triggers.count("daily_report_check") == 1
+    assert triggers.count("daily_report_check_retry") == 1
+    assert triggers.count("daily_report_check_retry2") == 1
 
 
 # --- 3. 每步一条（`mail.jsonl`） ---------------------------------------------
