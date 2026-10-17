@@ -1546,13 +1546,29 @@ async function viewGroup() {
   // 每一行：**群名当主标题**、群号在次要位（可复制）、「**对话**」一个**真开关**、
   // 「记忆」只读徽标。开关调的是**既有的** `POST /api/groups`（那口自带 confirm 校验
   // 与审计），不新增任何写入口。
+  // 每一张**已启用对话**的群卡片里放一个发送框（用户 2026-10-18：*"面板不新开页：
+  // 整合进既有的「群聊」那一页，**在每个启用群的卡片里**放一个发送框"*）。
+  // 发出去的是**操作者的话**（不是她自由发言），只经 `/api/notice` 那一条接缝，
+  // 后端再交给核心的 `ui.notice`——**不进她的对话历史**（与 `/admin relay` 同一条口径）。
+  // `@` 只填 QQ 号：`ui.groups` 那口只给四个字段（没有成员表），为"选人"另建一条
+  // 成员名单接缝是另一件事（用户明说不要）。
+  const noticeBox = (row) => (row.dialogue_on
+    ? `<div class="notice-box">
+        <input class="notice-text" type="text" data-id="${esc(row.id)}"
+          placeholder="以她的身份在这个群说一句" aria-label="发到这个群的话">
+        <input class="notice-at" type="text" inputmode="numeric"
+          placeholder="@ 谁（QQ 号，可留空）" aria-label="@ 谁的 QQ 号">
+        <button class="notice-send" data-id="${esc(row.id)}">发送</button>
+      </div>`
+    : "");
   const groupRow = (row) => prefRow(
     `<div class="pref-title">${esc(row.name || `群 ${row.id}`)}</div>` +
     `<div class="pref-summary"><code class="copyable mono">${esc(row.id)}</code>` +
     // 记忆那个**只读**：面板没有按群开关记忆的接缝，所以只显示、不给控件。
     `<span class="group-badge${row.memory_on ? " on" : ""}"
       title="要改去「记忆」页（这里只显示）">记忆${
-      row.memory_on ? "开" : "关"}</span></div>`,
+      row.memory_on ? "开" : "关"}</span></div>` +
+    noticeBox(row),
     `<label class="row-switch" title="这个群的对话开关">
        <span class="switch-text">对话</span>
        <input class="switch group-switch" type="checkbox" data-id="${esc(row.id)}"
@@ -1706,6 +1722,40 @@ function bind() {
       if (done) render();
       return;
     }
+    // 群卡片里那个发送框（2026-10-18）：走**新开的那一条** `/api/notice`，它背后是核心
+    // 的 `ui.notice`（所以这里**不拼 OneBot 请求**、也拿不到传输层）。
+    // 结果与拒绝原因都用 `sayInRow` **原样**落在这一行里——用户：*"拒绝原因…要原样
+    // 显示给操作者，别吞成「操作失败」"*，所以这里**不走** `write()`（它会加
+    // "操作失败："前缀），也不用 `showError()`（那句话会跑到页面顶上）。
+    if (act("notice-send", async (el) => {
+      const row = el.closest(".pref");
+      if (!row) return;
+      const text = (row.querySelector(".notice-text") || {}).value || "";
+      const at = ((row.querySelector(".notice-at") || {}).value || "").trim();
+      // `@` 只收纯数字 QQ 号（多个用逗号）。这一层是**前端校验**（用户要的"纯数字"）；
+      // 核心那边还会再清洗一遍——不是数字的丢掉并记账，不是整条拒。
+      if (at && !/^\d+(,\d+)*$/.test(at)) {
+        sayInRow(row, "@ 只能填纯数字的 QQ 号（多个人用逗号隔开）。");
+        return;
+      }
+      el.disabled = true;
+      try {
+        // `confirm: true` 是面板**所有写路由**的统一门槛（`_write()` 那一判）：
+        // 这里"点发送"本身就是那个确认动作，不再弹一次对话框——防误点是核心那 3 秒。
+        const done = await api("/api/notice", {
+          method: "POST",
+          body: { group_id: el.dataset.id, text, at, confirm: true },
+        });
+        sayInRow(row, done.message || "已经交给核心了。");
+        const box = row.querySelector(".notice-text");
+        if (box) box.value = "";
+      } catch (error) {
+        // **原样**：私聊不许发 / 群没开对话 / 3 秒内重复 / 空文本，都是核心那句人话。
+        sayInRow(row, error.message);
+      } finally {
+        el.disabled = false;
+      }
+    })) return;
     if (act("clear-session", async (el) => {
       const done = await write("/api/session/clear", { session_id: el.dataset.id },
         "清空会话 " + el.dataset.id + "？");

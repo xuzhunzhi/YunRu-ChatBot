@@ -116,6 +116,14 @@ def _panel_seams(ui, call_action) -> dict[str, object]:
     if callable(getattr(ui, "set_group_memory", None)):
         seams["set_group_memory"] = ui.set_group_memory
 
+    # 「群聊」页每张启用群卡片里的发送框（2026-10-18 用户："在每个启用群的卡片里放一个
+    # 发送框"）。核心那侧是 `runtime.ui_notice` → `engine.notice_group`：四条守卫
+    # （空文本 / 只许群 / 只许已启用对话的群 / 3 秒同内容）与审计**全在核心**，
+    # 面板只把"群号 + 正文 + @ 谁"交过去，**不碰 transport、不拼 OneBot 请求**。
+    # 名字读的是 `notice`（不是 chat）：它是操作者的话，不是她自由发言。
+    if callable(getattr(ui, "notice", None)):
+        seams["notice"] = ui.notice
+
     if callable(getattr(ui, "execute_action", None)):
         seams["execute_action"] = ui.execute_action
     if callable(getattr(ui, "apply_overrides", None)):

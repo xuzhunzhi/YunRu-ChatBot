@@ -498,6 +498,8 @@ class Panel:
             return self._approval(payload, source)
         if path == "/api/groups":
             return self._groups(payload, source)
+        if path == "/api/notice":
+            return self._notice(payload, source)
         if path == "/api/session/clear":
             return self._clear_session(payload, source)
         if path == "/api/memory/groups":
@@ -670,6 +672,69 @@ class Panel:
         text = ("已开启" if enabled else "已关闭") + f"群 {group_id} 的记忆"
         text += "。" if changed else "（本来就是这个状态）。"
         return json_response(_envelope({"ok": True, "changed": changed, "message": text}))
+
+    def _notice(self, payload: dict[str, object], source: str) -> Response:
+        """「群聊」页每张启用群卡片里的发送框：**只经 `ui.notice` 这一条接缝**。
+
+        用户 2026-10-18 的原话（这一笔的口径全在他那四句里）：
+
+        * *"面板不新开页：整合进既有的「群聊」那一页，在每个启用群的卡片里放一个发送框"*
+          ——所以这里只有一条写路由，页面还是那一页；
+        * *"后端只调核心那一口；不许自己拼 OneBot 请求"*——所以这里**不碰 transport、
+          不调 call_action、不自己拼 send_msg**：`_call(seam, group_id, text, at)` 之后
+          就完事，发不发、怎么发全在核心（`DialogueEngine.notice_group`）；
+        * *"拒绝原因（私聊不许发、群没开对话、3 秒内重复、空文本）要原样显示给操作者，
+          别吞成"操作失败""*——所以被拒时把核心那句 `reason` 原样塞进 `detail`
+          （前端 `api()` 会把它当错误文案抛出来，页面再**原样**显示在那一行里）。
+
+        **@ 只填 QQ 号**：核心那条 `ui.groups` 只给四个字段（没有成员表），
+        而为"选人"另建一条成员名单接缝是另一件事（用户：*"不要为了这个另建成员名单接缝"*）。
+        纯数字校验在**前端**（`app.js` 那个发送框），核心那边还会再清洗一遍（不是数字的丢掉）。
+
+        **不在这里记审计**：动作名 `panel_notice` 由核心写（`source="panel"`），
+        这里再记一笔就是同一件事两条记录（与 `_group_memory` 的处理一致）。
+        """
+
+        seam = self._seam("notice")
+        if seam is None:
+            # 老核心 / 没装上：如实说"这条路没接上"，不假装成功。
+            return failure("engine_unavailable", status=503)
+        group_id = str(payload.get("group_id") or "").strip()
+        if not group_id:
+            return failure("bad_request", detail="缺 group_id", status=400)
+        text = str(payload.get("text") or "")
+        at_ids: list[str] = []
+        raw_at = payload.get("at")
+        if isinstance(raw_at, str):
+            at_ids = [part.strip() for part in raw_at.split(",") if part.strip()]
+        elif isinstance(raw_at, (list, tuple)):
+            at_ids = [str(part).strip() for part in raw_at if str(part).strip()]
+        try:
+            result = _call(seam, group_id, text, tuple(at_ids))
+        except Exception as exc:  # noqa: BLE001 - 接缝抛了就如实回报，不 500 一坨
+            logger.warning("webui_notice_failed", exc_info=True)
+            return failure("notice_failed",
+                           detail=f"面板没能把这句话交给核心（{type(exc).__name__}）",
+                           status=502)
+        if not isinstance(result, dict):
+            return failure("notice_failed", detail="核心没有给出结果", status=502)
+        if not result.get("ok"):
+            # **原样透出**：私聊不许发 / 群没开对话 / 3 秒内重复 / 空文本，都是核心那句话。
+            return failure(
+                "notice_rejected",
+                detail=str(result.get("reason") or "核心拒了这条，但没给原因"),
+                status=400,
+            )
+        chars = result.get("chars")
+        at_count = len(result.get("at_user_ids") or ())
+        message = f"已交给群 {group_id}"
+        if isinstance(chars, int) and chars > 0:
+            message += f"（{chars} 字"
+            message += f"，@ {at_count} 人）" if at_count else "）"
+        return json_response(_envelope({
+            "ok": True, "message": message, "group_id": group_id,
+            "chars": chars, "at_count": at_count,
+        }))
 
     def _groups_list(self) -> Response:
         """「群聊」那一页的列表：**她所在的全部群**，只读。

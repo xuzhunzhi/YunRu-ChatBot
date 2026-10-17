@@ -644,6 +644,21 @@ button:disabled { opacity: 0.38; cursor: not-allowed; transform: none; }
 .pref-empty { padding: 16px; margin: 0; }
 .pref-add-group { margin-bottom: 12px; }
 
+/* --- 群卡片里的发送框（面板的「操作者的话」，2026-10-18）----------------------
+ * 它长在每一张**已启用对话**的群卡片里（用户："在每个启用群的卡片里放一个发送框"），
+ * 不是新页、也不是新卡片。窄屏（手机）上自动折行：正文一行、@ + 发送一行。
+ */
+.notice-box {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.notice-box input.notice-text { flex: 1 1 220px; min-width: 0; }
+.notice-box input.notice-at { flex: 0 1 160px; }
+.notice-box button.notice-send { flex: 0 0 auto; min-height: 40px; }
+
 .pref {
   display: flex;
   align-items: center;

@@ -1482,3 +1482,206 @@ class SelfReportedPanelTests(_PanelCase):
             data = self._with_seams(lambda name: spec)
         self.assertEqual([row["user_id"] for row in data["blocks"][0]["rows"]], ["1001"])
         self.assertNotIn("error", data["blocks"][0])
+
+
+class GroupNoticeTests(_PanelCase):
+    """「群聊」页每张启用群卡片里的发送框：**只经 `ui.notice` 那一条接缝**。
+
+    用户 2026-10-18 的四句（这一组的判据全在他那里）：
+
+    * *"面板不新开页：整合进既有的「群聊」那一页，在每个启用群的卡片里放一个发送框"*；
+    * *"后端只调核心那一口；不许自己拼 OneBot 请求"*——所以这里拿一个"一被调用就
+      报错"的 `call_action` 替身看着：谁要是自己拼 `send_msg`，当场红；
+    * *"拒绝原因（私聊不许发、群没开对话、3 秒内重复、空文本）要原样显示给操作者，
+      别吞成"操作失败""*——所以断言 `detail` 与核心那句 `reason` **逐字相同**；
+    * *"私聊一律不许发，其他群也不许。接缝层就拒，不要留给界面层挡"*——所以列表里
+      根本没有私聊目标，且喂一个 QQ 号进来也是核心那句拒绝原样回去。
+    """
+
+    GROUP = "1084401296"
+    PRIVATE = "87654321"
+
+    @staticmethod
+    def _asset(name: str) -> str:
+        return resources.files("qq_roleplay_bot.plugins.webui.webui").joinpath(
+            name).read_text(encoding="utf-8")
+
+    def _post(self, panel: Panel, body: dict):
+        response = panel.handle("POST", "/api/notice", json.dumps(body).encode("utf-8"),
+                                {"accept": "application/json", "content-type": "application/json",
+                                 "authorization": "Bearer " + TOKEN}, "127.0.0.1")
+        return response, json.loads(response.body.decode("utf-8"))
+
+    def _panel(self, seam) -> Panel:
+        def boom(*args, **kwargs):
+            raise AssertionError(f"通知那条路不该自己拼 OneBot 请求：{args} {kwargs}")
+
+        return Panel({"data_root": str(self.root), "notice": seam,
+                      "call_action": boom, "execute_action": boom},
+                     WebAccess(mode=LOCAL, token=TOKEN))
+
+    def test_the_route_calls_the_notice_seam_once_with_group_text_and_at(self) -> None:
+        calls: list[tuple] = []
+
+        def notice(group_id, text, at_user_ids=()):
+            calls.append((group_id, text, tuple(at_user_ids)))
+            return {"ok": True, "group_id": group_id, "chars": len(text),
+                    "at_user_ids": tuple(at_user_ids), "at_dropped": 0}
+
+        panel = self._panel(notice)
+        response, body = self._post(panel, {"group_id": self.GROUP, "text": "今晚八点开播。",
+                                            "at": "123456, 777888", "confirm": True})
+
+        self.assertEqual(response.status, 200)
+        self.assertTrue(body["data"]["ok"])
+        # **只调那一条接缝**，参数就是"群号 + 正文 + @ 谁"。
+        self.assertEqual(calls, [(self.GROUP, "今晚八点开播。", ("123456", "777888"))])
+        self.assertEqual(body["data"]["group_id"], self.GROUP)
+
+    def test_a_rejection_reason_reaches_the_operator_verbatim(self) -> None:
+        reason = "群 555000111 没开对话，不能往那里发（只允许已启用对话的群）。"
+
+        def notice(group_id, text, at_user_ids=()):
+            return {"ok": False, "reason": reason}
+
+        response, body = self._post(self._panel(notice),
+                                    {"group_id": "555000111", "text": "在吗", "confirm": True})
+
+        self.assertEqual(response.status, 400)
+        self.assertEqual(body["error"], "notice_rejected")
+        self.assertEqual(body["detail"], reason,
+                         "拒绝原因被改写了（用户要求原样显示，别吞成「操作失败」）")
+
+    def test_each_of_the_four_rejections_is_passed_through(self) -> None:
+        """空文本 / 私聊（QQ 号）/ 群没开对话 / 3 秒重复——四条原因都原样出来。"""
+
+        for reason in (
+            "内容不能为空（只写了空白也算空）。",
+            "只能往群聊里发：这个号码不像群号（私聊一律不发）。",
+            "群 555000111 没开对话，不能往那里发（只允许已启用对话的群）。",
+            "3 秒内重复提交了同一条内容，先等一下再发（防手抖）。",
+        ):
+            with self.subTest(reason=reason):
+                response, body = self._post(
+                    self._panel(lambda *a, **k: {"ok": False, "reason": reason}),
+                    {"group_id": self.GROUP, "text": "一句话", "confirm": True})
+                self.assertEqual(body["detail"], reason)
+
+    def test_a_private_chat_target_is_not_in_the_list_and_cannot_be_sent(self) -> None:
+        """私聊**根本不在列表里**，喂进来也只能是核心那条拒绝（界面层挡不住它）。"""
+
+        rows = [{"id": self.GROUP, "name": "富哥之家", "dialogue_on": True, "memory_on": False}]
+        fake_panel = Panel({"data_root": str(self.root),
+                            "ui_groups": lambda: rows},          # 同步接缝够了
+                           WebAccess(mode=LOCAL, token=TOKEN))
+        response = fake_panel.handle("GET", "/api/groups", b"",
+                                     {"accept": "application/json",
+                                      "authorization": "Bearer " + TOKEN}, "127.0.0.1")
+        listed = json.loads(response.body.decode("utf-8"))["data"]["rows"]
+        # 列表里**只有群**：没有 `user_id` / `kind` 这类"还能发私聊"的字段。
+        for row in listed:
+            self.assertEqual(set(row), {"id", "name", "dialogue_on", "memory_on"})
+            self.assertNotIn("private", json.dumps(row, ensure_ascii=False))
+            self.assertNotIn("user_id", row)
+
+        # 面板把 QQ 号当 group_id 递过去：核心那边拒（面板只负责把它原样显示）。
+        seen: list[str] = []
+
+        def notice(group_id, text, at_user_ids=()):
+            seen.append(group_id)
+            return {"ok": False,
+                    "reason": "只能往群聊里发：这个号码不像群号（私聊一律不发）。"}
+
+        _, body = self._post(self._panel(notice),
+                             {"group_id": self.PRIVATE, "text": "你好", "confirm": True})
+        self.assertEqual(seen, [self.PRIVATE], "面板改了操作者给的目标")
+        self.assertEqual(body["detail"],
+                         "只能往群聊里发：这个号码不像群号（私聊一律不发）。")
+
+    def test_without_the_seam_the_panel_says_so_instead_of_pretending(self) -> None:
+        panel = Panel({"data_root": str(self.root)}, WebAccess(mode=LOCAL, token=TOKEN))
+        response, body = self._post(panel, {"group_id": self.GROUP, "text": "一句话",
+                                            "confirm": True})
+        self.assertEqual(response.status, 503)
+        self.assertEqual(body["error"], "engine_unavailable")
+
+    def test_a_broken_seam_is_reported_not_a_500(self) -> None:
+        def notice(*args, **kwargs):
+            raise RuntimeError("核心那边炸了")
+
+        response, body = self._post(self._panel(notice),
+                                    {"group_id": self.GROUP, "text": "一句话", "confirm": True})
+        self.assertEqual(response.status, 502)
+        self.assertEqual(body["error"], "notice_failed")
+
+    def test_the_write_still_needs_the_panel_confirm_gate(self) -> None:
+        """面板**所有**写路由都要带 `confirm=true`（既有那道门，不因为新路由破例）。"""
+
+        response, body = self._post(self._panel(lambda *a, **k: {"ok": True}),
+                                    {"group_id": self.GROUP, "text": "一句话"})
+        self.assertEqual(response.status, 400)
+        self.assertEqual(body["error"], "needs_confirmation")
+
+
+class GroupNoticeWiringTests(unittest.TestCase):
+    """装配 + 页面：接缝名字对得上、发送框长在**群卡片里**、且不是新页。
+
+    这些是**静态**判据（读插件包里的源码/资源）——页面长什么样只能靠这条钉，
+    离线套件不跑浏览器。
+    """
+
+    def setUp(self) -> None:
+        self.plugin = pathlib.Path(__file__).resolve().parents[1] / \
+            "src" / "qq_roleplay_bot" / "plugins" / "webui"
+
+    def test_the_wiring_hands_the_panel_ui_notice_under_the_name_it_reads(self) -> None:
+        wire = (self.plugin / "wire.py").read_text(encoding="utf-8")
+        self.assertRegex(wire, r'seams\["notice"\] = ui\.notice',
+                         "装配点没有把 `ui.notice` 递给面板（或者名字与路由读的不一样）")
+        panel = (self.plugin / "webui_panel.py").read_text(encoding="utf-8")
+        self.assertIn('self._seam("notice")', panel, "路由读的接缝名字变了")
+
+    def test_the_backend_never_builds_an_onebot_request_of_its_own(self) -> None:
+        panel = (self.plugin / "webui_panel.py").read_text(encoding="utf-8")
+        start = panel.index("def _notice(")
+        end = panel.index("def _groups_list(")
+        # 只查**代码**：docstring 里正说着"不碰 transport / 不调 call_action"。
+        code = panel[start:end].split('"""', 2)[2]
+        for banned in ("send_msg", "call_action", "call_api", "transport", "MessageTarget"):
+            self.assertNotIn(banned, code,
+                             f"面板通知那条路自己碰了 {banned}（用户：后端只调核心那一口）")
+
+    def test_the_send_box_lives_inside_each_enabled_group_card(self) -> None:
+        js = (self.plugin / "webui" / "app.js").read_text(encoding="utf-8")
+        start = js.index("async function viewGroup()")
+        end = js.index("async function viewActions()")
+        body = js[start:end]
+        self.assertIn("notice-box", body, "群卡片里没有发送框")
+        self.assertIn("row.dialogue_on", body.split("notice-box")[0],
+                      "发送框没有只出现在「已启用对话」的群里")
+        self.assertIn("notice-text", body, "没有正文输入框")
+        self.assertIn("notice-at", body, "@ 那个输入框不在")
+        self.assertRegex(body, r'inputmode="numeric"',
+                         "@ 那个框没有要求数字键盘（纯数字 QQ 号）")
+        # **不是新页**：页面还是那一页（`viewGroup` 里**没有**另起一个 api 取数口）。
+        self.assertEqual(body.count('api("/api/groups")'), 1,
+                         "群聊页取了不止一次数（或者另开了一条取数通道）")
+        css = (self.plugin / "webui" / "app.css").read_text(encoding="utf-8")
+        self.assertRegex(css, r"\.notice-box\s*\{[^}]*display:\s*flex",
+                         "发送框没有样式（窄屏会挤成一团）")
+
+    def test_the_send_button_goes_through_the_new_route_and_shows_the_raw_reason(self) -> None:
+        js = (self.plugin / "webui" / "app.js").read_text(encoding="utf-8")
+        start = js.index("function bind()")
+        body = js[start:]
+        self.assertIn('api("/api/notice"', body, "发送按钮没有走那条新路由")
+        self.assertIn("confirm: true", body, "写路由没带确认（面板那道统一门槛）")
+        # 拒绝原因**原样**落在那一行：用 `sayInRow(row, error.message)`，
+        # 而不是 `write()`（它会给所有错误加"操作失败："前缀）。
+        self.assertIn("error.message", body, "面板把拒绝原因吞掉了")
+        branch_start = body.index('act("notice-send"')
+        branch_end = body.index("})) return;", branch_start)
+        notice_branch = body[branch_start:branch_end]
+        self.assertNotIn("await write(", notice_branch,
+                         "发送那条路走了会改写错误文案的 `write()`")
+        self.assertIn("sayInRow", notice_branch, "结果没有落在那一行里")
