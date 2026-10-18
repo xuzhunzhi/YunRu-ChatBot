@@ -2323,6 +2323,19 @@ class DialogueEngine:
         """
 
         system, user_content = request_parts(request)
+        if feature in ("reply", "judge"):
+            # 契约 D5：`reply.jsonl` / `judge.jsonl` 里要能看见"这一趟是哪一家 / 哪个模型"。
+            # 不加的话，"一键切换"在这两份日志里**完全不可见**——`feature_log.record`
+            # 落的就是传进来的这些 meta。两个值都不是凭据（`safe_summary` 本来就在打）。
+            # 为什么集中在这一处、而不是改那五六个调用点：少一处漏改，而且判据只有一份。
+            try:
+                from . import model_config
+
+                endpoint = model_config.resolve(feature)
+                meta.setdefault("provider", endpoint.provider)
+                meta.setdefault("model", endpoint.model)
+            except Exception:  # noqa: BLE001 - 日志元数据不许影响这一次调用
+                pass
         self.logs.record(feature, system=system, input=user_content,
                          output=output or "", **meta)
 
@@ -4277,8 +4290,12 @@ class DialogueEngine:
             from .balance_client import summarize
             from .builtin_balance_command import build_balance_client
 
+            # 凭据来源（2026-10-18，契约 D14）：不再读 `dev_config.API_BASE_URL` /
+            # `API_KEY` 那两个 import 期常量——文件/面板改了凭据之后它们还是旧的，
+            # 会与走 `resolve()` 的余额探针对不上账。
+            probe = provider_failover.probe_endpoint()
             client = build_balance_client(
-                dev_config.API_BASE_URL, dev_config.API_KEY,
+                probe.base_url, probe.api_key,
                 cache_seconds=dev_config.BALANCE_CACHE_SECONDS,
             )
             return "余额：" + summarize(await client.fetch())
@@ -4978,6 +4995,16 @@ class DialogueEngine:
         就已经过了去重、也已经记进历史，所以这次要跳过那两步（不然历史里会出现两遍）。
         """
 
+        # **"改文件即生效"的钩子之一**（契约 D6 三处之一，这一处必上）。
+        #
+        # 面板写入会顺手同步重指向，所以这个钩子只剩"有人直接改文件"这一条路；
+        # 没变时它只做一次 `stat`（`model_config.providers_file_token()`），很便宜。
+        # 放在最前面（连机器人自己的消息也过）：她自己的发言也可能触发模型调用。
+        # 任何异常都不许带走这条消息——同步是"让新配置早点生效"，不是业务本身。
+        try:
+            provider_failover.sync_from_file()
+        except Exception:  # noqa: BLE001 - 同步失败只记日志
+            logger.warning("模型来源同步失败（handle 顶部）", exc_info=True)
         if message.is_bot_message:
             self._stats["ignored_messages"] += 1
             logger.debug("Stage 3 ignored bot-originated message")

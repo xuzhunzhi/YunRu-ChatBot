@@ -208,7 +208,7 @@ def _log_model_config_self_check() -> list[str]:
     返回那几行（测试直接断言它，不必去抓日志）。
     """
 
-    from .model_config import self_check_lines
+    from .model_config import providers_file_lines, self_check_lines
 
     lines = self_check_lines()
     for line in lines:
@@ -216,6 +216,14 @@ def _log_model_config_self_check() -> list[str]:
     missing = [line for line in lines if "**缺**" in line]
     if missing:
         logger.warning("有用途没有可用的 key：%s", "；".join(missing))
+    # **返回值一个字不动**（用例钉着 `返回值 == self_check_lines()`）；文件状态那几行
+    # 只进日志。理由：那一份是"每个用途一行"的纯解析表，混进去会让条数不变式破掉
+    # （契约 §3.2，照 `fallback_self_check_lines` 的先例）。
+    try:
+        for line in providers_file_lines():
+            logger.info("%s", line)
+    except Exception:  # noqa: BLE001 - 自检多一行失败不该让启动的这条链断掉
+        logger.warning("模型供应商文件状态打印失败", exc_info=True)
     return lines
 
 
@@ -249,12 +257,242 @@ def _log_mail_recipient_self_check() -> list[str]:
 # 这一段就是"核心给插件的东西"的落点：权限、动作执行、审计都在核心里。
 
 
+#: 面板上**投给文件**的键 → `(用途, 这个键管哪一项)`。
+#:
+#: 契约 §3.5 的落点：这些键必须在 `SETTINGS` 查表**之前**被接管（那一张表的语义是
+#: "写进 `os.environ`"，正是本轮要退掉的那条路）。**显式枚举、不许通配**：前缀匹配会
+#: 破掉 `operator_config.py:33-34`"白名单就是能力边界"那条性质——将来谁往 SETTINGS
+#: 加一个 `xxx_api_key`，它会**悄悄**改投文件，没人会发现。
+#:
+#: 键名全部复用现有的（U1）：6 个新的 `*_provider` + 原有的 `*_api_key` /
+#: `*_api_base_url` / `*_api_model`。`judge` / `memory` / `review` 三路在面板上本来就
+#: 只有 key 与 `memory_model`（`operator_config.SETTINGS` 里没有它们的地址/模型键），
+#: 所以这里也**不加新键**——换它们的供应商用 `*_provider`，模型沿用文件/当前那一个。
+_FILE_SETTINGS: dict[str, tuple[str, str]] = {
+    "reply_provider": ("reply", "provider"),
+    "letter_provider": ("letter", "provider"),
+    "judge_provider": ("judge", "provider"),
+    "memory_provider": ("memory", "provider"),
+    "review_provider": ("review", "provider"),
+    "vision_provider": ("vision", "provider"),
+    "reply_api_key": ("reply", "key"),
+    "letter_api_key": ("letter", "key"),
+    "judge_api_key": ("judge", "key"),
+    "memory_api_key": ("memory", "key"),
+    "review_api_key": ("review", "key"),
+    "vision_api_key": ("vision", "key"),
+    "reply_api_base_url": ("reply", "base_url"),
+    "letter_api_base_url": ("letter", "base_url"),
+    "vision_api_base_url": ("vision", "base_url"),
+    "reply_api_model": ("reply", "model"),
+    "letter_api_model": ("letter", "model"),
+    "memory_model": ("memory", "model"),
+    "vision_api_model": ("vision", "model"),
+}
+
+#: `*_api_key` 这项配置 → 它管哪个用途（"key 有没有值"的回显要按文件 ∪ 覆盖层判）。
+_SECRET_SETTING_TASK: dict[str, str] = {
+    "reply_api_key": "reply",
+    "letter_api_key": "letter",
+    "judge_api_key": "judge",
+    "memory_api_key": "memory",
+    "review_api_key": "review",
+    "vision_api_key": "vision",
+}
+
+
+def _file_value(field: str, value: object) -> str:
+    """把面板传来的值归一化（**不**走 `operator_config.normalize`：新键不在白名单里）。
+
+    只有三种：名字 / 地址 / 模型名，都是字符串；`secret` 那一项允许空串（= 删掉这一路）。
+    """
+
+    if isinstance(value, bool):
+        text = "1" if value else "0"
+    else:
+        text = str(value or "")
+    text = " ".join(text.split())
+    if field == "provider":
+        return text.casefold()
+    return text
+
+
+def _sync_after_write(task: str) -> None:
+    """写完文件之后让活 client 生效（契约 D13：重指向，而不是把面板值盖上去）。
+
+    两道一起上：
+    - `sync_from_file()`：按文件 mtime 判断，兜底模式下**故意不动**（推迟、不丢）；
+    - `repoint_task(task)`：只重指这一路。为什么还要它——"清空某一路"在文件里可能是
+      一个 **no-op**（本来就没写这一条），mtime 没变、第一道会正确地什么都不做，但内存里
+      那个 client 仍然需要回到环境那套（D12 的"空值 = 回落"）。
+    """
+
+    from . import provider_failover
+
+    try:
+        provider_failover.sync_from_file()
+        provider_failover.repoint_task(task)
+    except Exception:  # noqa: BLE001 - 同步失败不该让"已经写进文件"变成写失败
+        logger.warning("模型来源同步失败（写完之后）", exc_info=True)
+
+
+def _apply_file_settings(engine, task: str, fields: dict[str, str],
+                         keys: list[str], *, config, audit, source: str,
+                         token: str) -> dict[str, object]:
+    """把一个用途的几项面板改动**一次写进文件**，然后让活 client 重指向。
+
+    契约 D11/D13：一次 `os.replace` 写全 `providers.<名字>` + `agents.<用途>`；
+    生效不靠"把面板给的原始值盖到 client 上"（那会造出地址与 key 不来自同一条），
+    而是写完之后 `provider_failover.sync_from_file()` 重新 `resolve()` 一遍。
+
+    `fields` 是**字段名 → 归一化后的值**（provider/key/base_url/model），`keys` 是这些值
+    来自哪几个面板键名（回执要按面板键逐个回，`apply_overrides` 要给它们同一个 detail）。
+    """
+
+    from . import model_config
+    from .model_providers_store import ModelProvidersRejected, clear_agent, upsert_agent
+
+    endpoint = model_config.resolve(task)  # 当前这一路（文件有就按文件，否则按环境）
+    entry = model_config.file_agent_entry(task)
+    provider_in = fields.get("provider", "")
+    key_given = "key" in fields
+    key_value = fields.get("key", "")
+
+    # D12：**空值 = 把该用途从文件里删掉**（回到环境变量那套），不是"写一个空 key"。
+    if key_given and not key_value and not provider_in \
+            and "base_url" not in fields and "model" not in fields:
+        try:
+            result = clear_agent(task, audit=audit, source=source, token=token)
+        except ModelProvidersRejected as exc:
+            return {"applied": "rejected", "detail": str(exc), "keys": keys}
+        _sync_after_write(task)
+        popped = _drop_operator_values(config, keys)
+        detail = f"已从模型供应商文件里删掉 {task}（回到 .env 那套）"
+        if popped:
+            detail += "；旧覆盖项已清理"
+        return {"applied": "live", "detail": detail, "keys": keys,
+                "cleared": bool(result.get("cleared"))}
+
+    # 文件里**没有**"只有地址、没有模型"这种形状（`agents.<用途>` 必须 provider + model，
+    # `providers.<名字>` 必须 base_url）。所以面板把地址或模型清空 = **把这一路从文件里
+    # 删掉**（与 D12 的空 key 语义一致），而不是造一个读侧一定会拒的半条。
+    blank_fields = [name for name in ("base_url", "model")
+                    if name in fields and not fields[name]]
+    if blank_fields:
+        if provider_in:
+            return {"applied": "rejected",
+                    "detail": "换供应商必须同时给模型名与地址（不许只清一项）", "keys": keys}
+        try:
+            clear_agent(task, audit=audit, source=source, token=token)
+        except ModelProvidersRejected as exc:
+            return {"applied": "rejected", "detail": str(exc), "keys": keys}
+        _sync_after_write(task)
+        popped = _drop_operator_values(config, keys)
+        detail = (f"已把 {'、'.join(blank_fields)} 清空 ⇒ {task} 从模型供应商文件里删掉"
+                  "（回到 .env 那套）")
+        if popped:
+            detail += "；旧覆盖项已清理"
+        return {"applied": "live", "detail": detail, "keys": keys, "cleared": True}
+
+    provider = provider_in or str(entry.get("provider", "") or "") or endpoint.provider
+    if not provider:
+        return {"applied": "rejected", "detail": "说不清要写哪一家（provider 为空）", "keys": keys}
+    file_specs = model_config.file_provider_specs()
+    file_has = model_config.file_provider_has_key(provider)
+    if provider == "custom":
+        # U2：`custom` 必须命名、地址与 key **成对**落进同一个 `providers.<名字>`。
+        # 只给地址不给 key → rejected（这一条是用户拍定的）。
+        base_url = fields.get("base_url", "") or str(
+            (file_specs.get("custom") or {}).get("base_url", "") or "")
+        if not base_url:
+            return {"applied": "rejected", "detail": "自定义地址要先填地址", "keys": keys}
+        if key_given and not key_value:
+            return {"applied": "rejected",
+                    "detail": "自定义地址要先填 key（地址与 key 必须成对）", "keys": keys}
+        if not key_given and not file_has:
+            return {"applied": "rejected",
+                    "detail": "自定义地址要先填 key（地址与 key 必须成对）", "keys": keys}
+    else:
+        try:
+            base_url = fields.get("base_url", "") or model_config.provider_base_url(provider)
+        except model_config.UnknownProvider:
+            return {"applied": "rejected",
+                    "detail": f"不认识的供应商：{provider}", "keys": keys}
+    model = fields.get("model", "") or str(entry.get("model", "") or "") or endpoint.model
+    if not model:
+        return {"applied": "rejected", "detail": "模型名为空", "keys": keys}
+    # **地址与 key 必须成对**（D13）：文件里这一家还没有 key、而这次也没给 key 时，
+    # 一个"地址与内置不同"的条目到了读侧会被**拒掉**（D1 的闸），写完等于没写。
+    # 与其留一个"面板说成功、实际不生效"的半条，不如当场拒掉并说清先填什么。
+    key_will_exist = (key_given and bool(key_value)) or file_has
+    if not key_will_exist:
+        try:
+            builtin_url = model_config.builtin_provider_base_url(provider)
+        except model_config.UnknownProvider:
+            builtin_url = ""
+        if base_url.rstrip("/") != builtin_url.rstrip("/"):
+            return {"applied": "rejected",
+                    "detail": (f"providers.{provider} 还没有 key：先把 key 填上"
+                               "（地址与 key 必须成对），或者先只填 key 再改地址"),
+                    "keys": keys}
+    try:
+        written = upsert_agent(
+            task, provider=provider, model=model, base_url=base_url,
+            key=key_value if key_given else None,
+            audit=audit, source=source, token=token,
+        )
+    except ModelProvidersRejected as exc:
+        return {"applied": "rejected", "detail": str(exc), "keys": keys}
+    # 写完之后**不**把面板值盖到 client 上：让它重新 `resolve()` 一遍
+    # （兜底期间 `sync_from_file()` 故意不动，改动推迟、不丢，见 §6.4）。
+    _sync_after_write(task)
+    popped = _drop_operator_values(config, keys)
+    detail = (f"已写入 {os.path.basename(model_config.providers_file_path())}：{task} → "
+              f"{written['provider']}（模型 {written['model']}）")
+    if written.get("converged"):
+        detail += f"；同一地址已有 {written['provider']}，按地址收敛（用户 U3）"
+    if provider != endpoint.provider and "model" not in fields:
+        detail += f"；模型名沿用 {model}（新家不一定有它，请一并确认模型名）"
+    if popped:
+        detail += "；旧覆盖项已清理"
+    return {"applied": "live", "detail": detail, "keys": keys}
+
+
+def _drop_operator_values(config, keys: list[str]) -> bool:
+    """D8：面板把某用途写进文件时，**顺手清掉** `operator_config.json` 里同一项的旧值。
+
+    不清的话，将来把那一项**从文件里删掉**时旧值会**悄悄复活**（"我明明删了"）。
+    只删**同一项**；值仍在 `control_audit` 里有记录、`.env` 也还在。
+    """
+
+    popped = False
+    for key in keys:
+        if key in getattr(config, "values", {}):
+            config.values.pop(key, None)
+            popped = True
+    return popped
+
+
 def _build_client_overrides(engine, operator) -> dict[str, str]:
-    """把覆盖层里的凭据类配置列出来（**不回显值**，只给"改过没有"）。"""
+    """凭据类配置"改过没有"：**文件 ∪ 覆盖层**，永不返回值。
+
+    契约 §3.5：key 现在住在 `data/model_providers.json` 里，只读 `operator_config`
+    会显示成"未设置"（而它明明配好了）——这就是"面板说没配、实际有 key"的分叉。
+    """
+
+    from . import model_config
 
     stored = getattr(operator, "values", {}) or {}
-    return {key: ("已设置" if stored.get(key) else "未设置")
-            for key, spec in operator_config.SETTINGS.items() if spec["kind"] == "secret"}
+    result: dict[str, str] = {}
+    for key, spec in operator_config.SETTINGS.items():
+        if spec["kind"] != "secret":
+            continue
+        if stored.get(key):
+            result[key] = "已设置"
+            continue
+        task = _SECRET_SETTING_TASK.get(key)
+        result[key] = "已设置" if task and model_config.file_has_key(task) else "未设置"
+    return result
 
 
 def apply_overrides(engine, payload: dict[str, object], *,
@@ -273,13 +511,37 @@ def apply_overrides(engine, payload: dict[str, object], *,
     - **空值 = 回落**：留空的 key 类配置会被写进覆盖层，含义是"清掉这一项"，
       而不是"把空 key 设上去"。这与 `agent_api_key` 的回落语义一致。
     - **重启项如实标注**：`restart_required` 就是不生效，面板必须照实显示。
+    - **六个用途的供应商 / key / 地址 / 模型改投文件**（2026-10-18 契约 §3.5）：
+      它们在进白名单查表之前就被 `_FILE_SETTINGS` 接管，写进
+      `data/model_providers.json`（唯一存储），然后同步重指向活 client。
+      所以它们**不会**再被写进 `os.environ` 或 `operator_config.json`。
     """
 
     config = store if store is not None else operator_config.shared()
     applied: dict[str, dict[str, str]] = {}
     chosen_provider = str(payload.get("provider", "") or "").strip().casefold()
     explicit_url = str(payload.get("api_base_url", "") or "").strip()
+    # ⓪ **投给文件的键先接管**——必须排在 `SETTINGS` 查表之前（那张表的语义是
+    #    "写进 os.environ"，正是本轮要退掉的那条路）。
+    file_groups: dict[str, dict[str, str]] = {}
+    file_keys: dict[str, list[str]] = {}
     for key in list(payload):
+        routing = _FILE_SETTINGS.get(str(key))
+        if routing is None:
+            continue
+        task, field = routing
+        file_groups.setdefault(task, {})[field] = _file_value(field, payload[key])
+        file_keys.setdefault(task, []).append(str(key))
+    for task, fields in file_groups.items():
+        result = _apply_file_settings(engine, task, fields, file_keys.get(task, []),
+                                      config=config, audit=audit, source=source,
+                                      token=token)
+        for key in result.get("keys", []):  # type: ignore[union-attr]
+            applied[str(key)] = {"applied": str(result["applied"]),
+                                 "detail": str(result["detail"])}
+    for key in list(payload):
+        if str(key) in applied:
+            continue  # 已由文件那一档处理（成功或拒绝）
         spec = operator_config.SETTINGS.get(str(key))
         if spec is None:
             applied[str(key)] = {"applied": "rejected", "detail": "不认识的配置项"}
@@ -509,9 +771,18 @@ def _reapply_reply_overrides(*, model: bool = False, api_key: bool = False) -> N
     def _specific(name: str) -> str:
         return os.environ.get(name, "").strip()
 
-    if model and _specific("QQBOT_REPLY_API_MODEL"):
+    def _file_has() -> bool:
+        """文件里配了 reply 这一路吗（读 store 的解析结果，不猜）。"""
+
+        from . import model_config
+
+        return model_config.file_has_agent("reply")
+
+    # 判据（契约 §3.5）：原来只看环境变量，而"文件里配了、环境里没配"是新架构下最常见
+    # 的形状——那时这一步会被**永久跳过**（文件里的专属值被全局改动冲掉）。
+    if model and (_file_has() or _specific("QQBOT_REPLY_API_MODEL")):
         apply_client_overrides(model=_cfg.reply_api_model(), usage_role="dialogue")
-    if api_key and _specific("QQBOT_REPLY_API_KEY"):
+    if api_key and (_file_has() or _specific("QQBOT_REPLY_API_KEY")):
         apply_client_overrides(api_key=_cfg.reply_api_key(), usage_role="dialogue")
 
 
@@ -1985,8 +2256,10 @@ def _build_style_reviewer(usage_store=None):
     它不再返回改写后的文本，正文永远出自回复 agent 自己。
     """
 
-    if not dev_config.REVIEW_ENABLED:
-        logger.info("风格审核未启用（QQBOT_STYLE_REVIEW=0 / 未配 QQBOT_REVIEW_API_KEY）")
+    # 判据是**函数**（2026-10-18，契约 D15）：import 期常量会让"文件里给了 review 的 key"
+    # 永远不生效——配了却永远不生效是最坏的一种。
+    if not dev_config.review_enabled():
+        logger.info("风格审核未启用（QQBOT_STYLE_REVIEW=0 / 文件与 .env 都没有 review 的 key）")
         return None
     from .model_config import MissingCredential
 
@@ -2907,6 +3180,13 @@ async def _message_loop(
     async def focus_loop() -> None:
         while True:
             await asyncio.sleep(tick_seconds)
+            # "改文件即生效"的钩子之二（契约 D6）：后台那几条（记忆维护 / 金句 / 读信 /
+            # 余额探针）在**另一个任务**里跑模型，只留 `handle()` 那一处会出现"记忆那一路
+            # 还在用旧家、要等下一轮群消息才恢复"的窗口。没变时只做一次 `stat`。
+            try:
+                provider_failover.sync_from_file()
+            except Exception:  # noqa: BLE001 - 同步失败不该带走焦点时钟
+                logger.warning("模型来源同步失败（焦点时钟）", exc_info=True)
             try:
                 for source, outgoing in await engine.tick():
                     await _deliver_reply(transport, engine, source, outgoing, outbox=outbox)

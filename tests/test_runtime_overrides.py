@@ -270,11 +270,16 @@ def test_empty_secret_means_fall_back_to_main_key() -> None:
 
 @_restores_shared_flags
 def test_clearing_a_role_key_leaves_no_empty_env_behind() -> None:
-    """清空某一项凭据时，环境里**不能留下空串**。
+    """清空某一项凭据时，环境里**不能留下空串**——而现在连"动环境"这件事都不该发生。
 
     由来（2026-10-01 实测发现）：`_factory_api_key` 读的是环境变量，环境里留一个空串
     会让**之后新建的会话 client 拿到空 key**——那个群从此一句话都说不出来，
     而且要重启才能恢复。空值必须表现为"环境里没有这一项"。
+
+    2026-10-18（契约 §3.5）：`judge_api_key` 这类键**改投文件**，面板不再写
+    `os.environ`。所以判据升级成更强的一条：清空之后环境里那项**原样没动**
+    （既不是空串、也不是被删掉），"空值"只表现在文件里（这一路被删掉）。
+    `_factory_api_key` 仍然读得到操作者配的那把——正是改动前的行为。
     """
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -286,11 +291,12 @@ def test_clearing_a_role_key_leaves_no_empty_env_behind() -> None:
             os.environ["QQBOT_API_KEY"] = "sk-main"
             os.environ["QQBOT_JUDGE_API_KEY"] = "sk-panel-set"
             apply_overrides(_Engine(), {"judge_api_key": ""}, store=_operator(tmp))
-            assert "QQBOT_JUDGE_API_KEY" not in os.environ, "环境里留下了空串"
-            assert judge.api_key == "sk-main"
+            assert os.environ.get("QQBOT_JUDGE_API_KEY") == "sk-panel-set", \
+                "面板清空一项不该去动操作者的环境变量（更不能留空串）"
+            assert judge.api_key == "sk-panel-set", "清空 = 回到环境那套（这一路仍按 .env）"
             from qq_roleplay_bot.runtime import _factory_api_key
 
-            assert _factory_api_key("QQBOT_JUDGE_API_KEY", "fallback") == "fallback"
+            assert _factory_api_key("QQBOT_JUDGE_API_KEY", "fallback") == "sk-panel-set"
         finally:
             judge.api_key = ""
             for name, value in saved.items():

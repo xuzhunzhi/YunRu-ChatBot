@@ -80,6 +80,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from urllib.parse import urlsplit
+
+from . import model_providers_store as _providers_store
 
 #: 供应商 → **只有连接信息**。这里绝不出现任何 key。
 #:
@@ -271,6 +274,300 @@ MODEL_ENV_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 
+# --- 文件层：`data/model_providers.json`（2026-10-18 核心契约）-----------------
+#
+# 这一段的形状是**一层覆盖**，不是第二套配置：文件里**写了的**用途按文件来
+# （供应商 / 地址 / key / 模型 / effort）；**没写的**逐字回落到今天那套
+# （`PROVIDERS` / `KEYS` / `TASKS` + `.env` + `data/operator_config.json`）。
+# 所以"没有这个文件"是这套代码里一个**必须保持可测试**的状态——它等价于今天
+# （契约 §五 / §5.2 的三重证法）。
+#
+# 三条写死的纪律（改之前先读，别让它们漂）：
+#
+# 1. **文件只有一处读口**：`_providers_file()`。`resolve` / `_key_source` /
+#    `_base_url_for` / `_resolve_model` 全从它（或它的 `_file_plan()`）取——那正是
+#    2026-10-06 那次 401 的根因：同一个值有第二处来源，就能拼出混搭。
+#    `tests/test_model_providers_file.py` 按源码形状钉住这一条。
+# 2. **文件里的用途一定成对取**：地址与 key 来自**同一个** `providers.<名字>` 条目
+#    （契约 D13）。所以文件这一档要么整份给出（地址 + key），要么拒绝这一路。
+# 3. **没写进文件的用途看不见文件里的 provider 覆盖**：文件的 `providers.deepseek`
+#    改了地址，也不会搬走环境中走 deepseek 的判定（那一路没写进文件）。否则"只配了
+#    回复那一路"会悄悄改到另外五路的地址——§5.1 的"没写的用途一字不改"就破了。
+#    ⇒ 环境那一条链路只认内置 `PROVIDERS`（`_builtin_base_url`）。
+
+
+@dataclass(frozen=True)
+class _FilePlan:
+    """文件给某个用途**算出来的一整份来源**（地址 / key / 模型一起，不许拆开取）。"""
+
+    task: str
+    provider: str
+    base_url: str
+    model: str
+    api_key: str
+    key_name: str
+    key_env: str
+    own_key: bool
+    reasoning_effort: str = ""
+    #: 这一份是从哪一档来的（自检行里打出来，人一眼能看出"文件到底生效没有"）。
+    origin: str = ""
+
+
+@dataclass(frozen=True)
+class _FileView:
+    """某一刻文件的**只读视图**：剥掉 key 的连接信息 + 原始 agents 条目。"""
+
+    snapshot: object
+    #: 供应商名 → `{base_url, client_type}`（**剥掉 key**，与 `PROVIDERS` 同形状）。
+    specs: dict[str, dict[str, str]]
+    #: 供应商名 → key（明文，**只在本模块内用来解析，不许进日志/自检**）。
+    keys: dict[str, str]
+    #: 用途名 → 原始条目（未校验；`_file_plan` 负责校验并给原因）。
+    agents: dict[str, dict[str, str]]
+    issues: tuple[str, ...] = ()
+
+
+_VIEW: "_FileView | None" = None
+#: 与 `_VIEW` 配套的缓存键 `(路径, mtime_ns, size, last_error, version_ok)`。
+_VIEW_KEY: object = None
+
+
+def _build_file_view(snapshot: object) -> _FileView:
+    providers = getattr(snapshot, "providers", {}) or {}
+    specs: dict[str, dict[str, str]] = {}
+    keys: dict[str, str] = {}
+    for name, entry in providers.items():
+        spec = {"base_url": str(entry.get("base_url", "") or "")}
+        client_type = str(entry.get("client_type", "") or "")
+        spec["client_type"] = client_type or "openai"
+        specs[name] = spec
+        key = str(entry.get("key", "") or "")
+        if key:
+            keys[name] = key
+    return _FileView(snapshot=snapshot, specs=specs, keys=keys,
+                     agents=dict(getattr(snapshot, "agents", {}) or {}),
+                     issues=tuple(getattr(snapshot, "issues", ()) or ()))
+
+
+def _providers_file() -> _FileView:
+    """**唯一**读口（见上面纪律 1）。按 `(路径, mtime_ns, size)` 缓存一份视图。"""
+
+    global _VIEW, _VIEW_KEY
+    snapshot = _providers_store.load()
+    key = (str(snapshot.path), snapshot.token, snapshot.last_error, snapshot.version_ok)
+    view = _VIEW
+    if view is not None and _VIEW_KEY == key:
+        return view
+    view = _build_file_view(snapshot)
+    _VIEW = view
+    _VIEW_KEY = key
+    return view
+
+
+def _host_of(url: str) -> str:
+    """只取 `scheme://host[:port]`：自检里要能看出"名字与地址对不对得上"。
+
+    为什么不用整条 URL：地址的 path / query 里可能塞着 token（中转站很常见），
+    自检行会进日志。
+    """
+
+    try:
+        parts = urlsplit(str(url or ""))
+    except ValueError:  # pragma: no cover - urlsplit 很少抛，抛了也不该拖垮自检
+        return ""
+    return parts.netloc or ""
+
+
+def _file_plan(task: str) -> _FilePlan | None:
+    """这个用途在文件里有没有一份**可用**的计划；没有（没写 / 写坏了）返回 `None`。
+
+    写坏了不是"整份作废"：只废这一路，原因由 `_file_rejection()` 报给 `status()`。
+    """
+
+    view = _providers_file()
+    entry = view.agents.get(task)
+    if entry is None:
+        return None
+    plan, _why = _plan_from_entry(task, entry, view)
+    return plan
+
+
+def _file_rejection(task: str) -> str:
+    """这个用途被文件拒绝的原因；没写或可用时是空串（`status()` 与自检行用）。"""
+
+    view = _providers_file()
+    entry = view.agents.get(task)
+    if entry is None:
+        return ""
+    plan, why = _plan_from_entry(task, entry, view)
+    return "" if plan is not None else why
+
+
+def _plan_from_entry(task: str, entry: dict[str, str],
+                     view: _FileView) -> tuple[_FilePlan | None, str]:
+    """把一个 `agents.<用途>` 条目算成一份来源，或者给出**为什么不能用**。
+
+    这一段的顺序就是契约 D1（"宽松带闸"）：
+    ① 文件里写了这一家、而且有 key → 用它（最高优先，压过环境）；
+    ② 写了这一家、没写 key → 只有地址与内置那条**完全相同**时，才允许借该用途的
+       环境变量 key（挡死"文件改了地址却借 .env 的 key"——那是 2026-10-06 的形状）；
+    ③ 这一家**不在**文件里 → 走内置表 + 环境变量（= 今天）。
+    """
+
+    provider = str(entry.get("provider", "") or "").strip().casefold()
+    model = str(entry.get("model", "") or "").strip()
+    effort = str(entry.get("reasoning_effort", "") or "").strip()
+    if not provider:
+        return None, "缺 provider"
+    if not model:
+        return None, "缺 model（文件里写了的用途必须自己给模型名）"
+    if provider in view.specs:
+        base_url = view.specs[provider]["base_url"].rstrip("/")
+        key = view.keys.get(provider, "")
+        if key:
+            return _FilePlan(task=task, provider=provider, base_url=base_url, model=model,
+                             api_key=key, key_name=f"文件:providers.{provider}",
+                             key_env=f"文件:providers.{provider}", own_key=True,
+                             reasoning_effort=effort, origin="文件"), ""
+        builtin = PROVIDERS.get(provider)
+        if builtin is None or builtin["base_url"].rstrip("/") != base_url:
+            return None, (f"providers.{provider} 没写 key，而地址又不是内置那一条"
+                          "（不许让文件改了地址却借 .env 里的 key）")
+        source = _env_key_source(task)
+        if not source.value:
+            return None, f"providers.{provider} 没写 key，环境里也没有这一路可用的 key"
+        if source.is_main:
+            declared, _stated = _main_provider(task)
+            if declared != provider:
+                return None, (f"环境里的主 key 属于 {declared}，与文件写的 {provider}"
+                              " 不是同一家（地址与 key 必须成对）")
+        elif source.provider != provider:
+            return None, (f"环境里那条 key 属于 {source.provider}，与文件写的 {provider}"
+                          " 不是同一家（地址与 key 必须成对）")
+        return _FilePlan(task=task, provider=provider, base_url=base_url, model=model,
+                         api_key=source.value, key_name=source.name, key_env=source.env,
+                         own_key=source.own, reasoning_effort=effort,
+                         origin="文件·借环境 key"), ""
+    if provider in PROVIDERS:
+        source = _env_key_source(task)
+        base_url = _env_base_url_for(task, source)
+        actual = source.provider or _default_provider(task)
+        return _FilePlan(task=task, provider=actual, base_url=base_url, model=model,
+                         api_key=source.value, key_name=source.name, key_env=source.env,
+                         own_key=source.own, reasoning_effort=effort,
+                         origin="文件·家回落"), ""
+    return None, f"不认识的供应商 {provider}（文件 providers 与内置表里都没有）"
+
+
+def providers_file_token() -> tuple[int, int] | None:
+    """文件的 `(mtime_ns, size)`；没有文件时是 `None`（`provider_failover` 用它判"变没变"）。"""
+
+    return _providers_file().snapshot.token  # type: ignore[union-attr]
+
+
+def file_provider_specs() -> dict[str, dict[str, str]]:
+    """文件里那几家供应商的连接信息（**剥掉 key**；`provider_registry` 合并视图用）。"""
+
+    return {name: dict(spec) for name, spec in _providers_file().specs.items()}
+
+
+def file_has_agent(task: str) -> bool:
+    """这个用途**真的**由文件管着（文件里写了、而且那一份能用）。"""
+
+    return _file_plan(str(task or "").strip().casefold()) is not None
+
+
+def file_has_key(task: str) -> bool:
+    """这个用途的 key 是从**文件里那条 provider** 取的（不是借环境的）。"""
+
+    plan = _file_plan(str(task or "").strip().casefold())
+    return plan is not None and plan.own_key and plan.key_env.startswith("文件:providers.")
+
+
+def file_agent_entry(task: str) -> dict[str, str]:
+    """文件里那个用途的原始条目（没写返回空 dict）。写侧拿它兜"沿用现有的模型名"。"""
+
+    return dict(_providers_file().agents.get(str(task or "").strip().casefold()) or {})
+
+
+def file_provider_has_key(name: str) -> bool:
+    """文件里这一家**有没有 key**（写侧判"自定义地址能不能只改地址"用；不返回值）。"""
+
+    return bool(_providers_file().keys.get(str(name or "").strip().casefold()))
+
+
+def providers_file_path() -> str:
+    """文件的路径（自检 / 回执里用；读侧的唯一出口仍是 `_providers_file()`）。"""
+
+    return str(_providers_file().snapshot.path)  # type: ignore[union-attr]
+
+
+def file_reasoning_effort(task: str) -> str:
+    """文件给这个用途的 `reasoning_effort`；没写返回空串（由 `dev_config` 接着往环境看）。"""
+
+    plan = _file_plan(str(task or "").strip().casefold())
+    return plan.reasoning_effort if plan is not None else ""
+
+
+def providers_file_lines() -> list[str]:
+    """文件状态那 1~3 行（**不并进 `self_check_lines()`**：那一份的条数被用例钉死）。
+
+    照 `fallback_self_check_lines()` 的先例单开一个函数：文件状态是"另一件事"
+    （哪几路被文件接管、哪几路被文件拒了），混进"每个用途一行"的表会把那条不变式弄红。
+    """
+
+    view = _providers_file()
+    snapshot = view.snapshot
+    if not snapshot.present:  # type: ignore[union-attr]
+        return [f"模型供应商文件: {snapshot.path} 不存在（= 今天那套：.env + operator_config）"]  # type: ignore[union-attr]
+    if snapshot.last_error:  # type: ignore[union-attr]
+        return [f"模型供应商文件: {snapshot.path} 整份忽略（{snapshot.last_error}）：按今天那套跑"]  # type: ignore[union-attr]
+    effective = [task for task in TASK_NAMES if _file_plan(task) is not None]
+    lines = [f"模型供应商文件: {snapshot.path} 生效 {len(effective)}/{len(TASK_NAMES)} 用途"  # type: ignore[union-attr]
+             f"（{'、'.join(effective) or '无'}）；providers={len(view.specs)}"]
+    if view.specs:
+        # host 只到 `scheme://host`（§6.3：名字与地址对不对得上，一眼看得出来）。
+        lines.append("模型供应商文件·地址: " + "、".join(
+            f"{name}@{_host_of(spec['base_url']) or '?'}"
+            for name, spec in sorted(view.specs.items())))
+    rejected = {task: why for task in TASK_NAMES if (why := _file_rejection(task))}
+    if rejected:
+        lines.append("模型供应商文件·被拒: " + "；".join(
+            f"{task}（{why}）" for task, why in rejected.items()))
+    if view.issues:
+        lines.append("模型供应商文件·坏条目: " + "；".join(view.issues))
+    return lines
+
+
+def status() -> dict[str, object]:
+    """文件 + 解析结果的读数（自检 / 面板 / 测试用；**不含任何 key 值**）。
+
+    `rejected` 是"文件里写了但这一路用不了"的用途 → 原因。为什么不在
+    `model_providers_store.status()` 里算它：store **不认识 `TASK_NAMES`**（契约 §3.4，
+    两份用途名清单必然漂移），所以"哪几路生效/被拒"只能在这一层算。
+    """
+
+    view = _providers_file()
+    snapshot = view.snapshot
+    effective = [task for task in TASK_NAMES if _file_plan(task) is not None]
+    rejected = {task: why for task in TASK_NAMES if (why := _file_rejection(task))}
+    return {
+        "path": str(snapshot.path),  # type: ignore[union-attr]
+        "present": bool(snapshot.present),  # type: ignore[union-attr]
+        "mtime": round(float(snapshot.mtime), 3),  # type: ignore[union-attr]
+        "token": list(snapshot.token) if snapshot.token else None,  # type: ignore[union-attr]
+        "last_error": str(snapshot.last_error),  # type: ignore[union-attr]
+        "version_ok": bool(snapshot.version_ok),  # type: ignore[union-attr]
+        "providers": sorted(view.specs),
+        "agents": sorted(view.agents),
+        "effective": effective,
+        "rejected": rejected,
+        "unknown_agents": sorted(set(view.agents) - set(TASK_NAMES)),
+        "issues": list(getattr(snapshot, "issues", ()) or ()),
+        "notes": list(getattr(snapshot, "duplicate_urls", ()) or ()),
+    }
+
+
 class UnknownTask(ValueError):
     """问了一个不在表里的用途名。别名不许猜——凭据类配置最怕"改了却没生效"。"""
 
@@ -311,6 +608,11 @@ class TaskEndpoint:
     key_env: str
     #: 有值的那条 key 是不是"自己那条"（False = 走了回落）。
     own_key: bool
+    #: 这一趟的值是从哪来的：`"文件"` = `data/model_providers.json`；空串 = 今天那套。
+    #:
+    #: 为什么要这个字段而不是"看 `key_env` 里有没有'文件'字样"：把语义藏在字符串里，
+    #: 下一个人改一个措辞就断了（契约 §3.2）。
+    source: str = ""
 
     def key_present(self) -> bool:
         return bool(self.api_key)
@@ -332,8 +634,13 @@ class TaskEndpoint:
             source = f"（{origin}）"
         else:
             source = "" if self.own_key else "（回落到这一条）"
-        return (f"{self.task}: provider={self.provider} model={self.model} "
+        line = (f"{self.task}: provider={self.provider} model={self.model} "
                 f"key={self.key_env}{source} {mark}")
+        if self.source:
+            # 文件那一路额外说清"来源 + host"：§6.3 要一眼看出"名字与地址对不对得上"
+            # （host 只到 `scheme://host`，不带 path/query——防止地址里塞的 token 进日志）。
+            line += f" 来源={self.source} host={_host_of(self.base_url) or '?'}"
+        return line
 
 
 def _read(name: str) -> str:
@@ -387,13 +694,50 @@ def _main_bundle_configured() -> bool:
     return bool(_main_key_value())
 
 
-def provider_base_url(provider: str) -> str:
-    """供应商的地址。不认识的供应商**明确报错**，不"就近找相似的"。"""
+def _builtin_base_url(provider: str) -> str:
+    """**内置**供应商的地址（环境那一条链路只看它，看不见文件里的覆盖）。
+
+    为什么环境链路必须看不见文件（契约 §5.1 的"没写的用途一字不改"）：文件里
+    `providers.deepseek` 改成中继地址，只该影响**写进文件的那几路**；判定没写进文件，
+    它仍然打 deepseek 官方地址。否则"只配了回复那一路"会悄悄搬走另外五路——
+    这正是 10-06 那次的形状（地址与 key 来自两个地方）。文件里的新家（如 `relay1`）
+    由 `_file_plan()` 自己认，不靠这里。
+    """
 
     spec = PROVIDERS.get(str(provider or "").strip().casefold())
     if spec is None:
         raise UnknownProvider(f"不认识的供应商：{provider}")
     return spec["base_url"]
+
+
+def _provider_spec(name: str) -> dict[str, str]:
+    """供应商的连接信息（**剥掉 key**）：文件里有就用文件的，否则内置表。
+
+    `PROVIDERS` 的字面量一个字都不改（`tests/test_model_config.py::test_the_three_layers_
+    are_layered` 钉着 `set(entry) == {"base_url", "client_type"}`）；文件条目带 `key`，
+    并进那张表就会把凭据混进"只放连接信息"的那一层。
+    """
+
+    key = str(name or "").strip().casefold()
+    spec = _providers_file().specs.get(key)
+    if spec is not None:
+        return spec
+    builtin = PROVIDERS.get(key)
+    if builtin is None:
+        raise UnknownProvider(f"不认识的供应商：{name}")
+    return builtin
+
+
+def provider_base_url(provider: str) -> str:
+    """供应商的地址（文件优先，内置兜底）。不认识的供应商**明确报错**，不"就近找相似的"。"""
+
+    return _provider_spec(provider)["base_url"]
+
+
+def builtin_provider_base_url(provider: str) -> str:
+    """**内置表**那一份地址（写侧判"文件里这一家的地址是不是就是内置那条"用）。"""
+
+    return _builtin_base_url(provider)
 
 
 @dataclass(frozen=True)
@@ -429,7 +773,21 @@ def _main_provider(task: str) -> tuple[str, bool]:
 
 
 def _key_source(task: str) -> _KeySource:
-    """这条用途的 key 来源。三档，顺序写死在这里：
+    """这条用途的 key 来源：**文件第一**（写进文件的用途押过一切），否则今天那三档。
+
+    文件那一档的判据是 `_file_plan()`（它已经算好"地址与 key 出自同一条"）；这一层
+    只把那份计划翻译成 `_KeySource`，不再自己读环境——两处取值的形状正是要消灭的东西。
+    """
+
+    plan = _file_plan(task)
+    if plan is not None:
+        return _KeySource(name=plan.key_name, env=plan.key_env, value=plan.api_key,
+                          provider=plan.provider, own=plan.own_key)
+    return _env_key_source(task)
+
+
+def _env_key_source(task: str) -> _KeySource:
+    """**今天那套**的 key 来源（环境变量 / `.env` / 兼容档）。三档，顺序写死在这里：
 
     ① **自己那条**（`KEYS[用途的 key]["env"]`）有值就用它；
     ② 表里写明的**同家回落**（例如 `letter → reply` 那把 mimo key）有值就用它；
@@ -537,6 +895,15 @@ def _follow_same_family(name: str) -> _KeySource | None:
 
 
 def _known_provider(provider: str, where: str) -> str:
+    """**内置**表里认不认识这一家（`KEYS` / 兼容档 / 兜底这三条链路只认内置表）。
+
+    契约 §3.2 原来要求它改走 `_provider_spec()`（= 也认文件里的新家）。**没这么做**，
+    因为它只被"今天那套"的链路调用（`KEYS` 的字面量 + `QQBOT_API_PROVIDER`），那些
+    地方永远只会写内置名字；让它认文件等于让文件里的同名条目**改写没写进文件的用途**
+    （文件 `providers.deepseek` 改了地址 → 没写进文件的判定也被搬走），那是 §5.1 明确
+    不许的。文件里的新家由 `_file_plan()` 直接认（它看 `providers` ∪ `PROVIDERS`）。
+    """
+
     key = str(provider or "").strip().casefold()
     if key not in PROVIDERS:
         raise UnknownProvider(f"{where} 绑了一个不认识的供应商：{provider}")
@@ -564,7 +931,21 @@ def _fallback_source() -> _KeySource | None:
 
 
 def _base_url_for(task: str, source: _KeySource) -> str:
-    """地址：任务级覆盖 → **这份来源自己的地址**。
+    """地址：文件里写了的用途**只**取文件那条 provider 的地址；否则今天那套。
+
+    文件这一档就是"成对取自同一条"的落点：地址与 key 出自**同一个**
+    `providers.<名字>`（契约 D13）。没有它，地址就会退回"全局"那个来源——那正是
+    2026-10-06 那次三系统 401 的形状。
+    """
+
+    plan = _file_plan(task)
+    if plan is not None:
+        return plan.base_url
+    return _env_base_url_for(task, source)
+
+
+def _env_base_url_for(task: str, source: _KeySource) -> str:
+    """**今天那套**的地址：任务级覆盖 → **这份来源自己的地址**（内置表那一份）。
 
     最后那一档就是成对保证的落点——没有它，地址就会退回"全局"那个来源，
     那正是这次事故的形状。兼容档那一对的地址就是 `QQBOT_API_BASE_URL`
@@ -579,8 +960,8 @@ def _base_url_for(task: str, source: _KeySource) -> str:
         # 所以地址与 key 成对。地址取 `QQBOT_API_BASE_URL`；没配地址时取
         # 这一对所属那家的默认地址（`QQBOT_API_PROVIDER` 声明的那家，或本用途自带那家）。
         provider, _declared = _main_provider(task)
-        return (_read(COMPAT_BASE_URL_ENV) or provider_base_url(provider)).rstrip("/")
-    return provider_base_url(source.provider)
+        return (_read(COMPAT_BASE_URL_ENV) or _builtin_base_url(provider)).rstrip("/")
+    return _builtin_base_url(source.provider)
 
 
 def _default_provider(task: str) -> str:
@@ -590,7 +971,16 @@ def _default_provider(task: str) -> str:
 
 
 def _resolve_model(task: str) -> str:
-    """模型名：任务级覆盖（含迁移期老名字）→ 兼容档 → `tasks` 里的真名。"""
+    """模型名：文件里写了的用途**只**取 `agents.<用途>.model`；否则今天那套。"""
+
+    plan = _file_plan(task)
+    if plan is not None:
+        return plan.model
+    return _env_resolve_model(task)
+
+
+def _env_resolve_model(task: str) -> str:
+    """**今天那套**的模型名：任务级覆盖（含迁移期老名字）→ 兼容档 → `tasks` 里的真名。"""
 
     for name in (MODEL_ENV[task],) + MODEL_ENV_ALIASES.get(task, ()):
         specific = _read(name)
@@ -614,8 +1004,12 @@ def resolve(task: str) -> TaskEndpoint:
     key = str(task or "").strip().casefold()
     if key not in TASKS:
         raise UnknownTask(f"不认识的用途：{task}")
+    plan = _file_plan(key)
     source = _key_source(key)
-    if source.is_main and not source.own:
+    if plan is not None:
+        # 文件里写了的用途：provider / 地址 / key / 模型全部出自那一份计划（成对）。
+        provider = plan.provider
+    elif source.is_main and not source.own:
         # 兼容档那一对：它是**哪一家**由声明（或这一条自带那家）决定。
         provider, _stated = _main_provider(key)
     else:
@@ -630,6 +1024,7 @@ def resolve(task: str) -> TaskEndpoint:
         key_name=source.name,
         key_env=source.env,
         own_key=source.own,
+        source="文件" if plan is not None else "",
     )
 
 
@@ -657,7 +1052,7 @@ def resolve_fallback(task: str) -> TaskEndpoint | None:
        那时操作者只配了一把 key，没有"另一家"可言；而且兼容档的地址是
        `QQBOT_API_BASE_URL`，兜底 key 打它正是那次 401 的形状；
     ③ 兜底那条 key（含它的同家回落链）**没有值** → `None`；
-    ④ 有值 → 地址**只**取 `provider_base_url(source.provider)`。
+    ④ 有值 → 地址**只**取 `_builtin_base_url(source.provider)`。
 
     ④ 那一行是这个函数存在的理由：地址**绝不**再读一次 `BASE_URL_ENV[task]`。
     任务级地址覆盖属于**主家那一路**（`_base_url_for` 的第一档），在这里读它
@@ -681,7 +1076,7 @@ def resolve_fallback(task: str) -> TaskEndpoint | None:
         task=key,
         provider=source.provider,
         declared_provider=source.provider,
-        base_url=provider_base_url(source.provider),
+        base_url=_builtin_base_url(source.provider),
         api_key=source.value,
         model=model,
         key_name=source.name,

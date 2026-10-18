@@ -44,8 +44,11 @@ def test_every_guard_reads_an_attribute_that_exists() -> None:
 
     from qq_roleplay_bot import dev_config
 
-    for name in ("REVIEW_ENABLED", "API_KEY", "VISION_ENABLED", "MEMORY_API_KEY"):
+    for name in ("review_enabled", "API_KEY", "VISION_ENABLED", "MEMORY_API_KEY"):
         # 这些是 `config_support` 与其它守卫实际读的
+        # （2026-10-18：`REVIEW_ENABLED` 常量改成了 `review_enabled()` 函数——契约 D15，
+        #   import 期常量让"文件/面板给了 review 的 key"永远不生效；这条断言跟着改名字，
+        #   不是放宽：它要钉的仍然是"守卫读的属性必须真的存在"。）
         assert hasattr(dev_config, name), f"dev_config.{name} 不存在，读它的守卫会静默走错分支"
 
     # 记忆开关**不在** `dev_config` 上——这正是原守卫写错的地方，
