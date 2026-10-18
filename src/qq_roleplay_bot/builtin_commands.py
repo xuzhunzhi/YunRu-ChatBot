@@ -169,16 +169,20 @@ def build_command_registry(extra: tuple[object, ...] = ()):
     与执行端（`group_admin.py`、`group_owner.py`）一起。这里只放 Stage 3 与底层的命令。
     """
 
-    from . import dev_config
+    from . import dev_config, provider_failover
     from .builtin_balance_command import BalanceCommand, build_balance_client
     from .command_plugins import CommandRegistry
 
     help_plugin = HelpCommand()
     ping_plugin = PingCommand()
+    # 凭据来源（2026-10-18，契约 D14）：原来这里是 `dev_config.API_BASE_URL` / `API_KEY`
+    # ——import 期常量。面板 / 文件改了凭据之后它们仍拿旧的那一份去查，与走 `resolve()`
+    # 的 `BalanceProbe` 对不上账。改成"探针用哪一路，就按那一路当前来源解析"。
+    probe = provider_failover.probe_endpoint()
     balance_plugin = BalanceCommand(
         build_balance_client(
-            dev_config.API_BASE_URL,
-            dev_config.API_KEY,
+            probe.base_url,
+            probe.api_key,
             cache_seconds=dev_config.BALANCE_CACHE_SECONDS,
         ),
         allowed_user_ids=dev_config.BALANCE_PRIVATE_USER_IDS,

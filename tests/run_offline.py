@@ -45,6 +45,20 @@ os.environ["QQBOT_RAW_EVENTS_DIR"] = str(root / ".tmp_test_run" / "logs")
 # 指到临时目录：它的默认落点是 `<项目根>/data/`，而套件里会有后台节拍跑起来
 # （2026-10-11 实测：`dev/data/faces.json` 被一个没被取消的节拍任务写出来了）。
 os.environ["QQBOT_FACE_NAMES"] = str(root / ".tmp_test_run" / "faces.json")
+# 同理把**模型供应商文件**（`data/model_providers.json`）指到临时目录：套件必须跑在
+# "**没有这个文件**"这个状态上（契约 §五 / §5.2 三重证法的第 1 条）。
+# 为什么必须显式设：本文件没有设 `QQBOT_DATA_DIR`，`dev_config.data_dir()` 就是
+# `dev/data` ⇒ 操作者一旦真建了 `dev/data/model_providers.json`（他的"一键切换"），
+# `tests/test_model_config.py` 那二十条"今天那套"会当场红。要测文件的用例自己显式
+# 把这个变量改到自己的临时路径（见 `tests/test_model_providers_file.py`）。
+os.environ["QQBOT_MODEL_PROVIDERS_FILE"] = str(root / ".tmp_test_run" / "model_providers.json")
+# 上一次跑留下的那份**要删掉**：它是"有没有文件"这个状态的锚点，一条崩溃/中断留下的
+# 空白文件（或半份配置）会让下一次"全绿"跑在另一个世界线上。删除只碰测试目录
+# （`.tmp_test_run/` 被忽略、里面本来就只有测试产物）。
+try:
+    (root / ".tmp_test_run" / "model_providers.json").unlink(missing_ok=True)
+except OSError:  # pragma: no cover - 删不掉就按"有可能读到旧文件"跑，不影响正常路径
+    pass
 
 sys.path.insert(0, str(root / "src"))
 sys.path.insert(0, str(root / "archive"))

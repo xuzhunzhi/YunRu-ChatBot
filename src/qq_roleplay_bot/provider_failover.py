@@ -186,6 +186,60 @@ def reapply(clients=None) -> int:
     return _repoint(clients, FALLBACK)
 
 
+#: 上一次 `sync_from_file()` 看到的文件 token（`(mtime_ns, size)`；没有文件时 `None`）。
+#: 只在 primary 模式下更新——兜底期间文件改动**推迟、不丢**（见 `sync_from_file`）。
+_last_sync_token: tuple[int, int] | None = None
+
+
+def sync_from_file(clients=None) -> int:
+    """文件（`data/model_providers.json`）变了，就把**已经存在**的 client 重指向。
+
+    契约 §3.5 / D13：写完文件之后不许把面板给的原始值直接盖到 client 上（那会造出
+    "地址与 key 不来自同一条"的形状），而是让这里**重新 `resolve()` 一遍**——每个用途
+    的地址 / key / provider 都从同一份来源解析出来。
+
+    判据与顺序（写死）：
+    ① **一次 `stat`**（`model_config.providers_file_token()`）：mtime 没变 → 立刻返回 0。
+       这是每轮都会被调到的钩子（`handle()` 顶部、焦点时钟、后台节拍各一次），不能重。
+    ② **兜底模式返回 0**：兜底是保命路径，优先级高于"一键切换"（§6.4）。文件改动在
+       兜底期间**推迟、不丢**——`restore_primary()` 切回主家时会重新 `resolve()`，
+       那时文件里的值自动生效；这里连 token 都不更新，好让切回来之后还会再同步一次。
+    ③ 变了 → `_repoint(None, PRIMARY)`；它只动"`resolve()` 解析得出来且有 key"的那几路。
+
+    `clients` 只给测试用（默认取 `llm_client.clients()` 那份登记簿）。
+    """
+
+    global _last_sync_token
+    if _mode == FALLBACK:
+        return 0
+    try:
+        token = model_config.providers_file_token()
+    except Exception:  # noqa: BLE001 - 读文件出了岔子不该拖垮这一轮
+        logger.warning("模型来源同步：读不出文件状态，本轮跳过", exc_info=True)
+        return 0
+    if _last_sync_token == token:
+        return 0
+    _last_sync_token = token
+    return _repoint(clients, PRIMARY)
+
+
+def repoint_task(task: str, clients=None) -> int:
+    """把**某一个用途**已存在的 client 按当前解析重指一遍，返回改了几个。
+
+    与 `sync_from_file()` 的分工：那一份靠"文件 mtime 变了"做触发，管的是"有人直接改
+    文件"；这一个由**写侧**在写完/清空之后直接调——因为"清空某一路"在文件里可能是一个
+    no-op（本来就没写），mtime 没变，但内存里那个 client 仍然需要回到环境那套
+    （契约 D12 的"空值 = 回落"，落点就在这一步）。
+    """
+
+    wanted = task_of_role(str(task or "").strip().casefold()) or str(task or "").strip()
+    targets = [client for client in (llm_client.clients() if clients is None else clients)
+               if task_of_client(client) == wanted]
+    if not targets:
+        return 0
+    return _repoint(targets, PRIMARY)
+
+
 def effective_timeout(task: str, default: float) -> float:
     """这一趟该用多长的闸：primary **原样返回 `default`**；兜底给更宽的那一档。
 
@@ -263,9 +317,14 @@ def status_line() -> str:
 
 
 def reset_for_tests() -> None:
-    """把进程内状态清回 primary（测试用；不碰任何 client）。"""
+    """把进程内状态清回 primary（测试用；不碰任何 client）。
 
-    global _mode, _since, _primary_provider, _task, _reason, _moved
+    连同 `_last_sync_token` 一起清：否则上一条用例留下的 token 会让
+    `sync_from_file()` 在文件内容**恰好相同**时提前返回 0，测试就测不到重指向
+    （用例自己也会显式改文件，但这条清干净更不容易骗人）。
+    """
+
+    global _mode, _since, _primary_provider, _task, _reason, _moved, _last_sync_token
     with _lock:
         _mode = PRIMARY
         _since = 0.0
@@ -273,6 +332,7 @@ def reset_for_tests() -> None:
         _primary_provider = ""
         _task = ""
         _moved = 0
+    _last_sync_token = None
 
 
 def _repoint(clients, mode_wanted: str) -> int:
@@ -414,3 +474,15 @@ def _probe_task() -> str:
         except Exception:  # noqa: BLE001 - 这一路解析不出来就换下一路
             continue
     return ""
+
+
+def probe_endpoint() -> model_config.TaskEndpoint:
+    """余额 / `/super apicheck` 该拿**哪一份凭据**：与 `BalanceProbe` 走同一条解析。
+
+    契约 D14：那两处原来读的是 `dev_config.API_BASE_URL` / `API_KEY`（**import 期常量**）。
+    面板 / 文件改了凭据之后操作者可能永远不碰 `.env`，于是那两处会拿旧凭据去查、
+    与 `BalanceProbe`（走 `resolve()`）**对不上账**。这里统一成"探针用哪一路，
+    那一路就按当前来源解析"。
+    """
+
+    return model_config.resolve(_probe_task() or "judge")

@@ -217,7 +217,9 @@ def build_flags(config=None) -> RuntimeFlags:
 
     values = {
         "judge_enabled": bool(_cfg.DUAL_AGENT_ENABLED),
-        "review_enabled": bool(_cfg.REVIEW_ENABLED),
+        # 判据是函数（2026-10-18，契约 D15）：常量是 import 期算的，文件/面板给了
+        # review 的 key 也不会让它变 True，面板还会显示成"关"。
+        "review_enabled": bool(_cfg.review_enabled()),
         "vision_enabled": bool(_cfg.VISION_ENABLED),
         # 记忆维护的开关不在 dev_config 里（它的启用条件是 key + 允许的群），
         # 所以这里默认 True：面板关掉它才需要一个新的、显式的闸门。

@@ -362,8 +362,30 @@ _REASONING_EFFORT_VALUES = {"none", "low", "high", "max"}
 
 
 def reasoning_effort(task: str) -> str:
-    """某个用途的思考深度。读 `QQBOT_<用途>_REASONING_EFFORT`；不配走 `low`。"""
-    raw = get(f"QQBOT_{task.upper()}_REASONING_EFFORT", "low").strip().lower()
+    """某个用途的思考深度。**文件 > 该用途自己的变量 > 迁移老名字 > `low`**。
+
+    三件事写在这里，改之前先看清（契约 D4 / §3.6）：
+
+    1. **文件优先**：`data/model_providers.json` 里写了 `agents.<用途>.reasoning_effort`
+       就用它——"文件是这六路的来源"，改文件即生效（`model_config.file_reasoning_effort`）。
+    2. **按用途名读**：`QQBOT_<用途>_REASONING_EFFORT`。回复那一路的账本名是 `dialogue`，
+       而配置名是 `REPLY`——`llm_client` 现在先做 role→用途映射再来这里（`_task_of_role`），
+       所以旧实现"`QQBOT_REPLY_REASONING_EFFORT` 从来没生效过"这个缺陷在这里修掉了。
+    3. **迁移别名**：`QQBOT_DIALOGUE_REASONING_EFFORT` 是回复那一路的**老名字**，
+       线上 `.env` 里它是未注释的（生效中），而 `QQBOT_REPLY_REASONING_EFFORT` 是注释掉的。
+       新名字优先、没配照旧读老名字——只改映射不加别名会让线上回复那一路的 effort
+       悄悄变成默认的 `low`，那就不是"逐字不变"了（契约 §二.3 第 2 条实测）。
+    """
+
+    raw = _model_config.file_reasoning_effort(task)
+    if not raw:
+        raw = get(f"QQBOT_{task.upper()}_REASONING_EFFORT", "")
+    if not raw:
+        for name in _REASONING_EFFORT_ALIASES.get(task, ()):
+            raw = get(name, "")
+            if raw:
+                break
+    raw = (raw or "low").strip().lower()
     if raw in ("minimal",):
         raw = "low"
     elif raw in ("medium", "xhigh"):
@@ -372,6 +394,16 @@ def reasoning_effort(task: str) -> str:
         logger.warning("reasoning_effort %s 不在可选值里（none/low/high/max），按 low 处理", raw)
         return "low"
     return raw
+
+
+#: **迁移期**的思考深度老名字（用途名 → 老变量名，按顺序找第一条有值的）。
+#:
+#: 为什么只给 reply 一条：`usage_role` 里只有它配置名不同（`dialogue` vs `REPLY`），
+#: 其余五路 role == 用途名，老名字就是新名字。别往这里加"猜"的别名——参数类配置
+#: 最怕"我明明改了却没生效"。
+_REASONING_EFFORT_ALIASES: dict[str, tuple[str, ...]] = {
+    "reply": ("QQBOT_DIALOGUE_REASONING_EFFORT",),
+}
 
 
 #: 每个用途的 **API 调用超时**（秒）。读 `QQBOT_<用途>_TIMEOUT`；不配走 `default`。
@@ -892,7 +924,39 @@ MEMORY_USER_ID = get("QQBOT_MEMORY_USER_ID", "qqbot-memory")
 # 所以上面那句"10 条改 5 条"是**历史**——见 `style_reviewer.py` 的模块说明。
 # 语义：配了 `QQBOT_REVIEW_API_KEY` 就自动启用；`QQBOT_STYLE_REVIEW=0/1` 可以强行关或开。
 REVIEW_API_KEY = _compat("QQBOT_REVIEW_API_KEY", "")
-REVIEW_ENABLED = _enabled("QQBOT_STYLE_REVIEW", "1" if REVIEW_API_KEY else "0")
+
+
+def review_enabled() -> bool:
+    """风格审核开没开。**函数，不是 import 期常量**（契约 D15 / §3.6 第 1 处）。
+
+    原来这里是 `REVIEW_ENABLED = _enabled("QQBOT_STYLE_REVIEW", "1" if REVIEW_API_KEY
+    else "0")`：import 时算一次，于是"文件 / 面板给了 review 的 key"之后审核**根本不会
+    被造出来**（`runtime._build_style_reviewer` 读的就是这个常量），面板还会显示成"关"
+    ——最坏的一种：配了却永远不生效。
+
+    判据（顺序写死）：
+    ① `QQBOT_STYLE_REVIEW` **出现了**就听它（空串也算出现，与改动前的 `_enabled` 一字
+       不差：`"" not in {"0","false","no","off"}` ⇒ True）；
+    ② 没出现 → 看**review 这一路自己那条 key**：文件里给了 review 的 key（`file_has_key`），
+       或者 import 期就有的 `QQBOT_REVIEW_API_KEY` 有值。
+
+    ⚠️ 契约 D15 原来写"内部用 `model_config.resolve("review").api_key` 判"。**没这么做**：
+    那个解析会按回落链借 `judge` / 兼容档那一把，于是"只配了一把主 key"的机器会**突然
+    自动开审核**（每条回复多一次调用），而线上今天的语义是"配了 `QQBOT_REVIEW_API_KEY`
+    才开"。那正好破了"没有文件时逐字节与今天相同"这条底线。收窄成"review 自己那条 key"
+    既保住今天，也满足 D15 的真正目的：**文件给了 review 的 key，不用重启就生效**。
+    """
+
+    if "QQBOT_STYLE_REVIEW" in os.environ:
+        return _enabled("QQBOT_STYLE_REVIEW")
+    try:
+        if _model_config.file_has_key("review"):
+            return True
+    except Exception:  # noqa: BLE001 - 文件坏了不该让 import/装配炸
+        pass
+    return bool(REVIEW_API_KEY)
+
+
 REVIEW_USER_ID = get("QQBOT_REVIEW_USER_ID", "qqbot-style-review")
 
 

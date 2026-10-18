@@ -54,21 +54,45 @@ class UnknownProvider(ValueError):
     """面板给了不认识的供应商名。"""
 
 
+def _merged_urls() -> dict[str, str]:
+    """内置表 + `data/model_providers.json` 里那几家（**文件里的新家也要能选**）。
+
+    为什么要在函数里合并、而且用延迟 import：`provider_registry` 是
+    `tests/check_module_removal.py` 列的"可插能力"之一——模块级 import `model_config`
+    会让"删掉它核心就起不来"（反向不受限，`runtime.py` 里就是这么用的）。
+    文件里同名的条目**优先**（与 `model_config._provider_spec` 同一口径），
+    这样面板下拉框里那个地址就是这一趟真正会打过去的地址。
+    """
+
+    merged = dict(PROVIDERS)
+    try:
+        from .model_config import file_provider_specs
+
+        for name, spec in file_provider_specs().items():
+            merged[name] = str(spec.get("base_url", "") or "")
+    except Exception:  # noqa: BLE001 - 下拉框不该因为一份坏文件而打不开
+        return merged
+    return merged
+
+
 def base_url_of(name: str) -> str:
     """取供应商的默认地址。`custom` 返回空串（由调用方用面板填的地址）。"""
 
+    urls = _merged_urls()
     key = str(name or "").strip().casefold()
-    if key not in PROVIDERS:
+    if key not in urls:
         raise UnknownProvider(f"不认识的供应商：{name}")
-    return PROVIDERS[key]
+    return urls[key]
 
 
 def known(name: str) -> bool:
-    return str(name or "").strip().casefold() in PROVIDERS
+    return str(name or "").strip().casefold() in _merged_urls()
 
 
 def options() -> list[dict[str, str]]:
-    """给面板的下拉框数据。"""
+    """给面板的下拉框数据（内置那几家在前，文件里新加的家排在后面）。"""
 
-    return [{"value": key, "label": LABELS.get(key, key), "base_url": PROVIDERS[key]}
-            for key in PROVIDERS]
+    urls = _merged_urls()
+    ordered = list(PROVIDERS) + [name for name in urls if name not in PROVIDERS]
+    return [{"value": key, "label": LABELS.get(key, key), "base_url": urls[key]}
+            for key in ordered]

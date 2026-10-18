@@ -63,11 +63,21 @@ _USER_ID_PATTERN = re.compile(r"^[a-zA-Z0-9\-_]{1,512}$")
 _SAMPLING_ROLE_TO_TASK = {"dialogue": "reply"}
 
 
+def _task_of_role(usage_role: str) -> str:
+    """`usage_role`（账本的历史名字）→ 配置里的**用途名**（只有 reply 那一条不同名）。
+
+    `reasoning_effort` 与采样参数都按用途名读环境；这里不映射的话，回复那一路读的是
+    `QQBOT_DIALOGUE_REASONING_EFFORT`——而代码/文档里写的都是 `QQBOT_REPLY_*`，
+    于是"我明明配了却没生效"（契约 D4）。
+    """
+
+    return _SAMPLING_ROLE_TO_TASK.get(str(usage_role or ""), str(usage_role or ""))
+
+
 def _sampling_params_for(usage_role: str) -> dict[str, float]:
     """这个 client 的采样参数；没配置的用途返回空字典（一个键都不多发）。"""
 
-    task = _SAMPLING_ROLE_TO_TASK.get(usage_role, usage_role)
-    return sampling_params(task)
+    return sampling_params(_task_of_role(usage_role))
 
 
 def _clean_user_id(value: str) -> str:
@@ -378,8 +388,21 @@ class OpenAICompatibleClient:
         return min(MAX_BACKOFF_SECONDS, base) * (0.5 + random.random() / 2)
 
     def _complete_sync(self, messages: list[dict[str, str]]) -> str:
+        # **入口快照五件套**（契约 §6.1：真竞态，不是理论）。
+        #
+        # 这个函数跑在 `asyncio.to_thread` 里（**另一个 OS 线程**），而"一键切换"
+        # 会在主循环/面板线程里就地改 client 的 `base_url` / `api_key` / `model` /
+        # `provider` / `timeout`。原来这五个是**分五次现读**的，重指向落在中间就会造出
+        # "body 里的 model 是旧家、URL/Authorization 是新家"的请求（服务端报错，
+        # 不会把回复发错人），或者 `user_id` / `reasoning_effort` 的门控与实际地址不一致。
+        # 快照之后这一次请求自始至终只用同一套值：要么整份旧的、要么整份新的。
+        base_url = self.base_url
+        api_key = self.api_key
+        model = self.model
+        provider = self.provider
+        timeout = self.timeout
         body = {
-            "model": self.model,
+            "model": model,
             "messages": messages,
             # 流式：输出一块读到一块（2026-10-13 用户拍板，闸门的判据见文件顶上那条
             # `STREAM_STALL_SECONDS`）。以前这里是非流式的 `False`，"5 秒"盖的是整段
@@ -391,9 +414,9 @@ class OpenAICompatibleClient:
         # `user_id` 与 `reasoning_effort` 是**DeepSeek 专有**的调优字段：前者给同一
         # 账号下的每个 agent 隔离 KVCache 与调度，后者控制 v4 系列的思考深度。
         # 别的家未必认这两个字段（实测 2026-10-12：mimo 收下它们**不会** 400，但会
-        # 带 `reasoning_content` 静默思考——兜底时那是白花的钱），所以按 `self.provider`
+        # 带 `reasoning_content` 静默思考——兜底时那是白花的钱），所以按 `provider`
         # 门控：`""`（还不知道是哪一家）或 `"deepseek"` → 照旧发；其它家 → 一个都不发。
-        deepseek_fields = self.provider in ("", "deepseek")
+        deepseek_fields = provider in ("", "deepseek")
         if self.user_id and deepseek_fields:
             # 同一账号下按 agent 隔离 KVCache 与调度；不带则所有请求共享隔离空间。
             body["user_id"] = self.user_id
@@ -405,14 +428,17 @@ class OpenAICompatibleClient:
         if deepseek_fields:
             # reasoning_effort：控制 DeepSeek v4 系列的思考深度（默认 high → 改 low ✓ 快很多）。
             # 2026-10-10 用户拍板。API 文档：none=关闭思考 / low / high / max。
+            # 按**用途名**读（`_task_of_role`）：回复那一路的账本名是 `dialogue`，
+            # 而它的配置名是 `QQBOT_REPLY_*`——不映射就永远读不到（契约 D4）。
+            # 文件里写了 `agents.<用途>.reasoning_effort` 时由 `dev_config` 优先取文件那份。
             from .dev_config import reasoning_effort
-            body["reasoning_effort"] = reasoning_effort(self.usage_role)
+            body["reasoning_effort"] = reasoning_effort(_task_of_role(self.usage_role))
         payload = json.dumps(body).encode("utf-8")
         request = urllib.request.Request(
-            f"{self.base_url}/chat/completions",
+            f"{base_url}/chat/completions",
             data=payload,
             headers={
-                "Authorization": f"Bearer {self.api_key}",
+                "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
                 "Accept": "text/event-stream",
                 "User-Agent": "QQRoleplayBot/0.1",
@@ -422,7 +448,7 @@ class OpenAICompatibleClient:
         # 每一次读的等待上限：min(首字闸, 停顿网)。**这一条就是"3 秒无响应砍掉本轮"的
         # 落点**——服务端连着 3 秒没吐任何字节，`response.readline()` 就抛 `socket.timeout`。
         # 首字来了之后，这个短超时只是"再等一轮"的心跳，真正放手看的是停顿网。
-        read_timeout = max(0.1, min(STREAM_STALL_SECONDS, float(self.timeout)))
+        read_timeout = max(0.1, min(STREAM_STALL_SECONDS, float(timeout)))
         last_byte_at = time.monotonic()
         got_bytes = False
         said_something = False
@@ -450,7 +476,7 @@ class OpenAICompatibleClient:
                     except (socket.timeout, TimeoutError) as exc:
                         if not got_bytes:
                             raise self._stall_error(said_something, detail="首字超时") from exc
-                        if time.monotonic() - last_byte_at > float(self.timeout):
+                        if time.monotonic() - last_byte_at > float(timeout):
                             raise self._stall_error(said_something, detail="停顿超时") from exc
                         continue
                     if not raw:

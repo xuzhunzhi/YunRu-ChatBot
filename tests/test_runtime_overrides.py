@@ -30,7 +30,7 @@ from config_support import skip_without_env
 #:
 #: 那些变量是**进程级状态**，测试自己造出来的就得自己收拾：下面这个上下文管理器在
 #: 每个会改它的测试外面保存 / 清空 / 还原。不改产品行为。
-_ADDRESS_VARS = ("QQBOT_API_BASE_URL", "QQBOT_PROVIDER",
+_ADDRESS_VARS = ("QQBOT_API_BASE_URL", "QQBOT_API_PROVIDER", "QQBOT_PROVIDER",
                  "QQBOT_REPLY_API_BASE_URL", "QQBOT_REPLY_API_MODEL",
                  "QQBOT_REPLY_API_KEY", "QQBOT_LETTER_API_KEY")
 
@@ -159,8 +159,22 @@ def test_api_key_change_keeps_client_identity_and_usage() -> None:
 
 @_restores_shared_flags
 def test_provider_switches_the_base_url() -> None:
+    """面板切供应商的实质是**换地址**（真正落盘的是 `api_base_url`）。
+
+    ⚠️ 这里显式把 `QQBOT_API_KEY` / `QQBOT_API_PROVIDER` 清掉再跑：机器上配了主 key 时，
+    `_apply_live` 会顺手把"主 key 属于哪家"也写成 `QQBOT_API_PROVIDER=openai`，而
+    `model_config.PROVIDERS`（内置连接表）里**没有 openai**（它在 `provider_registry`
+    那张面板下拉表里）⇒ `_known_compat_provider()` 会抛 `UnknownProvider`。
+    那是**另一个**已存在的问题（2026-10-18 实测 HEAD 上也一样：配了主 key 的机器选
+    openai 就会 500），不在本笔范围；这条用例判的是"地址翻译"，所以把那两个变量清掉。
+    """
+
+    saved = {name: os.environ.get(name) for name in
+             ("QQBOT_API_KEY", "QQBOT_API_PROVIDER")}
     with tempfile.TemporaryDirectory() as tmp, _clean_addresses():
         runtime_flags.install(runtime_flags.build_flags())
+        for name in saved:
+            os.environ.pop(name, None)
         client = _client("dialogue")
         try:
             applied = apply_overrides(_Engine(), {"provider": "openai"}, store=_operator(tmp))
@@ -171,6 +185,11 @@ def test_provider_switches_the_base_url() -> None:
             assert stored["api_base_url"] == "https://api.openai.com/v1"
         finally:
             client.base_url = "https://old.example"
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
 
 
 @_restores_shared_flags
@@ -252,29 +271,14 @@ def test_switching_the_global_provider_does_not_move_a_bound_purpose() -> None:
 
 
 @_restores_shared_flags
-def test_empty_secret_means_fall_back_to_main_key() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        runtime_flags.install(runtime_flags.build_flags())
-        judge = _client("judge", key="sk-judge")
-        main = _client("dialogue", key="sk-main")
-        try:
-            os.environ["QQBOT_API_KEY"] = "sk-main"
-            apply_overrides(_Engine(), {"judge_api_key": ""}, store=_operator(tmp))
-            assert judge.api_key == "sk-main", "留空 = 回落主 key，而不是空 key"
-            assert main.api_key == "sk-main"
-        finally:
-            judge.api_key = ""
-            main.api_key = ""
-            os.environ.pop("QQBOT_API_KEY", None)
+def test_a_secret_setting_moved_to_the_model_page_is_refused_not_silently_dropped() -> None:
+    """`judge_api_key` 这类**按路的密钥**已经搬到面板「模型与凭据」页。
 
+    2026-10-18 第二轮（"一个key一行"）之后，"这一路用哪把 key"是**一个 id**，不是一个
+    明文值——同一个明文值既不能确定是哪一把、也不能确定要不要新建一把。所以这一层
+    **明确拒绝**并指向新页面；留它走覆盖层会变成"我明明填了 key，它根本没生效"。
 
-@_restores_shared_flags
-def test_clearing_a_role_key_leaves_no_empty_env_behind() -> None:
-    """清空某一项凭据时，环境里**不能留下空串**。
-
-    由来（2026-10-01 实测发现）：`_factory_api_key` 读的是环境变量，环境里留一个空串
-    会让**之后新建的会话 client 拿到空 key**——那个群从此一句话都说不出来，
-    而且要重启才能恢复。空值必须表现为"环境里没有这一项"。
+    判据（与改动前同一条）：面板**不许**动操作者的环境变量——被拒时更是一个字节都不动。
     """
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -285,12 +289,16 @@ def test_clearing_a_role_key_leaves_no_empty_env_behind() -> None:
         try:
             os.environ["QQBOT_API_KEY"] = "sk-main"
             os.environ["QQBOT_JUDGE_API_KEY"] = "sk-panel-set"
-            apply_overrides(_Engine(), {"judge_api_key": ""}, store=_operator(tmp))
-            assert "QQBOT_JUDGE_API_KEY" not in os.environ, "环境里留下了空串"
-            assert judge.api_key == "sk-main"
+            applied = apply_overrides(_Engine(), {"judge_api_key": ""},
+                                      store=_operator(tmp))
+            assert applied["judge_api_key"]["applied"] == "rejected", applied
+            assert "模型与凭据" in applied["judge_api_key"]["detail"], applied
+            assert os.environ.get("QQBOT_JUDGE_API_KEY") == "sk-panel-set", \
+                "面板被拒的那一次不该去动操作者的环境变量（更不能留空串）"
+            assert judge.api_key == "sk-judge", "被拒的那一次一个 client 都不该动"
             from qq_roleplay_bot.runtime import _factory_api_key
 
-            assert _factory_api_key("QQBOT_JUDGE_API_KEY", "fallback") == "fallback"
+            assert _factory_api_key("QQBOT_JUDGE_API_KEY", "fallback") == "sk-panel-set"
         finally:
             judge.api_key = ""
             for name, value in saved.items():

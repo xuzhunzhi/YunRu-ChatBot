@@ -67,9 +67,14 @@ def skip_unless_memory_enabled() -> None:
 
 
 def skip_unless_review_enabled() -> None:
-    """风格审核没开就跳过（它需要 QQBOT_STYLE_REVIEW=1 且配了 key）。"""
+    """风格审核没开就跳过（它需要 QQBOT_STYLE_REVIEW=1 且配了 key）。
+
+    2026-10-18 起判据是 `dev_config.review_enabled()`（函数），不再是 import 期常量
+    `REVIEW_ENABLED`——常量在"文件/面板给了 review 的 key"时不会跟着变，守卫会读到一个
+    与运行时**不同**的答案（这正是本文件开头那段"死守卫"教训的同一个形状）。
+    """
 
     from qq_roleplay_bot import dev_config
 
-    if not getattr(dev_config, "REVIEW_ENABLED", False):
+    if not dev_config.review_enabled():
         raise unittest.SkipTest("风格审核没开（本机没有 QQBOT_STYLE_REVIEW：干净 clone 只有 .env.example）")

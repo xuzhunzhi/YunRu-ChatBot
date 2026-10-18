@@ -80,6 +80,16 @@ async def run_background_plugin(plugin: BackgroundPlugin, *, first_delay: float 
         if delay > 0:
             await asyncio.sleep(delay)
         while True:
+            # "改文件即生效"的钩子之三（契约 D6）：这一拍是后台那几条（记忆维护 / 金句 /
+            # 读信 / 余额探针）**唯一**共同的入口——只靠 `handle()` 的话，"没人说话的群"
+            # 里改完文件要等到下一条消息才生效。函数内 import：`provider_failover` 会
+            # import `llm_client` / `balance_client`，而本模块刻意只做壳。
+            try:
+                from .provider_failover import sync_from_file
+
+                sync_from_file()
+            except Exception:  # noqa: BLE001 - 同步失败不该带走这条后台通道
+                logger.warning("模型来源同步失败（后台节拍）", exc_info=True)
             try:
                 await plugin.poll_once()
             except asyncio.CancelledError:
