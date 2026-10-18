@@ -620,10 +620,13 @@ class EngineReviewWiringTests(unittest.TestCase):
         self.assertIsNotNone(outgoing)
         self.assertEqual(outgoing.text, "0.8 大。", "打回之后要发的是**重写**的那一版")
         self.assertEqual(len(reply.requests), 2, "同一轮里重写一次")
-        # 重写那一次的现场提示：既有理由，也有她刚写的那一版
+        # 重写那一次的现场提示：**只有理由，没有她刚写的那一版**。
+        # 2026-10-18 用户裁定拆掉放大器：把她的原话贴回去等于把编造再递一遍
+        # （15:41→15:42 越编越具体的推手），见 `tests/test_rewrite_prompt_amplifier.py`。
         note = _last_note(reply)
         self.assertIn("越权——替对方定了对错。", note)
-        self.assertIn("你要的是小数比大小，三秒钟的事。", note)
+        self.assertNotIn("你要的是小数比大小，三秒钟的事。", note)
+        self.assertNotIn("你刚写的是", note)
         # 重写走的是**同一份请求 + 一条追加消息**：system 一个字没动
         self.assertEqual(reply.requests[0][0]["content"], reply.requests[1][0]["content"])
         snapshot = engine.snapshot()

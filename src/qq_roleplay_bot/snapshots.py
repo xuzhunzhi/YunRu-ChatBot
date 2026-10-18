@@ -109,6 +109,17 @@ class EngineSnapshot:
     # 只有计数，没有正文。
     clarify_quiet: int = 0
     reply_grounding_rewrites: int = 0
+    # 「她把过往说成事实」（2026-10-18 交底、2026-10-19 接线；同一个
+    # `ask_when_unsure` 开关下，关掉它这三个数恒为 0）：
+    # `reply_past_claim_hits` 是判据命中的次数（**分母**：含"最长片段太短、按口径放行"
+    # 的那几例——那些不核，但"她在讲自己的过去"这件事已经发生了）；
+    # `reply_past_claim_rewrites` 是材料里对不上、**打回重写一次**的次数；
+    # `reply_past_claim_unfixed` 是重写之后**仍对不上、照发**的次数——这一关**绝不丢回复**
+    # （与 `data_marker_drops` 那一关刻意不同），所以它非零只说明"这一句没救回来"，
+    # 不代表有一句话没发出去。只有计数，**不记正文**。
+    reply_past_claim_hits: int = 0
+    reply_past_claim_rewrites: int = 0
+    reply_past_claim_unfixed: int = 0
     # 不可信数据的短码（`data_boundary`，2026-10-08）：`data_marker_retries` 是
     # "回复里抄了当轮短码、被打回重写一次"的次数；`data_marker_drops` 是"重写又抄、
     # 于是这一条没发出去"的次数（fail-closed）。只有计数，**不含短码、不含正文**。

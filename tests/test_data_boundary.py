@@ -1128,7 +1128,12 @@ def test_a_marker_in_the_reply_is_rejected_and_rewritten_once() -> None:
     feedback = reply.requests[1][-1]["content"]
     assert "你刚写的那一句要重来" in feedback
     assert token not in feedback, "反馈里不许把短码明文写进去（等于又示范一遍）"
-    assert "（那串记号）" in feedback, "引述那一版正文时应当把短码抹成占位"
+    # 2026-10-18 拆掉放大器之后，这一条**连占位都不该出现**：打回不再引述她那一版正文
+    # （`_revision_request` 删掉了"你刚写的是：…"），所以也没有"抹成占位"这回事
+    # （`redact` 参数随之删掉）。短码不可能被递回去，是从源头上没了，不是被抹掉的。
+    assert "（那串记号）" not in feedback, \
+        "连占位都不该出现：打回不再引述那一版正文（2026-10-18 拆掉放大器）"
+    assert "你刚写的是" not in feedback
     assert reply.requests[1][0]["content"] == reply.requests[0][0]["content"], \
         "system 段一个字都不该变"
     snapshot = engine.snapshot()

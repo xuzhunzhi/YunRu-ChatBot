@@ -13,13 +13,18 @@
 
 两件事在这一份里被钉住：
 
-1. 判据本身：四种形状命中、"没玩过这个"这类**承认不知道**的说法不许命中；
+1. 判据本身：**五种**形状命中（2026-10-18 用户裁定补的第五种 = **无主语 + 经历性动词 +
+   过 + 数量词**，见 `test_subject_elided_claims_with_a_quantity_are_now_caught`）；
+   "没玩过这个"这类**承认不知道**的说法、没有数量词的无主语句子都不许命中；
 2. 核对链：材料里有 → 放行；材料里没有 → 核不过并报出"哪一句、缺哪一段"；
    **她自己的上一句不能当依据**（不排除的话，重复上一句就能"通过"，那正是自证循环，
    也是 15:41→15:42 越编越具体那个放大器的一半）。
 
-⚠️ 这一份**只测函数**：接线（`stage3_main._model_path` 里那一关）在下一段。
+后半段是**接线**（2026-10-19，`stage3_main._model_path` 里那一关）的五条：
+材料里有依据不打回 / 没有则打回一次且话术正确 / 她自己的上一句不能当依据 /
+**因核对丢的回复 = 0** / 两条 WARNING。
 """
+import asyncio
 import unittest
 
 from qq_roleplay_bot.ask_when_unsure import (
@@ -30,6 +35,8 @@ from qq_roleplay_bot.ask_when_unsure import (
     material_haystack,
 )
 from qq_roleplay_bot.prompt_guard import scan_persona_text
+from qq_roleplay_bot.stage3_main import DialogueEngine
+from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 
 #: 她**真实说过**的编造（`run/data/logs/reply.jsonl` 里原样抄的，2026-10-18 那份日志，
 #: 15:41→15:42 那两轮）。这两条是这次交底里点名的那一例。
@@ -49,7 +56,7 @@ CONSTRUCTED_FABRICATED = (
     "我吃过那种东西，便宜管饱",
 )
 
-#: **不许**命中的：承认不知道（否定）、纯粹的建议、没有主语的日常句子。
+#: **不许**命中的：承认不知道（否定）、纯粹的建议、没有数量词的无主语句子。
 NOT_CLAIMS = (
     "没玩过这个",
     "买之前先看那四块盘",
@@ -60,6 +67,30 @@ NOT_CLAIMS = (
     "没用过也不用特地买，头发不干就不缺这个",
     "这种事我真不清楚",
     "",
+)
+
+#: 形状五（**无主语 + 经历性动词 + 过 + 数量词**）的正面样本：用户 2026-10-18 给的例子
+#: 原样抄在这里，外加交底点名的那一例（他自己举的就是「椅子倒是拆过几张」）。
+NO_SUBJECT_CLAIMS = (
+    "拆过几张",
+    "去过几次",
+    "吃过两回",
+    "看过两场",
+    "修过三个",
+    # 交底点名的那一例（`run/data/logs/reply.jsonl` 原样）：
+    "椅子倒是拆过几张",
+    "椅子倒是拆过几张，两百多那种坐垫真的撑不住",
+    # 动词落在逗号后面也是"无主语"：
+    "行吧，去过几次",
+)
+
+#: 形状五**不许**命中的：没有数量词、动词前面有否定词、主语是别人、或者根本没有"过"。
+NO_SUBJECT_NON_CLAIMS = (
+    "吃过，不然我哪敢跟你说",       # 交底点名：没有数量词
+    "没用过也不用特地买",            # 交底点名：没有数量词（前面还带否定）
+    "没拆过几张",                    # 否定：那是承认不知道
+    "他说他吃过两回",                # 主语是他（人称代词在，就不算"无主语"）
+    "你吃过几回",                    # 问的是对方
 )
 
 
@@ -200,19 +231,53 @@ def test_the_rewrite_wording_only_asks_for_a_hedge() -> None:
     assert scan_persona_text(PAST_CLAIM_NOTE) == [], scan_persona_text(PAST_CLAIM_NOTE)
 
 
-def test_known_gap_subject_elided_claims_are_not_caught() -> None:
-    """⚠️ **已知缺口，不是设计意图**：真实编造里有一半**没有主语**，这四种形状抓不到。
+def test_subject_elided_claims_with_a_quantity_are_now_caught() -> None:
+    """**用户 2026-10-18 裁定：扩，只扩 V过+数量词 这一种形态。**
 
-    这两条都是从 `run/data/logs/reply.jsonl` 里原样抄的（实测，2026-10-18）：
-    「椅子倒是拆过几张」正是这次交底举的那一例，而它没有"我"，所以不命中；
-    「吃过，不然我哪敢跟你说」也是——"吃过"前面没有主语。
+    （原 `test_known_gap_subject_elided_claims_are_not_caught`——那一版钉的是"抓不到"，
+    现在按裁定改成"抓得到"。）
 
-    留这条测试是为了**让缺口可见**：以后谁把判据扩到无主语的写法，这里会红，
-    于是必须回来读这段说明、按交底/用户的话决定要不要扩。**别把它当成"这样挺好"。**
+    缺口原样：真实编造里有一半**没有主语**，前四种形状一个都不命中。交底点名的两例，
+    都是从 `run/data/logs/reply.jsonl` 里原样抄的（实测，2026-10-18）：
+
+    * 「椅子倒是拆过几张」——这次交底举的那一例，整句没有"我"，第一版不命中；
+    * 「吃过，不然我哪敢跟你说」——"吃过"前面也没有主语。
+
+    裁定只扩**一种形态**（原话：*"扩，只扩 V过+数量词 这一种形态"*）：
+
+    * 「椅子倒是拆过几张」→ **现在命中**（无主语 + 经历性动词"拆" + 过 + 数量词"几张"）；
+    * 「吃过，不然我哪敢跟你说」→ **仍然不命中**（没有数量词）。这条**必须**继续不命中：
+      按裁定"只扩这一种形态"，它能命中就说明扩过头了。
+
+    ⚠️ 用户给的字面写法是"句首或标点/换行之后"，可那只认第一种（"拆过几张"），抓不到
+    他自己举的「椅子倒是拆过几张」（"拆"前面是"是"）。所以实现里多认了"整句没有人称
+    代词"这一种（见 `_subject_elided_claim`）——形态没变，只是不再要求动词贴边。
     """
 
-    for text in ("椅子倒是拆过几张，两百多那种坐垫真的撑不住", "吃过，不然我哪敢跟你说"):
+    # 1) 交底点名的那一例：现在抓得到。
+    assert has_past_claim("椅子倒是拆过几张，两百多那种坐垫真的撑不住") is True
+    # 2) 另一例**仍然**抓不到（没有数量词）——"只扩这一种形态"的那条边界。
+    assert has_past_claim("吃过，不然我哪敢跟你说") is False
+
+
+def test_the_fifth_shape_covers_the_five_examples_and_the_anchor() -> None:
+    """形状五的正面样本：`拆过几张 / 去过几次 / 吃过两回 / 看过两场 / 修过三个` 全命中。"""
+
+    for text in NO_SUBJECT_CLAIMS:
+        assert has_past_claim(text) is True, text
+
+
+def test_the_fifth_shape_does_not_fire_without_a_quantity_or_with_a_subject() -> None:
+    """形状五的反例：**没有数量词**、动词前带否定、主语是别人——一个都不许命中。
+
+    这几条正是"只扩一种形态"的护栏：多认出其中任何一条都说明扩过头了。
+    另外「我看了一眼，还行」这类（没有"过"）由 `NOT_CLAIMS` 那一组钉住。
+    """
+
+    for text in NO_SUBJECT_NON_CLAIMS:
         assert has_past_claim(text) is False, text
+    # 有第一人称的那句照旧由**形状一**抓到（不是形状五，但结果一样是"要核"）。
+    assert has_past_claim("我看过两场，都是老片子") is True
 
 
 def test_mentioning_a_moment_without_past_tense_is_not_enough() -> None:
@@ -220,6 +285,209 @@ def test_mentioning_a_moment_without_past_tense_is_not_enough() -> None:
 
     assert has_past_claim("那时候天还没黑，你们先吃") is False
     assert has_past_claim("以前的事，想说的时候再说吧") is False
+
+
+# --- 接线（`stage3_main._model_path` 里那一关，2026-10-19）-------------------
+#
+# 上面测的是判据（纯函数）；这一段测的是"这一关真的挂上去了没有"——五条：
+# 材料里有依据不打回 / 没有则打回一次且话术正确 / 她自己的上一句不能当依据 /
+# 因核对丢的回复 = 0 / 两条 WARNING。
+
+GROUP = "717151356"
+TARGET = MessageTarget(group_id=GROUP)
+
+
+def _msg(index, text="测试", *, mentioned=False, user_id="100"):
+    return IncomingMessage(
+        message_id=f"m{index}", session_id=f"group:{GROUP}", user_id=user_id,
+        text=text, target=TARGET, sender_name="某人", is_bot_mentioned=mentioned,
+    )
+
+
+class ScriptedJudge:
+    """脚本化的判定：一次一条输出（最后一条一直重复）。"""
+
+    def __init__(self, *outputs) -> None:
+        self.outputs = list(outputs) or ["<route>REPLY</route><topic>话题</topic>"]
+        self.requests: list = []
+
+    async def complete(self, request):
+        self.requests.append(request)
+        index = min(len(self.requests) - 1, len(self.outputs) - 1)
+        return self.outputs[index]
+
+
+class ScriptedReply:
+    """脚本化的回复 agent：一次一条输出（最后一条一直重复）。"""
+
+    def __init__(self, *texts, prefix="<decision>REPLY</decision><dialogue>KEEP</dialogue>") -> None:
+        self.texts = list(texts) or ["我接一句。"]
+        self.prefix = prefix
+        self.requests: list = []
+
+    async def complete(self, request):
+        self.requests.append(request)
+        index = min(len(self.requests) - 1, len(self.texts) - 1)
+        return f"{self.prefix}<reply>{self.texts[index]}</reply>"
+
+
+class FailingRewriteReply(ScriptedReply):
+    """第一版正常吐；**第二次**调用（重写那一趟）直接抛——模拟重写失败。"""
+
+    async def complete(self, request):
+        if self.requests:
+            self.requests.append(request)
+            raise RuntimeError("重写那一趟挂了")
+        return await super().complete(request)
+
+
+def _engine(reply, **flag_values) -> DialogueEngine:
+    """装一台引擎，并把运行期开关**钉在这一台上**（默认全开）。
+
+    ⚠️ 这里用实例级替身（`engine._flags = lambda: …`）而**不是** `runtime_flags.install`：
+    `_flags()` 优先读进程里共用的那一份，别的测试装过的全局开关会让"跑单条"与"跑全量"
+    结果不同（2026-10-08 记过这个坑）。`tests/test_style_reviewer.py` 用的是同一个写法。
+    """
+
+    from qq_roleplay_bot.runtime_flags import RuntimeFlags
+
+    engine = DialogueEngine(
+        reply, judge_client=ScriptedJudge(),
+        # 群必须在启停名单里，否则 `handle` 在"群未启用"那一步就静默落下（实测）。
+        enabled_group_ids=frozenset({GROUP}),
+    )
+    flags = RuntimeFlags(**flag_values)
+    engine._flags = lambda: flags
+    return engine
+
+
+#: 她**真实说过**的一句编造（`reply.jsonl` 15:41→15:42 那两轮里的一版，原样）：
+#: 用的是形状五（没有主语、有数量词），第一版判据抓不到，这一版抓得到。
+FABRICATED = "椅子倒是拆过几张，那坐垫真的撑不住"
+
+
+def test_a_grounded_past_line_is_let_through() -> None:
+    """**材料里有那一段字 → 不打回**（有依据就该照说）。"""
+
+    reply = ScriptedReply("椅子我拆过，那坐垫是真的撑不住")
+    engine = _engine(reply)
+
+    result = asyncio.run(engine.handle(
+        _msg(1, "@YunRu 那把椅子我拆过，那坐垫是真的撑不住，你说呢", mentioned=True)))
+
+    assert result is not None and result.text == "椅子我拆过，那坐垫是真的撑不住"
+    assert len(reply.requests) == 1, "材料里明明有那一段字，却被打回了"
+    snapshot = engine.snapshot()
+    assert snapshot.reply_past_claim_hits == 1, "判据没命中（这一条就什么都没测）"
+    assert snapshot.reply_past_claim_rewrites == 0
+    assert snapshot.reply_past_claim_unfixed == 0
+
+
+def test_an_ungrounded_past_line_is_pushed_back_once_with_the_right_wording() -> None:
+    """**材料里没有 → 打回一次**，递的话是"换成不确定的说法"（不是"删掉"，也不是"问她"）。"""
+
+    reply = ScriptedReply(FABRICATED, "记不清了，好像有过几张，说不太准。")
+    engine = _engine(reply)
+
+    result = asyncio.run(engine.handle(_msg(1, "@YunRu 你在忙什么", mentioned=True)))
+
+    assert result is not None and result.text == "记不清了，好像有过几张，说不太准。", \
+        "发出的是重写的那一版"
+    assert len(reply.requests) == 2, "没有打回重写（或者重写了不止一次）"
+    feedback = reply.requests[1][-1]["content"]
+    assert "你刚写的那一句要重来" in feedback
+    assert "意思照旧" in feedback, "话术要求换了说法，不是删掉"
+    assert "换成没那么确定的说法" in feedback
+    for word in ("删掉", "别说这句"):
+        assert word not in feedback, f"话术里出现了\"{word}\"：它会让她整句不说"
+    # **放大器已拆**：她那一版原话（连同这一句里最要命的那半段）一个字都不许贴回来。
+    assert FABRICATED not in feedback
+    assert "你刚写的是" not in feedback
+    # 常驻 system 一个字都没变。
+    assert reply.requests[1][0]["content"] == reply.requests[0][0]["content"]
+    snapshot = engine.snapshot()
+    assert snapshot.reply_past_claim_hits == 1
+    assert snapshot.reply_past_claim_rewrites == 1
+    assert snapshot.reply_past_claim_unfixed == 0
+
+
+def test_her_own_previous_line_does_not_count_as_material() -> None:
+    """**她自己的上一句不能当依据**（不排除就是自证循环，那是放大器的一半）。
+
+    这里让她第一轮说一句别的话、第二轮才说那句编造：如果 `speaker="yunru"` 那些行
+    没被摘掉，"最长片段"会命中**她自己**刚说过的话，于是这一关一声不响——
+    这条用例就会红。
+    """
+
+    reply = ScriptedReply(
+        "结实，坐垫还没塌。",          # 第一轮：不是断言
+        "椅子我拆过，那坐垫是真的撑不住",  # 第二轮：编造（材料里只有她自己在说）
+        "记不清了，说不准。",            # 重写那一版
+    )
+    engine = _engine(reply)
+
+    assert asyncio.run(engine.handle(_msg(1, "@YunRu 椅子结实吗", mentioned=True))) is not None
+    result = asyncio.run(engine.handle(_msg(2, "@YunRu 那你拆过椅子吗", mentioned=True)))
+
+    assert len(reply.requests) == 3, "她上一句被当成依据了（这一关没触发）"
+    assert result is not None and result.text == "记不清了，说不准。"
+    snapshot = engine.snapshot()
+    assert snapshot.reply_past_claim_rewrites == 1
+
+
+def test_this_gate_never_drops_the_reply() -> None:
+    """**因核对丢的回复 = 0**：两条失败路都不许把 `decision.text` 置空。
+
+    与短码那一关**刻意相反**：那是安全维度（宁可少说一句），这一关是分寸问题
+    （重写空手 → 发第一版；重写后仍核不过 → 发重写那一版，只记一笔）。
+    """
+
+    # ① 重写那一版**仍然**核不过 → 照发重写的那一版（不是第一版、更不是空）。
+    reply = ScriptedReply(FABRICATED)          # 重写那一趟还是同一句
+    engine = _engine(reply)
+    result = asyncio.run(engine.handle(_msg(1, "@YunRu 你在忙什么", mentioned=True)))
+    assert result is not None and result.text == FABRICATED
+    snapshot = engine.snapshot()
+    assert snapshot.reply_past_claim_rewrites == 1
+    assert snapshot.reply_past_claim_unfixed == 1
+    assert snapshot.replies == 1, "这一条必须真的发出去（不许被这一关丢掉）"
+
+    # ② 重写那一趟**失败**（抛异常）→ 发第一版，绝不留空。
+    reply = FailingRewriteReply(FABRICATED)
+    engine = _engine(reply)
+    result = asyncio.run(engine.handle(_msg(1, "@YunRu 你在忙什么", mentioned=True)))
+    assert result is not None and result.text == FABRICATED
+    assert engine.snapshot().replies == 1
+
+
+def test_the_gate_warns_twice_when_the_rewrite_is_still_ungrounded() -> None:
+    """**两条 WARNING**：打回一次、以及重写之后仍核不过（照发）——两件事都要看得见。"""
+
+    reply = ScriptedReply(FABRICATED)
+    engine = _engine(reply)
+
+    case = unittest.TestCase()
+    with case.assertLogs("qq_roleplay_bot.stage3_main", level="WARNING") as captured:
+        asyncio.run(engine.handle(_msg(1, "@YunRu 你在忙什么", mentioned=True)))
+
+    warnings = [record for record in captured.records
+                if "past claim" in record.getMessage()]
+    assert len(warnings) == 2, [record.getMessage() for record in warnings]
+    assert "打回重写" in warnings[0].getMessage()
+    assert "照发" in warnings[1].getMessage()
+
+
+def test_the_gate_can_be_turned_off_by_the_same_switch() -> None:
+    """面板关掉 `ask_when_unsure` → 这一条也不再生效（与那个开关的说明一致）。"""
+
+    reply = ScriptedReply(FABRICATED)
+    engine = _engine(reply, ask_when_unsure=False)
+
+    result = asyncio.run(engine.handle(_msg(1, "@YunRu 你在忙什么", mentioned=True)))
+
+    assert result is not None and result.text == FABRICATED
+    assert len(reply.requests) == 1, "关掉之后不该再打回"
+    assert engine.snapshot().reply_past_claim_rewrites == 0
 
 
 if __name__ == "__main__":  # pragma: no cover - 手动跑

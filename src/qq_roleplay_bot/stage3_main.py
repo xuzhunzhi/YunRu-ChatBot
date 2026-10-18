@@ -36,9 +36,12 @@ from .builtin_commands import (
 from ._host import HostServices
 from .ask_when_unsure import (
     NO_ASSERT_NOTE,
+    PAST_CLAIM_NOTE,
+    check_past_claim,
     context_is_explicit,
     decide_grounding,
     has_specific_claim,
+    material_haystack,
 )
 from .dialogue_judge import (
     OFFENSE_CODES,
@@ -1457,6 +1460,12 @@ class DialogueEngine:
             # 话里有具体断言、三处都没有根据，于是被打回重写一次"的次数。
             # （关掉 `ask_when_unsure` 开关时两者恒为 0。只有计数，没有正文。）
             "clarify_quiet", "reply_grounding_rewrites",
+            # 「她把过往说成事实」（2026-10-18 加）：`reply_past_claim_hits` 是判据命中的
+            # 次数（含"最长片段太短、按口径放行"的那几例，它是分母）；`..._rewrites` 是
+            # 材料里对不上、**打回重写一次**的次数；`..._unfixed` 是重写之后**仍对不上、
+            # 照发**（这一关绝不丢回复）的次数。三者都只有计数，**不记正文**。
+            "reply_past_claim_hits", "reply_past_claim_rewrites",
+            "reply_past_claim_unfixed",
             # 不可信数据的短码（`data_boundary`，2026-10-08）：`data_marker_retries` 是
             # "回复里抄了当轮短码、被打回重写一次"的次数；`data_marker_drops` 是
             # "重写又抄、于是这一条没发出去"的次数（fail-closed）。
@@ -1636,9 +1645,8 @@ class DialogueEngine:
             lines.append(f"现在聊的是：{topic}")
         return "\n".join(lines)[-600:]
 
-    def _revision_request(self, request: list[dict[str, str]], draft: str,
-                          reason: str, *, note: str = "",
-                          redact: tuple[str, ...] = (),
+    def _revision_request(self, request: list[dict[str, str]], reason: str, *,
+                          note: str = "",
                           allow_decline: bool = False) -> list[dict[str, str]]:
         """把"这一版被退回来了"接在**同一份请求**后面。
 
@@ -1647,16 +1655,23 @@ class DialogueEngine:
         这里只在末尾追加一条 user 消息：她仍然是那个人、仍然看着同一段语境，
         只是知道了"刚才那句为什么不行"。**指令进 user 段**，system 前缀一个字不动。
 
-        `note` 是"打回"的具体要求。两条路各自给一句现成的措辞（都在易变段、
+        **不再把她上一版的原话贴回来**（2026-10-18 用户裁定的"拆放大器"）：这一段
+        曾经写着"你刚写的是：{那一版}"，等于把**她自己刚才编的那句**（"椅子我拆过，
+        具身不具身我可不知道"）原样再递给她一遍。那不是"提醒她改哪句"，那是**给编造
+        加码**：实测 15:41→15:42 那两轮，她越编越具体，起点正是这句话被贴回去。它也是
+        整轮请求里**唯一一处"她自己的正文重新进 prompt"**的地方（她的历史在 DATA 段、
+        已经排掉 `speaker="yunru"`；这一处排不掉，因为那是我们主动贴的）。拆掉之后她
+        仍然知道"刚才那一句不行、为什么不行"（`reason` / `note`），但拿不到那段可以照着
+        抄的字。代价：打回的话必须**自足**——现在的写法就是"哪一处不合适"由 `reason` 或
+        `note` 自己说清，不再靠引用原文。
+
+        `note` 是"打回"的具体要求。三条路各自给一句现成的措辞（都在易变段、
         不常驻、不点机制词）：
         * 风格审核那一趟：`reason` 就是审核给的理由，没有别的话；
         * 「没把握就别断言」那一趟：`note=ask_when_unsure.NO_ASSERT_NOTE`
-          ——"别断言你不知道的 / 说你能说的，或者说这个你不清楚"，**不是**"问她一句"。
-
-        `redact`（2026-10-08）：这几串在**引述的那一版正文**里要被抹掉。
-        只有"回复抄了边界短码"那一趟用它——否则"你刚写的是：…‹7K3Q9ZM›…"会把那个
-        短码**又递回给她一次**，等于一边说不许抄、一边示范一遍。抹掉的位置写
-        `（那串记号）`，她看得到"这里原本有个记号"，但拿不到可抄的字串。
+          ——"别断言你不知道的 / 说你能说的，或者说这个你不清楚"，**不是**"问她一句"；
+        * 「她把过往说成事实」那一趟：`note=ask_when_unsure.PAST_CLAIM_NOTE`
+          ——"意思照旧，换成没那么确定的说法"，**不许**要求她删掉整句。
 
         `allow_decline`（2026-10-11，用户："审核agent打回后回复agent可以拒绝重写
         原样发出"）：**只给风格审核那一趟**用。文字上把"拒绝"的办法说清楚——她
@@ -1667,14 +1682,10 @@ class DialogueEngine:
         用户裁决"只把提示写硬一点"——补上"这不算顶嘴、不会因为这个再退回来、
         改不改你定"。**不改机制**：打回仍然打回，只是把"她可以不认"说到明处。
 
-        为什么只给它：另外两趟里，"没把握就别断言"与"别抄不可信短码"都不是审美，
+        为什么只给它：另外两趟里，"没把握就别断言"与"别把过往说成事实"都不是审美，
         是**这一版确实有问题**；那两趟必须照打回的要求改，不设退路。
         """
 
-        shown = draft or ""
-        for token in redact:
-            if token:
-                shown = shown.replace(token, "（那串记号）")
         note_block = f"\n{note.strip()}\n" if note.strip() else ""
         decline_block = (
             "\n要是你觉得原来那句本来就没问题、改了反而更差，就把原来那句"
@@ -1682,12 +1693,13 @@ class DialogueEngine:
             "不会因为这个再退回来。这不算顶嘴：改不改，你定。"
             if allow_decline else ""
         )
+        parts = ["--- 你刚写的那一句要重来 ---"]
+        if reason.strip():
+            parts.append(f"不合适的地方：{reason.strip()}")
         body = (
-            "--- 你刚写的那一句要重来 ---\n"
-            f"你刚写的是：{shown}\n"
-            f"不合适的地方：{reason or '（没写清楚是哪一处）'}"
-            f"{note_block}\n"
-            "照这个地方**重写一遍**——只改不合适的那处，别的不用动。"
+            "\n".join(parts)
+            + f"{note_block}\n"
+            "照上面说的**重写一遍**——只改不合适的那处，别的不用动。"
             "不要解释、也不要提这一段，像平常那样把新的一句说出来。"
             f"{decline_block}"
         )
@@ -1697,18 +1709,21 @@ class DialogueEngine:
                                     session_id: str, trigger: str, trigger_kind: str,
                                     context: str, known_message_ids: frozenset[str],
                                     must_reply: bool, note: str = "",
-                                    redact: tuple[str, ...] = (),
                                     allow_decline: bool = False) -> str | None:
         """打回之后：**在同一轮里**让回复 agent 重写一次。返回新正文或 `None`。
 
-        两个调用方共用这一条路（**不另造机器**）：
+        三个调用方共用这一条路（**不另造机器**）：
         * 风格审核判不过（2026-10-05）：`reason` 是审核给的那一句；
         * 「没把握就别断言」（2026-10-05 晚）：她这一版话里有具体断言，
           而知识库 / 记忆 / 语境三处都没有根据 → 同一个动作，
-          只是多带一句现成的 `note`（`ask_when_unsure.NO_ASSERT_NOTE`）。
+          只是多带一句现成的 `note`（`ask_when_unsure.NO_ASSERT_NOTE`）；
+        * 「她把过往说成事实」（2026-10-18 接线）：她这一版里有一句在断言自己的过去，
+          而这一轮的材料里找不到那一段字 → 同一个动作，
+          `note=ask_when_unsure.PAST_CLAIM_NOTE`（只要求换成不确定的说法）。
 
-        第三条（2026-10-08，不可信数据的边界短码）也走它：`reason` 是"你把那串短码
-        写进去了"；`redact=(marker,)` 保证引述那一版正文时**不把短码又递回去**。
+        `draft` **只用来认"她把原来那句原样写回来了"**（`allow_decline` 那一趟）：
+        它**不再被贴回请求里**（2026-10-18 拆掉的那个放大器，见 `_revision_request`）。
+        所以除了"逐字相同"这个比较，重写那一趟看不到她的第一版——这是有意的。
 
         几条边界（都是"宁可照旧，也不许把一条回复弄丢"）：
 
@@ -1727,8 +1742,8 @@ class DialogueEngine:
         审核能说"不行"，但不能替她把话改成另一句。
         """
 
-        retry_request = self._revision_request(request, draft, reason, note=note,
-                                               redact=redact, allow_decline=allow_decline)
+        retry_request = self._revision_request(request, reason, note=note,
+                                               allow_decline=allow_decline)
         self._stats["model_calls"] += 1
         started_at = self.clock()
         try:
@@ -5775,11 +5790,12 @@ class DialogueEngine:
         # **`allow_decline=True`（2026-10-11，用户："审核agent打回后回复agent可以拒绝重写
         # 原样发出"）**：这一趟是**审美**（措辞、分寸、不像人），不是"这句话有事实错误"，
         # 所以由**她自己**决定改不改——把原来那句原样写回来 = 拒绝，照第一版发。
-        # 另两趟（「没把握就别断言」、「别抄不可信短码」）不传这个参数：那两趟是这一版
-        # 确实有问题，必须照改，不设退路。
-        # `style_rewrote` 记"**风格审核**已经把这一次重写用掉了"（见下面那一关）：
-        # 它负责的是"审核与「没把握就别断言」**共用同一次**重写机会"这条规矩。
-        style_rewrote = False
+        # 另三趟（「没把握就别断言」、「她把过往说成事实」、「别抄不可信短码」）不传这个
+        # 参数：那几趟是这一版**确实有问题**，必须照改，不设退路。
+        # `grounding_used` 记"**这一次重写额度已经被用掉了**"（见下面那两关）：它负责的是
+        # "风格审核 / 「她把过往说成事实」 / 「没把握就别断言」**共用同一次**重写机会"这条
+        # 规矩（用户 2026-10-18 接线时定的：同一轮只重写一次）。三处置位、两处看它。
+        grounding_used = False
         if (self._flags().review_enabled and self.style_reviewer is not None
                 and decision.kind is DecisionKind.REPLY
                 and decision.text):
@@ -5807,11 +5823,72 @@ class DialogueEngine:
                     must_reply=self._judge_on(message.session_id),
                     allow_decline=True,
                 )
-                style_rewrote = True
+                grounding_used = True
                 if rewritten is not None:
                     # **只换正文**：这一轮要不要说、引用哪一句、语境是什么，
                     # 都是判定与第一次解析定下来的，不因为重写一遍就改主意。
                     decision = replace(decision, text=rewritten)
+        # 「她把过往说成事实」那一关（2026-10-18 交底，2026-10-19 接线）。
+        #
+        # 判据是**纯正则 + 纯子串**（`ask_when_unsure.check_past_claim`，**0 次模型调用**）：
+        # 她这一版里有一句在断言自己的过去（"我拆过""拆过几张""我那时候……"），而这一轮的
+        # **材料全文**（`material_haystack`：她看到的那些字，**排掉她自己说过的行**）里
+        # 找不到那一段字 → 打回，让她在同一轮里换成不确定的说法重说一次
+        # （`PAST_CLAIM_NOTE`；复用同一条重写通道，不另造机器）。
+        #
+        # 为什么它**不能**并进上面那两关：风格审核管"像不像人话"，`decide_grounding` 管
+        # "没懂又没有根据"，这一关管的是"把编出来的旧事说成事实"。交底里的实测：
+        # 判定的三重门槛让后一条在**生产上 0 次触发**（判定对"拆椅子"这种日常细节不觉得
+        # 有事），而她编的正是这种日常细节。所以这一关**不看判定的结论**，只看她这句话
+        # 自己的形状 + 材料里有没有那段字。
+        #
+        # 位置：**风格审核之后、「没把握就别断言」之前**（也就在短码那一关之前）。两条
+        # 理由：① 它是**事实**问题，比"措辞不合适"更靠近要防的东西，先由它说话；
+        # ② 与「没把握就别断言」**共用同一次**重写额度（`grounding_used`）：审核已经重写过
+        # → 这里不再重写第二次；这里重写过 → 下一关不再重写。同一轮只重写一次这条边界
+        # 对三条路一起成立。
+        #
+        # 开关：挂在 `ask_when_unsure` 那一个下面（面板关掉它 = 这一组确定性规则一起不生效，
+        # 与开关说明一致）。它**不需要判定**，所以开关开着、判定关掉的单 agent 模式下照样跑。
+        #
+        # ⚠️ **任何分支都不许把 `decision.text` 置空**（与下面短码那一关刻意相反）：
+        # 短码是安全维度（宁可少说一句，也不把"注入生效"的话发出去），这一关是**分寸**
+        # 问题——重写空手 → 照发第一版；重写后仍核不过 → 照发重写那一版、只记一笔。
+        # 也就是说这一关自己**永远不丢回复**（`reply_past_claim_unfixed` 就是那个出口）。
+        if (ask_rules and decision.kind is DecisionKind.REPLY and decision.text):
+            past_haystack = material_haystack(request)
+            past_claim = check_past_claim(decision.text, past_haystack)
+            if past_claim.claim:
+                # 判据命中的次数（含"最长片段太短、按口径放行"的那几例）——它是这一关的
+                # **分母**：长期看"她有多常在讲自己的过去"。
+                self._stats["reply_past_claim_hits"] += 1
+            if past_claim.claim and not past_claim.grounded and not grounding_used:
+                self._stats["reply_past_claim_rewrites"] += 1
+                grounding_used = True
+                logger.warning(
+                    "Stage 3 past claim: 一句旧事在材料里找不到，打回重写 session=%s "
+                    "trigger=%s sentence=%s missing=%s",
+                    message.session_id, trigger_kind,
+                    past_claim.sentence[:60], past_claim.chunk[:60])
+                rewritten = await self._rewrite_after_review(
+                    request, decision.text, reason="",
+                    session_id=message.session_id, trigger=trigger, trigger_kind=trigger_kind,
+                    context=self._review_context(message, state),
+                    known_message_ids=frozenset(message_ids),
+                    must_reply=self._judge_on(message.session_id),
+                    note=PAST_CLAIM_NOTE,
+                )
+                if rewritten is not None:
+                    decision = replace(decision, text=rewritten)
+                # 重写之后再看一眼（**只记数、只记日志，绝不置空**）：她要是换了个说法还在
+                # 断言那件旧事，这一条**照样发**——"不许把回复弄丢"比"这一句是否精确"重要。
+                after = check_past_claim(decision.text, past_haystack)
+                if after.claim and not after.grounded:
+                    self._stats["reply_past_claim_unfixed"] += 1
+                    logger.warning(
+                        "Stage 3 past claim: 重写之后那一句还是找不到，照发（不丢回复） "
+                        "session=%s trigger=%s chars=%s",
+                        message.session_id, trigger_kind, len(decision.text))
         # 「没把握就别断言」的**兜底那一关**（2026-10-05 晚加，治"不懂装懂"）。
         #
         # 条件全部确定性：**被叫到**（`grounding.rewrite` 只在被叫到时为 True）
@@ -5819,18 +5896,24 @@ class DialogueEngine:
         # + **她这一版的话里确实出现了具体断言**（数字 / 型号 / 流程——`has_specific_claim`）
         # → **打回，让她自己在同一轮里重写一次**（复用上面那条路，不另造机器；最多一次）。
         #
-        # 为什么放在审核之后：两条路共用**同一次**重写机会——先看审核，审核已经打回重写过
-        # 就不再重写第二次（"最多一次"这条边界对两条路一起成立）。
+        # 为什么排在第三位（风格审核 → 过往断言 → 这一关）：**三条路共用同一次**重写机会，
+        # 哪一条先重写过、后面的就不再要第二次（"最多一次"这条边界对三条路一起成立）。
+        # 这一关排在最后，是因为它最宽（只要"有具体断言"就够），让它先说话会盖住前面两条
+        # 更精确的理由（审核的措辞问题、旧事没有依据）。
         #
         # 为什么还要"有具体断言"才打回：只说她自己那点感受的（"这个我没跟上"、
         # "行，等你"）不打回——**不许把正常聊天掐死**。打回时递的那句话
         # （`NO_ASSERT_NOTE`）说的是"别断言你不知道的、不知道就直说"，
         # **不是**"问她一句"——那条路用户已经否掉了。
-        if (grounding is not None and grounding.rewrite and not style_rewrote
+        #
+        # `not grounding_used`（2026-10-18 接线时加）：这一关与风格审核、上面那一关
+        # **共用同一次**重写额度——哪一条先重写过，另外两条都不再要第二次。
+        if (grounding is not None and grounding.rewrite and not grounding_used
                 and decision.kind is DecisionKind.REPLY and decision.text
                 and has_specific_claim(decision.text)):
             first_draft = decision.text
             self._stats["reply_grounding_rewrites"] += 1
+            grounding_used = True
             logger.info(
                 "Stage 3 grounding: 没把握却写了具体断言，打回重写 session=%s topic=%s "
                 "understood=%s specialist=%s draft=%s",
@@ -5860,10 +5943,10 @@ class DialogueEngine:
         # （那是注入生效的样子）。处理分两步，与前面两条重写路**刻意不同**：
         #
         # * **第一次**：交回回复 agent 在同一轮里重写一次，反馈照样走
-        #   `_rewrite_request`（"你刚写的那一句要重来"）。这一趟**不消耗**风格审核/
-        #   「别断言」那一次机会——那条"最多一次"的规矩是**那两条路之间**的，
-        #   这里要求的是各自独立一次（安全维度不许被风格维度挤掉；`style_rewrote`
-        #   仍然只由审核那一条路置位）；
+        #   `_revision_request`（"你刚写的那一句要重来"）。这一趟**不消耗**风格审核/
+        #   「过往断言」/「别断言」那一次机会——那条"最多一次"的规矩是**那三条路之间**的，
+        #   这里要求的是各自独立一次（安全维度不许被风格维度挤掉；`grounding_used`
+        #   仍然只由那三条路置位）；
         # * **再犯**：**这一条不发**（fail-closed），并记 `data_marker_drops`。
         #   宁可少说一句，也不把"能证明注入生效"的话发到群里。
         #
@@ -5883,9 +5966,9 @@ class DialogueEngine:
                 context=self._review_context(message, state),
                 known_message_ids=frozenset(message_ids),
                 must_reply=self._judge_on(message.session_id),
-                # **不许把短码又递回给她**：反馈里引述那一版正文时把它抹掉
-                # （否则等于一边说不许抄、一边示范一遍）。
-                redact=(marker,),
+                # 反馈里**不可能**再出现那串短码（2026-10-18）：`_revision_request` 不再
+                # 引述她那一版正文，所以"一边说不许抄、一边把短码递回去示范一遍"这件事
+                # 从源头上没了，不再需要"抹成占位"那一步（`redact` 参数随之删掉）。
             )
             if rewritten is not None:
                 decision = replace(decision, text=rewritten)
