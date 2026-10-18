@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 from . import dev_config
+from . import notice_text
 from . import operator_config
 from . import prompt_library
 from . import provider_failover
@@ -1614,18 +1615,64 @@ class _SeamBinder:
 
         return call
 
-    async def notify(self, text: str) -> None:
-        """通知超管——走补发队列，连接断了也不会把这条提示弄丢。"""
+    async def notify(self, target: object, text: str | None = None) -> str:
+        """通知：**发出去**，然后把这一条记进目标会话的历史（`speaker="notice"`）。
+
+        ## 两种调用形状（老的那个一个字不用改）
+
+        * `notify(text)`：老写法，收件人是超管（`APPROVE_NOTIFY_USER_IDS`，最多 3 个），
+          与 2026-09-30 起 `join_approval` 用的一模一样。
+        * `notify(target, text)`：`target` 是一个 `MessageTarget`（群或私聊），或者
+          从配置里读出来的映射 `{"group_id": "…"}` / `{"user_id": "…"}`。
+          **不收裸字符串**：`"800000001"` 是群号还是 QQ 号，这里猜不出来，
+          猜错等于把通知发到别处去——比不发更糟（`_notice_target` 会抛）。
+
+        ## 为什么记历史这件事放在这里（而不是交给插件）
+
+        用户 2026-10-19：「发送通知这个，包括命令的回复，能不能通过规则让云茹识别成
+        另一个人在说话」→「哎要不还是通知吧，不要当人了」。也就是**发出去的通知要进
+        她的历史**，记成 `speaker="notice"`（不是人、也不是她说的）。
+
+        这件事只能在核心做：插件拿不到会话历史（`AGENTS.md` §2.3：插件不许碰对话与
+        记忆），而"这条到底发出去没有"只有这里知道。
+
+        ## "成功发出才记"
+
+        `_send_or_queue` 的三种结果：
+
+        | 结果 | 记不记 | 为什么 |
+        | --- | --- | --- |
+        | `sent` | 记 | 对面收到了 |
+        | `queued` | 记 | 进了补发队列，**它一定会被补发**；补发那条路不会再回调这里，不记就等于永远丢 |
+        | `failed` | **不记** | 队列都没有/满了，这条真的没出去——记进去就是让她以为发过 |
+
+        返回值是这三种状态之一（旧版返回 `None`；多这一位是为了让插件能记数，
+        `join_approval` 那种忽略返回值的调用方不受影响）。
+
+        进历史的那一份**不是原文**：先过 `notice_text.for_history`（去 CQ 码/@、
+        脱敏 QQ 号/路径/凭据、截断 200 字）。见 `_record_notice`。
+        """
 
         engine = self._require()
         transport = self._require_transport()
-        targets = tuple(
-            str(item) for item in getattr(dev_config, "APPROVE_NOTIFY_USER_IDS", ()) if str(item)
-        )[:3]
-        for user_id in targets:
-            await _send_or_queue(
-                transport, getattr(engine, "outbox", None), MessageTarget(user_id=user_id), text
+        if text is None:
+            # 老写法：`notify(text)`。收件人由配置定，正文就是那个参数。
+            body = "" if target is None else str(target)
+            targets: tuple[MessageTarget, ...] = tuple(
+                MessageTarget(user_id=str(item))
+                for item in getattr(dev_config, "APPROVE_NOTIFY_USER_IDS", ()) if str(item)
+            )[:3]
+        else:
+            body = str(text)
+            targets = (_notice_target(target),)
+        status = "failed"
+        for item in targets:
+            status = await _send_or_queue(
+                transport, getattr(engine, "outbox", None), item, body
             )
+            if status in ("sent", "queued"):
+                _record_notice(engine, item, body)
+        return status
 
     async def remind_send(self, delivery: RemindDelivery) -> RemindSendResult:
         """把一条提醒**发出去**：`async (RemindDelivery) -> RemindSendResult`。
@@ -2976,6 +3023,70 @@ def _build_group_actions(engine: DialogueEngine, registry, usage_store) -> None:
     engine.group_actions = built
 
 
+def _notice_target(target: object) -> MessageTarget:
+    """把插件递进来的"发给谁"统一成 `MessageTarget`。
+
+    只收两种形状（**刻意不收裸字符串**）：
+
+    * `MessageTarget`——插件可以 `from ...transport import MessageTarget`；插件 import
+      核心的类型在这一族里已有先例（`remind` 用核心的 `RemindDelivery`、
+      `timeout_alert` 用核心的快照口）。
+    * 映射 `{"group_id": "…"}` / `{"user_id": "…"}`——订阅列表这种从 JSON 读出来的
+      配置直接用得上，不必为了一个目标去 import 核心类型。
+
+    为什么不收 `"800000001"`：群号与 QQ 号都是纯数字，这里**猜不出来**。猜错的代价是
+    "通知发到了另一个人/另一个群"，那比不发更糟，而且发出去就收不回来。所以宁可抛
+    `ValueError`，让写插件的人在第一次跑的时候就看到。
+    """
+
+    if isinstance(target, MessageTarget):
+        return target
+    if isinstance(target, dict):
+        group_id = target.get("group_id")
+        user_id = target.get("user_id")
+        if group_id not in (None, ""):
+            return MessageTarget(group_id=str(group_id))
+        if user_id not in (None, ""):
+            return MessageTarget(user_id=str(user_id))
+    raise ValueError(
+        "notify 的目标要是 MessageTarget，或 {'group_id': …} / {'user_id': …} 这样的映射；"
+        f"收到的是 {type(target).__name__}（裸字符串在这里认不出是群号还是 QQ 号）"
+    )
+
+
+def _record_notice(engine, target: MessageTarget, text: str) -> None:
+    """把一条**已经发出去的通知**记进目标会话的历史（`speaker="notice"`）。
+
+    三条边界：
+
+    1. **只动历史**。出站那一步已经用原文发完了；这里洗的只是"进历史的那一份"
+       （`notice_text.for_history`：去 CQ 码/@、脱敏、截断 200 字）。
+    2. **失败不许冒泡**：记历史失败不能把"已经发出去"变成插件眼里的异常
+       （插件会以为自己没发成、再发一遍）。
+    3. **会话状态照常建**：`DialogueSessions.state()` 会新建一个空会话。这不是
+       "顺手多记一点"——通知本来就该在她下次开口时看得见；而"新建会话会让群背景
+       补不进来"那件事在 `_seed_history` 里另有判据（通知不算"有人说过话"）。
+    """
+
+    sessions = getattr(engine, "sessions", None)
+    state_of = getattr(sessions, "state", None)
+    if not callable(state_of):
+        # 最小引擎替身（测试里的 `_Recorder` 那种）没有会话表：什么都不记，也不炸。
+        return
+    cleaned = notice_text.for_history(text)
+    if not cleaned:
+        return
+    from .chat_log import session_id_of
+
+    session_id = session_id_of(target)
+    clock = getattr(engine, "clock", None)
+    now = float(clock()) if callable(clock) else time.time()
+    try:
+        state_of(session_id).record_notice(session_id, target, cleaned, now)
+    except Exception:  # noqa: BLE001 - 记历史失败不许影响出站
+        logger.warning("plugin notice history skipped session=%s", session_id, exc_info=True)
+
+
 def _plugin_action_seams(engine: DialogueEngine, transport: QQTransport):
     """给后台插件注入的两个窄接缝：`call_action` 与 `notify`。
 
@@ -2985,7 +3096,9 @@ def _plugin_action_seams(engine: DialogueEngine, transport: QQTransport):
       `purpose="join_approval"` 那一条），再调对面，回执拆成 `data` 返回；
       失败抛异常（`onebot_ws.call_api` 已经把 retcode≠0 变成异常了）。
       插件因此不需要知道回执形状，也绕不开闸门。
-    - `notify(text)`：通知超管——走补发队列，连接断了也不会把这条提示弄丢。
+    - `notify(target, text)`：通知——**发出去，并且记进那个会话的历史**
+      （`speaker="notice"`，见 `_SeamBinder.notify`）。老写法 `notify(text)` 仍然可用，
+      收件人是超管。连接断了也不会把这条提示弄丢（走补发队列）。
 
     她们（后台插件）拿到的就是这两个函数，拿不到 transport 本身。
 

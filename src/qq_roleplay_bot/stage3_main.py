@@ -126,6 +126,7 @@ from .memory_model import MemoryMaterial
 from .memory_service import MemoryService
 from . import data_boundary
 from . import face_names
+from . import notice_text
 from . import provider_failover
 from . import runtime_flags
 
@@ -2510,11 +2511,16 @@ class DialogueEngine:
     async def _seed_history(self, message: IncomingMessage, state: ConversationState) -> int:
         """把群聊背景补进短期历史；返回并入的条数。
 
-        只在会话里已有的历史为空时补（新会话的第一条消息），避免每轮都判断；
+        只在会话里**还没有任何人说过话**时补（新会话的第一条消息），避免每轮都判断；
+    通知（`speaker="notice"`）不算"有人说过话"——见下面那条判据。
         真正的限流由 provider 自己按群维护。任何失败都只是少一点背景。
         """
 
-        if self.context_provider is None or state.history:
+        if self.context_provider is None or any(not m.is_notice for m in state.history):
+            # 判据是"**她还没见过任何人说话**"，不是"历史列表非空"（2026-10-19 改）：
+            # 通知（`speaker="notice"`）也会进历史，但它不是谁说的话——如果拿"列表非空"
+            # 当判据，一个群只要先来一条通知，之后再也不会补上群背景，那是**改动前没有
+            # 的退化**（用户 2026-10-19 让命令回复也进历史，这类记录会更多）。
             return 0
         try:
             seeded = await self.context_provider.collect_seed_messages(
@@ -2897,7 +2903,8 @@ class DialogueEngine:
             message_id=message.reply_to_message_id or "",
         )
         # 动作结果一律是"工具性响应"：立刻送出，不掺拟人化停顿。
-        return OutgoingMessage(message.target, str(text or ""), paced=False)
+        # `is_notice=True`：这是**命令的回复**，进她的历史时记成通知（不是她说的）。
+        return OutgoingMessage(message.target, str(text or ""), paced=False, is_notice=True)
 
     async def execute_action(self, request, *, group_id: str | None, actor_id: str,
                              message_id: str = "", mentioned: bool = False) -> str:
@@ -3306,7 +3313,7 @@ class DialogueEngine:
                         return None
                 except Exception:  # noqa: BLE001 - 发图失败退回文字，帮助照样看得到
                     logger.warning("Stage 3 help card send failed; 退回文字")
-        return OutgoingMessage(message.target, text, paced=False)
+        return OutgoingMessage(message.target, text, paced=False, is_notice=True)
 
     def _profile_reply(self, message: IncomingMessage) -> str:
         """`/super profile @某人`：把那个人的**完整人物画像**发出来（发给群里）。
@@ -3657,7 +3664,7 @@ class DialogueEngine:
             return None
         if not _admin_deny_notice_enabled():
             return None
-        return OutgoingMessage(message.target, _admin_deny_notice(), paced=False)
+        return OutgoingMessage(message.target, _admin_deny_notice(), paced=False, is_notice=True)
 
     def _recent_denied_admins(self, group_id: str) -> list[IncomingMessage]:
         """本群里还没被放行、也还没过期的被拒命令，新的在前。过期的顺手清掉。"""
@@ -3744,7 +3751,8 @@ class DialogueEngine:
                     command.kind.value, message.user_id, target_group,
                 )
                 return OutgoingMessage(
-                    message.target, self._out_of_scope_reply(message, target_group), paced=False
+                    message.target, self._out_of_scope_reply(message, target_group),
+                    paced=False, is_notice=True,
                 )
         if command.kind in {
             AdminCommandKind.RELAY,
@@ -3753,10 +3761,12 @@ class DialogueEngine:
             AdminCommandKind.CANCEL,
         }:
             return OutgoingMessage(
-                message.target, await self._relay_reply(command, message, now), paced=False
+                message.target, await self._relay_reply(command, message, now),
+                paced=False, is_notice=True,
             )
         return OutgoingMessage(
-            message.target, self._admin_command_reply(command, message), paced=False
+            message.target, self._admin_command_reply(command, message),
+            paced=False, is_notice=True,
         )
 
     def _out_of_scope_reply(self, message: IncomingMessage, group_id: str) -> str:
@@ -4785,6 +4795,44 @@ class DialogueEngine:
         if expected == text and self.memory_service is not None:
             self.memory_service.record_sent_reply(message, text)
 
+    def record_sent_notice(self, source: IncomingMessage, text: str) -> bool:
+        """**命令的回复发出去之后**，把它记进她这个会话的历史——记成通知。
+
+        用户 2026-10-19：「这个也进，一起当通知」（前半句是「哎要不还是通知吧，
+        不要当人了」）。所以：
+
+        - 它进历史，但 `speaker="notice"`：**不是她说的**，也不是某个人说的；
+        - 进历史的那一份先过 `notice_text.for_history`（去 CQ/@、脱敏、截断 200 字）；
+        - **发出去的那一份一个字都不动**：操作者该看到的还是命令的完整输出。
+          （所以脱敏只发生在这里，而不是在出站路径上。）
+
+        与 `record_sent_reply` 的分工：那一条是"她真的说过的话"（进长期记忆的证据），
+        这一条**不进记忆**——命令回复不是她的人格台词，不该被记忆维护 agent 当成
+        她的表态收进去。
+
+        返回"记没记"（没有会话 id / 洗成空串时不记）。
+        """
+
+        session_id = str(getattr(source, "session_id", "") or "")
+        if not session_id:
+            return False
+        cleaned = notice_text.for_history(text)
+        if not cleaned:
+            return False
+        try:
+            state = self.sessions.state(session_id)
+        except Exception:  # noqa: BLE001 - 记历史失败不许影响"已经发出去"这件事
+            logger.warning("Stage 3 notice history skipped: session=%s", session_id, exc_info=True)
+            return False
+        now = self.clock()
+        recorded = state.record_notice(session_id, source.target, cleaned, now)
+        if recorded:
+            logger.info(
+                "Stage 3 command reply recorded as notice: session=%s chars=%s",
+                session_id, len(cleaned),
+            )
+        return recorded
+
     def _purge_expired_relays(self, now: float) -> None:
         expired = [
             token
@@ -5049,7 +5097,7 @@ class DialogueEngine:
             if isinstance(plugin_reply, ActionRequest):
                 # 插件只声明意图；权限、角色、闸门、审计、真调 action 全在这里。
                 return await self._plugin_action_reply(plugin_reply, message)
-            return OutgoingMessage(message.target, plugin_reply, paced=False)
+            return OutgoingMessage(message.target, plugin_reply, paced=False, is_notice=True)
         # /admin help 与 /super help 的先后：**菜单本身是公开的**，
         # 谁发都能看到管理员命令清单（用户 2026-09-28 要求"普通成员可以呼叫 /admin help
         # 调起 help 菜单"），没权限的人在末尾多读一段"怎么让超管放行一次"。
@@ -5083,7 +5131,7 @@ class DialogueEngine:
             # 放行那条会直接给出"被执行命令"的回复（目标和节奏都在里面）。
             if isinstance(reply, OutgoingMessage):
                 return reply
-            return OutgoingMessage(message.target, reply, paced=False)
+            return OutgoingMessage(message.target, reply, paced=False, is_notice=True)
         # 长得像命令但**这一层**没权限的：一概不落到模型、不进历史。
         # 注意按层级分别判：一个管理员发 `/super ...` 同样是没权限。
         # 收尾分两种：`/admin ...` 回一句说明（用户 2026-09-28 要求，也是 permit 的由来），
@@ -5200,6 +5248,7 @@ class DialogueEngine:
                     message.target,
                     f"这条 {privileged_level} 命令我没认出来。发 {hint} 看全部可用命令。",
                     paced=False,
+                    is_notice=True,
                 )
         security = check_message_security(message, self.all_admin_user_ids())
         if security.blocked:
@@ -6551,6 +6600,11 @@ async def _deliver_reply(
     segmented_sender = getattr(transport, "send_segmented", None)
     origin = f"message:{source.message_id}" if source.message_id else ""
     combined: list[str] = []
+    # 通知（命令的回复）单独收一份：它们进历史时记成 `speaker="notice"`，
+    # 而且进历史的那一份要脱敏 + 截断 200 字（见 `record_sent_notice`）。
+    # 与 `combined` 同一口径：**真发出去 / 排进补发队列的**才算——发失败的那条
+    # 一个字都不进历史（她没说过、这次也没送到，记进去就是假信息）。
+    notice_parts: list[str] = []
     connection_down = False
     for index, item in enumerate(outgoing):
         pause = pauses[index] if index < len(pauses) else 0.0
@@ -6562,6 +6616,8 @@ async def _deliver_reply(
             # 直接排队，顺序仍然保持。
             _queue_undelivered(outbox, item)
             combined.append(item.text)
+            if item.is_notice:
+                notice_parts.append(item.text)
             continue
         try:
             # 只在"要分几条发"时先亮一次状态：单条短回复本来就该干脆。
@@ -6575,6 +6631,8 @@ async def _deliver_reply(
                 await transport.send(item.target, item.text, reply_to=item.reply_to_message_id)
             engine.metrics.send_latency.observe(engine.clock() - sent_at)
             combined.append(item.text)
+            if item.is_notice:
+                notice_parts.append(item.text)
             logger.info(
                 "Stage 3 reply sent: group=%s segment=%s/%s reply_length=%s quoted=%s pause=%.2fs",
                 item.target.group_id,
@@ -6591,6 +6649,8 @@ async def _deliver_reply(
             logger.warning("Stage 3 reply not delivered (%s); queueing for resend", exc)
             _queue_undelivered(outbox, item)
             combined.append(item.text)
+            if item.is_notice:
+                notice_parts.append(item.text)
         except Exception:
             engine.metrics.record_send_failure()
             logger.exception("Stage 3 reply send failed")
@@ -6599,6 +6659,11 @@ async def _deliver_reply(
         # 排队中的那几段也算"她说过"：否则连接一断，她的语境里就没有那句话，
         # 下一轮会当成什么都没说过——重复比迟到更难看。
         engine.record_sent_reply(source, "\n\n".join(combined))
+    if notice_parts:
+        # 命令的回复：**发出去之后**才记进她的历史（2026-10-19 用户「这个也进，
+        # 一起当通知」）。放在这里而不是 `handle()` 里，就是因为"发出去了"这件事
+        # 只有这里知道——命令路径返回值那一刻还没发。
+        engine.record_sent_notice(source, "\n\n".join(notice_parts))
 
 
 def _queue_undelivered(outbox, item: OutgoingMessage) -> None:
