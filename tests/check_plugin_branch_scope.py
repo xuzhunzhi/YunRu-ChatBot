@@ -204,6 +204,12 @@ WHITELIST = {
     "tests/test_webui_panel.py":
         "面板的路由层 + 接缝 + 授权（不起线程、不连网）：测的是 `plugins/webui/` 的"
         "`webui_data` / `webui_access` / `webui_panel`。",
+    "tests/test_webui_v2_static.py":
+        "面板（`plugins/webui/`）的 `/v2/` 静态路由（2026-10-18 用户批准的唯一一处后端改动）："
+        "扩展名白名单、二进制按 `read_bytes`、`resolve()` 之后的防穿越、`index.html` 的"
+        "`no-store` 与 `.wasm`/字体的缓存策略、以及**改代码前**抓下来的老外壳基线逐字比对。"
+        "它测的对象全在 `plugins/webui/webui_panel.py` 与 `plugins/webui/webui/v2/` 里，"
+        "本体侧没有这两个东西。",
 }
 
 

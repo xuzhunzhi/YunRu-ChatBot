@@ -102,16 +102,25 @@ def _now() -> float:
 
 
 class Response:
-    """一次响应。`headers` 是**列表**而不是 dict：`Set-Cookie` 必须能出现多次。"""
+    """一次响应。`headers` 是**列表**而不是 dict：`Set-Cookie` 必须能出现多次。
 
-    __slots__ = ("status", "body", "content_type", "headers")
+    `cache_control`（2026-10-18 加）是**唯一**的 Cache-Control 出口：`_Handler._respond`
+    原来无条件发一条 `no-store`，而 `_static` 又往 `headers` 里塞了一条 —— 老面板的响应
+    线上其实带着**两条** `no-store`。v2 要 `no-cache`/强缓存，那条硬编码的 `no-store`
+    会让它失效（浏览器取第一条）。所以加这个字段：**给了就用它、不给就照旧发 `no-store`**，
+    老路径因此一个字节都不变（`tests/test_webui_v2_static.py` 用改前抓的基线逐字比对）。
+    """
+
+    __slots__ = ("status", "body", "content_type", "headers", "cache_control")
 
     def __init__(self, status: int, body: bytes, content_type: str,
-                 headers: list[tuple[str, str]] | None = None) -> None:
+                 headers: list[tuple[str, str]] | None = None,
+                 cache_control: str | None = None) -> None:
         self.status = status
         self.body = body
         self.content_type = content_type
         self.headers = list(headers or [])
+        self.cache_control = cache_control
 
 
 def json_response(payload: dict[str, object], *, status: int = 200,
@@ -148,6 +157,140 @@ def _static(name: str, content_type: str) -> Response:
     # 看起来像"改了没生效"，实际是缓存。面板是本机小工具，每次读文件的开销无所谓。
     return Response(200, text.encode("utf-8"), content_type,
                     headers=[("Cache-Control", "no-store")])
+
+
+# --- v2 外壳（Compose/wasm）-------------------------------------------------
+#
+# 2026-10-18 用户批准的唯一一处后端改动：「`/v2` 与 `/v2/` → `v2/index.html`；子路径按
+# **扩展名白名单**放行，不是通配」。老外壳仍是 `/`（`STATIC` 那张四名字表，一个字不改），
+# 两者并存。
+#
+# 为什么不复用 `_static`：它按 `read_text(encoding="utf-8")` 读，`.wasm`/`.ttf` 是二进制，
+# 照那条路读会当场 `UnicodeDecodeError`（或在 `errors="replace"` 下静默改字节）。
+# 所以二进制走 `read_bytes`，文本仍走 `read_text` —— 文本那条与老 `_static` 同一个口径。
+
+#: v2 产物的目录（`webui/v2/`，与本文件同级）。
+V2_DIR = "v2"
+
+#: `/v2/` 下**只认这张表**。产物今天的实际清单是
+#: `index.html` + `composeApp.js` + 两个 `<hash>.wasm` + `fonts/*.ttf`；
+#: `.css` / `.json` / `.map` 留着是因为 webpack 换配置时会产出它们（`.map` 我在
+#: `build-and-copy.ps1` 里没拷，但表里认它，省得以后加了却 404）。
+V2_TYPES: dict[str, tuple[str, bool]] = {
+    ".html": ("text/html; charset=utf-8", False),
+    ".js": ("application/javascript; charset=utf-8", False),
+    ".css": ("text/css; charset=utf-8", False),
+    ".json": ("application/json; charset=utf-8", False),
+    ".map": ("application/json; charset=utf-8", False),
+    ".wasm": ("application/wasm", True),
+    ".ttf": ("font/ttf", True),
+}
+
+#: 入口文件：**必须 no-store**（发版后浏览器拿旧壳就白发了）。
+V2_INDEX = "index.html"
+#: 名字里带内容哈希的产物（webpack 的 `[contenthash]`）才敢让它强缓存。
+V2_IMMUTABLE_CACHE = "public, max-age=31536000, immutable"
+#: 其余一律 `no-cache` + ETag：**能省传输，但每次都回来问一句**。
+#: 为什么字体不挂强缓存：`fonts/NotoSansSC-Regular-subset.ttf` 这个文件名**不含哈希**，
+#: 换一份字体（改字集/改字重）文件名不变，强缓存会让浏览器拿着旧字体到明年。
+V2_REVALIDATE_CACHE = "no-cache"
+
+
+def _is_v2_path(path: str) -> bool:
+    """`/v2`、`/v2/` 以及 `/v2/**`。只判前缀，具体能不能取由 `_static_v2` 决定。"""
+
+    return path == "/v2" or path.startswith("/v2/")
+
+
+def _v2_root():
+    """`webui/v2/` 的绝对路径。
+
+    用 `Path(__file__)` 而不是 `importlib.resources`：后面要做 `resolve()` 的**包含判断**
+    （防穿越），那需要一个真实的目录路径；`resources.files(...)` 拿到的是 Traversable，
+    不保证有 `resolve()`。
+    """
+
+    from pathlib import Path
+
+    return Path(__file__).resolve().parent / "webui" / V2_DIR
+
+
+def _looks_content_hashed(file_name: str) -> bool:
+    """`bfa5198fb2fe683c613a.wasm` 这种「主干全是十六进制且够长」的算带哈希。
+
+    判据刻意窄：宁可少挂一次强缓存，也不要把一个名字不变的产物钉在浏览器里一年。
+    """
+
+    stem, dot, _ = file_name.rpartition(".")
+    if not dot:
+        return False
+    return len(stem) >= 16 and all(ch in "0123456789abcdef" for ch in stem)
+
+
+def _v2_cache_control(relative: str) -> str:
+    if relative == V2_INDEX:
+        return "no-store"
+    name = relative.rsplit("/", 1)[-1]
+    if name.endswith(".wasm") and _looks_content_hashed(name):
+        return V2_IMMUTABLE_CACHE
+    return V2_REVALIDATE_CACHE
+
+
+def _static_v2(path: str, headers: dict[str, str]) -> Response:
+    """`/v2/**` 的静态读取：白名单扩展名 + 防穿越 + 二进制/文本分开读 + 缓存策略。
+
+    防穿越为什么这么做（而不是"删掉 `..` 再拼"）：`..` 可以在 URL 里编码成 `%2e%2e`，
+    也可以藏在多段里（`/v2/a/../../x`），**逐段拒绝**再加一层
+    `resolve()` 之后的**包含判断**，两道都过才读盘。只做字符串替换的写法
+    （`..` → ``）会被 `....//` 这类绕过——这是常识性坑，不赌。
+    """
+
+    rest = unquote(path[len("/v2"):]).lstrip("/")
+    if not rest:                       # `/v2` 与 `/v2/`
+        rest = V2_INDEX
+    segments = rest.split("/")
+    if any(seg in {"", ".", ".."} or "\\" in seg or ":" in seg or "\x00" in seg
+           for seg in segments):
+        return failure("not_found", status=404)
+    name = segments[-1]
+    ext = os.path.splitext(name)[1].lower()
+    spec = V2_TYPES.get(ext)
+    if spec is None:                   # 不在白名单里的扩展名一律 404（不是通配）
+        return failure("not_found", status=404)
+    content_type, binary = spec
+
+    root = _v2_root()
+    try:
+        resolved = (root / rest).resolve()
+    except OSError:                    # pragma: no cover - 坏符号链接之类
+        return failure("not_found", status=404)
+    if not resolved.is_relative_to(root) or not resolved.is_file():
+        return failure("not_found", status=404)
+
+    cache_control = _v2_cache_control(rest)
+    try:
+        info = resolved.stat()
+    except OSError:                    # pragma: no cover - 刚刚 stat 成功过
+        return failure("not_found", status=404)
+    # `no-store` 的响应不带 ETag：浏览器不会回来问，一个只在 304 里有用的头放上去只是噪音
+    # （也免得有人误以为 `index.html` 可以复用）。
+    extra: list[tuple[str, str]] = []
+    if cache_control != "no-store":
+        etag = '"%x-%x"' % (info.st_mtime_ns, info.st_size)
+        extra.append(("ETag", etag))
+        if str(headers.get("if-none-match", "")).strip() == etag:
+            # 只有"允许浏览器留着副本"的才给 304；`index.html` 永远回 200 + no-store。
+            return Response(304, b"", content_type, headers=extra, cache_control=cache_control)
+
+    try:
+        if binary:
+            body = resolved.read_bytes()
+        else:
+            # 文本仍是「按 UTF-8 读再编码」，与老 `_static` 同一个口径（换行/编码都不改）。
+            body = resolved.read_text(encoding="utf-8").encode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return failure("static_missing", detail=rest, status=404)
+    return Response(200, body, content_type, headers=extra, cache_control=cache_control)
 
 
 def _body_dict(raw: bytes) -> dict[str, object]:
@@ -259,6 +402,16 @@ class Panel:
     #: `{"ok": false, "error": "unauthorized"}`，看起来像面板坏了。
     PUBLIC_PATHS = frozenset({"/", "/index.html", "/app.css", "/app.js", "/health"})
 
+    @staticmethod
+    def is_public_shell(path: str) -> bool:
+        """外壳（老的那四个 + `/v2/**`）与健康检查不要求凭据。
+
+        v2 必须算进"公开外壳"，否则页面先要令牌、而令牌又要在页面里填——死锁，
+        与 2026-10-01 那次"打开 `/` 只有一行 401 JSON"是同一个形状。
+        """
+
+        return path in Panel.PUBLIC_PATHS or _is_v2_path(path)
+
     def authorize(self, method: str, path: str, headers: dict[str, str],
                   peer: str) -> AccessDecision | None:
         """返回 None 表示已通过；否则是"该直接回给对面的"决定。
@@ -267,7 +420,7 @@ class Panel:
         远程模式下它们仍然要过**来源校验**（挡跨站），只是不要求已有会话。
         """
 
-        if path in self.PUBLIC_PATHS or path == "/api/login":
+        if self.is_public_shell(path) or path == "/api/login":
             if self.access.remote and not self.access.origin_ok(headers):
                 return AccessDecision(False, "bad_origin", 403)
             return None
@@ -333,6 +486,18 @@ class Panel:
         if method == "GET" and path in STATIC:
             name, content_type = STATIC[path]
             return _static(name, content_type)
+        # v2 外壳（Compose/wasm）。与上面那张四名字表**并列**，不替换它：`/` 仍是老页面。
+        if method == "GET" and path == "/v2":
+            # 不直接吐 index.html，而是补一个结尾斜杠：产物里的 `composeApp.js`、`fonts/*.ttf`
+            # 都是**相对地址**，在 `/v2`（无斜杠）下会解析成 `/composeApp.js` → 404，
+            # 页面白屏。301/302 到 `/v2/` 是唯一不依赖改产物的办法
+            # （另一条路是给 index.html 塞 `<base href="/v2/">`，那要重建前端，且把部署前缀
+            # 写死进产物里）。用户批准的范围是"`/v2`、`/v2/` 都指向 index.html"——
+            # 重定向之后它确实指向 index.html，只是多一跳。
+            return Response(302, b"", "text/html; charset=utf-8",
+                            headers=[("Location", "/v2/")], cache_control="no-store")
+        if method == "GET" and _is_v2_path(path):
+            return _static_v2(path, headers)
         return failure("not_found", status=404)
 
     def _health(self) -> dict[str, object]:
@@ -1588,7 +1753,9 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(response.status)
         self.send_header("Content-Type", response.content_type)
         self.send_header("Content-Length", str(len(response.body)))
-        self.send_header("Cache-Control", "no-store")
+        # 老面板的每个响应都带一条 `no-store`（`_static` 又塞了一条，线上因此是两条——
+        # 既有行为，不动）。v2 要 `no-cache`/强缓存，所以显式给了 `cache_control` 就只发它。
+        self.send_header("Cache-Control", response.cache_control or "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         for key, value in (response.headers or []):
             self.send_header(key, value)
