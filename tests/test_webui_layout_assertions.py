@@ -1436,9 +1436,20 @@ class PersonPickerTests(unittest.TestCase):
         self.assertIn("personTail", body, "行里没有“尾部号”")
         self.assertIn('role="listbox"', body, "列表没有 listbox 语义")
         self.assertRegex(self.css, r"\.person-list\s*\{[^}]*flex-direction: column", "列表不是竖排")
-        self.assertRegex(self.css, r"\.person-row\s*\{[^}]*min-height: 48px", "点按区不够大")
-        self.assertRegex(self.css, r"\.person-row \+ \.person-row::before\s*\{[^}]*left: 14px",
-                         "分隔线没有从文字处缩进")
+        # 2026-10-19（第二轮）：**依据是用户原话「一切以 miuix 为先」**。
+        # 原来这里钉 48px / 分隔线 left:14px——两个数都是我们自己挑的。这一竖排的每一行
+        # 就是 Miuix `BasicComponent`（可点的那一版 = `ArrowPreference`）：
+        # `heightIn(min = 56.dp)` + `InsideMargin`，分隔线是 `Divider` 的 0.75px + 两侧 16px。
+        # 判据**没有放宽**：从"一个写死的数"改成"钉住它引的是哪两个令牌"（令牌本身在
+        # `MiuixFirstTests` 里逐个钉死取值）。
+        self.assertRegex(self.css, r"\.person-row\s*\{[^}]*min-height: var\(--miu-row-min-h\)",
+                         "点按区没有引 `--miu-row-min-h`（BasicComponent 的 56dp）")
+        self.assertRegex(self.css, r"\.person-row \+ \.person-row::before\s*\{[^}]*"
+                                   r"left: var\(--miu-divider-inset\)", 
+                         "分隔线没有按 `Divider` 的规范两侧缩进")
+        self.assertRegex(self.css, r"\.person-row \+ \.person-row::before\s*\{[^}]*"
+                                   r"right: var\(--miu-divider-inset\)",
+                         "分隔线只缩了左端（文档里是 `padding(horizontal = 16.dp)`，两侧都要缩）")
 
     def test_keyboard_walks_the_filtered_list_and_enter_picks(self) -> None:
         bind = _uncomment(_function_body(self.js, "bind"))
@@ -1549,16 +1560,37 @@ class PersonPageShapeTests(unittest.TestCase):
         self.assertIn("panes.push", block, "三节不是同一张表里出来的")
 
     def test_the_sections_are_tabs_and_only_one_is_visible(self) -> None:
+        """三节的分段是 **Miuix `TabRow`**（`segment()` 构建器），不是自造的下划线页签。
+
+        ⚠️ 2026-10-19（第二轮）改过这条判据，**依据是用户原话「一切以 miuix 为先」**：
+        原来这里钉 `person-tabs` / `person-tab`，而那一套是**网页里常见的下划线页签**，
+        不是 Miuix 的组件。这一轮把它换成 `TabRow`——与「日志 / 操作记录」
+        「看金句 / 审证据」**同一个控件**（`segment()` 那一个构建器）。
+
+        判据**只增不减**：
+          1. 仍然钉"三节是同一张表里出来的、一次只显示一块"（`pane` 的 `hidden`）；
+          2. 多钉一条：分段**必须**由 `segment()` 产出（`miu-tabrow`），
+             而且 `.person-tabs` / `.person-tab` 那一套**一个字都不许留**——
+             否则就是"两套页签并存"。
+          3. 接线还在（点一下只换显示的那一节，不整页重画）。
+        """
+
         block = _uncomment(_function_body(self.js, "personBlock"))
-        self.assertIn("person-tabs", block, "三节没有做成分段")
-        self.assertIn('role="tab"', block, "分段没有 tab 语义")
+        self.assertIn("segment(", block, "三节没有走 Miuix `TabRow` 那个构建器")
+        self.assertIn('extra: "person-pane"', block,
+                      "分段没有给委托留抓手（`bind()` 认不出点的是哪一节）")
+        self.assertNotIn("person-tabs", block, "自造的页签容器还在（两套页签并存）")
+        self.assertNotIn("person-tab-count", block, "自造的页签计数还在")
+        self.assertNotIn("person-tabs", _uncomment(self.css), "`app.css` 里那套自造页签没删干净")
+        self.assertNotIn("person-tab ", _uncomment(self.css), "`app.css` 里 `.person-tab` 没删干净")
+        self.assertNotIn("person-tab-count", _uncomment(self.css), "`app.css` 里 `.person-tab-count` 没删干净")
         self.assertRegex(block, r'id === showing \? "" : " hidden"',
                          "没有把不在看的那几节藏起来")
         self.assertRegex(self.css, r"\.pane\[hidden\]\s*\{\s*display: none;",
                          "藏起来的那几节没有 display: none")
         handlers = _uncomment(_function_body(self.js, "bind"))
-        self.assertIn('act("person-tab"', handlers, "分段没有接线")
-        tabs = re.search(r'act\("person-tab", \(el\) => \{(.*?)\}\)\) return;',
+        self.assertIn('act("person-pane"', handlers, "分段没有接线")
+        tabs = re.search(r'act\("person-pane", \(el\) => \{(.*?)\}\)\) return;',
                          handlers, re.S)
         self.assertIsNotNone(tabs, "分段那一段找不到")
         self.assertIn("pane.hidden =", tabs.group(1), "点分段没有换显示的那一节")
@@ -1619,8 +1651,19 @@ class PersonRecordsTests(unittest.TestCase):
         self.assertIn("countLine", block, "记录那一节没有放计数那一行")
 
     def test_the_touch_targets_and_rows_are_comfortable(self) -> None:
-        self.assertRegex(self.css, r"\.kind-chip\s*\{[^}]*min-height: 40px",
-                         "类别那几枚点按区太小")
+        # 2026-10-19（第二轮，**依据是用户原话「一切以 miuix 为先」**）：
+        # 类别筛选那几枚原来是我们自造的小胶囊（min-height: 40px、pill 圆角、主色选中）。
+        # 现在它与「记忆」页那两排筛选**同一个组件**：Miuix `TabRowWithContour`，
+        # 点按区是 `TabRowWithContourHeight = 45dp`（比原来的 40 更大，不是变小）。
+        self.assertRegex(self.css,
+                         r"--miu-tab-contour-h:\s*45px",
+                         "`TabRowWithContour` 的高度不是 45dp")
+        self.assertRegex(self.css,
+                         r"\.miu-tabrow--contour\s*\{[^}]*height: var\(--miu-tab-contour-h\)",
+                         "contour 那一档没有用 45dp 的高度")
+        block = _uncomment(_function_body(self.js, "personBlock"))
+        self.assertIn("miu-tabrow--contour", block, "类别筛选没有走 `TabRowWithContour`")
+        self.assertIn("miu-tabrow__tab", block, "类别筛选不是那个组件里的 tab")
         self.assertRegex(self.css, r"\.cols-profile th, \.cols-profile td \{[^}]*line-height: 1\.55",
                          "记录表行高还是挤的")
         self.assertRegex(self.css, r"\.clamp\s*\{[^}]*cursor: pointer",
@@ -1714,8 +1757,17 @@ class GroupPageLayoutTests(unittest.TestCase):
             "if (!(groupRowPaint && groupRowPaint(box.dataset.id, on))) render();", ""),
             "成功之后还去整页 render 了")
         self.assertNotIn('api("/api/groups"', inner, "成功之后又去取了一遍整张表")
-        self.assertRegex(self.css, r"\.row-switch\s*\{[^}]*min-height: 44px",
-                         "开关那一块点按区太小")
+        # 2026-10-19（第二轮）改这条判据，**依据是用户原话「一切以 miuix 为先」**：
+        # 原来钉的是"这个小标签自己 44px 高"。现在点按区由**整行**给：Miuix
+        # `SwitchPreference` 本来就是整行点击切换（源码里
+        # `BasicComponent(onClick = { onCheckedChange(!checked) })`），
+        # 而行的最小高是 `heightIn(min = 56.dp)`。所以判据改成钉"整行可点真的接上了"。
+        self.assertRegex(self.css, r"--miu-row-min-h:\s*56px",
+                         "行的最小高不是 `heightIn(min = 56.dp)`")
+        self.assertRegex(self.css, r"\.row-switch\s*\{[^}]*cursor: pointer",
+                         "开关那一块不是可点的样子")
+        self.assertIn("toggle.click()", _uncomment(_function_body(self.js, "bind")),
+                      "整行点击没有接上（Miuix `SwitchPreference` 是整行可点）")
 
 
 class MemoryGroupSwitchLayoutTests(unittest.TestCase):
@@ -1773,8 +1825,17 @@ class MemoryGroupSwitchLayoutTests(unittest.TestCase):
         self.assertIn("要改去「记忆」页", group, "徽标没有指一句去哪改")
 
     def test_the_switch_is_comfortable_to_tap(self) -> None:
-        self.assertRegex(self.css, r"\.row-switch\s*\{[^}]*min-height: 44px",
-                         "开关那一块点按区太小")
+        # 2026-10-19（第二轮）改这条判据，**依据是用户原话「一切以 miuix 为先」**：
+        # 原来钉的是"这个小标签自己 44px 高"。现在点按区由**整行**给：Miuix
+        # `SwitchPreference` 本来就是整行点击切换（源码里
+        # `BasicComponent(onClick = { onCheckedChange(!checked) })`），
+        # 而行的最小高是 `heightIn(min = 56.dp)`。所以判据改成钉"整行可点真的接上了"。
+        self.assertRegex(self.css, r"--miu-row-min-h:\s*56px",
+                         "行的最小高不是 `heightIn(min = 56.dp)`")
+        self.assertRegex(self.css, r"\.row-switch\s*\{[^}]*cursor: pointer",
+                         "开关那一块不是可点的样子")
+        self.assertIn("toggle.click()", _uncomment(_function_body(self.js, "bind")),
+                      "整行点击没有接上（Miuix `SwitchPreference` 是整行可点）")
         self.assertIn("input.switch", self.css, "开关不是那套既有的滑块")
 
 
@@ -1845,8 +1906,11 @@ class ProfileBadgeAndGroupChipTests(unittest.TestCase):
     def test_the_list_has_breathing_room_under_the_search_box(self) -> None:
         self.assertRegex(self.css, r"\.person-list\s*\{[^}]*margin-top: 6px",
                          "搜索框与列表之间还是贴死的")
-        self.assertRegex(self.css, r"\.person-list\s*\{[^}]*padding: 2px 0",
-                         "列表没有上下留白（最上面那行会被截）")
+        # 2026-10-19（第二轮，**依据是用户原话「一切以 miuix 为先」**）：列表**自己**不再垫
+        # 2px——每一行都是 `BasicComponent`（自带 `InsideMargin` 16dp），列表再垫一层
+        # 就是"文档里没有的间距"。滚动到边那一行也不会被截，因为行两边有 16px 的底。
+        self.assertRegex(self.css, r"\.person-list\s*\{[^}]*padding: 0;",
+                         "列表又垫了一层自造的 2px（行自己带 InsideMargin）")
 
 
 class MemoryFilterTests(unittest.TestCase):
@@ -1900,8 +1964,18 @@ class MemoryFilterTests(unittest.TestCase):
         self.assertIn("&q=${encodeURIComponent(keyword)}", body, "关键词没有交给后端筛")
         self.assertIn("mf-count", _uncomment(_function_body(self.js, "memoryFilterBar")),
                       "没有显式条数")
-        self.assertRegex(self.css, r"\.filter-chip\s*\{[^}]*min-height: 40px",
-                         "筛选胶囊点按区太小")
+        # 2026-10-19（第二轮）改这条判据，**依据是用户原话「一切以 miuix 为先」**：
+        # 筛选那两排原来是自造的小胶囊（min-height: 40px、pill 圆角、主色选中），
+        # 现在与「人物画像」的类别筛选**同一个组件**：Miuix `TabRowWithContour`，
+        # 点按区是 `TabRowWithContourHeight = 45dp`（比原来的 40 更大，不是变小）。
+        self.assertRegex(self.css, r"--miu-tab-contour-h:\s*45px",
+                         "`TabRowWithContour` 的高度不是 45dp")
+        self.assertRegex(self.css,
+                         r"\.miu-tabrow--contour\s*\{[^}]*height: var\(--miu-tab-contour-h\)",
+                         "contour 那一档没有用 45dp 的高度")
+        self.assertIn("miu-tabrow--contour",
+                      _uncomment(_function_body(self.js, "memoryFilterBar")),
+                      "筛选条没有走 `TabRowWithContour`")
         self.assertRegex(self.css, r"\.filter-input\s*\{[^}]*min-height: 44px",
                          "筛选输入框太小")
 
@@ -2135,3 +2209,304 @@ class ModelPageTests(unittest.TestCase):
             self.assertIsNotNone(block, f"{name} 那一段找不到")
             self.assertIn("error.message", block.group(0),
                           f"{name} 把核心的拒绝原因吞了")
+
+
+class MiuixFirstTests(unittest.TestCase):
+    """**一切以 Miuix 为先**（用户 2026-10-19 第二轮的硬指令，原话照抄）。
+
+    上一轮交付时报告里列了 8 条「我们自己的取舍」（行内边距压成 10px、卡片自己给 20/22、
+    「`*Preference` 不画线所以保留线」、窄屏把控件另起一行、两套状态小胶囊、两套页签、
+    `.kv` / `.chips` / `.filter-chip` 只对令牌……）。这一轮用户把话讲死了：
+    *「我要求一切以 miuix 为先，能听懂吗」* —— 那 8 条**全部按 Miuix 改回去**，
+    「后台信息密度高 / 一屏少看几行 / 页面会变长」**都不再是**偏离的理由。
+
+    这一组判据就是那 8 条（+ 深色分层）的机械覆盖。每条都写清「引的是哪个令牌 / 文档哪一节」。
+    判据是**新增的**：上面那些老判据一条都没删（只把钉死数字的那几处改成钉令牌）。
+    """
+
+    def setUp(self) -> None:
+        self.js = _asset("app.js")
+        self.css = _asset("app.css")
+        self.bare = _uncomment(self.css)
+
+    # ---------- ① 行内边距 ----------
+    def test_row_padding_is_sixteen_on_all_four_sides(self) -> None:
+        """① 行内边距 16px（四个方向）。依据 `components/basiccomponent.md`
+        §BasicComponentDefaults Constants：`InsideMargin = PaddingValues(16.dp)`；
+        源码 `Component.kt` 的 `.padding(insideMargin)`。
+        上一轮把竖直压成 10px（理由是「一屏少看三行」），这一轮撤回。"""
+
+        self.assertRegex(self.bare, r"--miu-row-pad-y:\s*16px", "竖直内边距不是 16px")
+        self.assertRegex(self.bare, r"--miu-row-pad-x:\s*16px", "水平内边距不是 16px")
+        self.assertRegex(
+            self.bare,
+            r"\.pref\s*\{[^}]*padding:\s*var\(--miu-row-pad-y\)\s+var\(--miu-row-pad-x\)",
+            "`.pref` 没有用那对令牌（行内边距必须四个方向都对上 InsideMargin）")
+        self.assertNotRegex(self.bare, r"--miu-row-pad-y:\s*(?!16px)\d+px",
+                            "竖直内边距又被改成别的数了")
+
+    # ---------- ② 卡片 insideMargin = 0 ----------
+    def test_the_card_itself_has_no_inside_margin(self) -> None:
+        """② 卡片 `insideMargin = 0`，边由卡里的「行」给。依据 `components/card.md`
+        §CardDefaults Constants（`InsideMargin = PaddingValues(0.dp)`）与源码 `Card.kt`
+        的 `Column(Modifier.padding(insideMargin))`。
+        上一轮卡片自己给 20/22，理由是「我们的卡里没有行」——这一轮让卡里每一块自己当行。"""
+
+        self.assertRegex(self.bare, r"--miu-card-inside:\s*0px", "卡片内边距令牌不是 0")
+        self.assertRegex(
+            self.bare, r"section\.card\s*\{[^}]*padding:\s*var\(--miu-card-inside\)",
+            "`section.card` 自己没有走 `--miu-card-inside`")
+        self.assertNotRegex(self.bare, r"section\.card\s*\{[^}]*padding:\s*\d+px",
+                            "`section.card` 又写死了一个内边距")
+        self.assertRegex(
+            self.bare, r"section\.card\s*>\s*\*\s*\{[^}]*padding:\s*var\(--miu-row-pad-y\)",
+            "卡里的块没有自己承担 InsideMargin")
+        self.assertRegex(self.bare, r"section\.card\s*>\s*table[^{]*\{[^}]*padding:\s*0",
+                         "表格被套了两层内边距（单元格已经给过一次）")
+        self.assertRegex(self.bare, r"section\.card\s*>\s*\.pref-list",
+                         "嵌套的 Card 被垫了一层")
+
+    # ---------- ③ 分割线照 Divider 的规范 ----------
+    def test_the_divider_follows_the_divider_component_spec(self) -> None:
+        """③ 分割线按 `Divider` 的规范：0.75px + `dividerLine` + **两侧各缩进 16px**。
+
+        依据 `components/divider.md`：§Properties 的 `thickness` / `color` 默认值指向
+        `DividerDefaults`（`Thickness = 0.75.dp`、`DividerColor = colorScheme.dividerLine`），
+        §Advanced Usage「Divider with Padding」写的是
+        `HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))`；
+        官方 example `component/BlurSection.kt` 里分隔偏好行用的就是那句。
+        上一轮只缩了左端（`right: 0`），还拿「`*Preference` 不画线」当「可以留线」的依据——
+        留线本身没错（文档里 `Divider` 是一等组件），错在没照它的缩进。"""
+
+        self.assertRegex(self.bare, r"--miu-divider-w:\s*0\.75px", "线宽不是 0.75px")
+        self.assertRegex(self.bare, r"--miu-divider-inset:\s*16px", "缩进不是 16px")
+        rule = re.search(r"\.pref\s*\+\s*\.pref::before\s*\{(.*?)\}", self.bare, re.S)
+        self.assertIsNotNone(rule, "行间分割线那条规则不见了")
+        body = rule.group(1)
+        self.assertIn("var(--miu-divider-w)", body, "线宽没有引令牌")
+        self.assertIn("var(--divider)", body, "线色不是 `dividerLine`")
+        self.assertIn("left: var(--miu-divider-inset)", body, "左端没有缩进")
+        self.assertIn("right: var(--miu-divider-inset)", body,
+                      "右端没有缩进（文档里是 `padding(horizontal = 16.dp)`，两侧都要缩）")
+        self.assertRegex(self.bare, r"th,\s*td\s*\{[^}]*border-bottom:\s*var\(--miu-divider-w\)",
+                         "表格行线没有用 Divider 的 0.75px")
+
+    # ---------- ④ endHardCap 60%，不加断点 ----------
+    def test_the_end_slot_is_always_capped_at_sixty_percent(self) -> None:
+        """④ `endHardCap = 60%`，**任何宽度下都是 60%**。依据源码 `Component.kt`：
+
+            val endHardCap = (widthAfterStart - spacerPx).coerceAtLeast(0) * 6 / 10
+
+        窄屏上标题被压成三行是**规范结果**。上一轮在 `max-width: 699px` 与
+        `max-width: 1099px` 各写了一条「控件另起一行」的断点（还写过
+        `.audit-item .pref-end { max-width: 40% }`）——这一轮全删，判据钉住「没有」。"""
+
+        self.assertRegex(self.bare, r"--miu-end-cap:\s*60%", "上限不是 60%")
+        self.assertRegex(self.bare,
+                         r"\.pref-end\s*\{[^}]*max-width:\s*var\(--miu-end-cap\)",
+                         "`.pref-end` 没有用 60% 那个令牌")
+        self.assertNotRegex(self.bare, r"\.pref-main\s*\{[^}]*flex:\s*1\s+1\s+100%",
+                            "又出现「窄屏把标题改成整行」的覆盖了")
+        end_rule = re.search(r"\.pref-end\s*\{([^}]*)\}", self.bare, re.S)
+        self.assertIsNotNone(end_rule, "`.pref-end` 那条规则不见了")
+        self.assertEqual(len(re.findall(r"max-width:", end_rule.group(1))), 1,
+                         "`.pref-end` 出现了第二个上限（60% 之外不该有别的）")
+        for block in re.findall(r"@media[^{]*\{(.*?\n\})", self.bare, re.S):
+            self.assertNotIn(".pref-end", block,
+                             "媒体查询里又在改 `.pref-end`（那是自己发明的断点）")
+            self.assertNotIn(".pref-main", block,
+                             "媒体查询里又在改 `.pref-main`（那是自己发明的断点）")
+
+    # ---------- ⑤ 状态不是胶囊 ----------
+    def test_status_is_text_not_a_pill(self) -> None:
+        """⑤ 状态 = 一段带颜色档的 `Text`，不是小胶囊。
+
+        依据 `components/switchpreference.md` §Advanced Usage「With End Actions」：
+        `Text(text = …, color = MiuixTheme.colorScheme.onSurfaceVariantActions)`。
+        `docs/components/` 全表里**没有**「状态标签 / chip」这类组件（`Badge` 是**计数**徽标：
+        `LargeSize = 16.dp`、字 `footnote2`）。所以 `.tag` / `.badge` / `.group-badge` /
+        `.person-group` 合成**一条**规则，且都没有底色/圆角/内边距——
+        「两套小胶囊并存」这件事不再有；自定的 `--good` / `--warn` 语义色也删了
+        （Miuix 只有 primary 与 error）。"""
+
+        rule = re.search(r"\.tag,\s*\.badge,\s*\.group-badge,\s*\.person-group\s*\{(.*?)\}",
+                         self.bare, re.S)
+        self.assertIsNotNone(rule, "四套状态控件没有合成一条规则")
+        body = rule.group(1)
+        self.assertIn("background: none", body, "状态文本还带底色（那就是胶囊）")
+        self.assertIn("border-radius: 0", body, "状态文本还带圆角（那就是胶囊）")
+        self.assertIn("padding: 0", body, "状态文本还带内边距（那就是胶囊）")
+        self.assertIn("var(--text-4)", body, "状态文本没用 `onSurfaceVariantActions` 那一档")
+        self.assertNotIn("--good", self.bare, "自造的「正常」语义色还在")
+        self.assertNotIn("--warn", self.bare, "自造的「警告」语义色还在")
+        self.assertRegex(self.bare, r"\.miu-badge\s*\{[^}]*min-width:\s*var\(--miu-badge-h\)",
+                         "计数徽标（Miuix `Badge`）不见了")
+
+    # ---------- ⑥ 页签只有一套 ----------
+    def test_there_is_exactly_one_kind_of_tab(self) -> None:
+        """⑥ 页签只有一套：人物画像页那三节也用 Miuix `TabRow`（`segment()`）。
+        依据 `components/tabrow.md`（§Properties 与 `TabRowDefaults`）。
+        上一轮留着 `.person-tabs`（下划线式），报告里还写着「那一页不在试点里」——
+        这一轮删掉，判据钉住「一个字都不许留」。"""
+
+        self.assertNotIn("person-tabs", self.bare, "`.person-tabs` 还在")
+        self.assertNotIn("person-tab-count", self.bare, "`.person-tab-count` 还在")
+        self.assertNotRegex(self.bare, r"\.person-tab[\s.{]", "`.person-tab` 还在")
+        block = _uncomment(_function_body(self.js, "personBlock"))
+        self.assertIn("segment(", block, "人物画像页三节没走 `segment()`")
+
+    # ---------- ⑦ 开关整行可点 ----------
+    def test_the_switch_row_is_clickable_as_a_whole(self) -> None:
+        """⑦ 整行可点。依据源码 `miuix-preference/SwitchPreference.kt`：
+        `BasicComponent(onClick = { onCheckedChange(!checked) })` + `role = Role.Switch`。
+        这是 `SwitchPreference` 的语义，不是「新功能」。"""
+
+        handlers = _uncomment(_function_body(self.js, "bind"))
+        self.assertIn("toggle.click()", handlers, "整行点击没有接上")
+        self.assertIn('row.querySelector("input.switch")', handlers,
+                      "整行点击没有认「这一行里的开关」")
+        self.assertIn("input, select, textarea, button, a, label", handlers,
+                      "整行点击没有把控件本身排除掉（点输入框会顺手拨开关）")
+        self.assertRegex(self.bare, r"\.pref:has\(input\.switch\)\s*\{[^}]*cursor:\s*pointer",
+                         "整行可点但看起来不可点")
+
+    # ---------- ⑧ .kv / .chips / 表格 / 代码块 / .filter-chip ----------
+    def test_the_readout_cell_is_two_basic_component_lines(self) -> None:
+        """⑧-1 `.kv` = `BasicComponent` 的两层文字：值是 title（`headline1` / Medium /
+        onBackground）、标签是 summary（`body2` / onSurfaceVariantSummary）。
+        依据 `components/basiccomponent.md` 的默认值表 + 源码 `Component.kt` 里
+        `fontSize = textStyles.headline1.fontSize` / `FontWeight.Medium` /
+        `summaryColor() = onSurfaceVariantSummary`。"""
+
+        self.assertRegex(self.bare, r"\.kv\s*\.k\s*\{[^}]*font-size:\s*var\(--miu-fs-body2\)",
+                         "标签不是 body2")
+        self.assertRegex(self.bare, r"\.kv\s*\.k\s*\{[^}]*color:\s*var\(--text-3\)",
+                         "标签不是 onSurfaceVariantSummary")
+        self.assertRegex(self.bare, r"\.kv\s*\.v\s*\{[^}]*font-size:\s*var\(--miu-fs-headline1\)",
+                         "值不是 headline1")
+        self.assertRegex(self.bare, r"\.kv\s*\.v\s*\{[^}]*font-weight:\s*500", "值不是 Medium")
+        self.assertRegex(
+            self.bare,
+            r"\.kv\s*\{[^}]*padding:\s*var\(--miu-row-pad-y\)\s+var\(--miu-row-pad-x\)",
+            "格子没有用 InsideMargin 16px")
+
+    def test_the_chips_are_monospace_text(self) -> None:
+        """⑧-2 一串号码 = **`Text` 的等宽档**（文档里没有 chip 组件，只对齐令牌）：
+        没有底色、没有圆角、没有内边距，只是等宽字 + `onSurfaceSecondary`。"""
+
+        rule = re.search(r"\.chips\s+\.chip\s*\{(.*?)\}", self.bare, re.S)
+        self.assertIsNotNone(rule, "号码片那条规则不见了")
+        body = rule.group(1)
+        self.assertIn("font-family: var(--mono)", body, "号码不是等宽字")
+        self.assertIn("background: none", body, "号码片还有底色（那就是自造的小胶囊）")
+        self.assertIn("border-radius: 0", body, "号码片还有圆角")
+        self.assertIn("padding: 0", body, "号码片还有内边距")
+
+    def test_the_table_only_borrows_tokens(self) -> None:
+        """⑧-3 表格：文档里没有表格组件，所以**只对齐令牌**——
+        单元格内边距 = 行的 `InsideMargin`（16px），行线 = `Divider` 的 0.75px + `dividerLine`。"""
+
+        self.assertRegex(
+            self.bare,
+            r"th,\s*td\s*\{[^}]*padding:\s*var\(--miu-row-pad-y\)\s+var\(--miu-row-pad-x\)",
+            "单元格内边距不是 InsideMargin")
+        self.assertRegex(self.bare, r"th,\s*td\s*\{[^}]*border-bottom:\s*var\(--miu-divider-w\)",
+                         "行线不是 Divider 的 0.75px")
+        self.assertRegex(self.bare, r"table\s*\{[^}]*font-size:\s*var\(--miu-fs-headline1\)",
+                         "表格正文字号不在 Miuix 的字号阶上")
+
+    def test_the_code_blocks_only_borrow_tokens(self) -> None:
+        """⑧-4 行内代码 / 代码块：文档里没有代码组件，只对齐令牌——
+        容器色 `--miu-container`、圆角取文档里那两档（16dp / contour 的 8dp）、
+        字 `footnote1` + mono。"""
+
+        self.assertRegex(self.bare, r"\ncode\s*\{[^}]*border-radius:\s*var\(--miu-tab-contour-r\)",
+                         "行内代码的圆角不在 Miuix 的圆角档里")
+        self.assertRegex(self.bare, r"\ncode\s*\{[^}]*background:\s*var\(--miu-container\)",
+                         "行内代码没有用容器那一档")
+        self.assertRegex(self.bare, r"\.preview\s*\{[^}]*border-radius:\s*var\(--miu-r-card\)",
+                         "代码块的圆角不是 Card 的 16dp")
+        self.assertRegex(self.bare, r"\.preview\s*\{[^}]*background:\s*var\(--miu-container\)",
+                         "代码块没有用容器那一档")
+
+    def test_the_filter_chips_are_contour_tabs(self) -> None:
+        """⑧-5 `.filter-chip` / `.kind-chip` / `.mem-status` = **`TabRowWithContour`**。
+        依据 `components/tabrow.md` §TabRowWithContour 与 `TabRowDefaults`：
+        高 45dp、圆角 8dp、间距 5dp、最小宽 62dp；颜色仍是 `tabRowColors()`。"""
+
+        for token, value in (("--miu-tab-contour-h", "45px"),
+                             ("--miu-tab-contour-r", "8px"),
+                             ("--miu-tab-contour-gap", "5px"),
+                             ("--miu-tab-contour-min-w", "62px")):
+            self.assertRegex(self.bare, token + r":\s*" + value, "`" + token + "` 不是 " + value)
+        self.assertIn("miu-tabrow--contour",
+                      _uncomment(_function_body(self.js, "memoryFilterBar")),
+                      "记忆页筛选条没走 contour 那一档")
+        for legacy in (".filter-chip", ".kind-chip", ".mem-status"):
+            rule = re.search(re.escape(legacy) + r"\s*\{([^}]*)\}", self.bare)
+            self.assertIsNotNone(rule, "`" + legacy + "` 那条规则不见了（委托还要认它）")
+            self.assertNotIn("background", rule.group(1),
+                             "`" + legacy + "` 还自己画底色（那就不是 TabRow 了）")
+            self.assertNotIn("border-radius", rule.group(1),
+                             "`" + legacy + "` 还自己定圆角（那就不是 TabRow 了）")
+
+    # ---------- ⑨ 深色分层 ----------
+    def test_the_container_token_steps_up_in_dark_too(self) -> None:
+        """⑨ 深色下容器也要真的高一档。依据 `theme/Colors.kt`：
+
+            darkColorScheme:  surfaceVariant #242424, surfaceContainer #242424,
+                              surfaceContainerHigh #242424, surfaceContainerHighest #2D2D2D
+            lightColorScheme: surfaceContainerHigh #E8E8E8, surfaceContainerHighest #E8E8E8
+
+        所以 `surfaceContainer` / `surfaceContainerHigh` 在深色里**与卡片同值**，
+        拿它们做层级等于没层级；`surfaceContainerHighest` 是唯一在两套主题里都比卡片
+        高一档的那一档。容器统一引 `--miu-container`（浅 #E8E8E8 / 深 #2D2D2D）。
+        （上一轮报告里写「深色下 Miuix 本来就没有层级」是**错的**：不是没有，是取错了 token。）"""
+
+        self.assertRegex(self.bare, r"--miu-container:\s*#e8e8e8",
+                         "浅色的容器档不是 `surfaceContainerHighest` 的值")
+        self.assertEqual(self.bare.count("--miu-container: #2d2d2d"), 2,
+                         "深色那两处（跟随系统 / 手动切）没有都设成 #2D2D2D")
+        for selector in (r"(?m)^\.kv\s*\{", r"(?m)^\.card-inline\s*\{"):
+            rule = re.search(selector + r"([^}]*)\}", self.bare, re.S)
+            self.assertIsNotNone(rule, "`" + selector + "` 那条规则不见了")
+            self.assertIn("var(--miu-container)", rule.group(1),
+                          "`" + selector + "` 还在用深色下与卡片同值的那个 token")
+        # 侧栏那条选中药丸：同一个 `selector` 在文件里出现多次（还有一条是过渡动画），
+        # 所以按"这一条规则里的 background"认，不按先出现的那条。
+        picked = re.findall(r"(?m)^nav button\.on\s*\{([^}]*)\}", self.bare)
+        self.assertTrue(picked, "`nav button.on` 那条规则不见了")
+        self.assertTrue(any("background: var(--miu-container)" in body for body in picked),
+                        "侧栏选中药丸还在用深色下与卡片同值的那个 token")
+
+    def test_pref_row_has_exactly_one_definition(self) -> None:
+        """`prefRow()` 只能有**一个**定义。
+
+        2026-10-19 第二轮：`app.js` 里曾经有**两份** `prefRow`（组件层一份、设置页那段
+        之前又一份），后定义的那份盖掉前一份，而且少了 `bottom` / `id` 两个槽——
+        于是"一整行铺开的底部块"**静默不画**（群聊页那个发送框、模型页每一把 key 的
+        输入框、每一路绑定的三个下拉全都落进 `center` 槽里硬挤）。
+        这是"同一件事有两个真相来源"的典型，判据钉住"只许一个"。
+        """
+
+        import re as _re
+        self.assertEqual(len(_re.findall(r"(?m)^function prefRow\(", self.js)), 1,
+                         "`prefRow` 又出现了第二个定义（后定义的会盖掉前一个，槽会丢）")
+        # 不用 `_function_body()`：它的形参默认值里有一对 `{}`（`options = {}`），
+        # 靠配对花括号取的写法会从那儿切开、取到空串（`segment()` 那条判据踩过同一个坑）。
+        start = self.js.index("function prefRow(")
+        end = self.js.index("\nfunction ", start + 1)
+        body = _uncomment(self.js[start:end])
+        for slot in ("options.icon", "options.extra", "options.bottom", "options.id"):
+            self.assertIn(slot, body, "`prefRow` 少了 " + slot + " 这个槽")
+        self.assertIn("pref-bottom", body, "`prefRow` 不再产出 `.pref-bottom`（bottomAction 那个槽）")
+
+    # ---------- 偏离清单是 0 条 ----------
+    def test_there_is_no_deviation_list_any_more(self) -> None:
+        """偏离清单**清零**：`app.css` 末尾那一节现在是「对应关系 + 文档里确无对应组件的
+        逐条列明」，不再有「我们故意不照 Miuix」的条目。"""
+
+        tail = self.css[self.css.index("与 Miuix 0.9.4 的对应关系"):]
+        self.assertIn("偏离清零", tail, "末尾那一节没改成「偏离清零」")
+        self.assertNotIn("与 Miuix 的偏离", tail, "旧的「偏离清单」标题还在")
+        self.assertIn("文档里确无对应组件", tail, "没有把「文档里确无」的逐条列出来")

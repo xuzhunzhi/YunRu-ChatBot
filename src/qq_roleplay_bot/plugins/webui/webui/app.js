@@ -591,6 +591,10 @@ function mdToHtml(text, escFn) {
 /* ---------- 小部件 ---------- */
 
 function kv(label, value, options = {}) {
+  // Miuix 里没有"标签 + 值"的格子组件；最接近的排版是 `BasicComponent` 的两层：
+  // 值是 title（`headline1` / Medium / onBackground）、标签是 summary
+  // （`body2` / onSurfaceVariantSummary）。所以这里就是那两层，容器只借令牌
+  // （`--miu-container` + Card 的 16dp 圆角 + InsideMargin），见 app.css 的 `.kv`。
   // `html: true` 只给**我们自己拼的**内容用（比如号码片），外部数据一律走 esc。
   const body = options.html ? value : esc(value);
   // `span`：横跨几列（由 `readoutGrid()` 算出来填最后一行，见那里的说明）。
@@ -635,6 +639,8 @@ function readoutGrid(cells, per = 3) {
 function chips(values) {
   // 一串号码/标签：每个一个片，**在片之间**折行。直接 join("、") 的话浏览器会把
   // "800000001、" 当成一个长词，窄列里就变成从数字中间断开（实测总览页就是这样）。
+  // Miuix 里没有 chip / tag 组件，最接近的是 **`Text` 的等宽档**，所以这一层
+  // 没有底色也没有圆角——只是一串等宽字（样式见 app.css 的 `.chips .chip`）。
   const items = (values || []).filter((v) => String(v || "").trim());
   if (!items.length) return "—";
   return `<span class="chips">`
@@ -660,8 +666,10 @@ function chips(values) {
  */
 
 function card(title, body, options = {}) {
-  // Miuix `Card`：圆角 16dp、底色 `surfaceContainer`、`insideMargin = 0`。
-  // 我们的卡要装表格/代码块，所以内边距给在卡片上（偏离 ②，见 app.css 末尾）。
+  // Miuix `Card`：圆角 16dp、底色 `surfaceContainer`、**`insideMargin = 0`**。
+  // 卡片自己不留内边距（2026-10-19 第二轮按"一切以 Miuix 为先"改回 `CardDefaults`），
+  // 边由卡里每一块自己当"行"来给——`app.css` 的 `section.card > *` 那一条。
+  // 所以构建器**不**在 `body` 外面再包一层带 padding 的壳。
   // `options.count`：标题右边那个计数（Miuix `Badge`，与 `prefGroup` 同一套）。
   const cls = ["card", options.classes || ""].filter(Boolean).join(" ");
   const head = title
@@ -674,8 +682,9 @@ function card(title, body, options = {}) {
 /* Miuix `Badge`：**计数**徽标。`BadgeDefaults.LargeSize = 16.dp`、水平内边距 4dp、
  * 字 `footnote2`(11sp)、行高 16dp、圆形；默认色 error/onError，我们另给 accent/neutral。
  *
- * ⚠️ 它不是状态标签。`.tag`（"面板覆盖中"那种四五个汉字）在 Miuix 里没有对应组件，
- * 塞进 16dp 的计数徽标里会挤成一条——所以那个**没有**换（见交付报告）。 */
+ * ⚠️ 它只用于**计数**（"共 N 把"、"12 条"）。**状态**不用它：Miuix 表达状态的写法是
+ * "一段 `Text` 加一个颜色档"（`switchpreference.md` §Advanced Usage "With End Actions"），
+ * 所以 `.tag` 那一层是**纯文字**、没有胶囊（见 app.css 的状态文本那一条）。 */
 function badge(text, tone = "") {
   const cls = ["miu-badge", tone].filter(Boolean).join(" ");
   return `<span class="${cls}">${esc(text)}</span>`;
@@ -706,7 +715,15 @@ function prefGroup(title, rows, options = {}) {
  *   - `bottomAction` 之前是 `Spacer(8.dp)`，且**占整行**       → `.pref-bottom`
  *
  * 参数顺序与 Miuix 一致：先是内容（`main`），再是右端（`end`），最后是配置（`options`）。
- * `options`：`icon` 行首图标名、`extra` 额外类名、`bottom` 底部块、`id` 行 id。 */
+ * `options`：`icon` 行首图标名、`extra` 额外类名、`bottom` 底部块、`id` 行 id。
+ *
+ * ⚠️ 2026-10-19 第二轮：这个函数**曾经有两个定义**（早的那个在这儿、晚的那个在
+ * 设置页那一段之前），后定义的会**盖掉**前一个——于是"哪些槽真的会被画出来"取决于
+ * 你读到的是哪一份。当时的症状：晚的那份没有 `bottom` / `id`，`bottomAction` 整块
+ * **静默不画**（群聊页那个发送框、模型页那些"整行铺开的输入框"全都落在 `center` 槽里
+ * 硬挤）。现在只留**这一个**定义，四个槽都认；早的那份删掉。
+ * 判据在 `tests/test_webui_layout_assertions.py::MiuixFirstTests::test_pref_row_has_exactly_one_definition`。
+ */
 function prefRow(main, end, options = {}) {
   const lead = options.icon ? icon(options.icon, "pref-icon") : "";
   const tail = end ? `<div class="pref-end">${end}</div>` : "";
@@ -725,17 +742,22 @@ function prefRow(main, end, options = {}) {
  *
  * 源码：高 42dp、圆角 12dp、每个 tab 左右 12dp、最小宽 76dp、tab 之间 9dp、
  * 字 `body1`(16sp)、选中 **Bold**、`maxLines = 1` + 省略号。
+ * `--contour` 那一档是 `TabRowWithContour`（高 45dp、圆角 8dp、间距 5dp、最小宽 62dp，
+ * 见 `tabrow.md`），用在页内"筛一类"的小段选上。
  *
  * `options.data`：给每个 tab 挂的委托抓手名（`data-page-pane` 这种）；
- * `options.label`：`aria-label`。只有这两个配置项，**没有业务字段**——
- * 传进来的 `items` 只认 `{ id, label }`。 */
+ * `options.label`：`aria-label`；`options.contour`：改用 contour 那一档的几何；
+ * `options.extra`：给每个 tab 多加的类名（`bind()` 的委托靠类名认控件）。
+ * 只有这四个配置项，**没有业务字段**——传进来的 `items` 只认 `{ id, label }`。 */
 function segment(items, current, options = {}) {
   const attr = options.data ? ` data-${options.data}` : "";
+  const extra = options.extra ? " " + options.extra : "";
+  const row = "miu-tabrow" + (options.contour ? " miu-tabrow--contour" : "");
   const tabs = items.map((item) => `<button type="button" role="tab"
-      class="miu-tabrow__tab${item.id === current ? " on" : ""}"${attr}="${esc(item.id)}"
+      class="miu-tabrow__tab${extra}${item.id === current ? " on" : ""}"${attr}="${esc(item.id)}"
       aria-selected="${item.id === current ? "true" : "false"}">${
   esc(item.label)}</button>`).join("");
-  return `<div class="miu-tabrow" role="tablist" aria-label="${
+  return `<div class="${row}" role="tablist" aria-label="${
     esc(options.label || "看哪一块")}">${tabs}</div>`;
 }
 
@@ -922,7 +944,9 @@ async function viewOverview() {
       { label: "模式", key: "mode", nowrap: true },
       { label: "条数", get: (r) => num(r.history_size), nowrap: true },
       { label: "话题", get: (r) => r.topic || "—" },
-    ], st.sessions || [], { widths: ["30%", "14%", "12%", "44%"] }));
+    ], st.sessions || [],
+      // 模式那一列放 `private`（约 50px + 左右 16px 内边距），12% 在 450px 的表里装不下
+      { widths: ["30%", "15%", "11%", "44%"] }));
 }
 
 async function viewUsage() {
@@ -952,7 +976,12 @@ async function viewUsage() {
       { label: "命中 / 未命中", get: (r) => num(r.hit_tokens) + " / " + num(r.miss_tokens), mono: true, nowrap: true },
     ], rows, {
       cols: "cols-usage",
-      widths: ["34%", "11%", "14%", "15%", "11%", "15%"],
+      // `命中 / 未命中` 那一列是 `mono + nowrap`（"565,000 / 347,000" 这种**不能折**），
+      // 而单元格的内边距现在是行的 `InsideMargin`（左右各 16px）。原来给 15%：
+      // 800px 的表宽下只剩 120px 可放，实测内容 146px → 溢出 26px，
+      // 顺带把整页顶出横向滚动条（DevTools 量的：`scrollWidth 1287 > client 1280`）。
+      // 所以按"两段数字最长约 150px + 32px 内边距"重新分：那一列 27%，其余按需缩。
+      widths: ["26%", "10%", "13%", "13%", "11%", "27%"],
     }))
     + card("引擎计数（全时）", `<div class="grid">`
       + Object.entries(data.counters || {}).map(([k, v]) => kv(k, num(v))).join("")
@@ -996,16 +1025,21 @@ function shownRecordsFor(rows) {
   });
 }
 
-//: 筛选条：人 / 关键词两个输入 + 类别与时间两排小胶囊 + 清空 + **显式条数**。
+//: 筛选条：人 / 关键词两个输入 + 类别与时间两排小段选 + 清空 + **显式条数**。
+//: 那两排"小段选"是 Miuix `TabRowWithContour`（`segment()` 的 contour 那一档）——
+//: 2026-10-19 第二轮把它们从自造的小胶囊换成文档里的组件（几何/颜色都照 `tabRowColors()`
+//: 与 `TabRowDefaults` 的 contour 四个常数），`filter-chip` 这个类名留着只是因为
+//: `bind()` 的委托按类名认控件。
 function memoryFilterBar(allRows, shownRows) {
   const filter = memoryFilter();
   const kinds = Array.isArray(filter.kinds) ? filter.kinds.map(String) : [];
   const choices = [...new Set((allRows || [])
     .map((row) => String(row.kind || "").trim()).filter(Boolean))].sort();
-  const chips = choices.map((kind) => `<button type="button" class="filter-chip${
-    kinds.includes(kind) ? " on" : ""}" data-mf-kind="${esc(kind)}">${esc(kind)}</button>`).join("");
+  const chips = choices.map((kind) => `<button type="button"
+    class="miu-tabrow__tab filter-chip${kinds.includes(kind) ? " on" : ""}"
+    data-mf-kind="${esc(kind)}">${esc(kind)}</button>`).join("");
   const ranges = MEMORY_TIME_RANGES.map(([value, label]) => `<button type="button"
-    class="filter-chip${String(filter.days || "") === value ? " on" : ""}"
+    class="miu-tabrow__tab filter-chip${String(filter.days || "") === value ? " on" : ""}"
     data-mf-days="${esc(value)}">${esc(label)}</button>`).join("");
   return `<div class="mem-filter">
     <div class="filter-row">
@@ -1014,11 +1048,12 @@ function memoryFilterBar(allRows, shownRows) {
       <input id="mf-q" class="filter-input" type="search" autocomplete="off"
         placeholder="关键词（内容 / 键）" value="${esc(filter.q || "")}">
     </div>
-    <div class="filter-row">${chips || '<span class="hint">这一页里没有别的类别。</span>'}</div>
-    <div class="filter-row">${ranges}
-      <button type="button" id="mf-clear" class="filter-chip">清空筛选</button>
-      <span class="hint" id="mf-count">筛出 <b>${num((shownRows || []).length)}</b> 条
-        （这一页取到 ${num((allRows || []).length)} 条）</span></div>
+    <div class="miu-tabrow miu-tabrow--contour" role="tablist" aria-label="按类别筛">${
+  chips || '<span class="hint">这一页里没有别的类别。</span>'}</div>
+    <div class="miu-tabrow miu-tabrow--contour" role="tablist" aria-label="按时间筛">${ranges}
+      <button type="button" id="mf-clear" class="miu-tabrow__tab filter-chip">清空筛选</button></div>
+    <div class="filter-row"><span class="hint" id="mf-count">筛出 <b>${num((shownRows || []).length)}</b> 条
+      （这一页取到 ${num((allRows || []).length)} 条）</span></div>
   </div>`;
 }
 
@@ -1055,8 +1090,12 @@ async function viewMemory() {
       <span class="mono">${esc(r.kind)}</span> ${esc(r.content)}</label></li>`).join("");
   const statusTabs = [["active", "只看生效"], ["", "全部状态"]]
     .map(([value, label]) =>
-      `<button class="mem-status ${statusFilter === value ? "on" : ""}" `
+      `<button class="miu-tabrow__tab mem-status ${statusFilter === value ? "on" : ""}" `
       + `data-status="${esc(value)}">${esc(label)}</button>`).join("");
+  // ①「只看生效 / 全部状态」= Miuix `TabRowWithContour`（`segment()` 的 contour 那一档）。
+  //   2026-10-19 第二轮：原来是 `.mem-status` 自己一套主色胶囊，与另外两处自造胶囊并存。
+  const statusBar = `<div class="miu-tabrow miu-tabrow--contour" role="tablist"
+    aria-label="看哪些状态的记忆">${statusTabs}</div>`;
   // **按群的记忆开关**（用户 2026-10-09：*"记忆开关肯定要上面板啊，**在记忆页**"*）。
   // 数据只走 `ui.groups` 这一条（就是群聊页那条 `/api/groups`）；写出去只走
   // `/api/memory/groups` —— 与对话那颗是**两条写路径**，两件事别混。
@@ -1117,10 +1156,10 @@ async function viewMemory() {
           （同一条事实只在一个地方显示）。</p>
         <p class="hint">画像同样只能删、不能改；删除入口在下面「问题记忆」那张卡里。</p>`)
     + card("你记得的旧事（两层混排）", `
-        <div class="row">${statusTabs}
-          <span class="hint">「已被顶替 / 已删」是记忆更新留下的旧版，不算重复——
-            提示词那边只用「生效中」的那些。画像不在这一块——它在左栏
-            「记忆」卡里那项「人物画像」（与「记忆」平级），按人排。</span></div>`
+        <div class="row">${statusBar}</div>
+        <p class="hint">「已被顶替 / 已删」是记忆更新留下的旧版，不算重复——
+          提示词那边只用「生效中」的那些。画像不在这一块——它在左栏
+          「记忆」卡里那项「人物画像」（与「记忆」平级），按人排。</p>`
       + memoryFilterBar(records.rows || [], shownRecords)
       + table([
         { label: "层", get: (r) => (r.tier === "long" ? "长期" : "中短期"), nowrap: true },
@@ -1134,7 +1173,7 @@ async function viewMemory() {
         { label: "版本", get: (r) => `r${num(r.revision)}`, nowrap: true },
       ], shownRecords, {
         cols: "cols-records",
-        widths: ["8%", "13%", "10%", "15%", "28%", "14%", "12%"],
+        widths: ["10%", "13%", "10%", "15%", "26%", "14%", "12%"],
       }))
     + card("归档（已删除，可恢复的原文）", table([
       { label: "关于谁", get: (r) => r.about || "—" },
@@ -1144,7 +1183,7 @@ async function viewMemory() {
       { label: "内容", get: (r) => r.content },
     ], archive.rows || [], {
       cols: "cols-archive",
-      widths: ["14%", "18%", "14%", "14%", "40%"],
+      widths: ["14%", "18%", "14%", "22%", "32%"],
     }))
     + card("关系两轴", table([
       { label: "user", key: "user_id", mono: true, nowrap: true },
@@ -1715,16 +1754,11 @@ const MOVED_TO_MODEL_PAGE = [
   "reply_api_base_url", "letter_api_base_url", "vision_api_base_url",
 ];
 
-function prefRow(main, end, options = {}) {
-  // `options.icon`：行首图标（一格里一堆开关时，图标是最快的区分手段）。
-  // 来自 Miuix 官方图标库，跟侧栏是同一套图形。
-  const lead = options.icon ? icon(options.icon, "pref-icon") : "";
-  return `<div class="pref${options.extra || ""}">
-    ${lead}
-    <div class="pref-main">${main}</div>
-    <div class="pref-end">${end}</div>
-  </div>`;
-}
+/* 这一段原来**又定义了一遍 `prefRow`**（第二份，晚于上面那份 → 把上面那份盖掉了），
+ * 而且少了 `bottom` / `id` 两个槽。2026-10-19 第二轮删掉这一份：
+ * 一个构建器只该有一个定义，否则"到底哪个槽会被画出来"取决于读的是哪一份。
+ * 现在 `prefRow` 只在组件层那一段定义一次（超集：icon / extra / bottom / id 全认）。
+ */
 
 function prefTitle(text, overridden) {
   // 面板覆盖过的项在主标题后面点一个小蓝点（原来左边有一道蓝条，配上表格很重）
@@ -2048,11 +2082,17 @@ function addProviderCard() {
     </div>`).join("");
   // 名字/地址/模型那几行 + 两把 key 都整行铺开（`bottomAction`），
   // 右端只留那一颗「添加这一套」——与上面每一行的形状一致。
+  // ⚠️ 2026-10-19 第二轮：那三组输入原来写在 `center` 槽里，要跟右端那颗按钮抢
+  // 60% 之外的空间，1280 下 `名字（字母/数字/下划线` 就被切掉了（截图核对）。
+  // 全部挪进 `bottom`：Miuix 里"一行控件铺满整行"就是 `bottomAction` 的事。
   return prefGroup("添加一套", prefRow(
     `<div class="pref-title">名字 / 地址 / 模型 / key</div>
      <div class="pref-summary">同名、同地址都不覆盖（同一个账号写成两个名字会让余额兜底
-       静默失效）。<b>至少填一把 key</b>——只写地址的那一套读侧会拒，等于加了个空壳。</div>
-     <div class="row">
+       静默失效）。<b>至少填一把 key</b>——只写地址的那一套读侧会拒，等于加了个空壳。</div>`,
+    `<button id="model-add-go" class="primary">添加这一套</button>`,
+    {
+      icon: "add",
+      bottom: `<div class="row">
        <input id="model-add-name" type="text" placeholder="名字（字母/数字/下划线）"
          aria-label="新供应商的名字">
        <input id="model-add-url" type="text" placeholder="https://…/v1"
@@ -2063,9 +2103,8 @@ function addProviderCard() {
      <div class="row">
        <input id="model-add-models" type="text" class="wide"
          placeholder="这家提供的模型，逗号分隔（可空）" aria-label="新供应商声明的模型">
-     </div>`,
-    `<button id="model-add-go" class="primary">添加这一套</button>`,
-    { icon: "add", bottom: keyFields }), { id: "model-add" });
+     </div>` + keyFields,
+    }), { id: "model-add" });
 }
 
 async function viewGroup() {
@@ -2099,14 +2138,17 @@ async function viewGroup() {
     // 记忆那个**只读**：面板没有按群开关记忆的接缝，所以只显示、不给控件。
     `<span class="group-badge${row.memory_on ? " on" : ""}"
       title="要改去「记忆」页（这里只显示）">记忆${
-      row.memory_on ? "开" : "关"}</span></div>` +
-    noticeBox(row),
+      row.memory_on ? "开" : "关"}</span></div>`,
     `<label class="row-switch" title="这个群的对话开关">
        <span class="switch-text">对话</span>
        <input class="switch group-switch" type="checkbox" data-id="${esc(row.id)}"
          data-on="${row.dialogue_on ? 1 : 0}"${row.dialogue_on ? " checked" : ""}
          aria-label="群 ${esc(row.id)} 的对话开关"></label>`,
-    { icon: "group" });
+    // 发送框走 `bottomAction`（`BasicComponent` 那个**整行铺开**的槽），不再塞进
+    // `center` 槽里：塞在 center 时它要跟右端的开关抢空间（右端占着 60% 的上限），
+    // 820/390 那几档里输入框会被挤得放不下自己的 placeholder（2026-10-19 截图核对）。
+    // "一行控件铺满整行"本来就是 Miuix `bottomAction` 该干的事。
+    { icon: "group", bottom: noticeBox(row) });
   const groups = groupRows.map(groupRow).join("");
   // 成功改完一个开关 → **只重画那一行**（`groupRowPaint`），不整页 `render()`、
   // 也不重新取整张表（用户 2026-10-09："换人不刷新"那条规矩）。
@@ -2624,11 +2666,11 @@ function bind() {
       state.last.profileKind = el.dataset.kind || "";
       if (!(profilePaint && profilePaint(state.last.profileKey))) render();
     })) return;
-    if (act("person-tab", (el) => {
+    if (act("person-pane", (el) => {
       state.last.profilePane = el.dataset.pane;
       const block = el.closest(".person-block");
       if (!block) return;
-      block.querySelectorAll(".person-tab").forEach((tab) => {
+      block.querySelectorAll(".person-pane").forEach((tab) => {
         const on = tab === el;
         tab.classList.toggle("on", on);
         tab.setAttribute("aria-selected", on ? "true" : "false");
@@ -2647,6 +2689,24 @@ function bind() {
       writePaneHash();
       render();
     })) return;
+    // Miuix `SwitchPreference` 的语义：**整行可点**，点一下 = 切换这一行的开关。
+    // 依据是源码 `miuix-preference/SwitchPreference.kt`：它把
+    // `BasicComponent(onClick = { currentOnCheckedChange.takeIf { enabled }?.invoke(!checked) })`
+    // 接上了，`role = Role.Switch`。所以这不是"新功能"，是把这层语义接回来。
+    //
+    // 三条边界：
+    //  ① **控件自己优先**：点开关本尊、点输入框/下拉/按钮/链接/label 都不算"点这一行"
+    //     （否则改输入框会顺手把开关拨过去）；
+    //  ② 走**原生 `click()`**：勾选状态、`change` 事件、既有的写路径（`/api/groups`、
+    //     `/api/memory/groups`）与 `confirm` 全都不变，这里不另开一条写通道；
+    //  ③ 合成的那次 click 会再冒泡回来，但那时 target 是 `input`，被第 ① 条挡住——
+    //     不会打圈。
+    const row = target.closest(".pref");
+    const toggle = row && row.querySelector("input.switch");
+    if (toggle && !target.closest("input, select, textarea, button, a, label")) {
+      toggle.click();
+      return;
+    }
   });
   // 群聊页的「对话」开关：调**既有的** `POST /api/groups`（`write()` 会带上
   // `confirm: true`，也正是那口要求的）。三条规矩：
@@ -2993,7 +3053,10 @@ async function viewPlugin(name) {
       : (item.panel ? "不给卸——它就是这个面板本身"
         : "不给卸（预装的插件只能停用，不能从面板删除）")],
     ["说明", item.note || "（这个插件没写 docstring）"],
-  ].map(([label, value]) => kv(label, value)).join("");
+  // 一行一个「标签 → 值」= Miuix 的两层文字（`.kv` 本身就是那个块），所以用
+  // `readoutGrid()` 排成网格；**不要再包一层 `<div class="kv">`**——那是 `.kv` 套 `.kv`，
+  // 两层容器底色 + 两层 16px 内边距（这一轮 `.kv` 按 Miuix 令牌重画之后才看得出来）。
+  ].map(([label, value]) => ({ label: label, value: value }));
   let panel = null;
   let readError = "";
   try {
@@ -3001,7 +3064,7 @@ async function viewPlugin(name) {
   } catch (error) {
     readError = error.message;
   }
-  let body = `<div class="kv">${rows}</div>`;
+  let body = readoutGrid(rows);
   if (readError) {
     body += `<p class="hint">它自己的界面这次没读到：${esc(readError)}`
       + '——这不是"它没做界面"，先看面板令牌与网络，再刷新。</p>';
@@ -3256,6 +3319,7 @@ function personBlock(key, data) {
 
   // ⑤ **类别筛选**：这一节里出现过的类别各一枚（带条数），"全部"一枚；
   // 挑了哪一类记在 `state.last.profileKind` 里（换人回来还停在同一类）。
+  // 这一排与「记忆」页那两排**同一个组件**：Miuix `TabRowWithContour`。
   const ownKinds = [...new Set(own.map((row) => String(row.kind || "").trim())
     .filter(Boolean))].sort();
   const kindPick = String(state.last.profileKind || "");
@@ -3263,11 +3327,12 @@ function personBlock(key, data) {
     ? own.filter((row) => String(row.kind || "").trim() === kindPick)
     : own;
   const countOf = (kind) => own.filter((row) => String(row.kind || "").trim() === kind).length;
-  const kindChips = ownKinds.length > 1 ? `<div class="kind-filter" role="group"
-      aria-label="按类别看">${[["", `全部 ${num(own.length)}`]]
+  const kindChips = ownKinds.length > 1 ? `<div class="kind-filter miu-tabrow miu-tabrow--contour"
+      role="tablist" aria-label="按类别看">${[["", `全部 ${num(own.length)}`]]
       .concat(ownKinds.map((kind) => [kind, `${kind} ${num(countOf(kind))}`]))
-      .map(([kind, label]) => `<button type="button" class="kind-chip${
-        kind === kindPick ? " on" : ""}" data-kind="${esc(kind)}">${esc(label)}</button>`)
+      .map(([kind, label]) => `<button type="button"
+        class="miu-tabrow__tab kind-chip${kind === kindPick ? " on" : ""}"
+        data-kind="${esc(kind)}">${esc(label)}</button>`)
       .join("")}</div>` : "";
   // "共 N 条"——这里只数**手上这些**；一页每类最多取 200 条，取满了就如实说一句。
   const countLine = `<p class="hint">共 ${num(shownOwn.length)} 条${
@@ -3307,14 +3372,16 @@ function personBlock(key, data) {
   }
   const wanted = String(state.last.profilePane || "");
   const showing = panes.some(([id]) => id === wanted) ? wanted : panes[0][0];
-  const tabs = panes.map(([id, name, extra]) => `<button type="button" role="tab"
-      class="person-tab${id === showing ? " on" : ""}" data-pane="${id}"
-      aria-selected="${id === showing ? "true" : "false"}">${esc(name)}${
-      extra ? `<span class="person-tab-count">${extra}</span>` : ""}</button>`).join("");
+  // 三节的分段 = **Miuix `TabRow`**（`segment()` 那一个构建器）。
+  // 2026-10-19 第二轮：原来这里是一整套 `.person-tabs` / `.person-tab`（下划线式页签），
+  // 那不是 Miuix 的组件。现在与「日志 / 操作记录」「看金句 / 审证据」**同一个控件**，
+  // `person-pane` 这个额外类名只是给 `bind()` 的委托当抓手（`miu-tabrow__tab` 两类页签共用）。
+  const tabs = segment(panes.map(([id, name, extra]) => ({ id, label: name + extra })),
+    showing, { data: "pane", extra: "person-pane", label: "看哪一节" });
   const bodies = panes.map(([id, , , body]) => `<div class="pane" data-pane="${id}"${
     id === showing ? "" : " hidden"}>${body}</div>`).join("");
   return `<div class="person-block">${head}
-    <div class="person-tabs" role="tablist" aria-label="看哪一节">${tabs}</div>
+    ${tabs}
     ${bodies}</div>`;
 }
 
@@ -3488,9 +3555,9 @@ async function viewPersonProfiles() {
 /* 骨架阶段的占位页：新开的五个口子还没有数据源，就**如实写"还没接"**——
  * 面板最容易犯的错是"看着有内容"，其实是编的。 */
 function viewStub(title, planned) {
-  const rows = planned.map(([what, where]) => kv(what, where)).join("");
+  const rows = planned.map(([what, where]) => ({ label: what, value: where }));
   return card(`${title} · 还没接`, '<p class="hint">这一页先占位置，接口还没接。计划放这些：</p>'
-    + `<div class="kv">${rows}</div>`);
+    + readoutGrid(rows));
 }
 
 //: 数据根目录下那几个名字的**人话标签**（设备页「占用空间」用）。
