@@ -25,13 +25,18 @@ const TABS = [
   ["account", "账号"],
   ["device", "设备"],
   ["logs", "日志"],
-  ["settings", "调参"],
-  // 2026-10-18（第二轮）：模型与凭据**独立成一页**，属**系统**那一档——它与「调参」
+  // 2026-10-18（第三轮）：这个口原来叫「调参」，用户要求改名为**「设置」**
+  // （原话："`调参` 页签改名为 `设置`"）——只改叫法，页里的开关一个没动。
+  ["settings", "设置"],
+  // 2026-10-18（第二轮）：模型与凭据**独立成一页**，属**系统**那一档——它与「设置」
   // 是同一层的东西（都是"配置这台机器怎么跑"），所以并排放在「系统」卡里。
   // 页内两块：`密钥`（一行一个，平铺）与`各路绑定`（每路一行 provider → key → model）。
   ["model", "模型与凭据"],
   ["actions", "动作"],
-  ["history", "操作记录"],
+  // ⚠️ 「操作记录」**不再占一行**（2026-10-18 第三轮，用户原话："`操作记录` 并进 `日志`"）：
+  // 它成了「日志」页里的**第二块子页签**（`PANES.logs`），老地址 `#history` 由
+  // `LEGACY_TABS` 落到那一块上。删掉这一行 = 左栏里不再有第二个入口；
+  // 内容一个字没删（`viewHistory()` 原样在画）。
   ["overview", "总览"],
   ["group", "群聊"],
   ["private", "私聊"],
@@ -39,16 +44,132 @@ const TABS = [
   // ——画像就是记忆里的一类（`kind='profile'`，见 `viewPersonProfiles`）。
   ["memory", "记忆"],
   ["memory_profile", "人物画像"],
-  // 「知识库」卡里的四个口（同样**同级并列**）：知识库本身，加上「金句」「金句审核」「黑话」。
-  // 后三样都是她**从群里学来的东西**（表情含义表 + 笔记 / 证据 / 黑话词条），
-  // 由 `registry.ui.learned` 提供（用户 2026-10-06："金句我看应该划到知识库里"、"还有黑话"；
-  // 同一天他又说 *"金句，你连原文和上下文都不贴出来怎么审核"*，于是多了「金句审核」这一页）。
+  // 「知识库」卡里的三个口（同样**同级并列**）：知识库本身，加上「金句」「黑话」。
+  // 后两样都是她**从群里学来的东西**（表情含义表 + 笔记 / 黑话词条），
+  // 由 `registry.ui.learned` 提供（用户 2026-10-06："金句我看应该划到知识库里"、"还有黑话"）。
   ["knowledge", "知识库"],
+  // ⚠️ 「金句审核」**不再占一行**（2026-10-18 第三轮，用户原话："`金句审核` 并进 `金句`"）：
+  // 它成了「金句」页里的**第二块子视图**（`PANES.knowledge_quotes`）——同一份数据的两个
+  // 动作：看金句 / 审证据。老地址 `#knowledge_quotes_evidence` 由 `LEGACY_TABS` 落到
+  // 证据那一块上。它 2026-10-06 确实单独开过口（那天用户说 *"金句，你连原文和上下文都
+  // 不贴出来怎么审核"*），这一轮只是**换了它出现的位置**，页面本身一个字没改。
   ["knowledge_quotes", "金句"],
-  ["knowledge_quotes_evidence", "金句审核"],
   ["knowledge_slang", "黑话"],
   ["plugins", "插件"],
 ];
+
+/* ---------- 页内子页签（2026-10-18 第三轮：两块"并进"之后才有）----------
+ *
+ * 用户这一轮的原话："`操作记录` 并进 `日志`"、"`金句审核` 并进 `金句`"——也就是这两对
+ * 各自**合成一个页签**，页内再用子页签分两块：
+ *
+ *   `logs`             → 日志 / 操作记录（`viewLogs` / `viewHistory`）
+ *   `knowledge_quotes` → 看金句 / 审证据（`viewKnowledgeQuotes` / `viewQuoteEvidence`）
+ *
+ * 为什么做成"页签里的子页签"而不是"上下两块一路铺下去"：这两对都是**同一份数据的两个
+ * 动作**（看日志 / 看审计、看金句 / 审证据），铺在一起会让人以为它们互不相干，也把页面
+ * 拉得很长。**写法照「人物画像」页那一套**（`person-tabs` + `.pane`，见 `personBlock()`）：
+ * 一眼是同一个控件的两种用法，不是为这两页新发明一个控件。
+ *
+ * `view` 就是**原来那一页的函数**——搬的只是"它出现在哪"，页面里画什么一个字没动。
+ */
+const PANES = {
+  logs: [
+    { id: "log", label: "日志", view: viewLogs },
+    { id: "history", label: "操作记录", view: viewHistory },
+  ],
+  knowledge_quotes: [
+    { id: "quotes", label: "看金句", view: viewKnowledgeQuotes },
+    { id: "evidence", label: "审证据", view: viewQuoteEvidence },
+  ],
+};
+
+/* 老地址：页签并进别的页之后，**老书签 / 手打的地址不能 404、不能白屏**——
+ * 落到新页签的**那一块子页签**上（用户 2026-10-18："`操作记录` 并进 `日志`"、
+ * "`金句审核` 并进 `金句`"）。
+ *
+ * 一项 = 老页签 id → `{ tab: 新页签, pane: 页内那一块 }`。**只登记老地址**：新页签自己有
+ * `PANES` 那份表，这里再抄一遍就是两份真相（将来加一块子页签，只改 `PANES`）。
+ */
+const LEGACY_TABS = {
+  history: { tab: "logs", pane: "history" },
+  knowledge_quotes_evidence: { tab: "knowledge_quotes", pane: "evidence" },
+};
+
+//: 老页签 → 〔新页签, 页内那一块〕；不是老地址就原样返回（`pane` 是空串）。
+function resolveTab(id) {
+  const legacy = LEGACY_TABS[id];
+  return legacy ? { tab: legacy.tab, pane: legacy.pane } : { tab: id, pane: "" };
+}
+
+/* 地址栏 → 〔页签, 页内那一块, 地址里那段原文〕。
+ *
+ * `token=` / `theme=` / `pane=` 是**保留段**，别把它们的值当页签名——令牌里不含 `=`，
+ * 所以 `#token=xxx&settings` 会切成 `token=xxx`、`settings` 两段，页签是后者
+ * （第一版漏了这个判断，于是永远停在总览；2026-10-04 截图抓到的令牌泄漏也是这一处）。
+ *
+ * `raw` 原样带回去，是为了认"**这是不是老地址**"——是的话落地之后要把地址栏换成新的。
+ */
+function landingOf(hash) {
+  const parts = String(hash || "").replace(/^#/, "").split("&");
+  const reserved = (part) => part.startsWith("token") || part.startsWith("theme")
+    || part.startsWith("pane=");
+  const raw = parts.find((part) => part && !reserved(part)) || "";
+  const shown = parts.find((part) => part.startsWith("pane=")) || "";
+  const wanted = resolveTab(raw);
+  return {
+    raw,
+    tab: wanted.tab,
+    // 老地址自带的那一块**优先**：`#history` 就该落在「操作记录」上，
+    // 哪怕地址里另外还写着 `&pane=`（那是有人手拼的，以老地址的语义为准）。
+    pane: wanted.pane || decodeURIComponent(shown.slice("pane=".length)),
+  };
+}
+
+/* 这个页签现在停在哪一块子页签上：没写过 / 写了不认识的，一律退回**第一块**。
+ * 没有子页签的页签返回空串（`paneBar()` 就什么都不画）。 */
+function paneOf(tab) {
+  const panes = PANES[tab] || [];
+  if (!panes.length) return "";
+  const wanted = (state.last.pane || {})[tab] || "";
+  return panes.some((item) => item.id === wanted) ? wanted : panes[0].id;
+}
+
+/* 记下"这一页停在哪一块"：地址里写了、而且写得对，就用它；否则回到**第一块**。
+ * 没有子页签的页签不进这张表（`paneOf()` 对它们返回空串，`paneBar()` 什么都不画）。 */
+function rememberPane(tab, pane) {
+  const panes = PANES[tab] || [];
+  if (!panes.length) return;
+  state.last.pane[tab] = panes.some((item) => item.id === pane) ? pane : panes[0].id;
+}
+
+/* 把地址栏换成"这一页、这一块"。**只在不是第一块时才写 `&pane=`**：默认那块就是
+ * `#logs`，多一段没有意义。**用 `replaceState`**：换子页签不该往历史里塞一堆条目
+ * （返回键仍然退回上一个页签，与人物画像页选人同一条规矩）。 */
+function writePaneHash(tab, pane) {
+  const target = tab || state.tab;
+  const showing = (pane === undefined) ? paneOf(target) : pane;
+  const first = (PANES[target] || [{ id: "" }])[0].id;
+  const tail = (showing && showing !== first)
+    ? "&pane=" + encodeURIComponent(showing) : "";
+  try {
+    history.replaceState(null, "", "#" + target + tail);
+  } catch (error) { /* 环境不支持就只留在内存里 */ }
+}
+
+/* 页内那条子页签（没有子页签的页签不画）。类名沿用「人物画像」页的 `person-tabs` /
+ * `person-tab` / `.pane`——同一套控件，两处用法；`bind()` 里那颗 `page-pane` 只改
+ * `state.last.pane` 再整页重画（两块**各自取各自的数**，不能像画像那样只翻 `hidden`）。 */
+function paneBar(tab) {
+  const panes = PANES[tab] || [];
+  if (!panes.length) return "";
+  const showing = paneOf(tab);
+  const tabs = panes.map((item) => `<button type="button" role="tab"
+      class="person-tab${item.id === showing ? " on" : ""}" data-page-pane="${item.id}"
+      aria-selected="${item.id === showing ? "true" : "false"}">${esc(item.label)}</button>`)
+    .join("");
+  return `<div class="person-tabs" role="tablist" aria-label="看哪一块">${tabs}</div>`;
+}
 
 /* 插件卡里的 tab 是**动态**的：清单从 `/api/plugins` 来（那个接口背后是装配点注入的
  * 只读接缝 `UiSeams.plugins`，见 `plugins/__init__.py::inventory()`）。
@@ -107,7 +228,7 @@ function labelOf(id) {
 const CARDS = [
   // 最上面**一张**卡，里面**只有两个口：账号、设备**。
   // 2026-10-04 用户："我要的是卡片里只有一个账号一个设备。"
-  // （我先前把"关于/占用空间/日志/调参/动作/操作记录"七项全塞进这一张卡，是错的。）
+  // （我先前把"关于/占用空间/日志/设置/动作/操作记录"七项全塞进这一张卡，是错的。）
   { title: "账号与设备", items: ["account", "device"] },
   // 四个功能区。
   { title: "聊天", items: ["overview", "group", "private"] },
@@ -120,18 +241,22 @@ const CARDS = [
   // 知识库卡下面**三个平级的口**：知识库本身，以及她**从群里学来的东西**
   // （「金句」「黑话」，用户 2026-10-06："金句我看应该划到知识库里"、"还有黑话"，
   // 紧接着："**金句黑话同理**"——同样是同一张卡下面的平级项）。
-  { title: "知识库", items: ["knowledge", "knowledge_quotes",
-    // 「金句审核」与「金句」是**同一份数据的两个看法**：前者看含义表 + 笔记，
-    // 后者看**证据**（她的原话 + 上下文 + 表情 + 结论落到哪条笔记）。
-    "knowledge_quotes_evidence", "knowledge_slang"] },
+  // ⚠️ 这里**没有** `knowledge_quotes_evidence`（2026-10-18 第三轮，"`金句审核` 并进
+  // `金句`"）：证据视图成了「金句」页里的第二块子视图（`PANES.knowledge_quotes`），
+  // 不再单独占左栏一项。数据、按钮、接口一个都没动，只是换了个入口。
+  { title: "知识库", items: ["knowledge", "knowledge_quotes", "knowledge_slang"] },
   // 插件卡：每个插件一个 tab（默认只列预装的）。
   { title: "插件", items: ["plugins"] },
   // ⚠️ 这四个是**运维页**，用户给的结构（账号与设备 + 聊天/记忆/知识库/插件）
   // 里没有它们的位置。先单独放一张卡**待用户定**——不许再往上面那张卡里塞。
   // 2026-10-18（第二轮）：用户把「模型与凭据」也归到这一档（"放**系统**层"），
-  // 所以它排在「调参」旁边：两页都是"这台机器怎么跑"的配置，而「聊天 / 记忆 / 知识库」
+  // 所以它排在「设置」旁边：两页都是"这台机器怎么跑"的配置，而「聊天 / 记忆 / 知识库」
   // 是她的内容——混在那边会把"她怎么说话"和"machine 怎么配"搅成一堆。
-  { title: "系统", items: ["logs", "settings", "model", "actions", "history"] },
+  //
+  // ⚠️ 这里**没有** `history`（2026-10-18 第三轮，用户原话："`操作记录` 并进 `日志`"）：
+  // 操作审计成了「日志」页里的第二块子页签（`PANES.logs`）。左栏少一个入口，
+  // 内容与那条 `/api/history` 读口原样在。
+  { title: "系统", items: ["logs", "settings", "model", "actions"] },
 ];
 
 // >>> ICONS-START（由 data/tmp_miuix_icons.py 从 Miuix 源码生成）
@@ -184,8 +309,9 @@ const ICON_ALIAS = {
   // `data/tmp_miuix_icons.py`，不该手画）：金句是"她自己说过的话"，借信件那张；
   // 黑话是一份带解释的词条表，借"规则清单"那种列表图标。
   knowledge_quotes: "letter",
-  // 金句审核：借"判定"那张图标（框里一个勾/叉），正好是"这条判得对不对"的意思。
-  knowledge_quotes_evidence: "judge",
+  // 金句审核并进「金句」之后，它**不再是左栏的一项**，所以这里也没有它那一行——
+  // 证据块里那些「判定」小图标走的是 `ICONS.judge`（见 `prefRow(..., { icon: "judge" })`），
+  // 与页签图标是两回事。
   knowledge_slang: "approve_rule",
   // 「模型与凭据」：借"凭证"那张（一把钥匙的图形）——它这一页管的就是密钥与凭据。
   model: "credential",
@@ -208,29 +334,35 @@ function icon(name, cls = "") {
 const TAB_NOTES = {
   account: "账号：她的资料头卡（头像 + 她自己的号 + 状态）、这台设备怎么连面板、供应商与模型",
   device: "设备：本机（地址 / Python / 数据目录）、与本体连接（端口 / 心跳 / 活快照）、占用空间（data/ 下各项）",
-  logs: "判定 / 回复 / 记忆 / 规则 最近几次的模型输入输出（只读尾部）",
-  settings: "六套 prompt、八个 agent 开关、供应商（兼容档）",
+  // 日志页两块（子页签）：日志 / 操作记录。副标题把两块都说全——用户点进来时
+  // 左栏只有这一行字可以看，漏掉一半就等于把并进来的那一块藏起来。
+  logs: "日志 / 操作记录：判定 / 回复 / 记忆 / 规则 最近几次的模型输入输出（只读尾部）＋ 面板自己的操作审计（改了什么、什么时候、从哪来）",
+  settings: "设置：六套 prompt、八个 agent 开关、供应商（兼容档）",
   model: "模型与凭据：密钥一行一把（哪一把被哪几路用着）、每一路按「供应商 → key → 模型」绑",
   actions: "清短期会话、调关系、重启 bot",
-  history: "面板自己的操作审计（改了什么、什么时候、从哪来）",
   overview: "她现在在不在跑、在哪些群说话、这次重启之后干了多少活",
   group: "群聊：启停群（每一行一个开关）；群管理动作与入群申请在各自的插件 tab 里",
   private: "私聊：跟谁聊过、聊了几轮（骨架，数据待接）",
   memory: "记忆只能删、不能改：写入只走记忆维护 agent，面板顶多把有问题的删掉（删前先归档）",
   memory_profile: "记忆里的「人物画像」：一个人一张，跟着人走、不按词检索；同样只能删不能改",
   knowledge: "知识库可以改：下面那份面板块能增 / 改 / 删；基准语料是只读的",
-  // 这两个口的副标题：`render()` 用 `textContent` 写它们，所以**不能**用 markdown 记号。
-  knowledge_quotes: "金句：从她自己的话里学来的——按群的表情含义表，以及风格 / 语境笔记（可纠正方向、可停用笔记）",
-  knowledge_quotes_evidence: "金句审核：她那条被点过表情的原话 + 开口前后的上下文 + 表情 + 结论落到哪条笔记（选一条看一条）",
+  // 金句页两块（子视图）：看金句 / 审证据。同样两句都要在。
+  // 这两条副标题：`render()` 用 `textContent` 写它们，所以**不能**用 markdown 记号。
+  knowledge_quotes: "金句：从她自己的话里学来的——按群的表情含义表，以及风格 / 语境笔记（可纠正方向、可停用笔记）；「审证据」那一块是她那条被点过表情的原话 + 开口前后的上下文 + 表情 + 结论落到哪条笔记（选一条看一条）",
   knowledge_slang: "黑话：她听到别人解释时记下来的词条（词 / 释义 / 谁解释的与原句 / 听到几次 / 改口）",
   plugins: "插件：每个插件一个 tab，它自己的界面由它自己声明；预装的不给卸，webui 自己也不给卸",
 };
 
+/* 打开这一下地址栏说的是哪一页、页内哪一块。`init()` 之后还会再算一次（`token=` 那一段
+ * 会先把地址栏改掉），这里要的是一个**第一笔就站对**的初值——否则第一帧会先画总览再
+ * 跳过去，从老地址（`#history`）进来时尤其看得出来。 */
+const landing0 = landingOf(location.hash);
+
 const state = {
-  // ⚠️ `token=` / `theme=` 是保留段，**不能**当页签名——否则令牌会被拿去渲染标题
-  // （2026-10-04 截图抓到的真 bug：页面上直接显示出了令牌）。
-  tab: (location.hash.replace("#", "").split("&")
-    .find((part) => part && !/^(token|theme)/.test(part))) || "overview",
+  // ⚠️ `token=` / `theme=` / `pane=` 是保留段，**不能**当页签名——否则令牌会被拿去渲染标题
+  // （2026-10-04 截图抓到的真 bug：页面上直接显示出了令牌）。解析只有一处：`landingOf()`
+  // ——页签、页内那一块、以及"这是不是老地址"都由它一次说清。
+  tab: landing0.tab || "overview",
   token: localStorage.getItem("yunru_panel_token") || "",
   //: 人物画像页选的那个人。地址栏里带着 `people=<号>` 就先用它——**可分享、刷新不丢**
   //: （2026-10-09 用户："主要是，横向的没法选人啊"，选完能看出是谁是这一步的要求之一）。
@@ -239,6 +371,9 @@ const state = {
     //: 「模型与凭据」页最后一次读到的数据（**级联要用**：换供应商之后，key 与模型
     //: 两个下拉框要按**新的那家**重画，而重画不该再打一次后端——数据已经在手里）。
     model: null,
+    //: 每个页签停在哪一块子页签上（`PANES`；没有子页签的页签不进这张表）。
+    //: 初值从地址栏读回来（`&pane=` 或老地址 `#history`）——**可分享、刷新不丢**。
+    pane: landing0.pane ? { [landing0.tab]: landing0.pane } : {},
     profileKey: decodeURIComponent(
       (location.hash.match(/(?:^|[&])people=([^&]*)/) || [])[1] || ""),
     //: 记忆页的筛选（见 `memoryFilter()`）：`&mf=<编码过的 JSON>`，可分享、刷新不丢。
@@ -1412,11 +1547,11 @@ const SETTING_GROUPS = {
   },
   // 2026-10-18（第二轮）：原来这一组叫「模型与凭据」，里面是一次性的 provider /
   // api_base_url / api_model / 主密钥 / 四路密钥。用户把它**整个搬到「模型与凭据」页**
-  // （左栏「系统」卡里，与「调参」平级），所以这里只剩**兼容档**这一小块：
+  // （左栏「系统」卡里，与「设置」平级），所以这里只剩**兼容档**这一小块：
   //
   //   * `provider` / `api_base_url` / `api_model` / `api_key` —— 那是 `.env` 那套
   //     "全局一对"的兼容档，用户明说**保留在原处**（"用户没要求搬走主 key 这个兼容档"）；
-  //   * `memory_model` —— 一个**模型名**，属于"这一路的模型"里唯一还留在调参页的
+  //   * `memory_model` —— 一个**模型名**，属于"这一路的模型"里唯一还留在设置页的
   //     （其余按路的密钥与供应商都归新页面了，见 `MOVED_TO_MODEL_PAGE`）。
   //
   // 两组不能同时存在（同一件事两个入口 = 迟早一份生效一份不生效）。所以这里**只写一份**，
@@ -1433,9 +1568,9 @@ const SETTING_GROUPS = {
   },
 };
 
-/* 已经搬到「模型与凭据」页的那几项：调参页**不再显示**、核心那边也**直接拒绝**写它们
+/* 已经搬到「模型与凭据」页的那几项：设置页**不再显示**、核心那边也**直接拒绝**写它们
  * （`runtime._MOVED_SETTINGS`）。两份入口会在文件里造成"我填了 key、它却按另一份在跑"，
- * 所以这里列一份"搬迁名单"：既不在调参页渲染，也不落到「其他」那一组里去。
+ * 所以这里列一份"搬迁名单"：既不在设置页渲染，也不落到「其他」那一组里去。
  *
  * 注意它**不等于** `operator_config.SETTINGS` 少了这些键——那张表还是能力边界，核心
  * 只是不再接受面板改它们。 */
@@ -1951,7 +2086,7 @@ function bind() {
     // （`bind()` 末尾那一个监听）：写出去用**既有的** `POST /api/groups`——
     // 那口自带 `confirm` 校验与审计，这里不新增任何写入口。
     // --- 从左栏底部搬过来的两样（2026-10-06）--------------------------------
-    // 它们的 DOM 长在页面内容里（调参页 / 账号页），所以走委托、不走 `init()`。
+    // 它们的 DOM 长在页面内容里（设置页 / 账号页），所以走委托、不走 `init()`。
     if (target.id === "panel-theme") {
       // 主题是**这台浏览器**的偏好（localStorage），不进 data/、也不进覆盖层——
       // 所以它不走 `/api/settings` 那套"保存改动"，点一下立即生效。
@@ -2345,6 +2480,16 @@ function bind() {
       block.querySelectorAll(".pane").forEach((pane) => {
         pane.hidden = pane.dataset.pane !== el.dataset.pane;
       });
+    })) return;
+    // 页内子页签（并页之后才有，见 `PANES` / `paneBar()`）：**日志 / 操作记录**、
+    // **看金句 / 审证据**。这两对里的两块**各自取各自的数**（一个 `/api/logs`、
+    // 一个 `/api/history`；一个 `/api/knowledge/quotes`、一个 `…/evidence`），
+    // 所以这里跟上面画像那种"只翻 `hidden`"不是一回事：**整页重画**，只取选中那一块的数，
+    // 地址栏也换成 `#<页签>&pane=<块>`（可分享、刷新不丢）。
+    if (act("page-pane", (el) => {
+      state.last.pane[state.tab] = el.dataset.pagePane || "";
+      writePaneHash();
+      render();
     })) return;
   });
   // 群聊页的「对话」开关：调**既有的** `POST /api/groups`（`write()` 会带上
@@ -3348,15 +3493,18 @@ const VIEWS = {
   // 「记忆」卡里与「记忆」**平级**的那一项：一个人一张画像。
   memory_profile: viewPersonProfiles,
   // 「知识库」卡里与「知识库」**平级**的两项：她**从群里学来的东西**。
-  // 金句 = 从她自己的话里学来的（表情含义表 + 风格/语境笔记）；
+  // 金句 = 从她自己的话里学来的（表情含义表 + 风格/语境笔记）+ **证据**那一块
+  // （`PANES.knowledge_quotes` 的第二块，2026-10-18 并进这一页）；
   // 黑话 = 她听到别人解释记下来的词条。取数都只走 `registry.ui.learned`。
   knowledge_quotes: viewKnowledgeQuotes, knowledge_slang: viewKnowledgeSlang,
-  // 金句**审核**：同一份数据的另一个看法——看证据（原话 + 上下文 + 表情 + 结论落到哪条笔记）。
-  knowledge_quotes_evidence: viewQuoteEvidence,
   logs: viewLogs, settings: viewSettings, group: viewGroup, actions: viewActions,
   // 「模型与凭据」：密钥一行一把 + 各路绑定（供应商 → key → 模型）。
   model: viewModel,
-  history: viewHistory,
+  // ⚠️ 这里**没有** `history` / `knowledge_quotes_evidence` 的两行（2026-10-18 第三轮，
+  // 用户原话："`操作记录` 并进 `日志`"、"`金句审核` 并进 `金句`"）：它们成了那两页里的
+  // 第二块（`PANES`），进 `VIEWS` 的只有页签自己。老地址由 `LEGACY_TABS` 接到新页签的
+  // 那一块上（见 `landingOf()`）。`viewHistory` / `viewQuoteEvidence` 这两个函数**原样还在**，
+  // 只是不再挂在 `VIEWS` 上、改为挂在 `PANES` 里。
   // ↓ 2026-10-03 按新架构开的五个口子（骨架；分组依据见 `CARDS` 上面的注释）
   account: viewAccount,
   // 设备页：用户原话"此设备这里塞关于、占用空间之类"——**这两样是这个页面里的内容**，
@@ -3401,12 +3549,17 @@ function drawTabs() {
 
 async function render() {
   // 插件页签是**动态**的（`plugin:<名字>`），所以先认它，再查静态的 `VIEWS`。
+  // 并页之后（`PANES`）页签里还分块：这一块归**它自己那个 `view`**（与 `VIEWS` 里那份
+  // 是同一个函数时也不冲突）——取不到才退回整页那一份。
+  const block = (PANES[state.tab] || []).find((item) => item.id === paneOf(state.tab));
   const view = state.tab.startsWith(PLUGIN_PREFIX)
     ? () => viewPlugin(state.tab.slice(PLUGIN_PREFIX.length))
-    : (VIEWS[state.tab] || viewOverview);
+    : ((block && block.view) || VIEWS[state.tab] || viewOverview);
   const note = TAB_NOTES[state.tab] || "";
   // 侧栏 + 详情那种布局需要一个大标题（小米平板设置页右侧顶部就是这个），
-  // 标题直接取页签名，副标题是原来那行说明。
+  // 标题直接取页签名，副标题是原来那行说明。**并页之后标题仍是页签名**（"日志"/"金句"），
+  // 页内那一块只由 `paneBar()` 那条子页签表达——别把标题改成"日志 · 操作记录"，
+  // 那会让人以为多了一个页签。
   $("page-title").textContent = state.tab.startsWith(PLUGIN_PREFIX)
     ? `插件 · ${labelOf(state.tab)}` : labelOf(state.tab);
   $("page-nav").textContent = note;
@@ -3416,13 +3569,17 @@ async function render() {
   }
   try {
     await refreshHealth();            // 顶栏徽章与页签无关，每轮都刷
-    $("view").innerHTML = await view();
+    // 子页签那一条画在内容**上面**（没有子页签的页签 `paneBar()` 返回空串，页面不变）。
+    $("view").innerHTML = paneBar(state.tab) + await view();
     replayEnter();
   } catch (error) {
     // 401 不再往左栏徽章里写了（那枚徽章没了）：登录门与登录卡自己会说清楚
     // （见 `checkToken` / `loginFailureText`），这一页走**失败态**——
     // 一句实话 + 一个重试入口（见 `errorCard`）。
-    $("view").innerHTML = errorCard(error);
+    //
+    // 子页签那一条**照样留着**：并页之后一块读不到不该把另一块也锁死
+    // （否则「操作记录」那条接口一挂，人连"日志"那一块都回不去——那才是死胡同）。
+    $("view").innerHTML = paneBar(state.tab) + errorCard(error);
     replayEnter();
   }
 }
@@ -3461,7 +3618,7 @@ function applyTheme(mode) {
   } else {
     document.documentElement.removeAttribute("data-theme");
   }
-  // 左栏那颗"深色/浅色"按钮已经撤掉（2026-10-06），现在这份状态由**调参页的开关**
+  // 左栏那颗"深色/浅色"按钮已经撤掉（2026-10-06），现在这份状态由**设置页的开关**
   // 表达：开关在页面上时同步它的勾选状态（不在就什么都不用做）。
   const toggle = $("panel-theme");
   if (toggle) toggle.checked = currentDark();
@@ -3565,18 +3722,25 @@ function init() {
 
   applyTheme(themeHash || localStorage.getItem("yunru_panel_theme") || "");
   // `#settings` 这种直接定位到某个页签（刷新后也保持当前页）。
-  // 注意：`token=` / `theme=` 是保留段，别把它们的值当页签名——
-  // 令牌里不含 `=`，所以整串会被切成 `token`、`theme=dark`、`settings` 三段，
-  // 只有最后那段才是页签（第一版漏了这个判断，于是永远停在总览）。
-  const reserved = (part) => part.startsWith("token") || part.startsWith("theme");
-  const tabHash = hash.replace(/^#/, "").split("&")
-    .find((part) => part && !reserved(part)) || "";
-  if (VIEWS[tabHash]) state.tab = tabHash;
+  // `token=` / `theme=` / `pane=` 是保留段，别把它们的值当页签名——解析只有
+  // `landingOf()` 那一处（令牌里不含 `=`，第一版漏了这个判断，于是永远停在总览）。
+  //
+  // 2026-10-18（第三轮，并页）：老地址（`#history` / `#knowledge_quotes_evidence`）
+  // 在 `landingOf()` 里已经落到**新页签的那一块子页签**上。落地之后把地址栏换成新地址
+  // （`writePaneHash()`）：书签 / 分享出去的是新地址，而老地址照样打得开（不会 404 白屏）。
+  const landing = landingOf(hash);
+  // 页内那一块：老地址自带的那块优先，其次地址里的 `&pane=`，都没有就是**第一块**
+  // （点左栏那颗页签就是这样进来的——地址栏说的是哪一块，页面就画哪一块）。
+  rememberPane(landing.tab, landing.pane);
+  if (VIEWS[landing.tab]) state.tab = landing.tab;
+  if (landing.raw && landing.tab !== landing.raw) {
+    writePaneHash(landing.tab, landing.pane);
+  }
   // 深链接（`#memory` 这种）在窄屏上应当直接进内容态，否则手机打开会停在卡片列表，
   // 看着像"链接没生效"。桌面/中等屏这行没有视觉效果。
-  if (tabHash) document.body.classList.add("is-reading");
+  if (landing.raw) document.body.classList.add("is-reading");
   // 主题与退出的**按钮**原来是左栏底部那两颗（`#theme` / `#signout`），2026-10-06
-  // 撤掉左栏那块之后它们分别搬去了调参页（开关 `#panel-theme`）与账号页（按钮
+  // 撤掉左栏那块之后它们分别搬去了设置页（开关 `#panel-theme`）与账号页（按钮
   // `#signout`）——那两样都长在**页面内容**里，`init()` 这一刻 DOM 里还没有，
   // 所以监听放在 `bind()` 的委托里（见那里 `target.id === "panel-theme"` / `"signout"`）。
   // 登录门（2026-10-04 用户："打开webui首先打开登录页而非在左下角输入令牌"）。
@@ -3608,22 +3772,34 @@ function init() {
     const button = event.target.closest("[data-tab]");
     if (!button) return;
     state.tab = button.dataset.tab;
+    // 点左栏进某一页 = 落回这一页的**第一块**子页签（地址栏接下来就是 `#logs`，
+    // 页面得跟地址栏说的一致；`rememberPane()` 对没有子页签的页签什么都不做）。
+    rememberPane(state.tab, "");
     location.hash = state.tab;
     reading(true);
     drawTabs();
     render();
   });
   window.addEventListener("hashchange", () => {
-    const tab = location.hash.replace("#", "");
+    // 地址栏 → 〔页签, 页内那一块〕。老地址（`#history` / `#knowledge_quotes_evidence`）
+    // 在这一步就落到**新页签的那一块**上——用户要求：老地址不许 404、不许白屏。
+    const landing = landingOf(location.hash);
+    if (!landing.raw) return;
     // `plugin:xxx` 是**动态**页签，不在 `VIEWS` 里，要单独认——否则手改/粘贴地址栏、
     // 或旧书签指向一个已消失的插件时，界面**完全没反应**（2026-10-04 审查 F1）。
-    const known = Boolean(VIEWS[tab]) || tab.startsWith(PLUGIN_PREFIX);
-    if (known && tab !== state.tab) {
-      state.tab = tab;
-      reading(true);
-      drawTabs();
-      render();
-    }
+    const known = Boolean(VIEWS[landing.tab]) || landing.tab.startsWith(PLUGIN_PREFIX);
+    if (!known) return;
+    const moved = landing.tab !== state.tab
+      || (landing.pane && landing.pane !== paneOf(landing.tab));
+    rememberPane(landing.tab, landing.pane);
+    // 从老地址进来时把地址栏换成新地址（`replaceState` 不会再触发一次 hashchange，
+    // 所以这里不会打圈）。新地址本身（`#logs&pane=history`）一个字都不用改。
+    if (landing.tab !== landing.raw) writePaneHash(landing.tab, landing.pane);
+    if (!moved) return;
+    state.tab = landing.tab;
+    reading(true);
+    drawTabs();
+    render();
   });
   bind();
   drawTabs();

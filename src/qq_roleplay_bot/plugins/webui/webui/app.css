@@ -473,7 +473,7 @@ nav button.on:hover { background: var(--surface-container-high); }
    用户："左边边栏下面的这个卡片不明所以，我为什么要在左边栏显示……这个不应该在
    system 页面吗"）。左栏从此**只放导航**（那是用户一开始就定的规格："在左边切换
    设置项"）。那几样东西分别搬去了：本体状态 → 总览「运行」卡；刷新 → 每一页的内容区
-   顶栏（`#refresh`）；深色 → 调参页的「面板」分组；退出登录 → 账号页。
+   顶栏（`#refresh`）；深色 → 设置页的「面板」分组；退出登录 → 账号页。
    所以这里连 `.rail-foot` / `.rail-actions` 的样式一起删了，不是留一段死 CSS。 */
 
 /* --- 右侧内容 -------------------------------------------------------------- */
@@ -964,7 +964,7 @@ textarea.tall { min-height: 260px; }
  * 差得很远（"时间"要 130px 不折行、"含义"是一整句解释、"改成"只放个下拉）。
  */
 
-/* 调参页：键窄、含义宽（一整句解释）、当前窄、改成窄（只放个下拉） */
+/* 设置页：键窄、含义宽（一整句解释）、当前窄、改成窄（只放个下拉） */
 .cols-settings col:nth-child(1) { width: 24%; }
 .cols-settings col:nth-child(2) { width: 44%; }
 .cols-settings col:nth-child(3) { width: 14%; }
@@ -1068,7 +1068,7 @@ td .hint { margin: 2px 0 0; }
 }
 .audit-item .preview { margin-top: 0; max-height: 120px; }
 
-/* 调参页：面板覆盖过的项在左边留一道主色条，一眼看得出"这几个是面板改的" */
+/* 设置页：面板覆盖过的项在左边留一道主色条，一眼看得出"这几个是面板改的" */
 .cols-settings tbody tr.overridden td:first-child { box-shadow: inset 3px 0 0 var(--primary); }
 /* 键名和"立即生效"标签分两行：并排会把 `compaction_enabled` 这种长键名挤断 */
 .cols-settings .set-key { display: block; overflow-wrap: anywhere; }
@@ -1850,7 +1850,7 @@ body.is-locked { display: block; padding: 0; }
  * 供应商小标题、以及"不在声明的模型里"的那一点红。
  *
  * 不加新的卡片/表格样式：页面的骨架复用既有的 `.pref-group` / `.pref-list` / `.pref`
- * ——与「调参」「群聊」两页同一套观感（用户 2026-10-01："你去看看小米的设置页好不好"）。
+ * ——与「设置」「群聊」两页同一套观感（用户 2026-10-01："你去看看小米的设置页好不好"）。
  */
 .model-warn {
   margin: 0 0 14px;

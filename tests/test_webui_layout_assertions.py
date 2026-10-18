@@ -9,7 +9,7 @@
    "左栏产出的每个 `<button>` 都必须带 `data-tab`"，而不是"某几颗按钮不在左栏"。
    同时反向钉住那几样**功能没被删掉**（别为了清空左栏把功能一起砍了），
    它们各自有新的落点：本体状态 → 总览「运行」卡；刷新 → 内容区顶栏；
-   深色 → 调参页「面板」分组的开关；退出 → 账号页。
+   深色 → 设置页「面板」分组的开关；退出 → 账号页。
 
 2. **人物画像属于「记忆」这张卡，且与「记忆」平级**（用户 2026-10-06 两句要一起读：
    "我应该说过人物画像属于记忆的子项目" = 它属于这个分区；
@@ -205,6 +205,47 @@ def _top_level_ids(card: dict[str, object]) -> list[str]:
             if not entry.startswith("{")]
 
 
+def _object_body(js: str, marker: str) -> str:
+    """取 `const <marker> = { … }` 的**正文**（配对计数，不用正则截）。
+
+    `marker` 是那个常量名（`"PANES"` / `"LEGACY_TABS"` / `"TAB_NOTES"`）。取不到就抛——
+    "解析器坏了"与"结构真变了"必须能分开（见模块头那段）。
+    """
+
+    plain = _uncomment(js)
+    found = re.search(r"const " + re.escape(marker) + r"\s*=\s*\{", plain)
+    if found is None:
+        raise ValueError(f"app.js 里找不到 `const {marker} = {{`")
+    start = plain.index("{", found.start())
+    return plain[start + 1:_balanced(plain, start, "{", "}") - 1]
+
+
+def _panes(js: str) -> dict[str, list[dict[str, str]]]:
+    """把页内子页签表 `PANES` 解析成 `{页签: [{id, label, view}]}`（顺序保持原样）。"""
+
+    body = _object_body(js, "PANES")
+    found: dict[str, list[dict[str, str]]] = {}
+    for key in re.finditer(r"(?m)^[ \t]*([a-z_]+):\s*\[", body):
+        name = key.group(1)
+        start = body.index("[", key.start())
+        stop = _balanced(body, start, "[", "]")
+        found[name] = [{"id": item.group(1), "label": item.group(2), "view": item.group(3)}
+                       for item in re.finditer(
+                           r"\{\s*id:\s*\"([a-z_]+)\"\s*,\s*label:\s*\"([^\"]+)\"\s*,"
+                           r"\s*view:\s*([A-Za-z_]+)\s*,?\s*\}", body[start + 1:stop - 1])]
+    return found
+
+
+def _legacy_tabs(js: str) -> dict[str, dict[str, str]]:
+    """把老地址表 `LEGACY_TABS` 解析成 `{老页签: {tab, pane}}`。"""
+
+    body = _object_body(js, "LEGACY_TABS")
+    return {item.group(1): {"tab": item.group(2), "pane": item.group(3)}
+            for item in re.finditer(
+                r"([a-z_]+):\s*\{\s*tab:\s*\"([a-z_]+)\"\s*,\s*pane:\s*\"([a-z_]+)\"\s*\}",
+                body)}
+
+
 class LeftRailTests(unittest.TestCase):
     """判据（1）：左栏只放导航；搬走的那几样功能仍在，各有新落点。"""
 
@@ -266,8 +307,8 @@ class LeftRailTests(unittest.TestCase):
 
         js = _asset("app.js")
 
-        # 深色 → 调参页「面板」分组的开关（浏览器本地偏好，不写 data/、不进覆盖层）。
-        self.assertIn('id="panel-theme"', js, "调参页里没有深色开关 `#panel-theme`")
+        # 深色 → 设置页「面板」分组的开关（浏览器本地偏好，不写 data/、不进覆盖层）。
+        self.assertIn('id="panel-theme"', js, "设置页里没有深色开关 `#panel-theme`")
         self.assertIn('target.id === "panel-theme"', js,
                       "深色开关没有接上（它长在页面内容里，要走 `bind()` 的委托）")
         self.assertIn('localStorage.setItem("yunru_panel_theme"', js,
@@ -541,10 +582,17 @@ class LearnedUnderKnowledgeTests(unittest.TestCase):
     3. **不新开通道**：两个页面里每个 `api(...)` 都必须指向 `/api/knowledge/`，
        页面代码里不许出现读文件/查库的字样（判据与「人物画像」那条同一套）；
     4. **接线还在**：两个页签在 `VIEWS` 里注册了，写入动作也都打在 `/api/knowledge/` 上。
+
+    2026-10-18（第三轮）：用户说"`金句审核` 并进 `金句`"，所以「知识库」卡里
+    **不再有第四个口** `knowledge_quotes_evidence`——它成了「金句」页里的第二块子视图
+    （`PANES.knowledge_quotes`，见 `MergedPageTabsTests`）。这一组因此从"三个口"改成
+    "两个口"，并**反向**钉住那个 id 不再出现在 `CARDS` / `TABS` / `VIEWS` 里
+    （"并进去"不等于"留一个隐藏的旧入口"）。
     """
 
     #: 这几个页签的 id 与它们**只许出现**在的那张卡。
-    IDS = ("knowledge_quotes", "knowledge_quotes_evidence", "knowledge_slang")
+    #: 依据（用户原话）："`金句审核` 并进 `金句`"——证据那一块不再是一个页签。
+    IDS = ("knowledge_quotes", "knowledge_slang")
     PARENT = "知识库"
     #: 这两个页面取数/写数只许用的前缀。
     API_PREFIX = "/api/knowledge/"
@@ -577,8 +625,11 @@ class LearnedUnderKnowledgeTests(unittest.TestCase):
         所以 `CARDS` 里它们是普通字符串；写成 `{ id: …, sub: 1 }` 就是被否掉的
         "挂在上面那个条目下面"的形状（左栏里会被画成低一级），当场失败。
 
-        （2026-10-07 多了第四个口「金句审核」——它是"金句"的**证据视图**，
-        与其余三个同级；这里把四个都点名，少一个/多一个都要人回来看一眼。）
+        （2026-10-07 多了第四个口「金句审核」——它是"金句"的**证据视图**，与其余三个同级。）
+        （2026-10-18 第三轮**撤掉那个第四个口**：用户原话"`金句审核` 并进 `金句`"——
+        证据视图成了「金句」页里的第二块子视图，左栏里不再单独占一项。所以这张卡里
+        现在是**三个**口；同时反向钉住 `knowledge_quotes_evidence` **不在任何一张卡里**
+        ——"并进去"不等于"留一个看不见的旧入口"。）
         """
 
         knowledge = self._card(self.PARENT)
@@ -586,13 +637,18 @@ class LearnedUnderKnowledgeTests(unittest.TestCase):
             self.assertIn(page, _card_ids(knowledge),
                           f"「{self.PARENT}」卡里没有 {page} 这个口")
         self.assertEqual(_card_ids(knowledge),
-                         ["knowledge", "knowledge_quotes", "knowledge_quotes_evidence",
-                          "knowledge_slang"],
-                         "「知识库」卡里的项不是「知识库 + 金句 + 金句审核 + 黑话」这四个平级项")
+                         ["knowledge", "knowledge_quotes", "knowledge_slang"],
+                         "「知识库」卡里的项不是「知识库 + 金句 + 黑话」这三个平级项")
         self.assertEqual(
             _top_level_ids(knowledge), _card_ids(knowledge),
             "「知识库」卡里有条目写成了 `{ id, sub }`——它们和「知识库」是同一张卡"
             "下面的平级项（用户 2026-10-06：\"金句黑话同理\"）")
+        # 依据（用户原话）："`金句审核` 并进 `金句`" —— 它不该再出现在任何一张卡里。
+        holders = [card["title"] for card in self.cards
+                   if "knowledge_quotes_evidence" in _card_ids(card)]
+        self.assertEqual(
+            holders, [],
+            f"`knowledge_quotes_evidence` 还挂在这些卡里：{holders}——它已经并进「金句」页了")
         for other in ("账号与设备", "记忆", "聊天"):
             self.assertNotIn(self.IDS[0], _card_ids(self._card(other)),
                              "金句挂到别的分区去了（用户明说过：它属于知识库）")
@@ -603,13 +659,15 @@ class LearnedUnderKnowledgeTests(unittest.TestCase):
         "一处缩进一处拍平"是不可能的了：`sub` 那套（连同 `subItems()` 归一）已经撤掉，
         所以这里钉的是**反面**——`TABS` 里再出现 `sub`、或者名字没自己占一行，
         都当场失败。
+
+        2026-10-18（第三轮）：`knowledge_quotes_evidence` / 「金句审核」那一行**必须没了**
+        ——依据是用户原话"`金句审核` 并进 `金句`"（"并进"就是不再单独占左栏一行）。
         """
 
         tabs_vector = re.search(r"const TABS = \[(.*?)\n\];", self.js, re.S)
         self.assertIsNotNone(tabs_vector, "app.js 里找不到页签名表 `TABS`")
         vector = tabs_vector.group(1)
         for page, label in (("knowledge_quotes", "金句"),
-                            ("knowledge_quotes_evidence", "金句审核"),
                             ("knowledge_slang", "黑话")):
             with self.subTest(page=page):
                 self.assertRegex(
@@ -621,6 +679,13 @@ class LearnedUnderKnowledgeTests(unittest.TestCase):
                 self.assertEqual(
                     len(re.findall(r"\"" + label + r"\"", vector)), 1,
                     f"`TABS` 里「{label}」这个名字出现了不止一次——它只该声明一次")
+        # 依据（用户原话）："`金句审核` 并进 `金句`" —— 页签名表里不该再有它。
+        self.assertNotIn(
+            '"knowledge_quotes_evidence"', vector,
+            "`TABS` 里还留着「金句审核」那一行——它已经并进「金句」页了")
+        self.assertNotIn(
+            '"金句审核"', vector,
+            "`TABS` 里还留着「金句审核」这个叫法——它已经并进「金句」页了")
         self.assertNotIn("sub", vector,
                          "`TABS` 里又出现了 `sub` ——那是被用户否掉的「挂在上面那一项下面」的写法")
         # `labelOf` 回到"查表"这一件事：不再有归一子项那一步。
@@ -656,17 +721,27 @@ class LearnedUnderKnowledgeTests(unittest.TestCase):
         反向钉住"别为了加页面把功能接线弄丢"：改方向 / 恢复自动 / 停用笔记 / 黑话的三个动作，
         以及**金句审核**那五个（选一条 / 采纳 / 否定 / 改成某一档 / 恢复自动 / 停用笔记）
         都在 `bind()` 的委托里，且 `write("…")` 的路径都是知识库那个既有写口。
+
+        2026-10-18（第三轮）：`knowledge_quotes_evidence` **不再进 `VIEWS`**（依据：用户原话
+        "`金句审核` 并进 `金句`"）；它作为「金句」页的第二块由 `PANES` 接线，
+        那一层在 `MergedPageTabsTests` 里钉。这里**反着**再钉一遍它不在 `VIEWS` 里。
         """
 
         views = _uncomment(_function_body(self.js, "render"))
         self.assertIn("VIEWS[state.tab]", views, "`render()` 不再按 `VIEWS` 取页面")
         vector = re.search(r"const VIEWS = \{(.*?)\n\};", self.js, re.S)
         self.assertIsNotNone(vector, "app.js 里找不到 `VIEWS`")
+        # 扫的是**代码**（去掉注释）：那一段注释里正写着"这里没有 `knowledge_quotes_evidence`"，
+        # 按原文扫会把注释也算成违规（与 `SubLevelEntriesTests` 扫 CSS 时同一个坑）。
+        route_table = _uncomment(vector.group(1))
         for page, name in (("knowledge_quotes", "viewKnowledgeQuotes"),
-                           ("knowledge_quotes_evidence", "viewQuoteEvidence"),
                            ("knowledge_slang", "viewKnowledgeSlang")):
-            self.assertRegex(vector.group(1), page + r":\s*" + name,
+            self.assertRegex(route_table, page + r":\s*" + name,
                              f"`VIEWS` 里没有把 {page} 接到 {name}()")
+        self.assertNotIn(
+            "knowledge_quotes_evidence", route_table,
+            "`VIEWS` 里还挂着 `knowledge_quotes_evidence`——它已经并进「金句」页"
+            "（用户原话：\"`金句审核` 并进 `金句`\"），页签那一层不该再有它")
 
         bound = _uncomment(_function_body(self.js, "bind"))
         # 认的是**真的接上**的那个形状（`if (act("q-save", async (el) => {`），
@@ -695,6 +770,240 @@ class LearnedUnderKnowledgeTests(unittest.TestCase):
         self.assertGreaterEqual(
             len(learned_writes), 5,
             f"金句/黑话/审核的写入没有全走 `/api/knowledge/`：{writes}")
+
+
+class MergedPageTabsTests(unittest.TestCase):
+    """2026-10-18（第三轮）：**三处纯搬家**（页签合并 / 改名），功能一个字都没改。
+
+    用户这一轮的原话就是判据，三句各一个 `subTest`：
+
+    1. *"`调参` 页签改名为 `设置`"* —— `TABS` 里那一行改叫法，左栏与副标题里不许再出现
+       "调参"（"别留半截"）；
+    2. *"`操作记录` 并进 `日志`"* —— `history` 不再占左栏一行，成了「日志」页里的第二块
+       子页签；
+    3. *"`金句审核` 并进 `金句`"* —— `knowledge_quotes_evidence` 同理，成了「金句」页里的
+       第二块子视图。
+
+    另外两条是这三件事的**后果**，而且是最容易漏的两处：
+
+    * **老地址**（`#history` / `#knowledge_quotes_evidence`）必须落到新页签的那一块上
+      ——不能 404、不能白屏（这一条在 `test_the_old_addresses_land_on_a_real_block` 里）；
+    * 页内子页签用的是**「人物画像」页那套控件**（`person-tabs`），不是为这两页新发明一个。
+
+    ⚠️ 这里**不许放宽**：删掉的那两个页签 id 一律**反向**钉住（`CARDS` / `TABS` /
+    `VIEWS` / `TAB_NOTES` 四处都不许再出现），而不是"少断言两条"。
+    """
+
+    #: 这三处搬家的判据（用户原话，写在这里供下一个人对照）。
+    BASIS = ("用户原话：「`操作记录` 并进 `日志`、`金句审核` 并进 `金句`、`调参` 改名 `设置`」")
+
+    def setUp(self) -> None:
+        self.js = _asset("app.js")
+        self.css = _asset("app.css")
+        self.html = _asset("index.html")
+        self.cards = _cards(self.js)
+        self.panes = _panes(self.js)
+
+    def _card_ids(self, title: str) -> list[str]:
+        for card in self.cards:
+            if card["title"] == title:
+                return _card_ids(card)
+        self.fail(f"`CARDS` 里没有标题为「{title}」的卡")
+
+    def _tabs_vector(self) -> str:
+        found = re.search(r"const TABS = \[(.*?)\n\];", self.js, re.S)
+        self.assertIsNotNone(found, "app.js 里找不到页签名表 `TABS`")
+        return found.group(1)
+
+    def _notes(self) -> str:
+        return _object_body(self.js, "TAB_NOTES")
+
+    # --- 1. 调参 → 设置 -----------------------------------------------------
+
+    def test_the_settings_tab_is_renamed(self) -> None:
+        """`["settings","设置"]`，而且文案里不再有"调参"（用户：改名为 `设置`）。"""
+
+        self.assertRegex(
+            self._tabs_vector(), r"\[\s*\"settings\"\s*,\s*\"设置\"\s*\]",
+            "`TABS` 里那一行还没改叫「设置」")
+        # 依据（用户原话）："`调参` 页签改名为 `设置`。同时把页面标题、任何文案里的
+        # 『调参』一起改，别留半截"——所以**左栏那份叫法**与**副标题**里都不许再有它
+        # （扫的是"文案"：TABS 的显示名与 TAB_NOTES 的值；`app.js` 顶部那条注释里
+        # 还留着"原来叫「设置」"这句变更记载，那不是文案）。
+        labels = re.findall(r"\[\s*\"[a-z_]+\"\s*,\s*\"([^\"]*)\"\s*\]", self._tabs_vector())
+        self.assertIn("设置", labels, "`TABS` 里没有「设置」这个叫法")
+        self.assertNotIn("调参", labels,
+                         f"左栏还在用「设置」这个叫法：{labels}——它已经改名为「设置」了")
+        notes = re.findall(r"(?m)^[ \t]+[a-z_]+:\s*\"([^\"]*)\",$", self._notes())
+        self.assertTrue(notes, "`TAB_NOTES` 一条都没解析出来（解析多半失效了）")
+        for text in notes:
+            with self.subTest(note=text[:12]):
+                self.assertNotIn("调参", text,
+                                 "副标题里还写着「设置」——它已经改名为「设置」了")
+        # 页面标题就是 `labelOf(state.tab)`（`render()` 里那两行），所以上面钉住 TABS
+        # 就等于钉住标题；这里再确认标题确实取自 `labelOf`，别有人另抄一份。
+        render_body = _uncomment(_function_body(self.js, "render", kind="async"))
+        self.assertIn("labelOf(state.tab)", render_body,
+                      "页面标题不再取自 `labelOf()`——那「设置」这个名字就不生效了")
+
+    # --- 2 / 3. 两个页签并进去了 -------------------------------------------
+
+    def test_the_two_merged_tabs_are_gone_from_the_left_rail(self) -> None:
+        """`history` / `knowledge_quotes_evidence` 在 `CARDS`、`TABS`、`VIEWS` 里都没了。
+
+        依据（用户原话）："`操作记录` 并进 `日志`"、"`金句审核` 并进 `金句`"。
+        钉三点：卡里的项（左栏画的就是它）、页签名表、以及 `VIEWS` 那张路由表。
+        """
+
+        self.assertEqual(
+            self._card_ids("系统"), ["logs", "settings", "model", "actions"],
+            "「系统」卡里的项不对——`history` 该已经并进「日志」"
+            "（" + self.BASIS + "）")
+        self.assertEqual(
+            self._card_ids("知识库"), ["knowledge", "knowledge_quotes", "knowledge_slang"],
+            "「知识库」卡里的项不对——`knowledge_quotes_evidence` 该已经并进「金句」"
+            "（" + self.BASIS + "）")
+        # 一张一张卡扫：那两个 id 在任何一张卡里都不许出现。
+        for gone in ("history", "knowledge_quotes_evidence"):
+            holders = [card["title"] for card in self.cards
+                       if gone in _card_ids(card)]
+            self.assertEqual(holders, [],
+                             f"`{gone}` 还挂在这些卡里：{holders}——它已经并进别的页了")
+        vector = _uncomment(self._tabs_vector())
+        for gone in ("\"history\"", "\"knowledge_quotes_evidence\"", "\"操作记录\"",
+                     "\"金句审核\""):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, vector,
+                                 f"`TABS` 里还留着 {gone}——它已经并进别的页了")
+        views = re.search(r"const VIEWS = \{(.*?)\n\};", self.js, re.S)
+        self.assertIsNotNone(views, "app.js 里找不到 `VIEWS`")
+        for gone in ("history:", "knowledge_quotes_evidence:"):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, views.group(1),
+                                 f"`VIEWS` 里还挂着 {gone}——它已经并进别的页了")
+        # 副标题表同理：页签没了，它那行说明就是死条目。
+        notes = self._notes()
+        for gone in ("history:", "knowledge_quotes_evidence:"):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, notes, f"`TAB_NOTES` 里还留着 {gone} 那行说明")
+
+    def test_each_merged_page_declares_exactly_the_two_blocks(self) -> None:
+        """并进去的那一块**真在页内**，而且用的就是**原来那个页面函数**。
+
+        这条是"搬家 ≠ 删功能"的机械判据：`PANES` 里那一块如果指向了新写的函数、
+        或者干脆指错，页面里画的东西就跟原来不一样了（而所有断言都还是绿的）。
+        """
+
+        self.assertEqual(
+            self.panes.get("logs"),
+            [{"id": "log", "label": "日志", "view": "viewLogs"},
+             {"id": "history", "label": "操作记录", "view": "viewHistory"}],
+            "「日志」页里的两块不是「日志 / 操作记录」，或者其中一块没接回原来那个函数")
+        self.assertEqual(
+            self.panes.get("knowledge_quotes"),
+            [{"id": "quotes", "label": "看金句", "view": "viewKnowledgeQuotes"},
+             {"id": "evidence", "label": "审证据", "view": "viewQuoteEvidence"}],
+            "「金句」页里的两块不是「看金句 / 审证据」，或者其中一块没接回原来那个函数")
+        # 没有并页的那些页签**不该**长出子页签（多一块就是多一层没人要的导航）。
+        self.assertEqual(set(self.panes), {"logs", "knowledge_quotes"},
+                         f"`PANES` 里多了别的页签：{sorted(set(self.panes))}")
+        # 两块各自都是**原来那个 view 函数**——两个函数都还在（没被顺手删掉）。
+        for name in ("viewLogs", "viewHistory", "viewKnowledgeQuotes", "viewQuoteEvidence"):
+            with self.subTest(view=name):
+                self.assertRegex(self.js, r"(async )?function " + name + r"\(",
+                                 f"`{name}()` 不见了——并页只该搬位置，不该删页面")
+
+    def test_the_blocks_are_drawn_by_the_person_profile_tab_control(self) -> None:
+        """页内子页签用的就是「人物画像」页那套 `person-tabs`（用户说的"那种写法"）。
+
+        钉四样：控件类名、`data-page-pane` 这个委托抓手、`render()` 把那条子页签画在
+        内容**上面**、以及 `bind()` 接住了点击（点了不换块 = 子页签是死的）。
+        """
+
+        bar = _uncomment(_function_body(self.js, "paneBar"))
+        self.assertIn("person-tabs", bar, "页内子页签没有用 `person-tabs` 那套控件")
+        self.assertIn("person-tab", bar, "页内子页签没有用 `person-tab` 那个按钮样式")
+        self.assertIn('role="tablist"', bar, "页内子页签没有 tablist 语义")
+        self.assertIn("data-page-pane", bar, "子页签按钮没有委托抓手（`bind()` 抓不到）")
+        self.assertIn("aria-selected", bar, "子页签没有 `aria-selected`")
+        # 复用是**复用**：那套样式仍在 `app.css` 里（别为了并页把它删了）。
+        self.assertRegex(self.css, r"\.person-tabs\s*\{[^}]*display:\s*flex",
+                         "`app.css` 里 `person-tabs` 那套控件不见了")
+        render_body = _uncomment(_function_body(self.js, "render", kind="async"))
+        self.assertIn("paneBar(state.tab) + await view()", render_body,
+                      "`render()` 没有把页内子页签画在内容上面")
+        # 并页之后每一块**各自取数**，所以选块要重画（不是像画像那样只翻 hidden）。
+        bound = _uncomment(_function_body(self.js, "bind"))
+        self.assertRegex(bound, r'if \(act\("page-pane", \(el\) => \{',
+                         "`bind()` 里没有接页内子页签（点了不会换块）")
+        self.assertIn("render()", re.search(
+            r'if \(act\("page-pane".*?\)\) return;', bound, re.S).group(0),
+            "点了子页签没有重画（两块各自取数，只翻 hidden 就画不出来）")
+        # 没有子页签的页签**一个像素都不许多**：`paneBar()` 直接返回空串。
+        self.assertIn('if (!panes.length) return "";', bar,
+                      "`paneBar()` 对没有子页签的页签没有直接返回空串")
+
+    def test_the_old_addresses_land_on_a_real_block(self) -> None:
+        """老地址落到**新页签的那一块**上——而且那一块**真的存在**。
+
+        用户要求（"`操作记录` 并进 `日志`"、"`金句审核` 并进 `金句`"）的后果：
+        书签里那个 `#history` 不能 404、不能白屏。所以这里钉三层：
+
+        1. `LEGACY_TABS` 那张表逐项对（落点就是"日志页的操作记录块"/"金句页的证据块"）；
+        2. 落点在 `PANES` 里**确实有**（不然重定向指向一个不存在的块 = 白屏）；
+        3. 这条解析真的被 `init()`（打开页面）与 `hashchange`（手改/粘贴地址栏）用上了，
+           而且落地之后地址栏换成了新地址（`writePaneHash`）。
+        """
+
+        legacy = _legacy_tabs(self.js)
+        self.assertEqual(
+            legacy,
+            {"history": {"tab": "logs", "pane": "history"},
+             "knowledge_quotes_evidence": {"tab": "knowledge_quotes", "pane": "evidence"}},
+            "老地址的落点不对——`#history` 该落到「日志」页的「操作记录」块，"
+            "`#knowledge_quotes_evidence` 该落到「金句」页的「审证据」块")
+        in_rail = {page for card in self.cards for page in _card_ids(card)}
+        for old, landing in legacy.items():
+            with self.subTest(address=old):
+                panes = [item["id"] for item in self.panes.get(landing["tab"], [])]
+                self.assertIn(
+                    landing["pane"], panes,
+                    f"`#{old}` 被指到 {landing['tab']} 的 `{landing['pane']}` 块，"
+                    f"可那一页只有 {panes}——重定向会指向一个不存在的块（等于白屏）")
+                self.assertIn(landing["tab"], in_rail,
+                              f"老地址落到的 `{landing['tab']}` 不在左栏里")
+        # 解析在唯一一处：`landingOf()` 查 `LEGACY_TABS`，并且把那一块带出来。
+        landing_body = _uncomment(_function_body(self.js, "landingOf"))
+        self.assertIn("resolveTab(raw)", landing_body,
+                      "`landingOf()` 没有查老地址表（那老地址就没人管了）")
+        self.assertIn("wanted.pane", landing_body,
+                      "`landingOf()` 没把老地址自带的那一块带出来")
+        self.assertIn('part.startsWith("pane=")', landing_body,
+                      "`landingOf()` 没把 `&pane=` 当保留段（会被当成页签名）")
+        # 两个入口都用上了：打开页面（`init()`）与换地址（`hashchange`）。
+        init_body = _uncomment(_function_body(self.js, "init"))
+        self.assertIn("landingOf(hash)", init_body,
+                      "`init()` 没有把老地址解析成新页签（刷新 / 书签进来会停错页）")
+        self.assertIn("rememberPane(landing.tab, landing.pane)", init_body,
+                      "`init()` 没有把页内那一块记下来（老地址进来会停错块）")
+        self.assertRegex(init_body, r"writePaneHash\(landing\.tab, landing\.pane\)",
+                         "`init()` 落地之后没有把地址栏换成新地址")
+        self.assertIn("addEventListener(\"hashchange\"", init_body,
+                      "`hashchange` 不在 `init()` 里了")
+        hash_body = init_body[init_body.index('addEventListener("hashchange"'):]
+        self.assertIn("landingOf(location.hash)", hash_body,
+                      "`hashchange` 没有走老地址解析（手改地址栏会白屏）")
+        self.assertIn("writePaneHash(landing.tab, landing.pane)", hash_body,
+                      "`hashchange` 从老地址落地后没有把地址栏换成新地址")
+        # 记与写这两颗的行为（纯函数，读一遍就够）：地址里写的就是"这一页的第几块"。
+        pane_body = _uncomment(_function_body(self.js, "rememberPane"))
+        self.assertIn("state.last.pane[tab] =", pane_body,
+                      "`rememberPane()` 没有记下页内那一块")
+        write_body = _uncomment(_function_body(self.js, "writePaneHash"))
+        self.assertIn('"&pane=" + encodeURIComponent(showing)', write_body,
+                      "`writePaneHash()` 没有把 `&pane=` 写进地址栏")
+        self.assertIn("history.replaceState(", write_body,
+                      "换子页签往历史里塞条目了（该用 `replaceState`）")
 
 
 class SubLevelEntriesTests(unittest.TestCase):
@@ -1660,8 +1969,8 @@ class ModelPageTests(unittest.TestCase):
 
     这一组钉六件事（每条都对应一次“顺手就会破”）：
 
-    1. **它是一页**（`TABS` 一行 + `VIEWS` 注册），而且**在「系统」卡里、紧挨「调参」**；
-    2. **调参页那一组没了**：`SETTING_GROUPS` 里不再有「模型与凭据」，按路的密钥/供应商
+    1. **它是一页**（`TABS` 一行 + `VIEWS` 注册），而且**在「系统」卡里、紧挨「设置」**；
+    2. **设置页那一组没了**：`SETTING_GROUPS` 里不再有「模型与凭据」，按路的密钥/供应商
        也不再渲染（它们进了 `MOVED_TO_MODEL_PAGE`，连「其他」那一组都不去）；
     3. **两块内容都在**：`密钥` 与 `各路绑定`，且页顶有那句“明文保存”的提示；
     4. **只调核心接缝**：这一页每一个 `api("…")` 都指向 `/api/model*`，页面代码里没有
@@ -1676,7 +1985,7 @@ class ModelPageTests(unittest.TestCase):
                "keySelectOptions", "modelOptions", "layerText",
                "addProviderCard")
 
-    #: 调参页**不许**再出现的那几项（按路的供应商 / 密钥）。
+    #: 设置页**不许**再出现的那几项（按路的供应商 / 密钥）。
     MOVED_KEYS = ("reply_api_key", "judge_api_key", "memory_api_key",
                   "review_api_key", "vision_api_key", "letter_api_key",
                   "reply_provider", "judge_provider")
@@ -1701,24 +2010,24 @@ class ModelPageTests(unittest.TestCase):
         ids = _card_ids(system)
         self.assertIn("model", ids)
         self.assertEqual(ids[ids.index("model") - 1], "settings",
-                         "它没有紧挨着「调参」——两页都是「这台机器怎么跑」的配置")
+                         "它没有紧挨着「设置」——两页都是「这台机器怎么跑」的配置")
         views = re.search(r"const VIEWS = \{(.*?)\n\};", self.js, re.S)
         self.assertIsNotNone(views, "app.js 里找不到 `VIEWS`")
         self.assertIn("model: viewModel", views.group(1), "`VIEWS` 里没把 model 接上")
 
-    # --- 2. 调参页那一组没了（别留两份） ------------------------------------
+    # --- 2. 设置页那一组没了（别留两份） ------------------------------------
 
     def test_the_old_model_group_is_gone_from_the_settings_page(self) -> None:
         groups = re.search(r"const SETTING_GROUPS = \{(.*?)\n\};", self.js, re.S)
         self.assertIsNotNone(groups, "app.js 里找不到 `SETTING_GROUPS`")
         block = groups.group(1)
         self.assertNotIn('title: "模型与凭据"', block,
-                         "「模型与凭据」这一组还留在调参页（同一件事两个入口）")
+                         "「模型与凭据」这一组还留在设置页（同一件事两个入口）")
         for key in self.MOVED_KEYS:
-            self.assertNotIn(f'"{key}"', block, f"调参页还在渲染 {key}")
+            self.assertNotIn(f'"{key}"', block, f"设置页还在渲染 {key}")
         # 但**主 key 这个兼容档要留着**（用户：没要求搬走它）。
         for key in ('"provider"', '"api_base_url"', '"api_model"', '"api_key"'):
-            self.assertIn(key, block, f"调参页把 {key} 也一起搬走了")
+            self.assertIn(key, block, f"设置页把 {key} 也一起搬走了")
         moved = re.search(r"const MOVED_TO_MODEL_PAGE = \[(.*?)\];", self.js, re.S)
         self.assertIsNotNone(moved, "app.js 里找不到 `MOVED_TO_MODEL_PAGE`")
         for key in ("judge_api_key", "review_api_key", "reply_provider",
