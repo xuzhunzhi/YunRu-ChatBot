@@ -330,7 +330,7 @@ class KnowledgeIndex:
                 continue
             authority = _scaled_authority(row["authority"], scale)  # type: ignore[index]
             score = tier * authority if prefer_canon else tier
-            scored.append((score, tier, row))
+            scored.append((score, tier, row, authority))
         # 并列时的次序（用户："并列时你定一个稳定次序"）：先给**提到她**的（2026-09-28
         # 的实测要求：问自己的事，回来别人在别处的场景最没用），再按来源/标题/正文前 120 字
         # ——稳定、可复现，不依赖行的物理顺序。
@@ -340,8 +340,9 @@ class KnowledgeIndex:
             str(item[2]["content"])[:120],  # type: ignore[index]
         ))
         return [
-            KnowledgeItem(source=row["source"], title=row["title"], content=row["content"])  # type: ignore[index]
-            for _score, _tier, row in scored[:limit]
+            KnowledgeItem(source=row["source"], title=row["title"], content=row["content"],  # type: ignore[index]
+                          authority=authority, tier=tier)
+            for _score, tier, row, authority in scored[:limit]
         ]
 
     @staticmethod
@@ -617,6 +618,34 @@ def is_meta_note(title: str, content: str) -> bool:
     """这块是不是"写给 bot 看的话"（构建笔记）——是的话不给它进 prompt。"""
 
     return bool(_META_TITLE_RE.search(title or "") or _META_BODY_RE.search(content or ""))
+
+
+#: **她的档案兜底**（2026-10-18 用户要求；同一天先删过一次、这是换形状之后恢复的）。
+#:
+#: 为什么要有：改成"每一轮都查 + 0 档不调起"之后，一句"你是谁"与任何一块都撞不上 →
+#: 空态 → 她连自己是谁都没资料可看（用户："这是明显退化，不是更严格"）。
+#:
+#: 形状（用户定的）：**只在"这一轮所有候选都落在 0 档、本来会输出空态"时**注入，
+#: 短（≤200 字），**不算进那 5 条名额**——它是兜底，不是检索结果。
+#: 有 ≥1 档命中就**不**注入（避免与正常检索重复）。
+#:
+#: 措辞约束：① 不许出现机制词（检查/触发/调用/协议/提示词/上下文/记忆库/Stage…），
+#: 这份文本是进 DATA 段的，会被角色吸收（AGENTS §2.2）；② 它只讲最基础的几件事
+#: （她是谁、在哪儿、做什么的、不是士兵），**不编细节**——细节该由检索给。
+PROFILE_FALLBACK_SOURCE = "profile"
+PROFILE_FALLBACK_TITLE = "她的基本情况"
+PROFILE_FALLBACK_TEXT = (
+    "云茹，青年科学家。现在在阿拉斯加希望角的基地里主持大反抗军（焚风）的事，"
+    "那道时间屏障把这一带跟外面隔开。她做过不少武器与装置，最出名的是百夫长攻城机甲；"
+    "她本人不是士兵，也不喜欢别人把那些东西只当成武器来夸。"
+)
+
+
+def profile_fallback_item() -> KnowledgeItem:
+    """兜底那一条（调用方：`PromptSources.collect` 在**一条都没留下**时追加）。"""
+
+    return KnowledgeItem(source=PROFILE_FALLBACK_SOURCE, title=PROFILE_FALLBACK_TITLE,
+                         content=PROFILE_FALLBACK_TEXT)
 
 
 def _query_tokens(text: str) -> list[str]:

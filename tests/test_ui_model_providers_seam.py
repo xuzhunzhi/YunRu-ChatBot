@@ -489,9 +489,10 @@ def test_without_the_file_the_seams_answer_instead_of_raising() -> None:
     assert view["providers"] == []
     assert view["present"] is False
     assert view["last_error"] == "", "没有文件不是错误"
-    # 六路都在，而且都报"文件没管它"（面板据此显示"实际走 .env"）。
+    # 七路都在，而且都报"文件没管它"（面板据此显示"实际走 .env"）。
+    # 2026-10-18 加第七路 `relevance`（知识块判档，与判定同一把 key）。
     assert [item["task"] for item in view["bindings"]] == [
-        "reply", "letter", "judge", "memory", "review", "vision"]
+        "reply", "letter", "judge", "relevance", "memory", "review", "vision"]
     assert {item["layer"] for item in view["bindings"]} == {"env"}
     assert key["ok"] is False and key["reason"].strip()
     assert remove["ok"] is False and remove["reason"].strip()

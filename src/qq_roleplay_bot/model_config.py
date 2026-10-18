@@ -152,13 +152,19 @@ TASKS: dict[str, dict[str, str]] = {
     # 这些模型名打到 xkiro 上。什么时候改回去：中继 Google 恢复后改
     # {"key": "reply", "model": "google/gemini-2.5-flash"}。
     "judge": {"key": "judge", "model": "deepseek-flash"},
+    # **知识块判档**（2026-10-18 用户："这块不行也加个agent，用dsflash，effort调none"）：
+    # 与 judge 同一把 key、同一个模型，**不新增 key 项**。思考深度写死在
+    # `dev_config.FIXED_REASONING_EFFORT["relevance"] = "none"`，不受 `.env` 或
+    # `data/model_providers.json` 影响——这一层要快、要便宜，不该被别人的环境变量带偏。
+    "relevance": {"key": "judge", "model": "deepseek-flash"},
     "memory": {"key": "memory", "model": "deepseek-flash"},
     "review": {"key": "review", "model": "deepseek-flash"},
     "vision": {"key": "vision", "model": "deepseek-flash"},
 }
 
 #: 用途的顺序（自检按它打印；测试也按它遍历）。
-TASK_NAMES: tuple[str, ...] = ("reply", "letter", "judge", "memory", "review", "vision")
+TASK_NAMES: tuple[str, ...] = ("reply", "letter", "judge", "relevance", "memory", "review",
+                               "vision")
 
 #: 兼容档的名字（改动前就在用；现在是**默认值**那一档）。
 COMPAT_BASE_URL_ENV = "QQBOT_API_BASE_URL"
@@ -237,6 +243,8 @@ FALLBACK_TASKS: dict[str, str] = {
     "reply": "mimo-v2.6-pro",
     "letter": "mimo-v2.6-pro",
     "judge": "mimo-v2.6-pro",
+    # 判档借判定那把 key，所以它也在兜底名单里：判定能跑的那一家，判档就能跑。
+    "relevance": "mimo-v2.6-pro",
     "memory": "mimo-v2.6-pro",
     "review": "mimo-v2.6-pro",
 }
@@ -250,6 +258,8 @@ BASE_URL_ENV: dict[str, str] = {
     "reply": "QQBOT_REPLY_API_BASE_URL",
     "letter": "QQBOT_LETTER_API_BASE_URL",
     "judge": "QQBOT_JUDGE_API_BASE_URL",
+    # 判档与判定同一把 key（同一个地址），所以这里直接跟随判定那条覆盖变量。
+    "relevance": "QQBOT_JUDGE_API_BASE_URL",
     "memory": "QQBOT_MEMORY_API_BASE_URL",
     "review": "QQBOT_REVIEW_API_BASE_URL",
     "vision": "QQBOT_VISION_API_BASE_URL",
@@ -260,6 +270,8 @@ MODEL_ENV: dict[str, str] = {
     "reply": "QQBOT_REPLY_API_MODEL",
     "letter": "QQBOT_LETTER_API_MODEL",
     "judge": "QQBOT_JUDGE_MODEL",
+    # 判档**不给任务级模型覆盖**：用户定的是"用 dsflash"，模型名由 `TASKS` 写死。
+    "relevance": "QQBOT_JUDGE_MODEL",
     "memory": "QQBOT_MEMORY_MODEL",
     "review": "QQBOT_REVIEW_MODEL",
     "vision": "QQBOT_VISION_MODEL",

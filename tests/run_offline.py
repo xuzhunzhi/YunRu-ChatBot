@@ -52,6 +52,12 @@ os.environ["QQBOT_FACE_NAMES"] = str(root / ".tmp_test_run" / "faces.json")
 # `tests/test_model_config.py` 那二十条"今天那套"会当场红。要测文件的用例自己显式
 # 把这个变量改到自己的临时路径（见 `tests/test_model_providers_file.py`）。
 os.environ["QQBOT_MODEL_PROVIDERS_FILE"] = str(root / ".tmp_test_run" / "model_providers.json")
+# 同理关掉**知识块的模型判档**（`QQBOT_KNOWLEDGE_TIER_LLM`）：它是 2026-10-18 加的
+# "一轮多一次调用"那一层，引擎用例里只要带了知识库就会真发请求（本机 key 是占位符，
+# 结果是 401 → fail-open，用例仍然过，但**离线套件不许碰网络**）。这一层的契约由
+# `tests/test_knowledge_tier.py` 用假 client 钉着（含"关掉 = 只有本地那套"的等价性），
+# 不靠引擎用例顺带覆盖。
+os.environ["QQBOT_KNOWLEDGE_TIER_LLM"] = "0"
 # 上一次跑留下的那份**要删掉**：它是"有没有文件"这个状态的锚点，一条崩溃/中断留下的
 # 空白文件（或半份配置）会让下一次"全绿"跑在另一个世界线上。删除只碰测试目录
 # （`.tmp_test_run/` 被忽略、里面本来就只有测试产物）。

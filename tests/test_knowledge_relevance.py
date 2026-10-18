@@ -62,6 +62,13 @@ class _Index:
         return list(self.items)
 
 
+class _AsyncIndex(_Index):
+    """`PromptSources` 那个端口要的是 `async def search`（测试里用真形状）。"""
+
+    async def search(self, query, *, limit, prefer_canon=True):
+        return _Index.search(self, query, limit=limit, prefer_canon=prefer_canon)
+
+
 def _knowledge(tmp: str, items=()) -> OperatorKnowledge:
     return OperatorKnowledge(_Index(items), OperatorChunksStore(Path(tmp)))
 
@@ -282,7 +289,68 @@ def test_a_rebuilt_index_records_the_scale_and_stops_mapping() -> None:
             connection.close()
 
 
-# --- 6. 条数可配 ------------------------------------------------------------
+# --- 7. 她的档案兜底（2026-10-18 用户："不能删…改成全 0 档时注入一小段"） --------
+
+
+def _context(text: str):
+    from qq_roleplay_bot.extensions import PromptContext
+    from qq_roleplay_bot.stage3_runtime import ContextState
+    from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
+
+    message = IncomingMessage(message_id="m1", session_id="group:1", user_id="100", text=text,
+                              target=MessageTarget(group_id="1"), sender_name="某人")
+    return PromptContext(session_id="group:1", message=message, recent_messages=(),
+                         mode="idle", trigger="threshold", context=ContextState())
+
+
+def test_all_zero_tiers_get_the_profile_fallback() -> None:
+    """① 一条都没留下（全 0 档）→ 追一条"她的基本情况"，**≤200 字**、**不占 5 条名额**。
+
+    用户原话（2026-10-18）："当这一轮所有候选都落在 0 档（也就是本来会输出空态）时，
+    注入一小段'她的档案'兜底——短，≤200 字…并且不算进那 5 条名额"。
+    为什么要它：改成"0 档不调起"之后，"你是谁"与任何一块都撞不上 → 空态 → 她连自己
+    是谁都没资料可看（"这是明显退化，不是更严格"）。
+    """
+
+    from qq_roleplay_bot.extensions import PromptSources
+    from qq_roleplay_bot.knowledge_base import PROFILE_FALLBACK_TEXT, PROFILE_FALLBACK_TITLE
+
+    sources = PromptSources(knowledge_base=_AsyncIndex([]))   # 这一轮一条都召不回 = 全 0 档
+    material = asyncio.run(sources.collect(_context("你是谁")))
+    assert len(material.knowledge_items) == 1, "全 0 档要兜底一条"
+    item = material.knowledge_items[0]
+    assert item.title == PROFILE_FALLBACK_TITLE and item.content == PROFILE_FALLBACK_TEXT
+    assert len(item.content) <= 200, f"兜底要短：{len(item.content)} 字"
+    # 它**不占名额**：limit 是 5 时兜底也只是追加在空列表后面，不是"第 1/5 条检索结果"
+    assert item.source == "profile"
+
+
+def test_any_tier_one_hit_suppresses_the_profile_fallback() -> None:
+    """② 有 ≥1 档命中 → **不**注入兜底（避免与正常检索重复）。"""
+
+    from qq_roleplay_bot.extensions import PromptSources
+
+    hit = KnowledgeItem(source="02-核心设定/x.md", title="能力",
+                        content="百夫长攻城机甲是她亲手造的保护壳。")
+    sources = PromptSources(knowledge_base=_AsyncIndex([hit]))
+    material = asyncio.run(sources.collect(_context("百夫长攻城机甲是什么")))
+    assert [item.title for item in material.knowledge_items] == ["能力"], \
+        "有命中就不该再塞兜底"
+
+
+def test_profile_fallback_has_no_mechanism_words() -> None:
+    """③ 兜底那段要过**人格口径的机制词扫描**（它进 DATA 段，措辞会被角色吸收）。"""
+
+    from qq_roleplay_bot.knowledge_base import PROFILE_FALLBACK_TEXT, is_meta_note
+    from qq_roleplay_bot.prompt_guard import PERSONA_MECHANISM_WORDS, scan_persona_text
+
+    assert scan_persona_text(PROFILE_FALLBACK_TEXT) == [], (
+        f"兜底里混进了机制词：{scan_persona_text(PROFILE_FALLBACK_TEXT)}／"
+        f"词表 {PERSONA_MECHANISM_WORDS}")
+    assert not is_meta_note("她的基本情况", PROFILE_FALLBACK_TEXT), "兜底不是'写给 bot 的说明'"
+
+
+# --- 8. 条数可配 ------------------------------------------------------------
 
 
 def test_knowledge_item_limit_is_configurable(monkeypatch=None) -> None:
@@ -300,7 +368,7 @@ def test_knowledge_item_limit_is_configurable(monkeypatch=None) -> None:
                               sender_name="某人")
     context = PromptContext(session_id="group:1", message=message, recent_messages=(),
                             mode="idle", trigger="threshold", context=ContextState())
-    index = _Index([KnowledgeItem(source="02-核心设定/a.md", title="t", content="正文")])
+    index = _AsyncIndex([KnowledgeItem(source="02-核心设定/a.md", title="t", content="正文")])
     sources = PromptSources(knowledge_base=index)
     try:
         os.environ.pop("QQBOT_KNOWLEDGE_ITEMS", None)
@@ -319,3 +387,4 @@ def test_knowledge_item_limit_is_configurable(monkeypatch=None) -> None:
             os.environ.pop("QQBOT_KNOWLEDGE_ITEMS", None)
         else:
             os.environ["QQBOT_KNOWLEDGE_ITEMS"] = saved
+

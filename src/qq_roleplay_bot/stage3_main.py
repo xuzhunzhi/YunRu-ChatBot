@@ -25,6 +25,7 @@ from .dev_config import (    BATCH_SIZE,
     ONEBOT_ACCESS_TOKEN,
 )
 from .llm_client import LLMError, OpenAICompatibleClient
+from .knowledge_tier import TIER_TIMEOUT_SECONDS, apply_tiers, tier_items
 from .attention import address_reason, is_addressed_to_bot, mentions_name
 from .focus import FocusController
 from .judge_sampling import JudgeSampler
@@ -120,7 +121,12 @@ from .memory_view import (
     build_overview,
     build_records_view,
 )
-from .extensions import PromptContext, PromptMaterial, PromptSources
+from .extensions import (
+    PromptContext,
+    PromptMaterial,
+    PromptSources,
+    knowledge_item_limit,
+)
 # `/admin` 是 **Stage 3 自己的命令**（直接管理聊天：开关群、清会话、转告），
 # 这个模块就是它的解析器，自身零依赖（只有 `re` + enum + dataclass）。
 # 所以这是**合法的 stage3 依赖**，不是要拆掉的拴缚。
@@ -2399,6 +2405,81 @@ class DialogueEngine:
         self._session_judges.pop(session_id, None)
         # 判定采样的按会话计数同批清掉（LRU 淘汰时 `leave_session` 不会走这条路）。
         self.judge_sampling.forget_session(session_id)
+
+    def _relevance_client(self):
+        """知识块**判档**那一路的 client（懒建、进程内复用；关掉开关/没 key 时返回 None）。
+
+        用途名是 `relevance`（`model_config.TASKS`）：与判定同一把 key、同一个模型
+        （`deepseek-flash`），思考深度写死在 `dev_config.FIXED_REASONING_EFFORT`（`none`）。
+        **不按会话分**：它不看历史、不带上下文，每轮只是"这些块能不能用上"的一次小调用，
+        共用一个 client 就够了（也就不会多出一份按会话的强引用要回收）。
+        """
+
+        cached = getattr(self, "_relevance_llm_client", None)
+        if cached is not None:
+            return cached or None
+        if not dev_config.knowledge_tier_llm_enabled():
+            self._relevance_llm_client = False
+            return None
+        from . import provider_failover  # noqa: PLC0415 - 与服务端装配同一条取源路径
+        from .llm_client import OpenAICompatibleClient  # noqa: PLC0415
+        from .model_config import MissingCredential  # noqa: PLC0415
+
+        try:
+            endpoint = provider_failover.endpoint_for("relevance")
+        except MissingCredential as exc:
+            logger.info("知识块判档没有可用凭据，按本地档继续：%s", exc)
+            self._relevance_llm_client = False
+            return None
+        client = OpenAICompatibleClient(*endpoint.triple(), provider=endpoint.provider,
+                                        usage_role="relevance")
+        self._relevance_llm_client = client
+        return client
+
+    async def _apply_knowledge_tiers(self, material: PromptMaterial,
+                                     query: str) -> PromptMaterial:
+        """给这一轮的知识块**用一次模型调用**重判相关档（2026-10-18）。
+
+        用户原话："这块不行也加个agent，用dsflash，effort调none"、
+        "prompt记得优化排序，保证高命中率"。
+
+        形状：
+        * **一轮一次**：候选一起进同一次调用（本地判 0 的已经在 `collect` 之后不在列表里）；
+        * 模型给的档就是**最终档**，最终分仍然 = **档 × 权威度**，降序取上限（默认 5）；
+        * **失败、超时、输出读不出来、开关关掉 → 原样返回**：这一层只许把顺序调准，
+          不许让这一轮没料（`tests/test_knowledge_tier.py` 钉着 fail-open 与"关掉=只有本地"）；
+        * 模型把**全部**判 0 → 与"本地全 0 档"同一个出口：追一条 ≤200 字的档案兜底
+          （用户："全 0 档…注入一小段她的档案兜底"），它不占那 5 条名额。
+        """
+
+        items = material.knowledge_items
+        if not items or not dev_config.knowledge_tier_llm_enabled():
+            return material
+        client = self._relevance_client()
+        if client is None:
+            return material
+        local_tiers = [int(getattr(item, "tier", 0) or 0) or 1 for item in items]
+        started_at = self.clock()
+        try:
+            tiers = await asyncio.wait_for(
+                tier_items(client, query, items, local_tiers=local_tiers),
+                timeout=TIER_TIMEOUT_SECONDS,
+            )
+        except Exception:  # noqa: BLE001 - 超时只等于"用本地档"
+            logger.warning("知识块判档超时/失败，按本地档继续", exc_info=True)
+            return material
+        if tiers is None:
+            return material
+        kept = apply_tiers(items, tiers, limit=knowledge_item_limit())
+        logger.info("Stage 3 knowledge tier: %.2fs 判=%s 留下=%s/%s",
+                    self.clock() - started_at, tiers, len(kept), len(items))
+        if kept == list(items):
+            return material
+        if not kept:
+            from .knowledge_base import profile_fallback_item  # noqa: PLC0415 - 避免循环
+
+            kept = [profile_fallback_item()]
+        return replace(material, knowledge_items=tuple(kept))
 
     def _judge_for(self, session_id: str):
         """这个会话该用哪个判定 client；退回单 agent 时返回 None。
@@ -5651,6 +5732,11 @@ class DialogueEngine:
             # 材料整段时间拿不到时，"她变笨了"也要能在计数上看见，不能只有一行日志。
             self.metrics.record_extension_failure()
             prompt_material = PromptMaterial()
+        # **模型判档那一层**（2026-10-18 用户："这块不行也加个agent，用dsflash，
+        # effort调none"）：本地判完 0/1/2 之后，把留下来的候选**一起**塞进**一次**调用，
+        # 按"能不能用上"重判；模型判出的档就是最终档（本地只当兜底）。
+        # 失败/格式不对/开关关掉 → 原样返回（与"只有本地那套"逐字一致）。
+        prompt_material = await self._apply_knowledge_tiers(prompt_material, message.text)
         if self.memory_service is not None:
             memory_material = await self.memory_service.retrieve(
                 message, state.context.topic, mentioned=self._mentioned_people(message, state))

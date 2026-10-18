@@ -447,7 +447,7 @@ def _overlap(row: _OperatorRow, tokens: list[str]) -> int:
 
 
 def _merge_ranked(rows: list[_OperatorRow], tokens: list[str], literal: set[str],
-                  *, prefer_canon: bool) -> list[tuple[int, _OperatorRow]]:
+                  *, prefer_canon: bool) -> list[tuple[int, int, _OperatorRow]]:
     """把"基准块 + 面板块"放一起算**同一份分数**：`相关程度 × 权威度`。
 
     2026-10-18 改：原来这里是按 `_rank_key`（authority → 扩展词 → 提到她 → RRF）重排，
@@ -460,15 +460,15 @@ def _merge_ranked(rows: list[_OperatorRow], tokens: list[str], literal: set[str]
 
     from .knowledge_base import relevance_tier  # noqa: PLC0415 - 与检索侧同一把尺子
 
-    scored: list[tuple[int, _OperatorRow]] = []
+    scored: list[tuple[int, int, _OperatorRow]] = []
     for row in rows:
         tier = relevance_tier(tokens, literal, row.title, row.content)
         if tier <= 0:
             continue
         score = tier * (row.authority if prefer_canon else 1)
-        scored.append((score, row))
-    scored.sort(key=lambda pair: (-pair[0], -_her_mention(pair[1]), pair[1].source,
-                                  pair[1].title, pair[1].content[:120]))
+        scored.append((score, tier, row))
+    scored.sort(key=lambda item: (-item[0], -_her_mention(item[2]), item[2].source,
+                                  item[2].title, item[2].content[:120]))
     return scored
 
 
@@ -529,8 +529,9 @@ class OperatorKnowledge:
             merged.append(_OperatorRow(source=item.source, title=item.title,
                                        content=item.content, authority=_authority_of(item)))
         ranked = _merge_ranked(merged, tokens, literal, prefer_canon=prefer_canon)
-        return [KnowledgeItem(source=row.source, title=row.title, content=row.content)
-                for _score, row in ranked[:limit]]
+        return [KnowledgeItem(source=row.source, title=row.title, content=row.content,
+                              authority=row.authority, tier=tier)
+                for _score, tier, row in ranked[:limit]]
 
     # --- 编辑（只给面板） -------------------------------------------------
 
