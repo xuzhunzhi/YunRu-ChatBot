@@ -47,7 +47,7 @@ from qq_roleplay_bot.data_boundary import (
     session_marker,
 )
 from qq_roleplay_bot.extensions import KnowledgeItem, PromptFragment, PromptMaterial
-from qq_roleplay_bot.memory_model import MemoryMaterial, MemoryRecord
+from qq_roleplay_bot.memory_model import MEMORY_SOURCE_RULE, MemoryMaterial, MemoryRecord
 from qq_roleplay_bot.prompt_guard import scan_persona_text
 from qq_roleplay_bot.stage3_main import DialogueEngine
 from qq_roleplay_bot.stage3_runtime import (
@@ -569,8 +569,20 @@ def test_a_wrapped_segment_has_the_exact_expected_shape() -> None:
     assert "<people>\n1=小K（QQ200）\n2=某人（QQ100）\n</people>\n" in stable
     assert _wrapped("<people>\n1=小K（QQ200）\n2=某人（QQ100）\n</people>\n") not in stable
     volatile = _volatile(_request())
+    # 记忆那一条现在带**出处与新鲜度**（2026-10-18）：`source="quote|inferred"` 与
+    # `age="N天前"`，这一节开头多一句"出处照标看"的规矩（`memory_model.MEMORY_SOURCE_RULE`）。
+    # `age` 是**墙上时间**算出来的（`_age_text`），所以这里钉"开头 + 正文 + 收尾"三段，
+    # 不把天数写死——写死的话这条测试每天都会红一次。
+    memory_lines = [line for line in volatile.split("\n") if "<memory " in line]
+    assert len(memory_lines) == 1, memory_lines
+    memory_line = memory_lines[0]
+    assert memory_line.startswith(
+        '<memory scope="user_group" subject="100" about="100" source="inferred" age="')
+    assert memory_line.endswith('">他提过这件事。</memory>')
+    assert memory_line.count('source="inferred"') == 1
+    assert f"\n{MEMORY_SOURCE_RULE}\n" in volatile
     assert _wrapped('<memory scope="user_group" subject="100" about="100">'
-                    "他提过这件事。</memory>\n") in volatile
+                    "他提过这件事。</memory>\n") not in volatile, "旧形状回来了（没有出处）"
     assert _wrapped("--- 你与这个人 ---\n"
                     "亲近：熟络——聊得起来，你愿意多说两句。\n"
                     "防备：收着——有些事你不想展开，点到为止。\n"

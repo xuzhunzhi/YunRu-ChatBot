@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import time
 from dataclasses import dataclass, field
 from html import escape
 
@@ -81,6 +82,14 @@ class MemoryRecord:
     # 这条记忆在哪一层（`short` = 中短期，`long` = 长期）。**不是数据库列**：
     # 两张表各自一张，读出来时由 store 标注（见 memory_store.TIERS）。
     tier: str = "short"
+    #: 这条记忆有没有**一句原话**顶着（数据库里 `source_event_ids` 非空）。
+    #:
+    #: **不是数据库列**：`source_event_ids` 是 JSON 文本、也是内部标识（面板与只读视图
+    #: 都不外露），所以由 `memory_store._record` 折算成这个布尔量带出来。渲染成
+    #: `source="quote|inferred"`（见 `MemoryMaterial.as_data`）：
+    #: 只有 `quote` 才配得上"我记得/你说过"的口吻，`inferred` 只能当印象。
+    #: 默认 `False` 是**保守的那一侧**：拿不到出处就当"只是印象"，不许冒充原话。
+    quoted: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,6 +301,42 @@ def parse_operations(raw: str, batch: MemoryBatch) -> tuple[MemoryOperation, ...
     return tuple(results)
 
 
+#: 这一节开头那一句**规矩**（2026-10-18，用户交底：「记忆带出处（读侧）」）。
+#:
+#: 为什么需要它：记忆是模型写的，而"她自己攒下的印象"和"别人当时说的原话"在 prompt 里
+#: 长得一模一样；她于是把印象说成"你上次说过"。实测最近 2 天"断言自身过往"的 23 条里
+#: **16 条不可核实（70%）**，最硬的一例「椅子倒是拆过几张」在那一轮输入里「拆」出现 0 次。
+#: 出处标出来以后，她手里第一次有了"这条能不能当成谁说过"的判据。
+#:
+#: 三条措辞纪律：
+#: 1. **不许出现机制词**（检查/触发/调用/协议/提示词/上下文/记忆库/Stage）：这句每轮都被
+#:    递到她眼前，措辞会被吸收（AGENTS §2.2）；
+#: 2. `quote` / `inferred` 两个值**必须原样**出现——属性里写的就是这两个词，她要对得上；
+#: 3. 一句就够：这一节每轮都跟着回复走，多一句就是每轮多一句噪声。
+MEMORY_SOURCE_RULE = (
+    '每条开头都标着出处：source="quote" 的是当时那句原话，可以照"我记得""你说过"来讲；'
+    'source="inferred" 的只是你自己攒下的印象，只能当印象，别说成谁说过。'
+)
+
+
+def _age_text(record, now: float | None = None) -> str:
+    """这条记忆是多久以前的（渲染成 `age="N天前"`）。
+
+    用 `created_at`（这条**什么时候进库**），不用 `updated_at`：后者每次合并、复述都会被
+    推到当下，拿它当"多久以前"会把三年前的事说成"今天"。反过来，如果哪天需要一个
+    "最近一次被确认"的说法，那应当另开一个属性，别在这里改口径。
+
+    `now` 只是给测试用的口子；生产上一律走 `time.time()`（与 `MemoryStore.clock` 同一套
+    墙上时间——那口钟本来也是 `time.time`）。
+    """
+
+    started = float(getattr(record, "created_at", 0.0) or 0.0)
+    elapsed = (time.time() if now is None else float(now)) - started
+    # 负数是时钟跳变（或测试里的未来时间戳）：按"今天"算，别渲染出 `-1天前` 那种话。
+    days = int(max(0.0, elapsed) // 86400)
+    return f"{days}天前"
+
+
 @dataclass(frozen=True, slots=True)
 class MemoryMaterial:
     records: tuple[MemoryRecord, ...] = ()
@@ -306,7 +351,10 @@ class MemoryMaterial:
 
     def as_data(self, group_id: str | None, user_id: str) -> str:
         lines = []
-        used = 0
+        # 规矩那一句也**算进这 2000 字的预算**（2026-10-18）：它每轮都跟着回复走，
+        # 不算进去就等于给自己开了一个"规矩随便写长"的后门——实测那样会顶破上限
+        # （`test_memory.py` 那条 2000 字的用例当场红：2058 > 2000）。
+        used = len(MEMORY_SOURCE_RULE) + 1
         allowed = {("group", group_id), ("user_group", f"{group_id}:{user_id}"), ("user_global", user_id)}
         for r in self.records:
             if not group_id or (r.scope_type, r.scope_key) not in allowed or r.visibility != "group_safe" or r.status != "active":
@@ -317,12 +365,21 @@ class MemoryMaterial:
             about = escape(self._about(r), quote=True)
             owner = escape(r.subject_user_id or "group", quote=True)
             detail = f' about="{about}"' if about else ""
-            line = f'<memory scope="{r.scope_type}" subject="{owner}"{detail}>{content}</memory>'
+            # 出处与新鲜度（2026-10-18）：两个属性都是**我们这边算出来的**，不是模型写的，
+            # 所以不转义（值只有 quote/inferred 与 `N天前` 两种形状）。
+            source = "quote" if getattr(r, "quoted", False) else "inferred"
+            age = _age_text(r)
+            line = (f'<memory scope="{r.scope_type}" subject="{owner}"{detail}'
+                    f' source="{source}" age="{age}">{content}</memory>')
             if used + len(line) > 2000 or len(lines) >= 5:
                 break
             lines.append(line)
             used += len(line)
-        return "\n".join(lines) or "（暂无可用长期记忆）"
+        if not lines:
+            # 没有可用记忆时**保持与改动前逐字相同**（那句规矩也跟着不出现：没有条目时
+            # "标着出处"这句话没有指称对象，纯噪声）。
+            return "（暂无可用长期记忆）"
+        return MEMORY_SOURCE_RULE + "\n" + "\n".join(lines)
 
     def as_judge_note(self, group_id: str | None, user_id: str, *, max_items: int = 2) -> str:
         """给判定 agent 的一行人话：这个人怎么称呼、他的红线是什么。

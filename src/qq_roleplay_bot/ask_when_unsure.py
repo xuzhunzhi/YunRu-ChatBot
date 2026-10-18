@@ -13,6 +13,13 @@
    被叫到、她这一版的话里**有具体断言**（数字 / 型号 / 流程），而知识库 / 记忆 / 语境
    **三处都没有根据** → **打回，让她自己重写一次**
    （复用"审核只打回、回复 agent 在同一轮重写一次"那条路，**不新增机器**）。
+4. **"她把过往说成事实"那一关**（2026-10-18 加，**纯正则 + 纯字符串，0 次模型调用**）：
+   `has_past_claim` 认四种形状（`我……过` / `我那时候` / `记不清哪一年` / `V过就是V过`），
+   `check_past_claim` 拿**这一轮的材料全文**（`material_haystack`，**排掉
+   `speaker="yunru"` 那些行**——她自己的话不算依据）去比最长的那段中文片段。
+   核不过 → 同一个重写通道、同一句"换成不确定的说法"（`PAST_CLAIM_NOTE`）。
+   为什么它必须与第 3 条并列、而不是收窄第 3 条：第 3 条只认数字 / 型号，实测对她
+   **8 条编造原话 8/8 返回 False**；而她编的是"拆过几张椅子"这种**日常细节**。
 
 ## 上一版的两个教训（这一版两条都不许重犯）
 
@@ -26,8 +33,9 @@
   守卫在 `tests/test_ask_when_unsure.py` 与 `tests/test_persona_shape.py`）。
   这一版唯一写进她 prompt 的那句话（`NO_ASSERT_NOTE`）**只在她被判定打回的那一轮**
   出现在回复请求的**易变段末尾**（`stage3_main._revision_request`），只此一次、口语化、
-  不点机制词；**确定性拦的那一层（`decide_grounding` / `has_specific_claim`）
-  一个字都不进她的 prompt**。
+  不点机制词；**确定性拦的那一层（`decide_grounding` / `has_specific_claim` /
+  `check_past_claim`）一个字都不进她的 prompt**——只在打回的那一轮，由
+  `NO_ASSERT_NOTE` / `PAST_CLAIM_NOTE` 这种**已经写成交谈视角**的话替它说话。
 * **② 只做"提示"，模型不听就没有兜底。** → 真的打回重写由核心决定
   （`stage3_main._model_path` 里"她这一版有没有具体断言"那一关），不靠她自己自觉。
 
@@ -109,6 +117,25 @@ NO_ASSERT_NOTE = """
 **别断言你不知道的**：能确定的部分照说，不能确定的就直说这个你不清楚——
 把"不知道"说出来不丢人，比编一个像样的答案强。
 **别拿反问绕过去**：他不是要你反过来问他一串，是要你给一句实话。
+"""
+
+#: 「她把自己的过往说成事实」那一趟打回时递的话（2026-10-18 加）。
+#:
+#: ⚠️ **本段没有调用点**：`check_past_claim` 已经就位，接线（`stage3_main._model_path`
+#: 里那一关）在**下一段**——这一段的交底只到"函数 + 单元测试"。
+#:
+#: 三条要求都来自交底：
+#: * **只许要求"换成不确定的说法"**——不许要求她删掉整句（删掉等于让她闭嘴，
+#:   而"没被叫到时可以不出声、被叫到时必须开口"那条口径在 `decide_grounding` 里）；
+#: * 所以这里明说"意思照旧"，并且给出三个她自己会用的退路（记不清了／好像有过／说不太准）；
+#: * 措辞不许点机制词（检查/触发/调用/协议/提示词/上下文/记忆库/Stage），也不出现
+#:   "材料""依据"这类我们这边的说法——她会捡去用。
+PAST_CLAIM_NOTE = """
+--- 刚那一句，重来一次 ---
+这一句你把一件旧事说成了真发生过的。可这件事，眼前这些字里没有一处对得上——
+你手里没有那一句。
+**别把它当成事实说**：意思照旧，换成没那么确定的说法（"记不清了""好像有过"
+"说不太准"）；实在说不出来，就说这件你说不出来。
 """
 
 # --- 限量 -------------------------------------------------------------------
@@ -283,6 +310,203 @@ def has_specific_claim(text: object) -> bool:
         if _SPECIFIC_CLAIM.search(flat):
             return True
     return False
+
+
+# --- 「她把自己的过往说成事实」（确定性，2026-10-18 加）----------------------
+#
+# **与上面那条并列，不动 `_SPECIFIC_CLAIM`**：那条认数字/型号，这条认"经历"。
+#
+# 由来（用户 2026-10-18 交底，都是实测）：最近 2 天里"断言自身过往"的 23 条有 **16 条
+# 不可核实**（70%）；最硬的一例是「椅子倒是拆过几张」，而那一轮材料里「拆」出现 **0 次**。
+# 人格里那条反编造（`base_prompt.REAL.py:168`）1507/1507 条 prompt 都在、**没挡住**：
+# 它写的是"设定里没有的细节"，而她编的是**日常细节**（拆椅子、吃过什么、以前怎么弄的）。
+# 上面那条 `_SPECIFIC_CLAIM` 只认数字/型号/流程，实测对她 **8 条编造原话 8/8 返回 False**。
+#
+# 所以这一条**不看判定的结论**（`decide_grounding` 那三重门槛让它在生产上 0 次生效：
+# 判定说 CLEAR + 非专业就放行、记忆一命中就放行），只看**她这句话自己的形状**：
+# 只要她把一段经历说成"事实"（"我……过"／"我当年……"／"记不清哪一年"／"V 过就是 V 过"），
+# 就要求材料里**真的有那一段字**对得上。
+#
+# 代价是零：纯正则 + 子串包含，**0 次模型调用**（`decide_grounding` 那套也是零成本，
+# 但那套在生产上从没触发过——根因是它在等判定点头，而判定对"日常细节"不觉得有事）。
+#
+# 判据刻意写窄（宁可漏、也不许把正常聊天掐死）：
+# * 只认**第一人称**（我／俺）；"没玩过这个"这种**没有主语**的否命题不碰；
+# * 主语与动词之间**不许夹否定词**（没／不／未／无）："我没拆过"是**承认不知道**，
+#   那是要鼓励的说法，不能打回；
+# * 经历性动词只认**交底里那一串**（见听吃去做拆修买玩走看读写过用），
+#   不认识的动词（焊过、拧过）不在此列——漏了就是漏了，别把判据扩成"凡是过都算"。
+_EXPERIENCE_VERBS = "见听吃去做拆修买玩走看读写过用"
+
+#: 形状一：`我/俺 + …… + <经历性动词>过`。主语与动词之间**排除**否定词
+#: （没／不／未／无），于是"我从没拆过""我从未拆过"这类不会命中——它们是**在承认不知道**，
+#: 那正是要鼓励的说法，不能反过来打回。
+_PAST_ACTION = re.compile(
+    rf"(?:我|俺)[^。！？!?；;\n没不未无]{{0,8}}?[{_EXPERIENCE_VERBS}]过"
+)
+
+#: 形状二：`我(那会儿|当年|以前|那时候|上回|那次)`——把一段经历挂在一个具体时段上。
+#: 它本身不带"过"，但"我那时候……"最常见的用法就是把编出来的细节说成回忆。
+_PAST_TIME = re.compile(r"(?:我|俺)(?:那会儿|当年|以前|那时候|上回|那次)")
+
+#: 形状三：`记不清哪一年`——**这句本身就是"编了一个时间框架"**：她把"记不清"当护身符，
+#: 后面接着说的仍然是一件被她当成发生过的事。所以它**不算** `_HEDGED` 那一类。
+_PAST_VAGUE_TIME = re.compile(r"记不清(?:哪一年|哪年)")
+
+#: 形状四：`V 过就是 V 过`——把一段编出来的经历说成"这事没得商量"。
+_PAST_INSIST = re.compile(
+    rf"[{_EXPERIENCE_VERBS}]过[^。！？!?；;\n]{{0,3}}就是[^。！？!?；;\n]{{0,3}}过"
+)
+
+#: 她句子里的"一段中文片段"（连续汉字）。核对拿**最长的那一段**去材料里找。
+_CJK_RUN = re.compile(r"[\u4e00-\u9fff]+")
+
+#: 拿去做子串判断的最短长度。短于它就没法当"可指认的原话"——
+#: 四个字的短语在材料里处处都能撞上，判了等于没判（交底：≥6 字）。
+PAST_CLAIM_MIN_CHUNK = 6
+
+
+def _past_claim_patterns_hit(sentence: str) -> bool:
+    """这一句里有没有"把过往说成事实"的形状（四种，见上面各自的说明）。"""
+
+    return bool(
+        _PAST_ACTION.search(sentence)
+        or _PAST_TIME.search(sentence)
+        or _PAST_VAGUE_TIME.search(sentence)
+        or _PAST_INSIST.search(sentence)
+    )
+
+
+def _claim_sentences(body: str) -> list[str]:
+    """按句读切开，只留"命中形状"的那些句子（顺序保持原样）。
+
+    为什么要先切句：这四种形状都是**句子级**的（"我那时候"跟"过"分属两句时不是同一件事），
+    而且日志要报"是哪一句"，所以切句这一步不能省。
+    """
+
+    out: list[str] = []
+    for sentence in re.split(r"[\n。！!；;？?]+", body):
+        flat = sentence.strip()
+        if flat and _past_claim_patterns_hit(flat):
+            out.append(flat)
+    return out
+
+
+def has_past_claim(text: object) -> bool:
+    """她这一版话里有没有**把一段过往说成事实**（纯正则，零模型调用）。
+
+    四种形状：`我/俺……<经历性动词>过`、`我(那会儿|当年|以前|那时候|上回|那次)`、
+    `记不清哪一年`、`V 过就是 V 过`。**没有主语、或者主语后面跟着否定词的都不算**。
+
+    它只回答"这句话像不像在断言自己的过去"，**不回答**"她到底做过没有"——那由
+    `check_past_claim` 拿材料去比（纯字符串）。判错的那一侧是**多打回一次**，
+    不是"凭空把正常聊天掐死"：真正的动作只有"换成不确定的说法重说一遍"，
+    重写后仍不合格**照发**（回复绝不丢）。
+    """
+
+    body = str(text or "").strip()
+    if not body:
+        return False
+    return bool(_claim_sentences(body))
+
+
+@dataclass(frozen=True, slots=True)
+class PastClaimCheck:
+    """一次"她这话有没有依据"的确定性结论（日志用，也是路由用的那个判据）。"""
+
+    #: 有没有命中那四种形状之一。
+    claim: bool = False
+    #: 材料里对不对得上。`claim=False` 时恒为 True（"没有可核的事"）。
+    grounded: bool = True
+    #: 触发的那一句（**日志用**：要能看见"哪一句"）。
+    sentence: str = ""
+    #: 拿去比的那一段最长中文片段；判不过时它就是"材料里缺的那一段"。
+    chunk: str = ""
+
+
+def _longest_cjk_run(sentence: str) -> str:
+    runs = _CJK_RUN.findall(sentence)
+    return max(runs, key=len) if runs else ""
+
+
+def check_past_claim(text: object, material: object) -> PastClaimCheck:
+    """她这一版里"过往断言"有没有材料对得上（**纯字符串，0 次模型调用**）。
+
+    做法（交底原话）：把这一轮的**材料全文**当 haystack，取她那一句里**最长的一段
+    中文片段（≥ `PAST_CLAIM_MIN_CHUNK` 字）**做子串包含判断。找不到 → 这一条核不过。
+
+    几条边界：
+
+    * 最长片段短于 6 字 → **不核**（放行）。四个字以下在材料里处处撞得上，
+      判了等于没判；这也是这一条**刻意留着的一个漏口**（她带上逗号写短句就绕过了），
+      交底就是这么定的，别自己加花样；
+    * 只要有一句核不过就返回`grounded=False` 并带上**那一句**与**缺的那一段**——
+      日志要能看见这两样（"哪一句、材料里缺什么"）；
+    * ⚠️ "缺的那一段"是**那一句里最长的中文片段**，**不保证就是断言那半句**：
+      真例子「椅子我拆过，具身不具身我可不知道」报出来的是「具身不具身我可不知道」。
+      为什么不改成"优先取含断言的片段"——那个片段只有 5 个字、低于门槛，等于放行，
+      而它正是要抓的那一例。代价是**偶尔多打回一次**（断言在材料里、尾巴不在时），
+      这个方向是安全的（重写只要求换成不确定的说法，**回复永远照发**）；
+    * `material` 的取法有专门的口子：`material_haystack`，它**必须**先把
+      `speaker="yunru"` 那些行整段摘掉（那是她自己说过的话，拿它当依据就是自证）。
+    """
+
+    body = str(text or "").strip()
+    if not body:
+        return PastClaimCheck()
+    haystack = str(material or "")
+    sentences = _claim_sentences(body)
+    if not sentences:
+        return PastClaimCheck()
+    first = sentences[0]
+    first_chunk = _longest_cjk_run(first)
+    for sentence in sentences:
+        chunk = _longest_cjk_run(sentence)
+        if len(chunk) < PAST_CLAIM_MIN_CHUNK:
+            continue  # 太短，核不了 → 放行
+        if chunk in haystack:
+            continue
+        return PastClaimCheck(claim=True, grounded=False, sentence=sentence, chunk=chunk)
+    return PastClaimCheck(claim=True, grounded=True, sentence=first, chunk=first_chunk)
+
+
+#: `<message ... speaker="yunru" ...>……</message>` —— **她自己说过的话**。
+#:
+#: 为什么要整段摘掉（2026-10-18）：她上一轮说过的话已经进了短期历史，会**原样出现在
+#: 这一轮的材料里**；重写那一轮又有"把她上一版递回去"的放大器（交底里点名要拆的那一处）。
+#: 不摘掉的话，她只要把上一句原样再说一遍，"最长片段"就一定命中——那不是"材料里有依据"，
+#: 那是**拿她自己的话证明她自己有依据**（自证循环，正是 15:41→15:42 越编越具体的推手）。
+_OWN_MESSAGE = re.compile(r'<message\b[^>]*\bspeaker="yunru"[^>]*>.*?</message>', re.S)
+
+#: 兜底：万一那段 `<message>` 没闭合（被截断），至少把**带那个标记的那些行**整行摘掉。
+_OWN_MESSAGE_LINE = re.compile(r'^.*\bspeaker="yunru".*$', re.M)
+
+
+def material_haystack(request: object) -> str:
+    """把这一轮请求里的**材料全文**拼成 haystack，**排除她自己说过的话**。
+
+    `request` 就是递给回复 agent 的那份 `list[dict[str, str]]`（`build_dialogue_messages`
+    的产物），所以这里不另取数据：**她看到什么，就核什么**。
+
+    **system 段（她的人格）也算在内**：人设里写着的就是她有资格讲的东西，
+    不算进去的话，"我那时候在巴米扬"会被当成编造。这是有意的——她的人格本来就在
+    "能指认"的那一侧。
+
+    排除分两道（顺序不能反）：
+    1. 先整段摘掉 `<message ... speaker="yunru" ...>…</message>`——**她的正文可能带换行**，
+       只按行摘会漏掉后面几行，等于把半句自证留了下来；
+    2. 再把残留的、带 `speaker="yunru"` 的行整行摘掉（那段没闭合时只有这一道管用）。
+    """
+
+    parts: list[str] = []
+    for item in request or ():
+        if isinstance(item, dict):
+            parts.append(str(item.get("content") or ""))
+        else:  # 不是我们认识的那份请求：宁可当空材料，也别拿别的字段来凑
+            continue
+    text = "\n".join(parts)
+    text = _OWN_MESSAGE.sub("", text)
+    return _OWN_MESSAGE_LINE.sub("", text)
 
 
 # --- 确定性结论（纯函数）----------------------------------------------------

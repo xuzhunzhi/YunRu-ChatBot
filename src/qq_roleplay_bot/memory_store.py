@@ -501,6 +501,17 @@ class MemoryStore:
     def _record(row, tier: str = "short") -> MemoryRecord:
         data = {name: row[name] for name in MemoryRecord.__dataclass_fields__ if name in row.keys()}
         data["tier"] = tier
+        # 出处（2026-10-18）：`source_event_ids` 是 JSON 文本列，**不是** dataclass 字段
+        # （它同时是内部标识，只读视图与面板都不外露它）。这里只折算成"有没有原话"，
+        # 由 `MemoryRecord.quoted` 带到渲染那一步（`source="quote|inferred"`）。
+        # 取不到这一列（有些查询只挑几列）→ 保持默认 False：**拿不到出处就当"只是印象"**，
+        # 宁可让她说得谨慎，也不许拿一句印象去冒充"你说过"。
+        if "source_event_ids" in row.keys():
+            try:
+                evidence = json.loads(row["source_event_ids"] or "[]")
+            except (TypeError, ValueError):  # 坏行不该让整次检索失败
+                evidence = ()
+            data["quoted"] = bool(evidence)
         return MemoryRecord(**data)
 
     @staticmethod
