@@ -788,7 +788,9 @@ class MergedPageTabsTests(unittest.TestCase):
 
     * **老地址**（`#history` / `#knowledge_quotes_evidence`）必须落到新页签的那一块上
       ——不能 404、不能白屏（这一条在 `test_the_old_addresses_land_on_a_real_block` 里）；
-    * 页内子页签用的是**「人物画像」页那套控件**（`person-tabs`），不是为这两页新发明一个。
+    * 页内子页签用的控件是**一处实现、别处复用**：并页那一轮复用的是「人物画像」页
+      那套 `person-tabs`，2026-10-19 组件对齐 Miuix 之后改成 `TabRow`（`segment()`
+      构建器）——见 `test_the_blocks_are_drawn_by_the_miuix_tabrow_control`。
 
     ⚠️ 这里**不许放宽**：删掉的那两个页签 id 一律**反向**钉住（`CARDS` / `TABS` /
     `VIEWS` / `TAB_NOTES` 四处都不许再出现），而不是"少断言两条"。
@@ -913,22 +915,52 @@ class MergedPageTabsTests(unittest.TestCase):
                 self.assertRegex(self.js, r"(async )?function " + name + r"\(",
                                  f"`{name}()` 不见了——并页只该搬位置，不该删页面")
 
-    def test_the_blocks_are_drawn_by_the_person_profile_tab_control(self) -> None:
-        """页内子页签用的就是「人物画像」页那套 `person-tabs`（用户说的"那种写法"）。
+    def test_the_blocks_are_drawn_by_the_miuix_tabrow_control(self) -> None:
+        """页内子页签用的是**Miuix `TabRow`**（`segment()` 构建器），不是另发明一个。
 
-        钉四样：控件类名、`data-page-pane` 这个委托抓手、`render()` 把那条子页签画在
-        内容**上面**、以及 `bind()` 接住了点击（点了不换块 = 子页签是死的）。
+        ⚠️ 2026-10-19 改过这条判据，**依据是用户这一轮的原话**：
+        *"求你了，组件参考这个"*（参考 `github.com/compose-miuix-ui/miuix`，本地副本在
+        `run/data/tmp_miuix/miuix-0.9.4/`）。原来这里钉的是 `person-tabs` / `person-tab`
+        ——那是「人物画像」页那套**下划线**页签，它**不是** Miuix 的组件，只是网页里
+        常见的那种；组件对齐之后，页内分段改用 Miuix `TabRow`（选中项自带
+        `surfaceContainer` 药丸、圆角 12dp、高 42dp），类名随之换成
+        `miu-tabrow` / `miu-tabrow__tab`。
+
+        判据**没有放宽，反而多钉一层**：
+          1. `paneBar()` 走的是 `segment()` 这个**构建器**（一处实现，别处复用）；
+          2. 构建器里那四样语义（`role="tablist"` / `aria-selected` / 委托抓手 /
+             两个类名）都还在；
+          3. `app.css` 里那条规则**是 flex 上的药丸**，且选中态有 `background`
+             （原来只钉 `display: flex`——药丸没了也能绿）。
         """
 
         bar = _uncomment(_function_body(self.js, "paneBar"))
-        self.assertIn("person-tabs", bar, "页内子页签没有用 `person-tabs` 那套控件")
-        self.assertIn("person-tab", bar, "页内子页签没有用 `person-tab` 那个按钮样式")
-        self.assertIn('role="tablist"', bar, "页内子页签没有 tablist 语义")
-        self.assertIn("data-page-pane", bar, "子页签按钮没有委托抓手（`bind()` 抓不到）")
-        self.assertIn("aria-selected", bar, "子页签没有 `aria-selected`")
-        # 复用是**复用**：那套样式仍在 `app.css` 里（别为了并页把它删了）。
-        self.assertRegex(self.css, r"\.person-tabs\s*\{[^}]*display:\s*flex",
-                         "`app.css` 里 `person-tabs` 那套控件不见了")
+        self.assertIn("segment(", bar, "页内子页签没有走 `segment()` 那个构建器")
+        self.assertIn('data: "page-pane"', bar,
+                      "子页签没有委托抓手名 `page-pane`（`bind()` 抓不到）")
+        # 没有子页签的页签**一个像素都不许多**：`paneBar()` 直接返回空串。
+        self.assertIn('if (!panes.length) return "";', bar,
+                      "`paneBar()` 对没有子页签的页签没有直接返回空串")
+        # 控件本身：Miuix `TabRow` 那四样。
+        #
+        # 这里不用 `_function_body()`：它是靠**配对花括号**取函数体的，而
+        # `segment(items, current, options = {})` 的**形参默认值**里就有一对 `{}`，
+        # 于是它会从那儿切开、取到空串（这条断言第一次就是这么"红得莫名其妙"的）。
+        # 改成按"从这一行到下一个顶层 function"切片——那段里没有别的顶层声明。
+        seg_start = self.js.index("function segment(")
+        seg_end = self.js.index("\nfunction ", seg_start + 1)
+        seg = _uncomment(self.js[seg_start:seg_end])
+        self.assertIn("miu-tabrow", seg, "构建器没有产出 Miuix `TabRow` 的容器类名")
+        self.assertIn("miu-tabrow__tab", seg, "构建器没有产出 `TabRow` 的 tab 类名")
+        self.assertIn('role="tablist"', seg, "页内子页签没有 tablist 语义")
+        self.assertIn("aria-selected", seg, "子页签没有 `aria-selected`")
+        # 样式仍然是那套控件自己的（别为了并页把它删了）：容器是 flex，
+        # 选中态是**实心药丸**（`surfaceContainer`），不是一条下划线。
+        self.assertRegex(self.css, r"\.miu-tabrow\s*\{[^}]*display:\s*flex",
+                         "`app.css` 里 `miu-tabrow` 那条规则不见了")
+        self.assertRegex(self.css,
+                         r"\.miu-tabrow__tab\.on\s*\{[^}]*background:\s*var\(--surface-container\)",
+                         "`TabRow` 的选中态不是 surfaceContainer 药丸（Miuix 的 selectedBackgroundColor）")
         render_body = _uncomment(_function_body(self.js, "render", kind="async"))
         self.assertIn("paneBar(state.tab) + await view()", render_body,
                       "`render()` 没有把页内子页签画在内容上面")
@@ -939,9 +971,6 @@ class MergedPageTabsTests(unittest.TestCase):
         self.assertIn("render()", re.search(
             r'if \(act\("page-pane".*?\)\) return;', bound, re.S).group(0),
             "点了子页签没有重画（两块各自取数，只翻 hidden 就画不出来）")
-        # 没有子页签的页签**一个像素都不许多**：`paneBar()` 直接返回空串。
-        self.assertIn('if (!panes.length) return "";', bar,
-                      "`paneBar()` 对没有子页签的页签没有直接返回空串")
 
     def test_the_old_addresses_land_on_a_real_block(self) -> None:
         """老地址落到**新页签的那一块**上——而且那一块**真的存在**。

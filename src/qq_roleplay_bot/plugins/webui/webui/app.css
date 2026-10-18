@@ -44,7 +44,13 @@
   --surface: #f7f7f7;              /* surface */
   --on-surface: #000000;           /* onSurface */
   --surface-variant: #ffffff;      /* surfaceVariant */
+  /* 2026-10-19（对齐 Miuix 组件层）：`--surface-container` 是 Miuix **Card 的默认底色**
+     （`CardDefaults.defaultColors` → `surfaceContainer`），浅色 #FFFFFF / 深色 #242424。
+     它跟上面的 `surfaceVariant` 在这两套主题里**碰巧同值**，但语义不同：卡片用这个。
+     新增是为了让"卡片的底"与"页面的底"在代码里一眼分得开（见下面组件层那段）。 */
+  --surface-container: #ffffff;    /* surfaceContainer（Card 默认底色） */
   --surface-container-high: #e8e8e8;  /* surfaceContainerHigh */
+  --on-surface-container-variant: #959595; /* onSurfaceContainerVariant（Badge 文字/次要） */
   --outline: #d9d9d9;              /* outline */
   --divider: #e0e0e0;              /* dividerLine */
   --window-dimming: rgba(0, 0, 0, 0.3);   /* windowDimming */
@@ -105,7 +111,9 @@
     --surface: #000000;              /* surface */
     --on-surface: #f2f2f2;
     --surface-variant: #242424;
+    --surface-container: #242424;    /* surfaceContainer（Card 默认底色） */
     --surface-container-high: #2d2d2d;
+    --on-surface-container-variant: #737373;
     --outline: #404040;
     --divider: #393939;
     --window-dimming: rgba(0, 0, 0, 0.6);
@@ -139,7 +147,9 @@
   --surface: #000000;
   --on-surface: #f2f2f2;
   --surface-variant: #242424;
+  --surface-container: #242424;
   --surface-container-high: #2d2d2d;
+  --on-surface-container-variant: #737373;
   --outline: #404040;
   --divider: #393939;
   --window-dimming: rgba(0, 0, 0, 0.6);
@@ -186,6 +196,82 @@
   --spring-press: linear(0, 0.0058, 0.0155, 0.0346, 0.0529, 0.0816, 0.1144, 0.1411, 0.1789, 0.2085, 0.2491, 0.2905, 0.3218, 0.3634, 0.3944, 0.4351, 0.475, 0.5041, 0.5418, 0.5691, 0.6043, 0.6378, 0.6618, 0.6924, 0.7142, 0.7417, 0.7675, 0.7857, 0.8085, 0.8245, 0.8445, 0.8629, 0.8758, 0.8917, 0.9027, 0.9162, 0.9285, 0.9369, 0.9472, 0.9543, 0.9628, 0.9704, 0.9755, 0.9816, 0.9857, 0.9906, 0.9949, 0.9977, 1.0009, 1.0031, 1.0055, 1.0075, 1.0088, 1.0102, 1.0111, 1.012, 1.0126, 1.013, 1.0133, 1.0134, 1.0135, 1.0134, 1.0132, 1.013, 1.0127, 1.0123, 1.0119, 1.0115, 1.011, 1.0106, 1.01, 1.0095, 1.0091, 1.0085, 1.0081, 1.0075, 1.007, 1.0066, 1.0061, 1.0057, 1.0053, 1.0048, 1.0045, 1.0041, 1.0038, 1.0034, 1.0031, 1.0028, 1.0025, 1.0023, 1.0021, 1.0018, 1.0016, 1.0014, 1.0013, 1.0011, 1.0009, 1.0008, 1.0007, 1.0006, 1.0005);
   --spring-dialog: linear(0, 0.0043, 0.0183, 0.0352, 0.0621, 0.0873, 0.1153, 0.153, 0.1849, 0.2262, 0.2599, 0.2939, 0.3364, 0.3701, 0.4115, 0.4439, 0.4755, 0.5137, 0.5432, 0.5786, 0.6056, 0.6315, 0.6623, 0.6856, 0.7132, 0.7339, 0.7535, 0.7765, 0.7937, 0.8138, 0.8287, 0.8427, 0.8589, 0.871, 0.8848, 0.895, 0.9045, 0.9155, 0.9234, 0.9326, 0.9393, 0.9454, 0.9524, 0.9575, 0.9632, 0.9674, 0.9712, 0.9754, 0.9785, 0.9819, 0.9844, 0.9866, 0.989, 0.9908, 0.9927, 0.994, 0.9952, 0.9965, 0.9974, 0.9984, 0.9991, 0.9997, 1.0003, 1.0007, 1.0011, 1.0014, 1.0017, 1.0019, 1.002, 1.0021, 1.0022, 1.0023, 1.0023, 1.0023, 1.0023, 1.0022, 1.0022, 1.0021, 1.0021, 1.002, 1.0019, 1.0018, 1.0017, 1.0017, 1.0016, 1.0015, 1.0014, 1.0013, 1.0012, 1.0012, 1.0011, 1.001, 1.0009, 1.0009, 1.0008, 1.0008, 1.0007, 1.0006, 1.0006, 1.0005, 1.0005);
   --spring-menu: linear(0, 0.0052, 0.0181, 0.0332, 0.0569, 0.0852, 0.1104, 0.1447, 0.1812, 0.2193, 0.2584, 0.2902, 0.3301, 0.3698, 0.4012, 0.4399, 0.4777, 0.5144, 0.5498, 0.5772, 0.6101, 0.6415, 0.6655, 0.6941, 0.7211, 0.7465, 0.7703, 0.7883, 0.8094, 0.829, 0.8436, 0.8607, 0.8765, 0.891, 0.9043, 0.9141, 0.9254, 0.9357, 0.9433, 0.9519, 0.9596, 0.9666, 0.9728, 0.9773, 0.9823, 0.9867, 0.9899, 0.9934, 0.9964, 0.9991, 1.0013, 1.0029, 1.0045, 1.0059, 1.0069, 1.0078, 1.0085, 1.0091, 1.0095, 1.0097, 1.0099, 1.0099, 1.0099, 1.0098, 1.0096, 1.0094, 1.0091, 1.0089, 1.0085, 1.0082, 1.0079, 1.0075, 1.0071, 1.0067, 1.0063, 1.006, 1.0056, 1.0052, 1.005, 1.0046, 1.0043, 1.0039, 1.0036, 1.0034, 1.0031, 1.0028, 1.0026, 1.0024, 1.0021, 1.0019, 1.0017, 1.0016, 1.0014, 1.0013, 1.0011, 1.001, 1.0009, 1.0008, 1.0007, 1.0006, 1.0005);
+}
+
+/* --- 组件层令牌（2026-10-19：对齐 Miuix 0.9.4 的组件规范） -------------------
+ *
+ * 这一组**只放几何与字号**（颜色在上面那三套主题里）。每一个值都标了它在 Miuix 源码里
+ * 的出处，谁要改外观就改这里——组件规则一律引令牌，不再写裸数字（"两个真相来源"是
+ * 之前表格列宽踩过的坑，这里不再犯第二遍）。
+ *
+ * 为什么不再抄 Compose 的 API（`CardDefaults.cornerRadius` 那种）：我们是纯 CSS，
+ * 没有组合函数、没有 `Colors` 数据类。所以只搬**尺寸、层级、状态语义**这三样，
+ * 名字用 `--miu-*` 前缀，跟 Miuix 的 token 名一一对应，方便回头对账。
+ */
+
+:root {
+  /* 圆角：Miuix 只有四档（16 / 12 / 32 / 50dp），没有"内部小圆角"这一档 */
+  --miu-r-card: 16px;        /* CardDefaults.CornerRadius */
+  --miu-r-control: 16px;     /* ButtonDefaults.CornerRadius / TextFieldDefaults.CornerRadius */
+  --miu-r-tab: 12px;         /* TabRowDefaults.TabRowCornerRadius */
+  --miu-r-dialog: 32px;      /* DialogDefaults.CornerRadius（居中/大屏那一档） */
+  --miu-r-pill: 999px;       /* CircleShape / SnackbarDefaults.ActionCornerRadius=50dp */
+
+  /* 列表行：BasicComponent 的四条硬指标 */
+  --miu-row-min-h: 56px;     /* Component.kt  heightIn(min = 56.dp) */
+  --miu-row-pad-x: 16px;     /* BasicComponentDefaults.InsideMargin = PaddingValues(16.dp) */
+  --miu-row-pad-y: 10px;     /* ⚠️ 偏离：源码是 16dp，见文件末尾"与 Miuix 的偏离" */
+  --miu-row-gap: 8px;        /* Component.kt 里的 spacerPx = 8.dp（start/center/end 之间） */
+  --miu-end-cap: 60%;        /* endHardCap = 剩余宽度 × 6/10——控件只收窄、不折行 */
+
+  /* 分割线：DividerDefaults */
+  --miu-divider-w: 0.75px;   /* DividerDefaults.Thickness = 0.75.dp（不是 1dp） */
+  --miu-divider-inset: 16px; /* 与行内边距对齐：线从"内容的左边"开始（见下面的说明） */
+
+  /* 分组标题：SmallTitleDefaults */
+  --miu-group-title-pad: 8px 28px;  /* PaddingValues(28.dp, 8.dp) */
+
+  /* 页内分段（TabRow 标准版） */
+  --miu-tab-h: 42px;         /* TabRowDefaults.TabRowHeight */
+  --miu-tab-gap: 9px;        /* TabRow 的 itemSpacing */
+  --miu-tab-min-w: 76px;     /* TabRowDefaults.TabRowMinWidth */
+  --miu-tab-pad-x: 12px;     /* 每个 tab 的 horizontal padding */
+
+  /* Switch（basic/Switch.kt 的三个常数，全是硬编码在 Box 的 size/offset 里的） */
+  --miu-switch-w: 49px;
+  --miu-switch-h: 28px;
+  --miu-switch-thumb: 20px;
+  --miu-switch-x-off: 4px;   /* 未选中滑块 offset x = 4.dp */
+  --miu-switch-x-on: 25px;   /* 选中   offset x = 25.dp */
+  --miu-switch-thumb-scale: 1.127;  /* 按下/悬停/拖动时滑块放大 1.127 */
+
+  /* 对话框：DialogDefaults */
+  --miu-dialog-max-w: 420px; /* MaxWidth */
+  --miu-dialog-pad: 24px;    /* insideMargin = DpSize(24.dp, 24.dp) */
+  --miu-dialog-margin: 12px; /* outsideMargin = DpSize(12.dp, 12.dp) */
+
+  /* 提示条：SnackbarDefaults */
+  --miu-snack-r: 16px;
+  --miu-snack-pad: 12px;     /* InsideMargin = PaddingValues(all = 12.dp) */
+  --miu-snack-outer: 12px;   /* OuterPadding = start/end 12dp、top 8dp、距底 12dp */
+  --miu-snack-min-h: 48px;
+  --miu-snack-shadow: 0 4px 14px rgba(0, 0, 0, 0.10);  /* dropShadow(radius=10.dp, alpha=0.1f) */
+
+  /* 徽标：BadgeDefaults */
+  --miu-badge-h: 16px;       /* LargeSize（带内容的徽标最小 16dp） */
+  --miu-badge-pad-x: 4px;    /* BadgeWithContentHorizontalPadding */
+
+  /* 字号阶（theme/TextStyles.kt，一个不多一个不少） */
+  --miu-fs-title1: 32px;     /* Title1 */
+  --miu-fs-title2: 24px;     /* Title2 */
+  --miu-fs-title3: 20px;     /* Title3 */
+  --miu-fs-title4: 18px;     /* Title4 */
+  --miu-fs-headline1: 17px;  /* Headline1（= main / button，正文基准） */
+  --miu-fs-body1: 16px;      /* Body1 */
+  --miu-fs-body2: 14px;      /* Body2（说明） */
+  --miu-fs-subtitle: 14px;   /* Subtitle（Bold，分组标题） */
+  --miu-fs-footnote1: 13px;  /* Footnote1 */
+  --miu-fs-footnote2: 11px;  /* Footnote2（徽标里的数字） */
 }
 
 /* --- 尊重系统设置：不接受动效的人一切从简 ---------------------------------- */
@@ -593,7 +679,9 @@ button {
   border: 1px solid var(--outline);
   border-radius: var(--radius-control);
   font: inherit;
-  font-size: 16px;                  /* button = 16sp */
+  /* Miuix `TextStyles.button` = 17sp（与 main/headline1 同档）。原来写 16——那是
+     `body1` 的档，按钮在 Miuix 里跟正文一样大。 */
+  font-size: var(--miu-fs-headline1);
   cursor: pointer;
   transition: transform 0.12s ease, background 0.18s ease, opacity 0.18s ease;
 }
@@ -609,36 +697,51 @@ button.danger { background: var(--error-container); color: var(--error); border-
 button.danger:hover { background: var(--error); color: var(--on-primary); }
 button:disabled { opacity: 0.38; cursor: not-allowed; transform: none; }
 
-/* --- 偏好行（照小米设置页：BasicComponent + *Preference） ------------------
+/* --- 组件层：偏好行（Miuix `BasicComponent` + `SmallTitle` + `Card`） ------
  *
- * 关键认识（2026-10-01 用户："你去看看小米的设置页好不好"）：**设置页不是表格**。
- * 它的结构是"偏好行"——每行左边是标题 + 下方灰色说明，右边是控件；若干行组成一张
- * 卡片，卡片之间用小号灰标题分组。规格全部来自 Miuix 源码：
+ * 2026-10-19 按 Miuix 0.9.4 的**组件规范**重画了这一层（用户："求你了，组件参考这个"，
+ * 参考 github.com/compose-miuix-ui/miuix）。结构没变（还是"行 = 标题 + 说明 + 右端控件"），
+ * 变的是**每一处尺寸都回到源码上的那个数**，并且全部走上面那组 `--miu-*` 令牌。
  *
- *   BasicComponent.kt   heightIn(min = 56.dp)、insideMargin = PaddingValues(16.dp)
- *                       标题 headline1 / Medium，说明 body2 / onSurfaceVariantSummary
- *                       控件在右端，且**硬上限 60% 宽**（endHardCap）
- *   SmallTitle.kt       InsideMargin = PaddingValues(28.dp, 8.dp)、subtitle 字号、
- *                       颜色 onBackgroundVariant
- *   Card.kt             CornerRadius = 16dp
- *   Switch.kt           轨道 49×28dp、滑块 20dp、选中滑块 x=25dp / 未选中 4dp、
- *                       走 `spring(0.8, 400)`；选中轨道 primary、未选中 secondary
+ * 与源码逐条对应（左=这里的规则，右=Miuix 出处）：
+ *
+ *   .pref               heightIn(min = 56.dp) + padding(InsideMargin)
+ *                       → `--miu-row-min-h` / `--miu-row-pad-*`；行间 spacer 8.dp
+ *   .pref-main          标题 headline1(17sp)/Medium、说明 body2(14sp)/onSurfaceVariantSummary
+ *   .pref-end           右端控件，**硬上限 60% 剩余宽**（`endHardCap = width × 6/10`）
+ *   .pref-bottom        `bottomAction`：源码里是 `Spacer(8.dp)` + 内容，占**整行**
+ *   .pref-icon          `startAction`（源码示例里图标自带 `padding(end = 16.dp)`）
+ *   .pref-group-title   `SmallTitle`：`PaddingValues(28.dp, 8.dp)`、subtitle(14sp **Bold**)、
+ *                       颜色 `onBackgroundVariant`
+ *   .pref-list          `Card`：圆角 16dp、`insideMargin = PaddingValues(0.dp)`
+ *                       → 卡片自己不留内边距（内边距由每一行给），所以分割线是**通到**
+ *                       卡片边缘的——这是 Miuix 的结构，别给卡片加 padding
+ *   .pref + .pref       行间分割线：`DividerDefaults.Thickness = 0.75.dp`、颜色
+ *                       `dividerLine`；**左端缩进 16px** 与行内边距对齐（Miuix 的
+ *                       `*Preference` 本身不画线，线是宿主列表画的；缩进量按
+ *                       "线从内容的左边开始"取，与 HyperOS 设置页一致）
  */
 
 .pref-group { margin-bottom: 6px; }
 .pref-group-title {
-  /* SmallTitle：左右 28dp、上下 8dp，颜色 onBackgroundVariant */
-  padding: 8px 28px;
-  color: var(--on-background-variant);
-  font-size: 14px;                  /* subtitle */
+  display: flex;
+  align-items: center;
+  gap: var(--miu-row-gap);
+  padding: var(--miu-group-title-pad);             /* SmallTitleDefaults.InsideMargin */
+  color: var(--on-background-variant);             /* SmallTitle.textColor 默认值 */
+  font-size: var(--miu-fs-subtitle);
+  font-weight: 700;                                /* subtitle 是 FontWeight.Bold */
+  line-height: 1.4;
 }
+/* 分组标题右边那个计数徽标（Miuix `Badge`）：别让 700 的粗字影响它 */
+.pref-group-title .miu-badge { font-weight: 400; }
 
 .pref-list {
-  /* Card：圆角 16dp，卡片之间留 12dp */
-  background: var(--surface-variant);
-  border-radius: var(--radius-card);
-  margin-bottom: 12px;
-  overflow: hidden;
+  /* Card：圆角 16、底色 surfaceContainer（Miuix Card 的默认色，不是 surfaceVariant） */
+  background: var(--surface-container);
+  border-radius: var(--miu-r-card);
+  margin-bottom: 12px;                /* Card 之间 12dp（示例里的 padding(bottom = 12.dp)） */
+  overflow: hidden;                   /* 裁掉首/末行与圆角的冲突 */
 }
 /* 分组卡片里的空状态 */
 .pref-empty { padding: 16px; margin: 0; }
@@ -660,54 +763,92 @@ button:disabled { opacity: 0.38; cursor: not-allowed; transform: none; }
 .notice-box button.notice-send { flex: 0 0 auto; min-height: 40px; }
 
 .pref {
+  /* BasicComponent：`Column(heightIn(min=56).fillMaxWidth().clickable().padding(insideMargin))`，
+     里面是一行 [start][8dp][center][8dp][end]，`bottomAction` 另起一行。
+     所以这里用 flex + wrap：**main 与 end 抢一行，bottom 整行**。
+     窄屏（手机）上 end 自然换到 main 下面——那正是 BasicComponent 在
+     `widthForCenter` 不够时的观感，不是"挤成一坨"。 */
+  position: relative;               /* 给下面那条分割线的伪元素做定位 */
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
-  min-height: 56px;                 /* BasicComponent.heightIn(min = 56.dp) */
-  padding: 10px 16px;               /* BasicComponentDefaults.InsideMargin */
+  gap: var(--miu-row-gap);          /* Component.kt 的 spacerPx = 8.dp */
+  min-height: var(--miu-row-min-h);
+  padding: var(--miu-row-pad-y) var(--miu-row-pad-x);
 }
-.pref + .pref { border-top: 1px solid var(--divider); }   /* 行间分隔线 */
-/* 行首图标：跟侧栏同一套图形（Miuix 官方），用次级色免得跟标题抢 */
+/* 行间分割线：`DividerDefaults` 的 0.75px + `dividerLine`；左端缩进 16px。
+ * 为什么用伪元素而不是 `border-top`：border 会连**内边距**一起横到底（线顶到卡片左边缘），
+ * 而 Miuix / HyperOS 的设置列表里那条线是**从内容左边开始**的。用绝对定位的伪元素
+ * 才能只挪左端、右端仍然通到卡片边缘。 */
+.pref + .pref::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: var(--miu-divider-inset);
+  right: 0;
+  border-top: var(--miu-divider-w) solid var(--divider);
+}
+/* 行首图标：跟侧栏同一套图形（Miuix 官方），用次级色免得跟标题抢。
+   尺寸 22px 是我们的取值（源码示例只给 `padding(end = 16.dp)`，没给图标尺寸；
+   这里是后台密集列表，24dp 的图标会把行撑得更高）。 */
 .pref > .icon.pref-icon {
+  flex: 0 0 auto;
   width: 22px;
   height: 22px;
   color: var(--text-3);
 }
-.pref-main { flex: 1 1 auto; min-width: 0; }
+.pref-main {
+  /* ⚠️ `flex-basis: 0`（不是 `auto`）：`auto` 会拿**内容的最大宽度**当基准，
+     于是一行长说明会把 `end` 挤到下一行、连图标也一起留下——实测截图里就是
+     "图标一行、标题一行、开关再一行"（三行）。基准给 0、只按剩余空间长，
+     `start/main/end` 才会真的待在同一行里（那正是 BasicComponent 的 Layout 干的事）。 */
+  flex: 1 1 0;
+  min-width: 0;
+}
 .pref-title {
-  color: var(--on-surface);
-  font-size: 17px;                  /* headline1 */
+  color: var(--on-surface);         /* onBackground */
+  font-size: var(--miu-fs-headline1);
   font-weight: 500;                 /* FontWeight.Medium */
   line-height: 1.35;
 }
 .pref-summary {
   margin-top: 3px;
-  /* `--text-3`（0.6 黑）在设置行里是**说明**，不是装饰——外观返工抬到 `--text-2`，
-     行高 1.45 → 1.5（Miuix 的 body2 档仍是 14px）。 */
-  color: var(--text-2);             /* onSurfaceVariantSummary */
-  font-size: 14px;                  /* body2 */
+  /* 说明用 `onSurfaceVariantSummary`。面板原先把 0.6 黑（--text-3）用在这里，
+     外观返工时抬到 `--text-2`（0.8 黑）——这一条**保留**：0.6 黑在浅底上读不清，
+     而 Miuix 的 0x99000000 在手机的高亮度屏上够看。见文件末尾"与 Miuix 的偏离"。 */
+  color: var(--text-2);
+  font-size: var(--miu-fs-body2);
   line-height: 1.5;
 }
 .pref-end {
-  /* 控件在右端，**宽了要收窄，不折行**（BasicComponent 给的是 maxWidth 上限，
-     不是把内容挤到下边） */
-  flex: 0 0 auto;
+  /* 控件在右端：`endHardCap` 是"剩余宽 × 6/10"的上限，**宽了只收窄、不折行**。
+     折行只发生在窄屏（见下面的媒体查询），那时 `margin-left: auto` 让它靠右。 */
+  flex: 0 1 auto;
+  margin-left: auto;
   display: flex;
   align-items: center;
-  gap: 8px;
-  max-width: 52%;
+  gap: var(--miu-row-gap);
+  max-width: var(--miu-end-cap);
 }
 .pref-end select, .pref-end input[type=text], .pref-end input[type=password] {
   max-width: 100%;
+}
+/* `bottomAction`：源码是 `Spacer(8.dp)` 之后再画。整行铺开，所以那些
+   "一行三个控件"的表单块（密钥、绑定）放这里，而不是硬塞进 60% 的右端。 */
+.pref-bottom {
+  flex: 0 0 100%;
+  min-width: 0;
+  padding-top: var(--miu-row-gap);  /* Spacer(8.dp) */
 }
 /* 值是一段文字（没有控件可放）时，右端用次级文字，不要跟标题抢 */
 .pref-value {
   color: var(--text-3);
   font-family: var(--mono);
-  font-size: 13.5px;
+  font-size: var(--miu-fs-footnote1);
   overflow-wrap: anywhere;
 }
-/* 面板覆盖过的项：标题后面一个小蓝点（比在左边挂一道蓝条轻得多） */.pref-dot {
+/* 面板覆盖过的项：标题后面一个小蓝点（比在左边挂一道蓝条轻得多） */
+.pref-dot {
   display: inline-block;
   width: 6px; height: 6px;
   margin-left: 6px;
@@ -715,35 +856,44 @@ button:disabled { opacity: 0.38; cursor: not-allowed; transform: none; }
   background: var(--primary);
   vertical-align: 2px;
 }
-/* "清除这一项"：小一号的次要按钮，别跟主控件抢注意力 */
+/* "清除这一项"：小一号的次要按钮，别跟主控件抢注意力。
+   圆角跟 Miuix 控件同一档（16px）：Miuix 没有"小一号的圆角"。 */
 .pref-clear {
   flex: 0 0 auto;
   min-width: 0;
   min-height: 32px;
-  padding: 6px 10px;
-  font-size: 13px;
-  border-radius: 10px;
+  padding: 6px 12px;
+  font-size: var(--miu-fs-footnote1);
+  border-radius: var(--miu-r-control);
 }
 .pref-end input.is-clearing { opacity: 0.5; text-decoration: line-through; }
 
 /* --- Switch（Miuix basic/Switch.kt：49×28 轨道 + 20dp 滑块） ---------------
  *
  * 用 `<input type=checkbox class=switch>`，滑块走 `::before`——不用额外加 DOM。
- * 这就是小米设置页里那个开关的样子，比默认的 checkbox 观感对得多。
+ * 五个常数全部硬编码在源码里，这里从 `--miu-switch-*` 引：
+ *
+ *   Box.size(49.dp, 28.dp).clip(CircleShape)         → 轨道
+ *   滑块 Box.size(20.dp).align(CenterStart)          → 20dp 圆
+ *   offset { (if (checked) 25.dp else 4.dp) + drag } → 4 / 25
+ *   thumbScale: 按下/拖动/悬停 → 1.127               → `scale`（独立变换，不影响位移）
+ *   thumbOffset spring(0.7, 987)、track spring(0.99, 438.6) → 两条弹簧（见 --dur/--spring）
+ *   颜色：checkedTrack=primary / uncheckedTrack=secondary /
+ *         checkedThumb=onPrimary / uncheckedThumb=onSecondary
  */
 input.switch {
   appearance: none;
   -webkit-appearance: none;
   position: relative;
   flex: 0 0 auto;
-  width: 49px;
-  height: 28px;
-  min-width: 49px;
-  min-height: 28px;
+  width: var(--miu-switch-w);
+  height: var(--miu-switch-h);
+  min-width: var(--miu-switch-w);
+  min-height: var(--miu-switch-h);
   margin: 0;
   padding: 0;
   border: none;
-  border-radius: 999px;
+  border-radius: var(--miu-r-pill);
   background: var(--secondary);      /* uncheckedTrackColor */
   cursor: pointer;
   transition: background var(--dur-200) var(--ease-fast-out-slow-in);
@@ -751,21 +901,26 @@ input.switch {
 input.switch::before {
   content: "";
   position: absolute;
-  top: 4px;
-  left: 4px;                         /* unchecked thumb x = 4.dp */
-  width: 20px;
-  height: 20px;
+  top: var(--miu-switch-x-off);
+  left: var(--miu-switch-x-off);     /* unchecked thumb x = 4.dp */
+  width: var(--miu-switch-thumb);
+  height: var(--miu-switch-thumb);
   border-radius: 50%;
   background: var(--on-secondary);   /* uncheckedThumbColor */
-  /* 滑块滑动走 `spring(0.8, 400)`（Switch.kt 里那条） */
+  /* 滑块滑动走 `spring(0.7, 987)`（Switch.kt 里那条，比按压那条更硬更快） */
   transition: transform var(--dur-press) var(--spring-press),
+              scale var(--dur-200) var(--spring-press),
               background var(--dur-200) var(--ease-fast-out-slow-in);
 }
+/* 悬停 / 按下时滑块放大到 1.127（`thumbScaleState`）。用独立的 `scale` 属性，
+   这样它跟 `transform: translateX()` 不打架：两个一起写会互相覆盖。 */
+input.switch:hover::before,
+input.switch:active::before { scale: var(--miu-switch-thumb-scale); }
 input.switch:checked {
   background: var(--primary);        /* checkedTrackColor */
 }
 input.switch:checked::before {
-  transform: translateX(21px);       /* 25.dp - 4.dp */
+  transform: translateX(calc(var(--miu-switch-x-on) - var(--miu-switch-x-off)));
   background: var(--on-primary);     /* checkedThumbColor */
 }
 input.switch:focus-visible {
@@ -799,15 +954,18 @@ section.card {
      描边用 Miuix 自己的 `outline`（#D9D9D9）而不是 `dividerLine`（#E0E0E0）：
      前者深一档，正是"轮廓"该用的那个 token。内边距 18/20 → **20/22**，
      与下面的行高、间距一起把卡片里的呼吸感补回来。 */
-  background: var(--surface-variant);
+  background: var(--surface-container);   /* = Miuix Card 的默认色 surfaceContainer */
   border: 1px solid var(--outline);
-  border-radius: var(--radius-card);
+  border-radius: var(--miu-r-card);
+  /* ⚠️ 偏离：Miuix `CardDefaults.InsideMargin = PaddingValues(0.dp)`——卡片自己不留边，
+     边由里面的行（`BasicComponent` 的 16dp）给。我们是**后台**卡片，里面装的是表格、
+     代码块、正文，没有"行"来当内边距的载体，所以保留 20/22（见文件末尾）。 */
   padding: 20px 22px;
   margin-bottom: 16px;
 }
 section.card h2 {
   margin: 0 0 14px;
-  font-size: 18px;                  /* title5 档（在 title4 与 subtitle 之间） */
+  font-size: var(--miu-fs-title4);   /* Title4 = 18sp */
   font-weight: 600;
   color: var(--on-surface);
 }
@@ -926,8 +1084,11 @@ td.wrap-anywhere { overflow-wrap: anywhere; }
   line-height: 1.6;
 }
 .card-inline {
-  background: var(--secondary-variant);
-  border-radius: var(--radius-control);
+  /* 卡里再一块（比如 prompt 那一套、审计的一条）：Miuix 里同层级的"再深一档"是
+     `surfaceContainerHigh`（`.kv` 用的也是它），圆角仍是 Card 的 16dp——
+     Miuix 没有"内部小一号圆角"这一档。 */
+  background: var(--surface-container-high);
+  border-radius: var(--miu-r-card);
   padding: 14px 16px;
   margin-bottom: 10px;
 }
@@ -1061,12 +1222,12 @@ td .hint { margin: 2px 0 0; }
 .row input.s-def { flex: 1 1 220px; }
 
 /* 操作记录：一条一块（不用表格，六列在 1180px 里平摊必然撑爆） */
-.audit-item { padding: 12px 14px; }
-.audit-head {
-  display: flex; flex-wrap: wrap; gap: 8px 12px;
-  align-items: center; margin-bottom: 8px;
-}
+/* 「日志 → 操作记录」那一条：它现在就是 `.pref`（`BasicComponent` 的形状），
+ * 所以只补三样——参数那块别太长、令牌那种右端值不换行、卡片之间别贴死。
+ * 原来那段 `.audit-head`（一行 flex 里塞五样）随结构一起删了：
+ * 那五样现在分在"标题 / 说明 / 底部"三层里。 */
 .audit-item .preview { margin-top: 0; max-height: 120px; }
+.audit-item .pref-end { max-width: 40%; }
 
 /* 设置页：面板覆盖过的项在左边留一道主色条，一眼看得出"这几个是面板改的" */
 .cols-settings tbody tr.overridden td:first-child { box-shadow: inset 3px 0 0 var(--primary); }
@@ -1420,26 +1581,204 @@ code {
 }
 .md.clamp .md-table { font-size: 12.5px; }
 
-/* --- 确认弹窗（用 windowDimming，圆角与卡片一致） -------------------------- */
+/* --- 页内分段：Miuix `TabRow`（标准版） ------------------------------------
+ *
+ * 「日志 / 操作记录」这种"同一份数据的两个动作"，在 Miuix 里对应的就是 TabRow：
+ * 一条 `surface` 底色的横条，**选中那一块自己带一个 `surfaceContainer` 的药丸**
+ * （`TabRowDefaults.tabRowColors()`：backgroundColor=surface、contentColor=
+ * onSurfaceVariantSummary、selectedBackgroundColor=surfaceContainer、
+ * selectedContentColor=onBackground）。
+ *
+ * 尺寸取自 `TabRowDefaults`：高 42dp、圆角 12dp、每个 tab 左右 12dp、
+ * 最小宽 76dp、tab 之间 9dp；文字 `body1`(16sp)、选中 Bold、单行省略。
+ *
+ * 为什么不是"下划线页签"（原来 `.person-tab.on::after` 那条线）：那不是 Miuix 的
+ * TabRow，是网页里常见的那种。Miuix 用**实心药丸**表示选中——这也解决了深色下
+ * "一条 2px 的线在 #242424 上看不见"的老问题。
+ */
+.miu-tabrow {
+  display: flex;
+  align-items: stretch;
+  gap: var(--miu-tab-gap);
+  height: var(--miu-tab-h);
+  margin: 6px 0 12px;
+  overflow-x: auto;                 /* 三个以上就横向滚（TabRow 本来就是 LazyRow） */
+  scrollbar-width: none;
+}
+.miu-tabrow::-webkit-scrollbar { width: 0; height: 0; }
+.miu-tabrow__tab {
+  flex: 0 0 auto;
+  min-width: var(--miu-tab-min-w);
+  height: 100%;
+  min-height: 100%;                 /* 压掉全局 button 的 min-height: 40px */
+  padding: 0 var(--miu-tab-pad-x);
+  border: 0;
+  border-radius: var(--miu-r-tab);
+  background: transparent;          /* backgroundColor(false) = surface */
+  color: var(--text-3);             /* onSurfaceVariantSummary */
+  font-size: var(--miu-fs-body1);   /* body1 = 16sp */
+  font-weight: 400;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;          /* maxLines = 1 + TextOverflow.Ellipsis */
+  position: relative;
+}
+.miu-tabrow__tab.on {
+  background: var(--surface-container);   /* selectedBackgroundColor */
+  color: var(--on-surface);               /* selectedContentColor = onBackground */
+  font-weight: 700;                       /* FontWeight.Bold（选中） */
+}
+.miu-tabrow__tab:not(.on):hover { color: var(--on-surface); }
+/* 相邻两个**都没选中**时，Miuix 在它们之间画一条 1dp 的 outline 竖线
+   （TabRow 的 `VerticalDivider`）；贴着选中项的那一侧不画。 */
+.miu-tabrow__tab + .miu-tabrow__tab::before {
+  content: "";
+  position: absolute;
+  left: calc(var(--miu-tab-gap) / -2);
+  top: 50%;
+  height: 20px;
+  margin-top: -10px;
+  border-left: 1px solid var(--outline);
+}
+.miu-tabrow__tab.on::before,
+.miu-tabrow__tab.on + .miu-tabrow__tab::before { display: none; }
+
+/* --- 徽标：Miuix `Badge`（**计数**用，不是状态标签）------------------------
+ *
+ * `BadgeDefaults`：`LargeSize = 16.dp`、水平内边距 4dp、字 `footnote2`(11sp)、
+ * 行高 16dp（源码里显式给 16.sp 并居中，免得各平台基线不一致）、圆形。
+ * 默认色 `error` / `onError`（红底白字），这里多给两档：`accent`（primary）与
+ * `neutral`（surfaceContainerHigh + onSurfaceContainerVariant）。
+ *
+ * ⚠️ 它不是 `.tag` 的替代：`.tag`（"面板覆盖中"这种四五个汉字的**状态**标签）
+ * 在 Miuix 里没有对应组件，塞进 16dp 的计数徽标里会把字挤死。见文件末尾的偏离清单。
+ */
+.miu-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--miu-badge-h);
+  height: var(--miu-badge-h);
+  padding: 0 var(--miu-badge-pad-x);
+  border-radius: var(--miu-r-pill);
+  background: var(--error);                 /* BadgeDefaults.containerColor */
+  color: var(--on-primary);                 /* onError（Miuix 的 onError 与 onPrimary 同值） */
+  font-size: var(--miu-fs-footnote2);
+  line-height: var(--miu-badge-h);
+  font-weight: 400;
+  white-space: nowrap;
+}
+.miu-badge.accent { background: var(--primary); color: var(--on-primary); }
+.miu-badge.neutral {
+  background: var(--surface-container-high);
+  color: var(--on-surface-container-variant);
+}
+
+/* --- 提示条：Miuix `Snackbar` ---------------------------------------------
+ *
+ * `SnackbarDefaults`：圆角 16dp、内边距 12dp、最小高 48dp、外面 start/end 12dp、
+ * 距底 12dp、阴影 `dropShadow(radius = 10.dp, alpha = 0.1f)`；
+ * 底色 `onSecondaryVariant`（浅 #303030 / 深 #D9D9D9）、文字 `secondaryVariant`、
+ * 动作是**主色药丸**（`actionContainerColor = primary`、圆角 50dp、最小 26dp、
+ * 左右 12dp、15sp 字）。
+ *
+ * 面板只在一个地方用它：模型页「添加一套」那种**单行**结果。多行结果（保存改动
+ * 那份逐项回执）仍然走顶部 `.error` 条——Snackbar 塞十几行是错的组件。
+ */
+.miu-snackbar {
+  position: fixed;
+  left: 50%;
+  bottom: var(--miu-snack-outer);
+  transform: translateX(-50%);
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: var(--miu-snack-pad);
+  width: min(var(--miu-dialog-max-w), calc(100vw - 24px));
+  min-height: var(--miu-snack-min-h);
+  padding: var(--miu-snack-pad);
+  border-radius: var(--miu-snack-r);
+  background: var(--on-secondary-variant);  /* SnackbarDefaults.containerColor */
+  color: var(--secondary-variant);          /* SnackbarDefaults.contentColor */
+  box-shadow: var(--miu-snack-shadow);
+  font-size: var(--miu-fs-body2);           /* body2、maxLines = 2 */
+  animation: snackbar-in var(--dur-300) var(--ease-sin-out);
+}
+.miu-snackbar__text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+/* `[hidden]` 必须压得住 `.miu-snackbar { display: flex }`——登录卡那次踩过同一个坑 */
+.miu-snackbar[hidden] { display: none; }
+.miu-snackbar__action {
+  flex: 0 0 auto;
+  min-width: 26px;
+  min-height: 26px;
+  padding: 0 var(--miu-snack-pad);
+  border: 0;
+  border-radius: var(--miu-r-pill);
+  background: var(--primary);               /* actionContainerColor */
+  color: var(--on-primary);                 /* actionContentColor */
+  font-size: 15px;                          /* Snackbar 的 action 文字 15sp */
+}
+.miu-snackbar__action:hover { background: var(--primary-container); }
+@keyframes snackbar-in {
+  from { opacity: 0; transform: translate(-50%, 12px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* --- 卡里的提示块（Miuix `Card(colors = defaultColors(color = surfaceContainerHigh))`）
+ * 明文警告这类"要注意但不拦路"的一段话。Miuix 没有 info surface，最接近的做法就是
+ * **换一档底色的 Card**（docs 的 Advanced Usage 里就是这样写的）。 */
+.miu-note {
+  display: block;
+  padding: 12px var(--miu-row-pad-x);
+  margin: 0 0 12px;
+  border-radius: var(--miu-r-card);
+  background: var(--surface-container-high);
+  color: var(--text-3);                     /* onSurfaceContainerVariant */
+  font-size: var(--miu-fs-body2);
+  line-height: 1.6;
+}
+
+/* --- 确认弹窗（Miuix `OverlayDialog` / `DialogDefaults`） ------------------
+ *
+ * 2026-10-19 按源码对齐的四处（原来都是"看着差不多"的值）：
+ *
+ *   CornerRadius = 32.dp（原来是 20px——Miuix 的居中弹窗是 32，介于它的 16 与 50 之间）
+ *   insideMargin = DpSize(24.dp, 24.dp)（原来上下 24/16 不对称）
+ *   outsideMargin = DpSize(12.dp, 12.dp)（遮罩那圈留白，原来是 24px）
+ *   MaxWidth = 420.dp（原来就是 420，对上）
+ *   底色 `backgroundColor()` = colorScheme.background（浅 #FFFFFF / 深 #242424）
+ *     → 面板的 `--background` 正好是这一档，所以用 `--background` 而不是卡片色
+ */
 
 .scrim {
   position: fixed; inset: 0; z-index: 50;
   background: var(--window-dimming);
   display: flex; align-items: center; justify-content: center;
-  padding: 24px;
+  padding: var(--miu-dialog-margin);
   animation: scrim-in var(--dur-300) var(--ease-sin-out);   /* tween(300, SinOutEasing) */
 }
 .dialog {
-  background: var(--surface-variant);
-  border-radius: 20px;
-  padding: 24px 24px 16px;
-  width: min(420px, 100%);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+  background: var(--background);            /* DialogDefaults.backgroundColor() */
+  border-radius: var(--miu-r-dialog);
+  padding: var(--miu-dialog-pad);
+  width: min(var(--miu-dialog-max-w), 100%);
+  /* Miuix 弹窗没有 dropShadow，靠 windowDimming + 底色分层；网页上底色与卡片同色时
+     没有阴影就"浮不起来"，所以留一层很淡的：比原来那层 0.18 收一半。 */
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.14);
   /* folmeSpring(0.88, 450)：淡入 + 从 0.9 放大 + 轻微下移，带一点回弹 */
   animation: dialog-in var(--dur-300) var(--spring-dialog);
 }
-.dialog h3 { margin: 0 0 8px; font-size: 18px; font-weight: 600; }
-.dialog p { margin: 0 0 18px; color: var(--text-2); font-size: 14px; white-space: pre-wrap; }
+.dialog h3 {
+  margin: 0 0 8px;
+  font-size: var(--miu-fs-title4);
+  font-weight: 600;
+}
+.dialog p {
+  margin: 0 0 18px;
+  color: var(--text-2);                     /* DialogDefaults.summaryColor = onSurfaceSecondary */
+  font-size: var(--miu-fs-body2);
+  white-space: pre-wrap;
+}
 .dialog .actions { display: flex; justify-content: flex-end; gap: 10px; }
 
 @keyframes scrim-in { from { opacity: 0; } to { opacity: 1; } }
@@ -1525,6 +1864,14 @@ code {
      多一个类，**特异性更高**——不点名的话，窄屏上"填洞"的那一格会留着 2/3 宽，
      一行里就会出现半截格子（写完这条规则前是照属性优先级想当然的，实测才发现）。 */
   .grid .kv, .grid .kv.span-2, .grid .kv.span-3 { flex: 0 1 100%; }
+  /* 偏好行在手机宽度下**分成两行**：标题/说明一行、控件一行（靠右）。
+     为什么不像桌面那样挤在一行里：Miuix 的 `endHardCap` 是"剩余宽 × 60%"，
+     手机上那 60% 只剩 100 多 px，一个下拉框就把标题压成三行——
+     用户要求"窄屏要能看，别挤成一坨"，所以这一档改成上下两行。 */
+  .pref-main { flex: 1 1 100%; }
+  .pref-end { flex: 1 1 100%; max-width: 100%; justify-content: flex-end; }
+  /* 页内分段窄屏会横向滚（TabRow 本来就是 LazyRow），滚动条已经藏了 */
+  .miu-tabrow { gap: 6px; }
   /* 知识库「全库浏览」：窄屏把「来源」加宽一点——22% 时一条路径会被切成七八行
      （截图核对过），抬到 30% 好读一些。 */
   .cols-knowledge col:nth-child(1) { width: 30%; }
@@ -1853,25 +2200,30 @@ body.is-locked { display: block; padding: 0; }
  * ——与「设置」「群聊」两页同一套观感（用户 2026-10-01："你去看看小米的设置页好不好"）。
  */
 .model-warn {
+  /* 换成 Miuix 的「换一档底色的 Card」：`.miu-note` 就是它（底色 surfaceContainerHigh、
+     圆角 16、12/16 内边距）。这里只留"这句要更显眼"的那点橙色重量。 */
   margin: 0 0 14px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: rgba(242, 163, 60, 0.14);
   color: var(--text-2);
-  font-size: 13.5px;
+  font-size: var(--miu-fs-body2);
   line-height: 1.6;
 }
 .model-warn b { color: var(--warn); font-weight: 600; }
 
-/* 一套供应商那一行：它下面紧跟着自己的 key 行，所以给它一点"分组头"的份量。 */
-.pref.model-src { border-top: 1px solid var(--divider); }
+/* 一套供应商那一行：它下面紧跟着自己的 key 行，所以给它一点"分组头"的份量
+   （粗一档标题 + 右边那把数的徽标）。**不再自己画一条 border-top**：
+   行间分割线已经由 `.pref + .pref::before` 统一画（0.75px + 左缩进），
+   两处都画就是两条线叠在一起、而且这条不缩进——2026-10-19 对齐组件层时删掉。 */
 .pref.model-src .pref-title { font-weight: 600; }
-.pref.model-key .pref-end { flex-wrap: wrap; }
+/* 密钥/绑定那些控件行现在都在 `.pref-bottom` 里：`.row` 自带的 12px 下边距会变成
+   "卡片底部多出一截"，所以在这里收掉，行与行之间用 Miuix 的 8dp 间距。 */
+.pref-bottom .row { margin-bottom: 0; }
+.pref-bottom .row + .row { margin-top: var(--miu-row-gap); }
 .pref.model-key input[type="text"],
 .pref.model-key input[type="password"] { min-width: 150px; }
 
-/* 绑定那三件套：供应商 / key / 模型必须一眼看出是**一条链**。 */
-.model-bind { margin: 8px 0 0; }
+/* 绑定那三件套：供应商 / key / 模型必须一眼看出是**一条链**。
+ * 它们现在在 `.pref-bottom` 里（整行铺开），所以 `.row` 自带的上/下外边距收掉。 */
+.model-bind { margin: 0; }
 .model-bind select,
 .model-bind input { min-width: 150px; }
 .model-bind .m-model { flex: 1 1 180px; }
@@ -1882,3 +2234,47 @@ body.is-locked { display: block; padding: 0; }
   font-weight: 400;
 }
 .model-bad { color: var(--error, #e94634); }
+
+/* ==========================================================================
+ * 与 Miuix 的偏离（2026-10-19 对齐组件层时逐条定下，**别无声无息地改回去**）
+ * ==========================================================================
+ *
+ * 这些地方**故意**没有照 Miuix 0.9.4 的那个数。每条都写了"为什么不照"，
+ * 以及"什么条件下可以改回去"。判据只有一个：**Miuix 是手机界面，这是密集后台**。
+ *
+ *  1. **行内边距竖直方向 10px（Miuix 16dp）**——`--miu-row-pad-y`。
+ *     BasicComponent 的 16dp × 上下 = 32px，加上标题(17)+说明(14)两行，一行就是 ~76px。
+ *     设置页现在 13 行，那样会从 ~830px 变成 ~990px，一屏里少看三行。
+ *     水平 16px 是照抄的（那是"字从哪里开始"的锚，与分割线缩进对齐）。
+ *     改回去的条件：如果哪天面板改成"每行只有一个控件、没有说明文字"，就照 16dp。
+ *
+ *  2. **卡片内边距 20/22（Miuix Card 是 0）**——`section.card`。
+ *     Miuix 的 `CardDefaults.InsideMargin = PaddingValues(0.dp)`，因为卡里装的全是
+ *     `BasicComponent`（自带 16dp）。我们的卡里装表格、代码块、正文，没有"行"来
+ *     承担内边距，所以边必须给在卡片上。
+ *
+ *  3. **行首图标 22px**（源码示例只给 `padding(end = 16.dp)`、没给尺寸）。
+ *     24dp 会把带图标的行撑高 2px，且与 17px 标题的比例显得空。
+ *
+ *  4. **说明文字用 `--text-2`（0.8 黑），不是 `onSurfaceVariantSummary`（0.6 黑）**。
+ *     0.6 黑在桌面浅底上读不清（2026-10-06 外观返工时改的）。手机屏亮度高、距离近，
+ *     0.6 黑够用；桌面 27 寸显示器上不够。
+ *
+ *  5. **`input.switch` 的滑块位移用 `transform` 而不是 Miuix 的 `offset`**：
+ *     CSS 的等价物就是 `transform: translateX()`。放大 1.127 走独立的 `scale` 属性
+ *     （两者互不覆盖）。浏览器不支持 `scale` 时只是少了"悬停放大"，位移不受影响。
+ *
+ *  6. **`.miu-badge` 的高度固定 16px，但字**没有**再缩到 11px 以下**：
+ *     Miuix 的 Badge 是**计数**徽标（数字），我们是"共 N 把"这类短计数，够用。
+ *     ⚠️ 但 `.tag`（"面板覆盖中"这种状态标签）**没有**换成 Badge：四五个汉字塞进
+ *     16dp 的计数徽标里会挤成一条。`.tag` 保持原样，见交付报告"还没对齐的"。
+ *
+ *  7. **`.kv` / `.grid` / `.chips` / `.filter-chip` / `.dialog .actions` 的按钮**
+ *     在 Miuix 里**没有对应组件**（`BasicComponent` 是"标题+说明+右端控件"，
+ *     不是"标签+值"的网格）。所以它们只是引了同一套令牌，结构没动。
+ *
+ *  8. **页内分段用 `TabRow` 的"实心药丸"而不是下划线**：这一条**不是**偏离，
+ *     是纠正——原来 `.person-tab.on::after` 那条下划线不是 Miuix 的 TabRow。
+ *     「人物画像」页那一套（`.person-tabs`）这一轮**没动**（那一页不在这次试点里），
+ *     等它一起换过来时把 `.person-*` 删掉，别留两套。
+ */

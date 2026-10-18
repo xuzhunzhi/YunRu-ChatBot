@@ -157,18 +157,19 @@ function writePaneHash(tab, pane) {
   } catch (error) { /* 环境不支持就只留在内存里 */ }
 }
 
-/* 页内那条子页签（没有子页签的页签不画）。类名沿用「人物画像」页的 `person-tabs` /
- * `person-tab` / `.pane`——同一套控件，两处用法；`bind()` 里那颗 `page-pane` 只改
- * `state.last.pane` 再整页重画（两块**各自取各自的数**，不能像画像那样只翻 `hidden`）。 */
+/* 页内那条子页签（没有子页签的页签不画）。
+ *
+ * ⚠️ 2026-10-19：**控件换了**。原来复用的是「人物画像」页那套 `.person-tabs`
+ * （底下一条 1px 下划线 + 选中变色），那不是 Miuix 的组件——只是网页里常见的那种。
+ * 用户这一轮要求控件对齐 Miuix，而"同一份数据的两个动作"在 Miuix 里对应的是
+ * **`TabRow`**（选中项自己带一个 `surfaceContainer` 药丸），所以改走 `segment()`。
+ *
+ * `bind()` 里那颗 `page-pane` 只改 `state.last.pane` 再整页重画
+ * （两块**各自取各自的数**，不能像画像那样只翻 `hidden`）。 */
 function paneBar(tab) {
   const panes = PANES[tab] || [];
   if (!panes.length) return "";
-  const showing = paneOf(tab);
-  const tabs = panes.map((item) => `<button type="button" role="tab"
-      class="person-tab${item.id === showing ? " on" : ""}" data-page-pane="${item.id}"
-      aria-selected="${item.id === showing ? "true" : "false"}">${esc(item.label)}</button>`)
-    .join("");
-  return `<div class="person-tabs" role="tablist" aria-label="看哪一块">${tabs}</div>`;
+  return segment(panes, paneOf(tab), { data: "page-pane", label: "看哪一块" });
 }
 
 /* 插件卡里的 tab 是**动态**的：清单从 `/api/plugins` 来（那个接口背后是装配点注入的
@@ -641,8 +642,133 @@ function chips(values) {
     + `</span>`;
 }
 
-function card(title, body) {
-  return `<section class="card">${title ? `<h2>${esc(title)}</h2>` : ""}${body}</section>`;
+/* ---------- 组件层（对齐 Miuix 0.9.4 的组件规范） ----------
+ *
+ * 2026-10-19：用户给了参考（"求你了，组件参考这个"，github.com/compose-miuix-ui/miuix）。
+ * 本地有它的源码与文档副本（`run/data/tmp_miuix/miuix-0.9.4/`），所以这里**不是**凭印象
+ * 仿制：每个构建器对应哪个 Compose 组件、抄了它哪几个数，都写在下面各自的注释里。
+ *
+ * 五条约定（改了要跟着改注释）：
+ *
+ *  1. **构建器只产出一个组件**，不拼整页。页面负责把组件摆成一页（`viewXxx()`）。
+ *  2. **尺寸/颜色一律来自 `app.css` 的 `--miu-*` 令牌**，JS 里不写行内样式
+ *     （两处都写就是两个真相——表格列宽那次已经吃过这个亏）。
+ *  3. 参数沿用 Miuix 的**槽位**名字（`main`=center、`end`=endActions、`bottom`=bottomAction），
+ *     这样对着源码看得懂；但**不抄 Compose 的 API**（我们没有 Modifier、没有 Colors）。
+ *  4. 结构化内容用 `esc()`，我们自己拼的片段才允许 `html`（与 `kv()` 同一条规矩）。
+ *  5. 构建器**不认识业务**：`prefRow()` 不知道什么叫 key、什么叫绑定，它只画一行。
+ */
+
+function card(title, body, options = {}) {
+  // Miuix `Card`：圆角 16dp、底色 `surfaceContainer`、`insideMargin = 0`。
+  // 我们的卡要装表格/代码块，所以内边距给在卡片上（偏离 ②，见 app.css 末尾）。
+  // `options.count`：标题右边那个计数（Miuix `Badge`，与 `prefGroup` 同一套）。
+  const cls = ["card", options.classes || ""].filter(Boolean).join(" ");
+  const head = title
+    ? `<h2>${esc(title)}${options.count !== undefined
+      ? " " + badge(options.count, "neutral") : ""}</h2>`
+    : "";
+  return `<section class="${cls}">${head}${body}</section>`;
+}
+
+/* Miuix `Badge`：**计数**徽标。`BadgeDefaults.LargeSize = 16.dp`、水平内边距 4dp、
+ * 字 `footnote2`(11sp)、行高 16dp、圆形；默认色 error/onError，我们另给 accent/neutral。
+ *
+ * ⚠️ 它不是状态标签。`.tag`（"面板覆盖中"那种四五个汉字）在 Miuix 里没有对应组件，
+ * 塞进 16dp 的计数徽标里会挤成一条——所以那个**没有**换（见交付报告）。 */
+function badge(text, tone = "") {
+  const cls = ["miu-badge", tone].filter(Boolean).join(" ");
+  return `<span class="${cls}">${esc(text)}</span>`;
+}
+
+/* Miuix `SmallTitle` + `Card`：一个分组 = 一行小标题 + 一张卡片。
+ *
+ * 源码：`SmallTitle(text, insideMargin = PaddingValues(28.dp, 8.dp), textColor =
+ * onBackgroundVariant)`，样式 `subtitle`（14sp、**Bold**）；
+ * 卡片是 `Card(cornerRadius = 16.dp)`，卡里的每一行是 `BasicComponent`。
+ * `options.count` 给标题右边加一个计数徽标（`密钥（共 12 把）`那种）。 */
+function prefGroup(title, rows, options = {}) {
+  if (!rows) return "";
+  const id = options.id ? ` id="${esc(options.id)}"` : "";
+  const count = options.count !== undefined ? " " + badge(options.count, "neutral") : "";
+  return `<div class="pref-group"${id}>`
+    + `<div class="pref-group-title">${esc(title)}${count}</div>`
+    + `<div class="pref-list">${rows}</div></div>`;
+}
+
+/* Miuix `BasicComponent`：一行 = `startAction`(图标) + `center`(标题/说明) +
+ * `endActions`(右端控件) + 可选的 `bottomAction`(整行铺开的那一块)。
+ *
+ * 源码硬指标（`Component.kt`）：
+ *   - `heightIn(min = 56.dp)`、`padding(InsideMargin = 16.dp)`  → `.pref` 的令牌
+ *   - start / center / end 之间各 `8.dp` 的 spacer           → `--miu-row-gap`
+ *   - `endHardCap = 剩余宽 × 6 / 10`（宽了**只收窄、不折行**）  → `--miu-end-cap`
+ *   - `bottomAction` 之前是 `Spacer(8.dp)`，且**占整行**       → `.pref-bottom`
+ *
+ * 参数顺序与 Miuix 一致：先是内容（`main`），再是右端（`end`），最后是配置（`options`）。
+ * `options`：`icon` 行首图标名、`extra` 额外类名、`bottom` 底部块、`id` 行 id。 */
+function prefRow(main, end, options = {}) {
+  const lead = options.icon ? icon(options.icon, "pref-icon") : "";
+  const tail = end ? `<div class="pref-end">${end}</div>` : "";
+  const bottom = options.bottom ? `<div class="pref-bottom">${options.bottom}</div>` : "";
+  const id = options.id ? ` id="${esc(options.id)}"` : "";
+  return `<div class="pref${options.extra || ""}"${id}>
+    ${lead}
+    <div class="pref-main">${main}</div>
+    ${tail}
+    ${bottom}
+  </div>`;
+}
+
+/* Miuix `TabRow`（标准版）：一条 `surface` 底色的横条，选中那一块自己带一个
+ * `surfaceContainer` 的药丸（`TabRowDefaults.tabRowColors()`）。
+ *
+ * 源码：高 42dp、圆角 12dp、每个 tab 左右 12dp、最小宽 76dp、tab 之间 9dp、
+ * 字 `body1`(16sp)、选中 **Bold**、`maxLines = 1` + 省略号。
+ *
+ * `options.data`：给每个 tab 挂的委托抓手名（`data-page-pane` 这种）；
+ * `options.label`：`aria-label`。只有这两个配置项，**没有业务字段**——
+ * 传进来的 `items` 只认 `{ id, label }`。 */
+function segment(items, current, options = {}) {
+  const attr = options.data ? ` data-${options.data}` : "";
+  const tabs = items.map((item) => `<button type="button" role="tab"
+      class="miu-tabrow__tab${item.id === current ? " on" : ""}"${attr}="${esc(item.id)}"
+      aria-selected="${item.id === current ? "true" : "false"}">${
+  esc(item.label)}</button>`).join("");
+  return `<div class="miu-tabrow" role="tablist" aria-label="${
+    esc(options.label || "看哪一块")}">${tabs}</div>`;
+}
+
+/* Miuix `Snackbar`：底部浮起的单行提示。
+ *
+ * `SnackbarDefaults`：圆角 16dp、内边距 12dp、最小高 48dp、距底 12dp、
+ * `dropShadow(radius=10.dp, alpha=0.1f)`；底色 `onSecondaryVariant`、文字
+ * `secondaryVariant`、动作是主色药丸（圆角 50dp、最小 26dp、15sp）。
+ * `SnackbarDuration.Short` = 4000ms——这里就是 4 秒自动收起。
+ *
+ * 为什么只在一个地方用：**多行**结果（"保存改动"那份逐项回执）走顶部 `.error` 条，
+ * 把十几行塞进 Snackbar 是选错了组件（Miuix 的 `maxLines = 2`）。
+ * 所以这里只给"添加一套"那种**一行**结果用。 */
+let snackTimer = 0;
+
+function snackbar(text, options = {}) {
+  if (!text) return;
+  let box = $("snackbar");
+  if (!box) {
+    box = document.createElement("div");
+    box.id = "snackbar";
+    box.className = "miu-snackbar";
+    box.setAttribute("role", "status");
+    box.setAttribute("aria-live", "polite");
+    box.innerHTML = '<span class="miu-snackbar__text"></span>'
+      + '<button type="button" class="miu-snackbar__action">知道了</button>';
+    document.body.appendChild(box);
+  }
+  box.querySelector(".miu-snackbar__text").textContent = text;
+  box.querySelector(".miu-snackbar__action").onclick = () => { box.hidden = true; };
+  box.hidden = false;
+  clearTimeout(snackTimer);
+  snackTimer = setTimeout(() => { box.hidden = true; }, options.duration || 4000);
 }
 
 function table(columns, rows, options = {}) {
@@ -1488,9 +1614,16 @@ async function viewLogs() {
   const data = await api("/api/logs?feature=" + encodeURIComponent(feature) + "&limit=20");
   const options = (data.features || []).map((name) =>
     `<option value="${esc(name)}"${name === feature ? " selected" : ""}>${esc(name)}</option>`).join("");
+  // 一条日志 = 一张 `Card`，头部是"标题 + 说明"两行（`BasicComponent` 的形状），
+  // 正文三段是等宽代码块（Miuix 里没有对应组件，保持 `.preview`）。
+  // 2026-10-19 只做了两件事：把原来挤在 `<h2>` 里的六样拆成"标题 / 说明"两行，
+  // 并让整页用同一套卡片外壳。**内容一个字没动**。
   const rows = (data.rows || []).slice().reverse().map((row) => `
     <section class="card">
-      <h2>#${esc(row.seq)} · ${esc(row.feature)} · ${ts(row.at)}${row.trigger ? " · " + esc(row.trigger) : ""}${row.error ? " · ⚠ " + esc(row.error) : ""}</h2>
+      <h2>${esc(row.feature)} <span class="model-sub">#${esc(row.seq)}</span></h2>
+      <div class="pref-summary"><code class="copyable mono">${esc(ts(row.at))}</code>${
+  row.trigger ? " · " + esc(row.trigger) : ""}${
+  row.error ? ` · <span class="model-bad">⚠ ${esc(row.error)}</span>` : ""}</div>
       ${row.system ? `<div class="preview"><b>system</b>\n${esc(String(row.system).slice(0, 1500))}</div>` : ""}
       <div class="preview"><b>input</b>\n${esc(String(row.input || "").slice(0, 2000))}</div>
       <div class="preview"><b>output</b>\n${esc(String(row.output || "").slice(0, 1500))}</div>
@@ -1646,8 +1779,9 @@ function settingsGroup(spec, byKey) {
     const field = byKey[key];
     return field ? settingsRow(field, label, hint, state.last.flags || {}, glyph) : "";
   }).join("");
-  return rows ? `<div class="pref-group"><div class="pref-group-title">${
-    esc(spec.title)}</div><div class="pref-list">${rows}</div></div>` : "";
+  // 2026-10-19：壳子统一走 `prefGroup()`（= Miuix `SmallTitle` + `Card`），
+  // 不再自己拼一层 `.pref-group` / `.pref-list`——三个页面用同一套壳。
+  return rows ? prefGroup(spec.title, rows) : "";
 }
 
 async function viewSettings() {
@@ -1670,37 +1804,40 @@ async function viewSettings() {
       : "");
 
   const prompts = await api("/api/prompts");
-  const promptRows = (prompts.prompts || []).map((p) => `
-    <div class="card-inline">
-      <div class="row">
-        <b class="mono">${esc(p.name)}</b>
-        <span class="tag ${p.overridden ? "restart" : "live"}">${p.overridden ? "面板覆盖中" : "内置默认"}</span>
-        <span class="hint">${num(p.chars)} 字</span>
-        <button class="edit-prompt" data-name="${esc(p.name)}">编辑</button>
-      </div>
-      <div class="preview">${esc(p.preview)}</div>
-    </div>`).join("");
+  // 一套 prompt = **一行**：标题是名字，右边是"状态标签 + 编辑"，正文预览走 `bottomAction`。
+  // 原来是"一个 `.card-inline` 里再套一个 `.row`"——卡里套卡、卡里再套行，三层；
+  // 现在就是 `BasicComponent` 那一个形状：行 + 底部块（预览）。
+  const promptRows = (prompts.prompts || []).map((p) => prefRow(
+    prefTitle(p.name)
+    + `<div class="pref-summary">${badge(num(p.chars) + " 字", "neutral")}
+       · 保存前会校验（缺必需片段 / 含机制措辞会被拒）</div>`,
+    `<span class="tag ${p.overridden ? "restart" : "live"}">${
+      p.overridden ? "面板覆盖中" : "内置默认"}</span>
+     <button class="edit-prompt" data-name="${esc(p.name)}">编辑</button>`,
+    {
+      icon: "letter",
+      bottom: `<div class="preview">${esc(p.preview)}</div>`,
+    })).join("");
 
   const overridden = data.overridden || [];
   // 「面板」这一组是**这台浏览器**的观感设置（主题），与 `/api/settings` 那套覆盖层
   // 无关——所以这一行**没有 `data-key`**（"保存改动"时不会被上报、也不会被拒），
   // 点一下立即生效。它是从左栏底部那颗"深色"按钮搬过来的（2026-10-06）。
-  const panelGroup = `<div class="pref-group"><div class="pref-group-title">面板</div>
-    <div class="pref-list">${prefRow(
+  const panelGroup = prefGroup("面板", prefRow(
     prefTitle("深色主题") + '<div class="pref-summary">只影响这个面板的外观；存在这台浏览器的'
       + '本地存储里，不写 <code>data/</code>、也不进覆盖层</div>',
     `<input class="switch" type="checkbox" id="panel-theme"${
       currentDark() ? " checked" : ""} aria-label="深色主题">`,
-    { icon: "settings" })}</div></div>`;
+    { icon: "settings" }));
   return `<div class="row"><button id="save-settings" class="primary">保存改动</button>
       <span class="hint">留空表示"不改"；留空密钥表示清掉这一项、回落主密钥。
       面板改的东西写 <code>data/operator_config.json</code>，<b>不碰 .env</b>。</span></div>`
     + panelGroup
     + groups
-    + card("六套 prompt", `<p class="hint">保存前会校验：缺必需片段或含机制措辞会被拒绝。
-       改完立即生效（回复/判定/记忆/审核/识图都每次现取）。</p>
-       ${promptRows}
-       <div id="prompt-editor"></div>`)
+    + prefGroup("六套 prompt", promptRows)
+    + `<p class="hint">六套 prompt 改完立即生效（回复/判定/记忆/审核/识图都每次现取）。
+       保存前会校验：缺必需片段或含机制措辞会被拒绝。</p>
+       <div id="prompt-editor"></div>`
     + card("供应商与覆盖层", `<div class="grid">`
       + (data.providers || []).map((p) => kv(p.label, p.base_url || "自定义")).join("")
       + `</div>
@@ -1732,7 +1869,9 @@ async function viewSettings() {
 async function viewModel() {
   const data = await api("/api/model");
   state.last.model = data;
-  const warn = `<p class="hint model-warn">密钥在这里是<b>明文保存</b>的
+  // 页顶那句"明文保存"是 `Miuix` 的**换一档底色的 Card**（`.miu-note`），
+  // 不是原来那种"自带圆角的橙底段落"——Miuix 里没有 info surface 这种组件。
+  const warn = `<p class="miu-note model-warn">密钥在这里是<b>明文保存</b>的
     （<code>data/model_providers.json</code> 不进 git，安全等级与 <code>.env</code> 相同）。</p>`;
   if (!data.available) {
     // **fail-closed**：核心这一版还没有这条接缝（或它当场失败了）。面板不自己读文件，
@@ -1747,12 +1886,10 @@ async function viewModel() {
   const keyRows = providers.length
     ? providers.map(providerBlock).join("")
     : '<p class="hint pref-empty">还没有任何一套。下面「添加一套」把第一套加进来。</p>';
+  // 两块都是 `SmallTitle + Card`：标题右边那个计数是 Miuix `Badge`（`共 N 把`）。
   return warn
-    + `<div class="pref-group"><div class="pref-group-title">密钥（一行一把，共 ${
-      num(totalKeys)} 把）</div>
-       <div class="pref-list">${keyRows}</div></div>`
-    + `<div class="pref-group"><div class="pref-group-title">各路绑定（供应商 → key → 模型）</div>
-       <div class="pref-list">${bindings.map(bindingRow).join("")}</div></div>`
+    + prefGroup("密钥（一行一把）", keyRows, { count: num(totalKeys) + " 把" })
+    + prefGroup("各路绑定（供应商 → key → 模型）", bindings.map(bindingRow).join(""))
     + addProviderCard();
 }
 
@@ -1768,8 +1905,10 @@ function providerBlock(p) {
       : " · 没声明模型（绑定那一栏可以直接手输）") +
     (p.used_by && p.used_by.length ? ` · 被 ${p.used_by.map(esc).join("、")} 用着` : "") +
     `</div>`,
+    // 右端只放那一颗删除——`endHardCap` 60% 是给**控件**的上限，
+    // 不是给一排输入框的（那一排走下面的 `bottomAction`）。
     `<button class="m-del" data-name="${esc(p.name)}"${
-      p.can_remove ? "" : ` disabled title="${esc(p.remove_reason || "")}"`}>删除这一套</button>`,
+  p.can_remove ? "" : ` disabled title="${esc(p.remove_reason || "")}"`}>删除这一套</button>`,
     { icon: "credential", extra: " model-src" });
   const keys = (p.keys || []).map((k) => prefRow(
     `<div class="pref-title">${esc(k.id)}${
@@ -1778,7 +1917,13 @@ function providerBlock(p) {
       k.used_by && k.used_by.length
         ? `被 ${k.used_by.map(esc).join("、")} 用着`
         : "还没被哪一路指明"}</div>`,
-    `<div class="row model-key">
+    "",
+    {
+      icon: "credential",
+      extra: " model-key",
+      // 标签 + 新值 + 保存 + 删除 = 四个控件：`BasicComponent` 的右端放不下
+      // （`endHardCap` 只给 60%），所以按它的 `bottomAction` 放成**整行**。
+      bottom: `<div class="row model-key">
        <input class="m-label" data-name="${esc(p.name)}" data-id="${esc(k.id)}"
          type="text" value="${esc(k.label || "")}" placeholder="标签（可空）"
          aria-label="${esc(p.name)} ${esc(k.id)} 的标签">
@@ -1789,11 +1934,15 @@ function providerBlock(p) {
        <button class="m-key-del danger" data-name="${esc(p.name)}"
          data-id="${esc(k.id)}">删除</button>
      </div>`,
-    { icon: "credential", extra: " model-key" }));
+    }));
   const add = prefRow(
     `<div class="pref-title">给这套加一把</div>` +
     `<div class="pref-summary">新加的那把排在 <b>最后</b>（"第一把"永远是上面最上面那把）</div>`,
-    `<div class="row model-key">
+    "",
+    {
+      icon: "add",
+      extra: " model-key",
+      bottom: `<div class="row model-key">
        <input class="m-new-label" data-name="${esc(p.name)}" type="text"
          placeholder="标签（可空）" aria-label="${esc(p.name)} 新 key 的标签">
        <input class="m-new-value" data-name="${esc(p.name)}" type="password"
@@ -1801,7 +1950,7 @@ function providerBlock(p) {
          aria-label="${esc(p.name)} 的新 key">
        <button class="m-key-add" data-name="${esc(p.name)}">加一把</button>
      </div>`,
-    { icon: "add", extra: " model-key" });
+    });
   return head + keys.join("") + add;
 }
 
@@ -1812,6 +1961,8 @@ function bindingRow(b) {
     task}</span></div>` +
     `<div class="pref-summary">${layerText(b)}${
       b.note ? ` · ${esc(b.note)}` : ""}</div>`;
+  // 三个控件（供应商 → key → 模型）是一条**链**，要横着对齐才好点，所以整行走
+  // `bottomAction`；右端只留一颗「保存这一路」。
   const body = `<div class="row model-bind" data-task="${task}">
       <select class="m-provider" data-task="${task}" aria-label="${esc(b.label)} 用哪家供应商">
         ${providerSelectOptions(b.provider)}
@@ -1824,9 +1975,8 @@ function bindingRow(b) {
         aria-label="${esc(b.label)} 用哪个模型">
       <datalist id="models-${task}">${modelOptions(b.provider)}</datalist>
     </div>`;
-  return prefRow(head + body,
-    `<button class="m-bind" data-task="${task}">保存这一路</button>`,
-    { icon: "judge" });
+  return prefRow(head, `<button class="m-bind" data-task="${task}">保存这一路</button>`,
+    { icon: "judge", bottom: body });
 }
 
 //: 「现在实际用的是哪一层」——**原样**用核心算出来的那句（`layer_label`），
@@ -1896,29 +2046,26 @@ function addProviderCard() {
       <input class="a-value-${index}" type="password" placeholder="粘贴一把 key"
         autocomplete="off" aria-label="第 ${index + 1} 把 key">
     </div>`).join("");
-  return `<div class="pref-group" id="model-add"><div class="pref-group-title">添加一套</div>
-    <div class="pref-list">
-      <div class="pref"><div class="pref-main">
-        <div class="pref-title">名字 / 地址 / 模型 / key</div>
-        <div class="pref-summary">同名、同地址都不覆盖（同一个账号写成两个名字会让余额兜底
-          静默失效）。<b>至少填一把 key</b>——只写地址的那一套读侧会拒，等于加了个空壳。</div>
-        <div class="row">
-          <input id="model-add-name" type="text" placeholder="名字（字母/数字/下划线）"
-            aria-label="新供应商的名字">
-          <input id="model-add-url" type="text" placeholder="https://…/v1"
-            aria-label="新供应商的接口地址">
-          <input id="model-add-client" type="text" placeholder="client_type（可空，默认 openai）"
-            aria-label="新供应商的 client_type">
-        </div>
-        <div class="row">
-          <input id="model-add-models" type="text" class="wide"
-            placeholder="这家提供的模型，逗号分隔（可空）" aria-label="新供应商声明的模型">
-        </div>
-        ${keyFields}
-      </div><div class="pref-end">
-        <button id="model-add-go" class="primary">添加这一套</button>
-      </div></div>
-    </div></div>`;
+  // 名字/地址/模型那几行 + 两把 key 都整行铺开（`bottomAction`），
+  // 右端只留那一颗「添加这一套」——与上面每一行的形状一致。
+  return prefGroup("添加一套", prefRow(
+    `<div class="pref-title">名字 / 地址 / 模型 / key</div>
+     <div class="pref-summary">同名、同地址都不覆盖（同一个账号写成两个名字会让余额兜底
+       静默失效）。<b>至少填一把 key</b>——只写地址的那一套读侧会拒，等于加了个空壳。</div>
+     <div class="row">
+       <input id="model-add-name" type="text" placeholder="名字（字母/数字/下划线）"
+         aria-label="新供应商的名字">
+       <input id="model-add-url" type="text" placeholder="https://…/v1"
+         aria-label="新供应商的接口地址">
+       <input id="model-add-client" type="text" placeholder="client_type（可空，默认 openai）"
+         aria-label="新供应商的 client_type">
+     </div>
+     <div class="row">
+       <input id="model-add-models" type="text" class="wide"
+         placeholder="这家提供的模型，逗号分隔（可空）" aria-label="新供应商声明的模型">
+     </div>`,
+    `<button id="model-add-go" class="primary">添加这一套</button>`,
+    { icon: "add", bottom: keyFields }), { id: "model-add" });
 }
 
 async function viewGroup() {
@@ -2014,18 +2161,25 @@ async function viewHistory() {
   // 在 1180px 里平摊下来每列不到 200px，"参数"那种长 JSON 必然把行撑爆、
   // 把"结果"挤到只剩 95px（实测两个字就折行）。改成一条一块：参数铺满整行，
   // 其余字段在小字元信息行里排开，读起来也顺。
+  //
+  // 2026-10-19：一条记录改用 `BasicComponent` 那个形状——**标题=动作、说明=时间/来源/结果、
+  // 底部块=参数 JSON**（原来是一个 `.card-inline` 里塞一行 `.audit-head`，那是"卡里套行"）。
+  // 这样它与「日志」页那几条日志卡片、以及设置页那些行是**同一个形状**。
   const blocks = rows.map((r) => `
-    <div class="card-inline audit-item">
-      <div class="audit-head">
-        <span class="mono">${esc(ts(r.at))}</span>
-        <span class="tag">${esc(r.action)}</span>
-        <span class="hint">${esc(r.result || "")}</span>
-        <span class="hint">来自 ${esc(r.source || "—")}</span>
-        ${r.token ? `<span class="hint mono">令牌 ${esc(r.token)}</span>` : ""}
+    <div class="pref audit-item">
+      <div class="pref-main">
+        <div class="pref-title">${esc(r.action)}${
+  r.result ? ` <span class="model-sub">${esc(r.result)}</span>` : ""}</div>
+        <div class="pref-summary"><code class="copyable mono">${esc(ts(r.at))}</code>
+          · 来自 ${esc(r.source || "—")}</div>
       </div>
-      <div class="preview">${esc(JSON.stringify(r.detail || {}, null, 0))}</div>
+      ${r.token ? `<div class="pref-end"><span class="pref-value">令牌 ${esc(r.token)}</span></div>` : ""}
+      <div class="pref-bottom">
+        <div class="preview">${esc(JSON.stringify(r.detail || {}, null, 0))}</div>
+      </div>
     </div>`).join("");
-  return card("面板操作审计（只增，含来源）", blocks);
+  // 条数用 Miuix `Badge` 挂在分组标题右边（与「模型与凭据」页同一套）。
+  return prefGroup("面板操作审计（只增，含来源）", blocks, { count: num(rows.length) + " 条" });
 }
 
 /* ---------- 事件绑定（事件委托，避免每次重绘都重绑） ---------- */
@@ -2256,7 +2410,9 @@ function bind() {
         })).filter((item) => item.value.trim() || item.label.trim()),
       };
       if (!body.keys.some((item) => item.value.trim())) {
-        showError("添加一套至少要有一把 key（只写地址的那一套读侧会拒）。");
+        // 这三处原来走 `showError()`（页面顶部那条常驻条）。它们是**一行**结果，
+        // 该用 Miuix `Snackbar`（底部浮起、4 秒收起）；多行的那种逐项回执仍然走顶部条。
+        snackbar("添加一套至少要有一把 key（只写地址的那一套读侧会拒）。");
         return;
       }
       target.disabled = true;
@@ -2264,10 +2420,10 @@ function bind() {
         const done = await api("/api/model/add", {
           method: "POST", body: { ...body, confirm: true },
         });
-        showError(done.message || "已经加上了。");
+        snackbar(done.message || "已经加上了。");
         render();
       } catch (error) {
-        showError(error.message);
+        snackbar(error.message);
       } finally {
         target.disabled = false;
       }
@@ -2357,7 +2513,7 @@ function bind() {
       const all = await api("/api/prompts");
       const item = (all.prompts || []).find((p) => p.name === name);
       $("prompt-editor").innerHTML = `
-        <div class="card-inline">
+        <section class="card">
           <h2>编辑 ${esc(name)}</h2>
           <textarea id="prompt-text" class="tall">${esc(item ? item.text : "")}</textarea>
           <div class="row">
@@ -2365,7 +2521,7 @@ function bind() {
             <button id="prompt-reset" data-name="${esc(name)}">恢复内置默认</button>
             <span class="hint" id="prompt-note"></span>
           </div>
-        </div>`;
+        </section>`;
     })) return;
     if (target.id === "prompt-save") {
       const done = await write("/api/prompts", { action: "save", name: target.dataset.name,
