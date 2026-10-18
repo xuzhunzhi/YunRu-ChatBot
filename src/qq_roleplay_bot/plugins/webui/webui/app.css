@@ -1842,3 +1842,43 @@ body.is-locked .content { display: none; }
 /* 没登录时 ody 不能还是 flex：.login 会变成 flex 子项、收缩到左边贴边
    （2026-10-04 截图抓到：登录卡没居中）。改成块级，让 .login 自己撑满整屏居中。 */
 body.is-locked { display: block; padding: 0; }
+
+/* ---------- 「模型与凭据」页（2026-10-18 第二轮） ----------
+ *
+ * 这一页只有两种行：**一把 key 一行**与**一路绑定一行**。控件都排在同一行里
+ * （`.row` 已经是 flex + 换行），所以这里只补三样：页顶那句"明文"的分量、
+ * 供应商小标题、以及"不在声明的模型里"的那一点红。
+ *
+ * 不加新的卡片/表格样式：页面的骨架复用既有的 `.pref-group` / `.pref-list` / `.pref`
+ * ——与「调参」「群聊」两页同一套观感（用户 2026-10-01："你去看看小米的设置页好不好"）。
+ */
+.model-warn {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(242, 163, 60, 0.14);
+  color: var(--text-2);
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+.model-warn b { color: var(--warn); font-weight: 600; }
+
+/* 一套供应商那一行：它下面紧跟着自己的 key 行，所以给它一点"分组头"的份量。 */
+.pref.model-src { border-top: 1px solid var(--divider); }
+.pref.model-src .pref-title { font-weight: 600; }
+.pref.model-key .pref-end { flex-wrap: wrap; }
+.pref.model-key input[type="text"],
+.pref.model-key input[type="password"] { min-width: 150px; }
+
+/* 绑定那三件套：供应商 / key / 模型必须一眼看出是**一条链**。 */
+.model-bind { margin: 8px 0 0; }
+.model-bind select,
+.model-bind input { min-width: 150px; }
+.model-bind .m-model { flex: 1 1 180px; }
+
+.model-sub {
+  font-size: 12px;
+  color: var(--text-4);
+  font-weight: 400;
+}
+.model-bad { color: var(--error, #e94634); }

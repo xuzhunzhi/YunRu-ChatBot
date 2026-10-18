@@ -66,6 +66,24 @@ LEARNED_CALLS = ("quote_view", "quote_evidence", "quote_correct", "quote_note_en
 #: 所以这个常量由 `tests/test_webui_panel.py` 对着核心那张表钉住。
 QUOTE_AUTO = "auto"
 
+#: 「模型与凭据」那一页的五条写路由 → **核心那一口** + 必填字段。
+#:
+#: 2026-10-18 第二轮（用户：「我倾向于一个key一行…agent那边先选供应商再选对应的key
+#: 最后选供应商提供的模型」）：这一页只有这几件事——加一套 / 加或改一把 key /
+#: 删一把 key / 绑一路 / 删一套。**每一条都只转发**给 `registry.ui.model_provider_*`：
+#: 校验、"在用的不许删"、审计全在核心那一侧；面板这里只做**形状**检查（缺字段 → 400），
+#: 然后把核心给的拒绝原因**原样**透出去（用户：别吞成"操作失败"）。
+#:
+#: 为什么不在这里校验"这一把 key 被哪几路用着"：那是 `agents.<用途>.key` 的事，
+#: 只有核心认识它（面板拿到的是一份只读视图）。
+MODEL_WRITES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "/api/model/add": ("model_provider_add", ("name", "base_url")),
+    "/api/model/key": ("model_provider_key", ("name",)),
+    "/api/model/key/remove": ("model_provider_key_remove", ("name", "id")),
+    "/api/model/bind": ("model_provider_bind", ("task",)),
+    "/api/model/remove": ("model_provider_remove", ("name",)),
+}
+
 #: 跨线程跑协程的闭包（`runtime` 装配时用 `install_async_runner` 填）。
 #: 定义放在模块顶部：`_call` 在运行时读它，**不能依赖"定义在文件后面"**
 #: （第一次踩：调度顺序在定义之前，于是每个动作都变成 NameError → 500）。
@@ -462,6 +480,12 @@ class Panel:
             if path == "/api/knowledge/slang":
                 return json_response(_envelope(
                     self._slang_view(str(query.get("group_id") or ""))))
+            # 「模型与凭据」那一页（2026-10-18 第二轮）：**密钥清单**（一行一把，
+            # 平铺）+ **各路绑定**（每路一行 provider → key → model）。
+            # 数据只从装配点注入的 `registry.ui.model_providers` 来，面板**不读文件**、
+            # 也拿不到明文 key（核心那一侧只给 id / label / 掩码 / 长度）。
+            if path == "/api/model":
+                return self._model_view()
             if path == "/api/history":
                 audit = self._seam("control_audit")
                 rows = audit.tail(limit) if audit is not None else []
@@ -510,6 +534,12 @@ class Panel:
             return self._memory_affinity(payload, source)
         if path == "/api/settings":
             return self._settings(payload, source)
+        # 「模型与凭据」那一页的五条写路由（2026-10-18 第二轮）。每一条**只转发**给核心
+        # 那一口（`ui.model_provider_add|key|key_remove|bind|remove`）：校验、审计、以及
+        # "在用的不许删"全在核心；面板这里只做参数形状检查（缺字段 → 400），
+        # **拒绝原因原样透出**（用户：别吞成"操作失败"）。
+        if path in MODEL_WRITES:
+            return self._model_write(path, payload)
         if path == "/api/prompts":
             return self._prompt_write(payload, source)
         if path == "/api/knowledge/operator":
@@ -765,6 +795,63 @@ class Panel:
                          "dialogue_on": bool(row.get("dialogue_on")),
                          "memory_on": bool(row.get("memory_on"))})
         return json_response(_envelope({"available": True, "rows": rows}))
+
+    def _model_view(self) -> Response:
+        """「模型与凭据」那一页的只读数据：**密钥清单** + **各路绑定**。
+
+        只从装配点给的 `registry.ui.model_providers` 来（核心那一侧只给 id / label /
+        掩码 / 长度 + 每路绑定 + 供应商下拉框）。**面板不读 `data/model_providers.json`**，
+        也不碰 transport——所以这里没有"取不到就自己扫文件"的退路：接缝没有就如实报
+        `available: false`（fail-closed，不编一份空表出来让操作者以为"一把 key 都没配"）。
+        """
+
+        seam = self._seam("model_providers")
+        if seam is None:
+            return json_response(_envelope({"available": False, "providers": [],
+                                            "bindings": [], "options": []}))
+        try:
+            raw = _call(seam) or {}
+        except Exception:  # noqa: BLE001 - 接缝出问题不该让整页 500
+            logger.warning("webui_model_view_failed", exc_info=True)
+            return json_response(_envelope({"available": False, "providers": [],
+                                            "bindings": [], "options": []}))
+        if not isinstance(raw, dict):
+            return json_response(_envelope({"available": False, "providers": [],
+                                            "bindings": [], "options": []}))
+        data = dict(raw)
+        data["available"] = True
+        return json_response(_envelope(data))
+
+    def _model_write(self, route: str, payload: dict[str, object]) -> Response:
+        """五条写路由的统一形状：**只转发**给核心，拒绝原因原样透出。
+
+        返回给前端的是 `{"ok": True, "message": …, …}`（成功）或 `400` +
+        `detail=<核心那句人话>`（被拒）。前端 `api()` 会把 `detail` 当错误文案抛出来，
+        页面再**原样**显示在那一行里——与「群聊」页那个发送框同一条处理。
+        """
+
+        seam_name, required = MODEL_WRITES[route]
+        seam = self._seam(seam_name)
+        if seam is None:
+            return failure("engine_unavailable", status=503)
+        missing = [name for name in required if not str(payload.get(name) or "").strip()]
+        if missing:
+            return failure("bad_request", detail="缺 " + "、".join(missing), status=400)
+        try:
+            result = _call(seam, **_model_write_args(route, payload))
+        except Exception as exc:  # noqa: BLE001 - 接缝抛了就如实回报，不 500 一坨
+            logger.warning("webui_model_write_failed route=%s", route, exc_info=True)
+            return failure("model_write_failed",
+                           detail=f"面板没能把这次改动交给核心（{type(exc).__name__}）",
+                           status=502)
+        if not isinstance(result, dict):
+            return failure("model_write_failed", detail="核心没有给出结果", status=502)
+        if not result.get("ok"):
+            # **原样**：重名 / 同地址 / 在用的 key 不许删 / 悬空 id……都是核心那句话。
+            return failure("model_rejected",
+                           detail=str(result.get("reason") or "核心拒了这次改动，但没给原因"),
+                           status=400)
+        return json_response(_envelope(result))
 
     def _clear_session(self, payload: dict[str, object], source: str) -> Response:
         clear = self._seam("session_clear")
@@ -1359,6 +1446,54 @@ def _as_int(value: object, default: int) -> int:
         return int(str(value).strip())
     except (TypeError, ValueError):
         return default
+
+
+def _model_write_args(route: str, payload: dict[str, object]) -> dict[str, object]:
+    """一条写路由的 payload → 核心那一口的**关键字参数**（逐条显式，不许 `**payload`）。
+
+    为什么逐个挑而不是"整份 payload 传过去"：`**payload` 会把面板不认识、核心也不接受的
+    键（`confirm` 之类的）一起塞进去，而接缝那几个函数的签名是**契约**（`UiSeams` 里
+    逐个写死、测试逐个钉住）。显式挑键 = 多一个键就当场 TypeError，不会静默漂移。
+
+    三处刻意的默认值：
+
+    - `label=None` / `value=None` 表示**那一项不动**（面板只拿得到掩码，空输入框就是
+      "没改"，不是"清空"——真要删一把用 `/api/model/key/remove`）；
+    - `key=None` 表示**不改这一路的 key 绑定**（只改供应商/模型时），`""` 才是"解开"；
+    - `models` 允许是数组或逗号分隔的字符串（页面那个输入框就是后者）。
+    """
+
+    if route == "/api/model/add":
+        return {
+            "name": str(payload.get("name") or "").strip(),
+            "base_url": str(payload.get("base_url") or "").strip(),
+            "keys": payload.get("keys") if isinstance(payload.get("keys"), list) else [],
+            "client_type": str(payload.get("client_type") or "").strip(),
+            "models": payload.get("models"),
+        }
+    if route == "/api/model/key":
+        raw_label = payload.get("label")
+        raw_value = payload.get("value")
+        return {
+            "name": str(payload.get("name") or "").strip(),
+            "key_id": str(payload.get("id") or "").strip(),
+            "label": None if raw_label is None else str(raw_label),
+            "value": None if raw_value is None else str(raw_value),
+        }
+    if route == "/api/model/key/remove":
+        return {"name": str(payload.get("name") or "").strip(),
+                "key_id": str(payload.get("id") or "").strip()}
+    if route == "/api/model/bind":
+        raw_key = payload.get("key")
+        return {
+            "task": str(payload.get("task") or "").strip(),
+            "provider": str(payload.get("provider") or "").strip(),
+            "key": None if raw_key is None else str(raw_key),
+            "model": None if payload.get("model") is None else str(payload.get("model")),
+        }
+    if route == "/api/model/remove":
+        return {"name": str(payload.get("name") or "").strip()}
+    raise ValueError(f"不认识的模型写路由：{route}")
 
 
 def _call(func, *args, **kwargs):

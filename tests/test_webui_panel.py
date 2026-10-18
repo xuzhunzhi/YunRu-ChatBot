@@ -1685,3 +1685,242 @@ class GroupNoticeWiringTests(unittest.TestCase):
         self.assertNotIn("await write(", notice_branch,
                          "发送那条路走了会改写错误文案的 `write()`")
         self.assertIn("sayInRow", notice_branch, "结果没有落在那一行里")
+
+
+class ModelPageRoutesTests(unittest.TestCase):
+    """「模型与凭据」那五条写路由 + 一条读路由（2026-10-18 第二轮）。
+
+    ## 这一组钉什么
+
+    用户当天拍的两句（原话）：`「添加而非替换」` 与 `「我倾向于一个key一行……
+    agent那边先选供应商再选对应的key最后选供应商提供的模型」`。面板这一侧只做三件事：
+
+    1. **读**：`GET /api/model` 只转发 `registry.ui.model_providers`，接缝没有就如实报
+       `available: false`（**fail-closed**，绝不自己读 `data/model_providers.json`）；
+    2. **写**：`POST /api/model/{add,key,key/remove,bind,remove}` 逐条转发给
+       `ui.model_provider_*`，**参数逐个显式挑**（不是 `**payload`）；
+    3. **拒**：核心说 `ok: false` 时，把 `reason` **原样**放进 `detail`（400）。
+
+    ## 为什么这几条值得单独测
+
+    这一页是"能改密钥"的界面，三条最容易破的地方都很具体：
+
+    * 图省事写成 `**payload` → 多一个 `confirm` 键就 `TypeError`（或者更糟：
+      被接缝当成未知参数悄悄忽略）——所以这里有签名级断言；
+    * 把核心的拒绝原因吞成"操作失败" → 操作者不知道是"重名"还是"还在用"；
+    * 没有接缝时编一份空表 → 操作者以为"一把 key 都没配"，于是又加一遍。
+    """
+
+    def _panel(self, seams: dict | None = None) -> Panel:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        base = {"data_root": tmp.name}
+        base.update(seams or {})
+        return Panel(base, WebAccess(mode=LOCAL, token=TOKEN))
+
+    @staticmethod
+    def _get(panel: Panel, path: str):
+        response = panel.handle("GET", path, b"",
+                                {"accept": "application/json",
+                                 "authorization": "Bearer " + TOKEN}, "127.0.0.1")
+        return response, json.loads(response.body.decode("utf-8"))
+
+    @staticmethod
+    def _post(panel: Panel, path: str, body: dict):
+        response = panel.handle("POST", path, json.dumps(body).encode("utf-8"),
+                                {"accept": "application/json",
+                                 "content-type": "application/json",
+                                 "authorization": "Bearer " + TOKEN}, "127.0.0.1")
+        return response, json.loads(response.body.decode("utf-8"))
+
+    # --- 读：只转发接缝，没有就 fail-closed ---------------------------------
+
+    def test_without_the_seam_the_page_says_so_instead_of_faking_an_empty_table(self) -> None:
+        response, body = self._get(self._panel(), "/api/model")
+        self.assertEqual(response.status, 200)
+        data = body["data"]
+        self.assertFalse(data["available"], "没有接缝时不该报成「可用」")
+        self.assertEqual(data["providers"], [])
+        self.assertEqual(data["bindings"], [])
+
+    def test_the_read_view_is_exactly_what_the_seam_returned(self) -> None:
+        calls: list[str] = []
+        payload = {"path": "/x/model_providers.json", "present": True,
+                   "providers": [{"name": "relay1", "base_url": "https://relay/v1",
+                                  "models": ["m"], "key_count": 1,
+                                  "keys": [{"id": "k1", "label": "主号", "present": True,
+                                            "length": 9, "masked": "sk-1…7890",
+                                            "used_by": ["reply"]}],
+                                  "used_by": ["reply"], "can_remove": False,
+                                  "remove_reason": "还被 agents.reply 用着"}],
+                   "bindings": [{"task": "reply", "label": "对话", "provider": "relay1",
+                                 "key": "k1", "key_label": "主号", "model": "m",
+                                 "layer": "own", "layer_label": "对话绑定的那一把 key（k1）",
+                                 "present": True, "reason": "", "model_declared": True,
+                                 "note": ""}],
+                   "options": [{"value": "relay1", "label": "relay1",
+                                "base_url": "https://relay/v1", "in_file": True}]}
+
+        def seam():
+            calls.append("model_providers")
+            return dict(payload)
+
+        response, body = self._get(self._panel({"model_providers": seam}), "/api/model")
+        self.assertEqual(response.status, 200)
+        data = body["data"]
+        self.assertEqual(calls, ["model_providers"], "读那一口不是只调了一次")
+        self.assertTrue(data["available"])
+        self.assertEqual(data["providers"][0]["keys"][0]["id"], "k1")
+        self.assertEqual(data["bindings"][0]["layer"], "own")
+
+    def test_a_broken_read_seam_does_not_500_the_page(self) -> None:
+        def boom():
+            raise RuntimeError("核心炸了")
+
+        response, body = self._get(self._panel({"model_providers": boom}), "/api/model")
+        self.assertEqual(response.status, 200, "接缝炸了不该把整页打成 500")
+        self.assertFalse(body["data"]["available"])
+
+    # --- 写：逐条转发，参数显式 --------------------------------------------
+
+    def test_adding_a_set_forwards_name_url_keys_and_models(self) -> None:
+        calls: list[dict] = []
+
+        def add(name, base_url, keys, client_type="", models=None):
+            calls.append({"name": name, "base_url": base_url, "keys": keys,
+                          "client_type": client_type, "models": models})
+            return {"ok": True, "name": name, "key_ids": ["k1"], "message": "好了"}
+
+        response, body = self._post(
+            self._panel({"model_provider_add": add}), "/api/model/add",
+            {"name": "relay2", "base_url": "https://relay2/v1",
+             "keys": [{"label": "主号", "value": "sk-x"}], "models": "m-a,m-b",
+             "confirm": True})
+        self.assertEqual(response.status, 200)
+        self.assertEqual(calls, [{"name": "relay2", "base_url": "https://relay2/v1",
+                                  "keys": [{"label": "主号", "value": "sk-x"}],
+                                  "client_type": "", "models": "m-a,m-b"}], calls)
+        self.assertTrue(body["data"]["ok"])
+
+    def test_a_key_write_keeps_none_meaning_do_not_touch(self) -> None:
+        calls: list[dict] = []
+
+        def key(name, key_id="", label=None, value=None):
+            calls.append({"name": name, "key_id": key_id, "label": label, "value": value})
+            return {"ok": True, "id": "k3", "created": True, "count": 3}
+
+        panel = self._panel({"model_provider_key": key})
+        # 新加一把：没有 id、没有 value（其实有）——重点是**没给的项是 None**。
+        self._post(panel, "/api/model/key", {"name": "relay1", "value": "sk-new",
+                                             "confirm": True})
+        # 改一把的标签但不改值：value 必须是 None（"不改这把"），不是空串（"清空"）。
+        self._post(panel, "/api/model/key", {"name": "relay1", "id": "k1",
+                                             "label": "改名", "confirm": True})
+        self.assertEqual(calls[0], {"name": "relay1", "key_id": "", "label": None,
+                                    "value": "sk-new"})
+        self.assertEqual(calls[1], {"name": "relay1", "key_id": "k1", "label": "改名",
+                                    "value": None}, calls[1])
+
+    def test_removing_a_key_forwards_the_id(self) -> None:
+        calls: list[tuple] = []
+
+        def remove(name, key_id):
+            calls.append((name, key_id))
+            return {"ok": True, "name": name, "id": key_id, "count": 1, "message": "删了"}
+
+        response, _body = self._post(self._panel({"model_provider_key_remove": remove}),
+                                     "/api/model/key/remove",
+                                     {"name": "relay1", "id": "k2", "confirm": True})
+        self.assertEqual(response.status, 200)
+        self.assertEqual(calls, [("relay1", "k2")])
+
+    def test_binding_forwards_the_three_pieces_in_order(self) -> None:
+        calls: list[dict] = []
+
+        def bind(task, provider, key=None, model=None):
+            calls.append({"task": task, "provider": provider, "key": key, "model": model})
+            return {"ok": True, "task": task, "provider": provider, "key": key,
+                    "model": model, "model_declared": True, "message": "绑好了"}
+
+        panel = self._panel({"model_provider_bind": bind})
+        self._post(panel, "/api/model/bind",
+                   {"task": "judge", "provider": "relay1", "key": "k2",
+                    "model": "m-b", "confirm": True})
+        # 解绑那一趟：provider 空、key/model 空串也算"给了"。
+        self._post(panel, "/api/model/bind",
+                   {"task": "judge", "provider": "", "key": "", "model": "",
+                    "confirm": True})
+        self.assertEqual(calls[0], {"task": "judge", "provider": "relay1", "key": "k2",
+                                    "model": "m-b"})
+        self.assertEqual(calls[1], {"task": "judge", "provider": "", "key": "",
+                                    "model": ""})
+
+    # --- 拒：原因原样透出 -------------------------------------------------
+
+    def test_a_refusal_comes_back_verbatim_as_a_400(self) -> None:
+        def remove(name):
+            return {"ok": False, "reason": "providers.relay1 还被 agents.reply 用着"}
+
+        response, body = self._post(self._panel({"model_provider_remove": remove}),
+                                    "/api/model/remove",
+                                    {"name": "relay1", "confirm": True})
+        self.assertEqual(response.status, 400)
+        self.assertEqual(body["detail"], "providers.relay1 还被 agents.reply 用着",
+                         "核心的拒绝原因被改写了")
+
+    def test_every_write_needs_confirm(self) -> None:
+        called: list[str] = []
+
+        def add(*args, **kwargs):  # pragma: no cover - 根本不该被调到
+            called.append("add")
+            return {"ok": True}
+
+        response, body = self._post(self._panel({"model_provider_add": add}),
+                                    "/api/model/add",
+                                    {"name": "relay2", "base_url": "https://x/v1",
+                                     "keys": [{"value": "sk"}]})
+        self.assertEqual(response.status, 400)
+        self.assertEqual(body["error"], "needs_confirmation")
+        self.assertEqual(called, [])
+
+    def test_missing_fields_are_rejected_before_the_seam(self) -> None:
+        called: list[dict] = []
+
+        def bind(*args, **kwargs):  # pragma: no cover - 根本不该被调到
+            called.append(kwargs)
+            return {"ok": True}
+
+        response, body = self._post(self._panel({"model_provider_bind": bind}),
+                                    "/api/model/bind", {"task": "", "confirm": True})
+        self.assertEqual(response.status, 400)
+        self.assertIn("task", body["detail"])
+        self.assertEqual(called, [])
+
+    def test_a_write_without_the_seam_is_503_not_silent_success(self) -> None:
+        response, body = self._post(self._panel(), "/api/model/remove",
+                                    {"name": "relay1", "confirm": True})
+        self.assertEqual(response.status, 503)
+        self.assertEqual(body["error"], "engine_unavailable")
+
+    def test_a_broken_write_seam_is_502(self) -> None:
+        def boom(*args, **kwargs):
+            raise RuntimeError("核心炸了")
+
+        response, body = self._post(self._panel({"model_provider_key": boom}),
+                                    "/api/model/key",
+                                    {"name": "relay1", "value": "sk", "confirm": True})
+        self.assertEqual(response.status, 502)
+        self.assertIn("RuntimeError", body["detail"])
+
+    # --- 路由表本身 -------------------------------------------------------
+
+    def test_the_route_table_is_the_five_writes_the_core_documents(self) -> None:
+        from qq_roleplay_bot.plugins.webui import webui_panel
+
+        self.assertEqual(sorted(webui_panel.MODEL_WRITES), [
+            "/api/model/add", "/api/model/bind", "/api/model/key",
+            "/api/model/key/remove", "/api/model/remove"])
+        seams = {name for name, _required in webui_panel.MODEL_WRITES.values()}
+        self.assertEqual(seams, {
+            "model_provider_add", "model_provider_key", "model_provider_key_remove",
+            "model_provider_bind", "model_provider_remove"})

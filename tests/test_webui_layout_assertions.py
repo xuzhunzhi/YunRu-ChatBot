@@ -1645,3 +1645,155 @@ class PluginPanelPageLayoutTests(unittest.TestCase):
             for mark in ("*", "`", "**"):
                 self.assertNotIn(mark, match.group(1),
                                  f"{key} 的副标题里出现了 markdown 记号（会原样显示）")
+
+
+class ModelPageTests(unittest.TestCase):
+    """判据（8）：**「模型与凭据」是独立一页、属系统层、两块内容、只调核心接缝**。
+
+    2026-10-18 第二轮用户拍的口径（原话）：
+
+    > 「我倾向于**一个key一行**而不是一个供应商一行外加好多key。**agent那边先选供应商
+    > 再选对应的key最后选供应商提供的模型**。」
+    > 「「模型与凭据」独立成页，放**系统**层……页内两块：**「密钥」**（平铺，一行一个
+    > key，可加可删，显示被哪几路用着）与**「各路绑定」**（每路一行：供应商下拉 → key
+    > 下拉 → 模型下拉/输入，三级级联）。页顶那句明文提示保留。」
+
+    这一组钉六件事（每条都对应一次“顺手就会破”）：
+
+    1. **它是一页**（`TABS` 一行 + `VIEWS` 注册），而且**在「系统」卡里、紧挨「调参」**；
+    2. **调参页那一组没了**：`SETTING_GROUPS` 里不再有「模型与凭据」，按路的密钥/供应商
+       也不再渲染（它们进了 `MOVED_TO_MODEL_PAGE`，连「其他」那一组都不去）；
+    3. **两块内容都在**：`密钥` 与 `各路绑定`，且页顶有那句“明文保存”的提示；
+    4. **只调核心接缝**：这一页每一个 `api("…")` 都指向 `/api/model*`，页面代码里没有
+       读文件/拼请求的字样；
+    5. **级联换供应商时清 key、留模型并标注**（这条是本轮自己定的口径，理由写在那个
+       change 处理器的注释里：key 的 id 跟着供应商走，模型名常常跨家通用）；
+    6. **六颗按钮都接上了**（加 key / 存 key / 删 key / 删一套 / 绑一路 / 添加一套），
+       而且拒绝原因**原样**贴在那一行下面。
+    """
+
+    HELPERS = ("providerBlock", "bindingRow", "providerSelectOptions",
+               "keySelectOptions", "modelOptions", "layerText",
+               "addProviderCard")
+
+    #: 调参页**不许**再出现的那几项（按路的供应商 / 密钥）。
+    MOVED_KEYS = ("reply_api_key", "judge_api_key", "memory_api_key",
+                  "review_api_key", "vision_api_key", "letter_api_key",
+                  "reply_provider", "judge_provider")
+
+    def setUp(self) -> None:
+        self.js = _asset("app.js")
+        self.cards = _cards(self.js)
+
+    def _body(self, name: str, *, is_async: bool = False) -> str:
+        return _uncomment(_function_body(self.js, name,
+                                        kind="async" if is_async else "function"))
+
+    # --- 1. 它是一页，且在系统卡里 ------------------------------------------
+
+    def test_it_is_a_page_of_its_own_next_to_the_settings_page(self) -> None:
+        self.assertRegex(self.js, r"\[\s*\"model\"\s*,\s*\"模型与凭据\"\s*\]",
+                         "`TABS` 里没有「模型与凭据」这一行")
+        holders = [card["title"] for card in self.cards if "model" in _card_ids(card)]
+        self.assertEqual(holders, ["系统"],
+                         f"「模型与凭据」出现在了这些卡里：{holders}——用户要求放系统层")
+        system = next(card for card in self.cards if card["title"] == "系统")
+        ids = _card_ids(system)
+        self.assertIn("model", ids)
+        self.assertEqual(ids[ids.index("model") - 1], "settings",
+                         "它没有紧挨着「调参」——两页都是「这台机器怎么跑」的配置")
+        views = re.search(r"const VIEWS = \{(.*?)\n\};", self.js, re.S)
+        self.assertIsNotNone(views, "app.js 里找不到 `VIEWS`")
+        self.assertIn("model: viewModel", views.group(1), "`VIEWS` 里没把 model 接上")
+
+    # --- 2. 调参页那一组没了（别留两份） ------------------------------------
+
+    def test_the_old_model_group_is_gone_from_the_settings_page(self) -> None:
+        groups = re.search(r"const SETTING_GROUPS = \{(.*?)\n\};", self.js, re.S)
+        self.assertIsNotNone(groups, "app.js 里找不到 `SETTING_GROUPS`")
+        block = groups.group(1)
+        self.assertNotIn('title: "模型与凭据"', block,
+                         "「模型与凭据」这一组还留在调参页（同一件事两个入口）")
+        for key in self.MOVED_KEYS:
+            self.assertNotIn(f'"{key}"', block, f"调参页还在渲染 {key}")
+        # 但**主 key 这个兼容档要留着**（用户：没要求搬走它）。
+        for key in ('"provider"', '"api_base_url"', '"api_model"', '"api_key"'):
+            self.assertIn(key, block, f"调参页把 {key} 也一起搬走了")
+        moved = re.search(r"const MOVED_TO_MODEL_PAGE = \[(.*?)\];", self.js, re.S)
+        self.assertIsNotNone(moved, "app.js 里找不到 `MOVED_TO_MODEL_PAGE`")
+        for key in ("judge_api_key", "review_api_key", "reply_provider",
+                    "reply_api_base_url"):
+            self.assertIn(f'"{key}"', moved.group(1), f"搬迁名单里少了 {key}")
+        settings_body = self._body("viewSettings", is_async=True)
+        self.assertIn("MOVED_TO_MODEL_PAGE.includes(key)", settings_body,
+                      "「其他」那一组还会把搬走的项渲染出来")
+
+    # --- 3. 两块内容 + 明文提示 --------------------------------------------
+
+    def test_the_page_has_the_plaintext_warning_and_both_blocks(self) -> None:
+        body = self._body("viewModel", is_async=True)
+        self.assertIn("明文保存", body, "页顶没有那句「密钥在这里是明文保存的」")
+        self.assertIn("data/model_providers.json", body)
+        self.assertIn("安全等级与", body)
+        self.assertIn("密钥（一行一把", body)
+        self.assertIn("各路绑定（供应商 → key → 模型）", body)
+        self.assertIn("addProviderCard()", body, "页底没有「添加一套」")
+        # 密钥那一块是**平铺的一行一把**：每把 key 自己一行，而不是一套一行。
+        block = self._body("providerBlock")
+        self.assertIn("p.keys", block)
+        self.assertIn("model-key", block)
+        self.assertIn("m-key-add", block, "没有「给这套加一把」")
+        self.assertIn("used_by", block, "每把 key 没有显示「被哪几路用着」")
+        # 绑定那一块：三级级联（供应商 / key / 模型）。
+        bind = self._body("bindingRow")
+        for control in ("m-provider", "m-key", "m-model"):
+            self.assertIn(control, bind, f"绑定行里没有 {control} 这个控件")
+        self.assertIn("layerText(b)", bind, "绑定行没有那句「现在实际用的是哪一层」")
+        self.assertIn("layer_label", self._body("layerText"),
+                      "那一行没有用核心算出来的 layer_label")
+        self.assertIn("model_declared", self._body("layerText"),
+                      "模型不在声明的清单里时没有标注")
+
+    # --- 4. 只调核心接缝 ---------------------------------------------------
+
+    def test_the_page_only_talks_to_the_model_routes(self) -> None:
+        bodies = [self._body("viewModel", is_async=True)]
+        bodies += [self._body(name) for name in self.HELPERS]
+        for body in bodies:
+            for call in re.findall(r"api\((`[^`]*`|\"[^\"]*\")", body):
+                self.assertIn("/api/model", call,
+                              f"这一页去打了 {call}——它的取数/写数口只有 /api/model*")
+        whole = "\n".join(bodies)
+        for forbidden in ("readFile", "open(", 'fetch("data', "localStorage"):
+            self.assertNotIn(forbidden, whole,
+                             f"这一页里出现了 {forbidden}——它只能走接缝，不许读文件")
+
+    # --- 5. 级联：换供应商清 key、留模型并标注 ------------------------------
+
+    def test_changing_the_provider_clears_the_key_and_keeps_the_model(self) -> None:
+        bound = self._body("bind")
+        self.assertIn('classList.contains("m-provider")', bound,
+                      "`bind()` 里没有接供应商下拉的 change")
+        self.assertIn('keySelectOptions(provider, "")', bound,
+                      "换供应商之后没有把 key 选择清空")
+        self.assertIn("modelOptions(provider)", bound,
+                      "换供应商之后没有按新那家重画模型提示")
+        self.assertIn("不在它声明的模型里", bound,
+                      "模型不在新那家声明的清单里时没有标注")
+        # 这条口径本身的理由要写在代码里（下一个人才不会「顺手」改成保留 key）。
+        self.assertIn("key 的 id 跟着供应商走", bound)
+
+    # --- 6. 六颗按钮都接上了 ------------------------------------------------
+
+    def test_the_six_buttons_are_wired(self) -> None:
+        bound = self._body("bind")
+        for name in ("m-key-add", "m-key-save", "m-key-del", "m-del", "m-bind"):
+            self.assertIn(f'act("{name}"', bound, f"`bind()` 里没有接 {name}")
+        self.assertIn('target.id === "model-add-go"', bound,
+                      "「添加一套」那颗按钮没接")
+        # 拒绝原因要**原样**贴在那一行下面（`error.message`），不是吞成「操作失败」。
+        for name in ("m-key-add", "m-key-save", "m-bind"):
+            block = re.search(rf'act\("{name}".*?\)\) return;', bound, re.S)
+            self.assertIsNotNone(block, f"{name} 那一段找不到")
+            self.assertIn("error.message", block.group(0),
+                          f"{name} 把核心的拒绝原因吞了")

@@ -26,6 +26,10 @@ const TABS = [
   ["device", "设备"],
   ["logs", "日志"],
   ["settings", "调参"],
+  // 2026-10-18（第二轮）：模型与凭据**独立成一页**，属**系统**那一档——它与「调参」
+  // 是同一层的东西（都是"配置这台机器怎么跑"），所以并排放在「系统」卡里。
+  // 页内两块：`密钥`（一行一个，平铺）与`各路绑定`（每路一行 provider → key → model）。
+  ["model", "模型与凭据"],
   ["actions", "动作"],
   ["history", "操作记录"],
   ["overview", "总览"],
@@ -124,7 +128,10 @@ const CARDS = [
   { title: "插件", items: ["plugins"] },
   // ⚠️ 这四个是**运维页**，用户给的结构（账号与设备 + 聊天/记忆/知识库/插件）
   // 里没有它们的位置。先单独放一张卡**待用户定**——不许再往上面那张卡里塞。
-  { title: "系统", items: ["logs", "settings", "actions", "history"] },
+  // 2026-10-18（第二轮）：用户把「模型与凭据」也归到这一档（"放**系统**层"），
+  // 所以它排在「调参」旁边：两页都是"这台机器怎么跑"的配置，而「聊天 / 记忆 / 知识库」
+  // 是她的内容——混在那边会把"她怎么说话"和"machine 怎么配"搅成一堆。
+  { title: "系统", items: ["logs", "settings", "model", "actions", "history"] },
 ];
 
 // >>> ICONS-START（由 data/tmp_miuix_icons.py 从 Miuix 源码生成）
@@ -180,6 +187,8 @@ const ICON_ALIAS = {
   // 金句审核：借"判定"那张图标（框里一个勾/叉），正好是"这条判得对不对"的意思。
   knowledge_quotes_evidence: "judge",
   knowledge_slang: "approve_rule",
+  // 「模型与凭据」：借"凭证"那张（一把钥匙的图形）——它这一页管的就是密钥与凭据。
+  model: "credential",
 };
 
 function icon(name, cls = "") {
@@ -200,7 +209,8 @@ const TAB_NOTES = {
   account: "账号：她的资料头卡（头像 + 她自己的号 + 状态）、这台设备怎么连面板、供应商与模型",
   device: "设备：本机（地址 / Python / 数据目录）、与本体连接（端口 / 心跳 / 活快照）、占用空间（data/ 下各项）",
   logs: "判定 / 回复 / 记忆 / 规则 最近几次的模型输入输出（只读尾部）",
-  settings: "六套 prompt、八个 agent 开关、模型与凭据、供应商切换",
+  settings: "六套 prompt、八个 agent 开关、供应商（兼容档）",
+  model: "模型与凭据：密钥一行一把（哪一把被哪几路用着）、每一路按「供应商 → key → 模型」绑",
   actions: "清短期会话、调关系、重启 bot",
   history: "面板自己的操作审计（改了什么、什么时候、从哪来）",
   overview: "她现在在不在跑、在哪些群说话、这次重启之后干了多少活",
@@ -226,6 +236,9 @@ const state = {
   //: （2026-10-09 用户："主要是，横向的没法选人啊"，选完能看出是谁是这一步的要求之一）。
   //: 格式与页签同一套：`#记忆页签&people=10001`（`&` 分开的段，`token=`/`theme=` 是保留段）。
   last: {
+    //: 「模型与凭据」页最后一次读到的数据（**级联要用**：换供应商之后，key 与模型
+    //: 两个下拉框要按**新的那家**重画，而重画不该再打一次后端——数据已经在手里）。
+    model: null,
     profileKey: decodeURIComponent(
       (location.hash.match(/(?:^|[&])people=([^&]*)/) || [])[1] || ""),
     //: 记忆页的筛选（见 `memoryFilter()`）：`&mf=<编码过的 JSON>`，可分享、刷新不丢。
@@ -1397,21 +1410,42 @@ const SETTING_GROUPS = {
       ["approve_reject_reason", "拒绝时回的话", "写给人看的理由", "letter"],
     ],
   },
-  model: {
-    title: "模型与凭据",
+  // 2026-10-18（第二轮）：原来这一组叫「模型与凭据」，里面是一次性的 provider /
+  // api_base_url / api_model / 主密钥 / 四路密钥。用户把它**整个搬到「模型与凭据」页**
+  // （左栏「系统」卡里，与「调参」平级），所以这里只剩**兼容档**这一小块：
+  //
+  //   * `provider` / `api_base_url` / `api_model` / `api_key` —— 那是 `.env` 那套
+  //     "全局一对"的兼容档，用户明说**保留在原处**（"用户没要求搬走主 key 这个兼容档"）；
+  //   * `memory_model` —— 一个**模型名**，属于"这一路的模型"里唯一还留在调参页的
+  //     （其余按路的密钥与供应商都归新页面了，见 `MOVED_TO_MODEL_PAGE`）。
+  //
+  // 两组不能同时存在（同一件事两个入口 = 迟早一份生效一份不生效）。所以这里**只写一份**，
+  // 新页面那一份在 `viewModel()` 里。
+  compat: {
+    title: "供应商（兼容档）",
     items: [
       ["provider", "供应商", "", "settings"],
       ["api_base_url", "接口地址", "", "settings"],
       ["api_model", "对话模型", "", "settings"],
       ["memory_model", "记忆模型", "留空则用对话模型", "memory"],
-      ["api_key", "主密钥", "回复 / 判定共用", "credential"],
-      ["judge_api_key", "判定密钥", "留空回落主密钥", "credential"],
-      ["memory_api_key", "记忆密钥", "留空回落主密钥", "credential"],
-      ["review_api_key", "审核密钥", "留空回落主密钥", "credential"],
-      ["vision_api_key", "识图密钥", "留空回落主密钥", "credential"],
+      ["api_key", "主密钥", "回复 / 判定共用的那一把（.env 那套）", "credential"],
     ],
   },
 };
+
+/* 已经搬到「模型与凭据」页的那几项：调参页**不再显示**、核心那边也**直接拒绝**写它们
+ * （`runtime._MOVED_SETTINGS`）。两份入口会在文件里造成"我填了 key、它却按另一份在跑"，
+ * 所以这里列一份"搬迁名单"：既不在调参页渲染，也不落到「其他」那一组里去。
+ *
+ * 注意它**不等于** `operator_config.SETTINGS` 少了这些键——那张表还是能力边界，核心
+ * 只是不再接受面板改它们。 */
+const MOVED_TO_MODEL_PAGE = [
+  "reply_provider", "letter_provider", "judge_provider", "memory_provider",
+  "review_provider", "vision_provider",
+  "reply_api_key", "letter_api_key", "judge_api_key", "memory_api_key",
+  "review_api_key", "vision_api_key",
+  "reply_api_base_url", "letter_api_base_url", "vision_api_base_url",
+];
 
 function prefRow(main, end, options = {}) {
   // `options.icon`：行首图标（一格里一堆开关时，图标是最快的区分手段）。
@@ -1489,8 +1523,11 @@ async function viewSettings() {
   (data.fields || []).forEach((field) => { byKey[field.key] = field; });
 
   // 分组外的项（未来加了新配置但这里没登记）也要显示，不能悄悄漏掉。
+  // 2026-10-18：**搬去「模型与凭据」页的那几项要剔掉**——不然它们会掉进「其他」那一组，
+  // 于是同一件事又有了第二个入口（而且点保存会被核心拒掉，看着像"面板坏了"）。
   const known = new Set(Object.values(SETTING_GROUPS).flatMap((g) => g.items.map(([k]) => k)));
-  const leftovers = Object.keys(byKey).filter((key) => !known.has(key));
+  const leftovers = Object.keys(byKey)
+    .filter((key) => !known.has(key) && !MOVED_TO_MODEL_PAGE.includes(key));
   const groups = Object.entries(SETTING_GROUPS)
     .map(([, spec]) => settingsGroup(spec, byKey)).join("")
     + (leftovers.length
@@ -1534,6 +1571,219 @@ async function viewSettings() {
       + `</div>
       <p class="hint">面板覆盖过的项：${
         overridden.length ? esc(overridden.join("、")) : "（无）"}。标题后面带蓝点的那几行就是。</p>`);
+}
+
+/* ---------- 「模型与凭据」页（2026-10-18 第二轮） ----------
+ *
+ * 用户当天那两句定了这一页的形状：
+ *
+ * > 「我倾向于**一个key一行**而不是一个供应商一行外加好多key。」
+ * > 「**agent那边先选供应商再选对应的key最后选供应商提供的模型**。」
+ *
+ * 所以页内只有两块：
+ *
+ *  1. **密钥**：一行一把（平铺），每行显示 `id · 标签 · 掩码 · 被哪几路用着`，
+ *     可加可删可改；一套供应商的名字/地址/声明的模型在它那几把 key 上面当小标题。
+ *  2. **各路绑定**：每路一行，三个控件**级联**——供应商下拉 → key 下拉 → 模型下拉/输入。
+ *
+ * 三条不许破的（都落在代码里，不是靠记）：
+ *
+ *  * **面板不读文件**：数据只从 `/api/model` 来（背后是核心的 `ui.model_providers`），
+ *    写只打那五条 `/api/model/*`；页面上**没有**明文 key 可显示，输入框永远是空的。
+ *  * **拒绝原因原样**：核心拒了什么（重名、同地址、在用的 key 不许删、悬空 id…），
+ *    就把那句人话贴在**这一行**下面（`sayInRow`），不吞成"操作失败"。
+ *  * **级联换供应商时清掉 key 选择、模型留着并标注**（理由见 `onProviderChange`）。
+ */
+async function viewModel() {
+  const data = await api("/api/model");
+  state.last.model = data;
+  const warn = `<p class="hint model-warn">密钥在这里是<b>明文保存</b>的
+    （<code>data/model_providers.json</code> 不进 git，安全等级与 <code>.env</code> 相同）。</p>`;
+  if (!data.available) {
+    // **fail-closed**：核心这一版还没有这条接缝（或它当场失败了）。面板不自己读文件，
+    // 所以如实说"读不到"，不编一份空表让人以为"一把 key 都没配"。
+    return warn + card("这一页读不出来", `<p class="hint">核心没有给出
+      <code>ui.model_providers</code> 这条接缝（这一版核心还没有它，或者刚才取数失败了）。
+      面板不自己读 <code>data/model_providers.json</code>——更新核心之后这一页就会出来。</p>`);
+  }
+  const providers = data.providers || [];
+  const bindings = data.bindings || [];
+  const totalKeys = providers.reduce((sum, p) => sum + (p.keys || []).length, 0);
+  const keyRows = providers.length
+    ? providers.map(providerBlock).join("")
+    : '<p class="hint pref-empty">还没有任何一套。下面「添加一套」把第一套加进来。</p>';
+  return warn
+    + `<div class="pref-group"><div class="pref-group-title">密钥（一行一把，共 ${
+      num(totalKeys)} 把）</div>
+       <div class="pref-list">${keyRows}</div></div>`
+    + `<div class="pref-group"><div class="pref-group-title">各路绑定（供应商 → key → 模型）</div>
+       <div class="pref-list">${bindings.map(bindingRow).join("")}</div></div>`
+    + addProviderCard();
+}
+
+//: 一套供应商 + 它下面那几把 key（**平铺**：每把 key 自己一行）。
+function providerBlock(p) {
+  const keyCount = (p.keys || []).length;
+  const head = prefRow(
+    `<div class="pref-title">${esc(p.name)}</div>` +
+    `<div class="pref-summary"><code class="copyable mono">${esc(p.base_url)}</code>` +
+    ` · ${keyCount ? num(keyCount) + " 把 key" : "还没有 key（这几路都会回落到 .env）"}` +
+    (p.models && p.models.length
+      ? ` · 声明模型 ${p.models.map(esc).join(" / ")}`
+      : " · 没声明模型（绑定那一栏可以直接手输）") +
+    (p.used_by && p.used_by.length ? ` · 被 ${p.used_by.map(esc).join("、")} 用着` : "") +
+    `</div>`,
+    `<button class="m-del" data-name="${esc(p.name)}"${
+      p.can_remove ? "" : ` disabled title="${esc(p.remove_reason || "")}"`}>删除这一套</button>`,
+    { icon: "credential", extra: " model-src" });
+  const keys = (p.keys || []).map((k) => prefRow(
+    `<div class="pref-title">${esc(k.id)}${
+      k.label ? ` · ${esc(k.label)}` : ""}</div>` +
+    `<div class="pref-summary">${esc(k.masked || "（空）")} · ${num(k.length)} 字符 · ${
+      k.used_by && k.used_by.length
+        ? `被 ${k.used_by.map(esc).join("、")} 用着`
+        : "还没被哪一路指明"}</div>`,
+    `<div class="row model-key">
+       <input class="m-label" data-name="${esc(p.name)}" data-id="${esc(k.id)}"
+         type="text" value="${esc(k.label || "")}" placeholder="标签（可空）"
+         aria-label="${esc(p.name)} ${esc(k.id)} 的标签">
+       <input class="m-value" data-name="${esc(p.name)}" data-id="${esc(k.id)}"
+         type="password" placeholder="留空 = 不改这把" autocomplete="off"
+         aria-label="${esc(p.name)} ${esc(k.id)} 的新 key">
+       <button class="m-key-save" data-name="${esc(p.name)}" data-id="${esc(k.id)}">保存</button>
+       <button class="m-key-del danger" data-name="${esc(p.name)}"
+         data-id="${esc(k.id)}">删除</button>
+     </div>`,
+    { icon: "credential", extra: " model-key" }));
+  const add = prefRow(
+    `<div class="pref-title">给这套加一把</div>` +
+    `<div class="pref-summary">新加的那把排在 <b>最后</b>（"第一把"永远是上面最上面那把）</div>`,
+    `<div class="row model-key">
+       <input class="m-new-label" data-name="${esc(p.name)}" type="text"
+         placeholder="标签（可空）" aria-label="${esc(p.name)} 新 key 的标签">
+       <input class="m-new-value" data-name="${esc(p.name)}" type="password"
+         placeholder="粘贴一把新 key" autocomplete="off"
+         aria-label="${esc(p.name)} 的新 key">
+       <button class="m-key-add" data-name="${esc(p.name)}">加一把</button>
+     </div>`,
+    { icon: "add", extra: " model-key" });
+  return head + keys.join("") + add;
+}
+
+//: 一路的绑定：`provider → key → model` 三件套 + 一句"现在实际用的是哪一层"。
+function bindingRow(b) {
+  const task = esc(b.task);
+  const head = `<div class="pref-title">${esc(b.label)} <span class="model-sub">${
+    task}</span></div>` +
+    `<div class="pref-summary">${layerText(b)}${
+      b.note ? ` · ${esc(b.note)}` : ""}</div>`;
+  const body = `<div class="row model-bind" data-task="${task}">
+      <select class="m-provider" data-task="${task}" aria-label="${esc(b.label)} 用哪家供应商">
+        ${providerSelectOptions(b.provider)}
+      </select>
+      <select class="m-key" data-task="${task}" aria-label="${esc(b.label)} 用哪把 key">
+        ${keySelectOptions(b.provider, b.key)}
+      </select>
+      <input class="m-model" data-task="${task}" type="text" list="models-${task}"
+        value="${esc(b.model || "")}" placeholder="模型名"
+        aria-label="${esc(b.label)} 用哪个模型">
+      <datalist id="models-${task}">${modelOptions(b.provider)}</datalist>
+    </div>`;
+  return prefRow(head + body,
+    `<button class="m-bind" data-task="${task}">保存这一路</button>`,
+    { icon: "judge" });
+}
+
+//: 「现在实际用的是哪一层」——**原样**用核心算出来的那句（`layer_label`），
+//: 面板不自己推一遍：两份实现必然漂移，而漂移的样子正好是"面板说在用 k1、实际打的是
+//: `.env` 主 key"。
+function layerText(b) {
+  if (b.reason) return `<span class="model-bad">这一路现在用不了：${esc(b.reason)}</span>`;
+  const now = b.provider
+    ? `现在实际用的是 ${esc(b.layer_label || "（核心没说）")}`
+    : "没绑供应商：现在整条走 .env 那套";
+  const extra = b.model_declared === false
+    ? `；<span class="model-bad">这个模型名不在 ${esc(b.provider)} 声明的模型里</span>`
+    : "";
+  return now + extra;
+}
+
+//: 供应商下拉框：内置那几家 + 文件里的新家；空值 = "这一路走 .env"。
+function providerSelectOptions(selected) {
+  const rows = [`<option value=""${selected ? "" : " selected"}>（不指定，走 .env）</option>`];
+  for (const option of (state.last.model && state.last.model.options) || []) {
+    rows.push(`<option value="${esc(option.value)}"${
+      option.value === selected ? " selected" : ""}>${esc(option.label)}${
+      option.in_file ? "" : "（只在 .env）"}</option>`);
+  }
+  return rows.join("");
+}
+
+//: key 下拉框：**这一家自己的那几把** + "第一把"那一档（不指名 key）。
+//: 一家在文件里没有条目时只剩"（这一家还没有 key）"——面板不编一个 id 出来。
+function keySelectOptions(provider, selected) {
+  const entry = providerEntry(provider);
+  const keys = (entry && entry.keys) || [];
+  const rows = [`<option value=""${
+    selected ? "" : " selected"}>（用这一套的第一把）</option>`];
+  if (!keys.length) {
+    rows.push(`<option value="" disabled>${
+      entry ? "这一套还没有 key" : "这一家不在文件里（只能在 .env）"}</option>`);
+    return rows.join("");
+  }
+  for (const key of keys) {
+    rows.push(`<option value="${esc(key.id)}"${
+      key.id === selected ? " selected" : ""}>${esc(key.id)}${
+      key.label ? ` · ${esc(key.label)}` : ""} · ${esc(key.masked || "（空）")}</option>`);
+  }
+  return rows.join("");
+}
+
+//: 模型下拉提示：**这一家声明过的模型**（`datalist` 只是提示，手输任何值都行——
+//: 用户定的是"可以填列表外的值，但要标注"）。
+function modelOptions(provider) {
+  const entry = providerEntry(provider);
+  return ((entry && entry.models) || [])
+    .map((name) => `<option value="${esc(name)}"></option>`).join("");
+}
+
+function providerEntry(name) {
+  const providers = (state.last.model && state.last.model.providers) || [];
+  return providers.find((item) => item.name === name) || null;
+}
+
+//: 页底：「添加一套」——名字 / 地址 / client_type（可选）/ 声明的模型（可选）/ 若干 key。
+function addProviderCard() {
+  const keyFields = [0, 1].map((index) => `
+    <div class="row model-key">
+      <input class="a-label-${index}" type="text" placeholder="标签（可空）"
+        aria-label="第 ${index + 1} 把 key 的标签">
+      <input class="a-value-${index}" type="password" placeholder="粘贴一把 key"
+        autocomplete="off" aria-label="第 ${index + 1} 把 key">
+    </div>`).join("");
+  return `<div class="pref-group" id="model-add"><div class="pref-group-title">添加一套</div>
+    <div class="pref-list">
+      <div class="pref"><div class="pref-main">
+        <div class="pref-title">名字 / 地址 / 模型 / key</div>
+        <div class="pref-summary">同名、同地址都不覆盖（同一个账号写成两个名字会让余额兜底
+          静默失效）。<b>至少填一把 key</b>——只写地址的那一套读侧会拒，等于加了个空壳。</div>
+        <div class="row">
+          <input id="model-add-name" type="text" placeholder="名字（字母/数字/下划线）"
+            aria-label="新供应商的名字">
+          <input id="model-add-url" type="text" placeholder="https://…/v1"
+            aria-label="新供应商的接口地址">
+          <input id="model-add-client" type="text" placeholder="client_type（可空，默认 openai）"
+            aria-label="新供应商的 client_type">
+        </div>
+        <div class="row">
+          <input id="model-add-models" type="text" class="wide"
+            placeholder="这家提供的模型，逗号分隔（可空）" aria-label="新供应商声明的模型">
+        </div>
+        ${keyFields}
+      </div><div class="pref-end">
+        <button id="model-add-go" class="primary">添加这一套</button>
+      </div></div>
+    </div></div>`;
 }
 
 async function viewGroup() {
@@ -1756,6 +2006,138 @@ function bind() {
         el.disabled = false;
       }
     })) return;
+    // --- 「模型与凭据」页（2026-10-18 第二轮）--------------------------------
+    // 六颗按钮都只打 `/api/model/*`：背后是核心那五口接缝，校验与审计都在那边；
+    // 结果与**拒绝原因**都用 `sayInRow` 原样贴在这一行下面（与发送框同一条处理）。
+    if (act("m-key-add", async (el) => {
+      const row = el.closest(".pref");
+      const label = (row.querySelector(".m-new-label") || {}).value || "";
+      const value = (row.querySelector(".m-new-value") || {}).value || "";
+      if (!value.trim()) { sayInRow(row, "新加一把 key 必须把值贴进来。"); return; }
+      el.disabled = true;
+      try {
+        const done = await api("/api/model/key", {
+          method: "POST",
+          body: { name: el.dataset.name, label, value, confirm: true },
+        });
+        sayInRow(row, done.message || "已经加上了。");
+        render();
+      } catch (error) {
+        sayInRow(row, error.message);
+      } finally {
+        el.disabled = false;
+      }
+    })) return;
+    if (act("m-key-save", async (el) => {
+      const row = el.closest(".pref");
+      const label = (row.querySelector(".m-label") || {}).value || "";
+      const value = (row.querySelector(".m-value") || {}).value || "";
+      el.disabled = true;
+      try {
+        const done = await api("/api/model/key", {
+          method: "POST",
+          // 空 value = **不改这把**（面板只拿得到掩码，空输入框就是"没动"）。
+          body: { name: el.dataset.name, id: el.dataset.id, label,
+                  value: value.trim() ? value : null, confirm: true },
+        });
+        sayInRow(row, done.message || "已经改好了。");
+        render();
+      } catch (error) {
+        sayInRow(row, error.message);
+      } finally {
+        el.disabled = false;
+      }
+    })) return;
+    if (act("m-key-del", async (el) => {
+      const row = el.closest(".pref");
+      if (!(await confirmWrite("删掉这把 key？还有几路在用它的话会被拒绝。"))) return;
+      el.disabled = true;
+      try {
+        const done = await api("/api/model/key/remove", {
+          method: "POST",
+          body: { name: el.dataset.name, id: el.dataset.id, confirm: true },
+        });
+        sayInRow(row, done.message || "已经删掉了。");
+        render();
+      } catch (error) {
+        sayInRow(row, error.message);
+      } finally {
+        el.disabled = false;
+      }
+    })) return;
+    if (act("m-del", async (el) => {
+      const row = el.closest(".pref");
+      if (el.disabled) { sayInRow(row, el.title || "这一套现在不能删。"); return; }
+      if (!(await confirmWrite("删掉这一套（连同它下面那些 key）？"))) return;
+      el.disabled = true;
+      try {
+        const done = await api("/api/model/remove", {
+          method: "POST", body: { name: el.dataset.name, confirm: true },
+        });
+        sayInRow(row, done.message || "已经删掉了。");
+        render();
+      } catch (error) {
+        sayInRow(row, error.message);
+      } finally {
+        el.disabled = false;
+      }
+    })) return;
+    if (act("m-bind", async (el) => {
+      const row = el.closest(".pref");
+      const box = row.querySelector(".model-bind");
+      if (!box) return;
+      const body = {
+        task: el.dataset.task,
+        provider: (box.querySelector(".m-provider") || {}).value || "",
+        key: (box.querySelector(".m-key") || {}).value || "",
+        model: (box.querySelector(".m-model") || {}).value || "",
+      };
+      if (body.provider && !body.model.trim()) {
+        sayInRow(row, "选了供应商还要选一个模型名（先选供应商、再选 key、最后选模型）。");
+        return;
+      }
+      el.disabled = true;
+      try {
+        const done = await api("/api/model/bind", {
+          method: "POST", body: { ...body, confirm: true },
+        });
+        sayInRow(row, done.message || "已经绑好了。");
+        render();
+      } catch (error) {
+        sayInRow(row, error.message);
+      } finally {
+        el.disabled = false;
+      }
+    })) return;
+    if (target.id === "model-add-go") {
+      const body = {
+        name: ($("model-add-name") || {}).value || "",
+        base_url: ($("model-add-url") || {}).value || "",
+        client_type: ($("model-add-client") || {}).value || "",
+        models: ($("model-add-models") || {}).value || "",
+        keys: [0, 1].map((index) => ({
+          label: (document.querySelector(`.a-label-${index}`) || {}).value || "",
+          value: (document.querySelector(`.a-value-${index}`) || {}).value || "",
+        })).filter((item) => item.value.trim() || item.label.trim()),
+      };
+      if (!body.keys.some((item) => item.value.trim())) {
+        showError("添加一套至少要有一把 key（只写地址的那一套读侧会拒）。");
+        return;
+      }
+      target.disabled = true;
+      try {
+        const done = await api("/api/model/add", {
+          method: "POST", body: { ...body, confirm: true },
+        });
+        showError(done.message || "已经加上了。");
+        render();
+      } catch (error) {
+        showError(error.message);
+      } finally {
+        target.disabled = false;
+      }
+      return;
+    }
     if (act("clear-session", async (el) => {
       const done = await write("/api/session/clear", { session_id: el.dataset.id },
         "清空会话 " + el.dataset.id + "？");
@@ -2006,6 +2388,43 @@ function bind() {
     }
     box.dataset.on = on ? "1" : "0";
     if (!(memoryGroupPaint && memoryGroupPaint(box.dataset.id, on))) render();
+  });
+  // 「模型与凭据」页的级联：**换供应商**只重画**这一行**的 key 与模型两个控件，
+  // **不打后端**（供应商清单已经在 `state.last.model` 里了）。
+  //
+  // 换供应商时怎么处理旧选择（这一条要写清，因为它决定了"改完会不会悄悄指错"）：
+  //
+  //  * **key 选择清空** → 回到"这一家的第一把"。key 的 id 是**跟着供应商**的
+  //    （`k1` 在 A 家是主号、在 B 家可能是另一个账号），保留它只会有两种下场：
+  //    悬空（那一行当场没有 key）或者**指到同名的另一把**——后者更坏，它悄悄换了一个
+  //    账号而页面上看不出任何异常。
+  //  * **模型名保留**，但如果它不在新供应商声明的模型里，就在那一行**标红**说明。
+  //    模型名常常跨家通用（中转站尤其如此），换家往往只想换账号；清掉它等于每次换家
+  //    都要重打一遍模型名，而"打错模型名"比"留着旧模型名并标注"更难查。
+  $("view").addEventListener("change", (event) => {
+    const box = event.target;
+    if (!(box instanceof HTMLElement) || !box.classList.contains("m-provider")) return;
+    const row = box.closest(".pref");
+    const bindRow = box.closest(".model-bind");
+    if (!row || !bindRow) return;
+    const provider = box.value;
+    const keySelect = bindRow.querySelector(".m-key");
+    if (keySelect) keySelect.innerHTML = keySelectOptions(provider, "");
+    const datalist = bindRow.querySelector("datalist");
+    if (datalist) datalist.innerHTML = modelOptions(provider);
+    const model = ((bindRow.querySelector(".m-model") || {}).value || "").trim();
+    const entry = providerEntry(provider);
+    const declared = (entry && entry.models) || [];
+    let note;
+    if (!provider) {
+      note = "没绑供应商：保存之后这一路整条走 .env 那套。";
+    } else if (declared.length && model && declared.indexOf(model) < 0) {
+      note = `换到 ${provider}：${model} 不在它声明的模型里`
+        + "（可以照用，但请确认那一家确实有这个模型）。";
+    } else {
+      note = `key 已清空成 ${provider} 的第一把（key 的 id 跟着供应商走，不能沿用旧的）。`;
+    }
+    sayInRow(row, note + " 保存之后才会写进文件。");
   });
   // 记忆页筛选的两个输入框：**输入即筛**（重画走 `setMemoryFilter`，它会把光标放回末尾）。
   $("view").addEventListener("input", (event) => {
@@ -2935,6 +3354,8 @@ const VIEWS = {
   // 金句**审核**：同一份数据的另一个看法——看证据（原话 + 上下文 + 表情 + 结论落到哪条笔记）。
   knowledge_quotes_evidence: viewQuoteEvidence,
   logs: viewLogs, settings: viewSettings, group: viewGroup, actions: viewActions,
+  // 「模型与凭据」：密钥一行一把 + 各路绑定（供应商 → key → 模型）。
+  model: viewModel,
   history: viewHistory,
   // ↓ 2026-10-03 按新架构开的五个口子（骨架；分组依据见 `CARDS` 上面的注释）
   account: viewAccount,
