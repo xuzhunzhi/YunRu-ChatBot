@@ -5513,8 +5513,16 @@ class DialogueEngine:
         profile_note = ""
         # 判定说"这一句还接着原来那条线吗"——「顺带一提」用它判断话题有没有离开那件事。
         verdict_related = True
-        # 判定说"这一句在问她的世界吗"——只有 YES 才去翻世界观资料（单 agent 模式照旧查）。
-        lore_wanted = True
+        # 判定里那个"这一句在问她的世界吗"（`<lore>`）**已废弃**，不再决定查不查知识库。
+        # 2026-10-18 用户裁定：「我不介意查库，消息积压了就多条一判，ds速度是够的」。
+        # 现在的形状：**每一轮 REPLY 都查**，再由相关度筛（`knowledge_base.relevance_tier`，
+        # 0/1/2 三档，0 档一条都不取）+ 权威度乘法决定给她看哪几条。
+        #
+        # 为什么必须废掉那道门（实测）：判定口径里明写"议论她本人、@ 她、提她名字都不算"，
+        # 于是"问她自己的过去"这条路**系统性不检索**——1,579 条判定里 NO 1,411（89.4%）、
+        # YES 只有 20（1.3%）。字段留着（判定仍在输出它，删字段等于动判定输出协议），
+        # 但这里只当"读数"记日志，**不再拿它关检索**。
+        lore_recorded = True
         care_note: dict | None = None
         # 「惦记事」（2026-10-11）：她自己记着、还没划掉的事（"回头问他那个接口好没"）。
         # 与 `care_note` 是两样东西：那是"别人的处境，提一次就够"，这是"她自己的备忘，
@@ -5567,7 +5575,11 @@ class DialogueEngine:
             # "她没说话"不等于"话题没变"，而带下去的旧话题正是她强推旧事的原因。
             self._refresh_context_from_verdict(state, verdict, session_id=message.session_id)
             verdict_related = bool(getattr(verdict, "related", True))
-            lore_wanted = bool(getattr(verdict, "lore", True))
+            # 判定的 `<lore>` 读数：**只记日志、不影响检索**（见本轮开头那段注释与用户
+            # 2026-10-18 的原话）。它现在的用处只剩"看一眼判定往哪边偏"。
+            lore_recorded = bool(getattr(verdict, "lore", True))
+            logger.info("Stage 3 lore: 判定读数（已废弃，不影响检索） session=%s lore=%s",
+                        message.session_id, "YES" if lore_recorded else "NO")
             # 「没把握就别断言」的第一道确定性规则（2026-10-04 加，2026-10-05 晚改口径）：
             # **没被叫到 + 没懂 + 具体话题 → 不插话**。不出声，**不是**"问一句"——
             # 用户否掉的就是"不懂就问"那条路（"没根据的时候，要么不出声，要么别断言"）。
@@ -5612,9 +5624,13 @@ class DialogueEngine:
         # 什么时候能改回去：用户重新定一条"按话题裁历史"的口径时——那时要连判定
         # prompt 与 `docs/MULTI_GROUP_FOCUS.md` 第五节一起恢复。
         history = state.live_history()
+        # **每一轮都查知识库**（2026-10-18 用户裁定：不介意查库、ds 速度够）。
+        # 不再传 `knowledge_enabled=`：给它传 False 就是"这一轮根本没查"，
+        # 而那正是这次要拆掉的东西。要不要给她看、看哪几条，由检索侧的相关度筛 +
+        # 权威度乘法决定（0 档不占名额，筛完为空就是"（无扩展材料）"）。
         try:
             prompt_material = await asyncio.wait_for(
-                self.prompt_sources.collect(prompt_context, knowledge_enabled=lore_wanted),
+                self.prompt_sources.collect(prompt_context),
                 timeout=EXTENSION_TIMEOUT_SECONDS,
             )
         except Exception:

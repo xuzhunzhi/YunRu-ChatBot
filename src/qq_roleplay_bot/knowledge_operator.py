@@ -49,9 +49,16 @@ STORE_VERSION = 1
 #: 单块正文上限（与索引侧的 `MAX_CHUNK_CHARS` 同量级，别让一块顶掉整段预算）。
 MAX_CONTENT = 2000
 MAX_TITLE = 120
-#: 面板块的权威度：**排在官方口径之上**——它是操作者当场的纠正/补充，
-#: 不该被 885 KB 同人叙事挤下去。`AUTHORITY` 里官方最高是 3。
+#: 面板块的默认权威度（2026-10-18 刻度：官方 5 / **面板 4** / 官方补充 3 / 同人 2 /
+#: 世界知识 1）。它**不再高于官方**——用户裁定「官方权威程度5，面板4」：面板是人手写的
+#: 补充，不该压过官方原文。档位只做乘法里的系数（最终分 = 相关程度 × 权威度），
+#: 所以一个只沾边的面板块（1×4=4）压不过一条对题的官方块（2×5=10）。
 OPERATOR_AUTHORITY = 4
+#: **世界知识档**（用户原话：「同人2，世界知识1」）：现实世界的物理/军工技术那类资料，
+#: 将来（34 条军用科技）按这个档灌进面板块。它永远最低——"世界知识永远不抢占"。
+WORLD_KNOWLEDGE_AUTHORITY = 1
+#: 面板写入**只允许**这两档（别的值拒绝：面板是手写补充，不是让人随手改检索权重的地方）。
+OPERATOR_TIERS = (WORLD_KNOWLEDGE_AUTHORITY, OPERATOR_AUTHORITY)
 #: 面板块数量上限（防"把语料全文贴进来"这种用法把内存吃满）。
 MAX_CHUNKS = 2000
 #: 每块留几个历史版本。
@@ -82,6 +89,10 @@ class OperatorChunk:
     note: str = ""
     created_at: float = 0.0
     updated_at: float = 0.0
+    #: 档位（2026-10-18）：缺省 4 = 面板档；1 = 世界知识档。旧文件里**没有这个键**的块
+    #: 天然读成 4（`load()` 里 `item.get("authority")` 取不到就走缺省），18 条现有条目
+    #: 因此一个字都不用改。
+    authority: int = OPERATOR_AUTHORITY
 
     @property
     def source(self) -> str:
@@ -91,13 +102,50 @@ class OperatorChunk:
     def lines(self) -> str:
         return ""
 
-    @property
-    def authority(self) -> int:
-        return OPERATOR_AUTHORITY
-
     def as_row(self) -> dict[str, object]:
         return {"id": self.id, "title": self.title, "content": self.content, "note": self.note,
+                "authority": self.authority,
                 "created_at": self.created_at, "updated_at": self.updated_at}
+
+
+def _tier(value: object) -> int:
+    """把面板交上来的档位规整成 1 或 4（缺省 = 4）。
+
+    只收这两档：面板是手写补充，不是让人随手改检索权重的口子。别的值给人话拒绝，
+    而不是悄悄夹到最近的一档——夹了之后写进去的块档位跟她要的不一样，更难查。
+    """
+
+    if value is None or value == "":
+        return OPERATOR_AUTHORITY
+    try:
+        number = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise KnowledgeRejected(
+            "档位只认 1（世界知识）或 4（面板）",
+            detail=f"收到 {value!r}",
+        ) from None
+    if number not in OPERATOR_TIERS:
+        raise KnowledgeRejected(
+            "档位只认 1（世界知识）或 4（面板）",
+            detail=f"收到 {number}",
+        )
+    return number
+
+
+def _stored_tier(value: object) -> int:
+    """从磁盘读回来的档位：缺省/坏值/越界一律当 4（面板档）。
+
+    与写侧 `_tier` 的严格拒绝**刻意不同**：写侧要拦（她提交时就该知道不对），
+    读侧不能让一个脏字段把整份面板块变成"没有资料"。
+    """
+
+    if value is None or value == "":
+        return OPERATOR_AUTHORITY
+    try:
+        number = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return OPERATOR_AUTHORITY
+    return number if number in OPERATOR_TIERS else OPERATOR_AUTHORITY
 
 
 def _validate(title: str, content: str) -> tuple[str, str]:
@@ -189,6 +237,9 @@ class OperatorChunksStore:
                 note=str(item.get("note") or ""),
                 created_at=float(item.get("created_at") or 0.0),
                 updated_at=float(item.get("updated_at") or 0.0),
+                # 旧文件里没有这个键 → 缺省 4（面板档）。坏值/越界值也只当缺省：
+                # 读侧绝不能让一个脏字段把整份面板块变成"没有资料"。
+                authority=_stored_tier(item.get("authority")),
             ))
         return list(self.chunks)
 
@@ -206,22 +257,25 @@ class OperatorChunksStore:
 
     # --- 写 ---------------------------------------------------------------
 
-    def add(self, *, title: str, content: str, note: str = "") -> OperatorChunk:
+    def add(self, *, title: str, content: str, note: str = "",
+            authority: object = None) -> OperatorChunk:
         head, body = _validate(title, content)
         if len(self.all()) >= MAX_CHUNKS:
             raise KnowledgeRejected(f"面板块太多了（上限 {MAX_CHUNKS} 条）")
         now = self.clock()
         chunk = OperatorChunk(id=uuid.uuid4().hex[:12], title=head, content=body,
                               note=" ".join(str(note or "").split())[:200],
-                              created_at=now, updated_at=now)
+                              created_at=now, updated_at=now, authority=_tier(authority))
         self._snapshot()
         self.chunks = self.all() + [chunk]
         self._write()
-        logger.warning("operator_chunk_added id=%s chars=%s", chunk.id, len(body))
+        logger.warning("operator_chunk_added id=%s chars=%s authority=%s",
+                       chunk.id, len(body), chunk.authority)
         return chunk
 
     def update(self, chunk_id: str, *, title: str | None = None,
-               content: str | None = None, note: str | None = None) -> OperatorChunk:
+               content: str | None = None, note: str | None = None,
+               authority: object = None) -> OperatorChunk:
         existing = self.get(chunk_id)
         if existing is None:
             raise KnowledgeRejected("没有这个块")
@@ -233,11 +287,13 @@ class OperatorChunksStore:
             id=existing.id, title=head, content=body,
             note=existing.note if note is None else " ".join(str(note).split())[:200],
             created_at=existing.created_at, updated_at=self.clock(),
+            authority=_tier(authority) if authority is not None else existing.authority,
         )
         self._snapshot()
         self.chunks = [updated if item.id == existing.id else item for item in self.all()]
         self._write()
-        logger.warning("operator_chunk_updated id=%s chars=%s", updated.id, len(body))
+        logger.warning("operator_chunk_updated id=%s chars=%s authority=%s",
+                       updated.id, len(body), updated.authority)
         return updated
 
     def delete(self, chunk_id: str) -> bool:
@@ -321,6 +377,7 @@ class OperatorChunksStore:
                 note=str(item.get("note") or ""),
                 created_at=float(item.get("created_at") or 0.0),
                 updated_at=float(item.get("updated_at") or 0.0),
+                authority=_stored_tier(item.get("authority")),
             ))
         self.chunks = restored
         self._write()
@@ -357,11 +414,10 @@ class OperatorChunksStore:
 
 @dataclass(frozen=True, slots=True)
 class _OperatorRow:
-    """给 `knowledge_base` 的排序函数用的行。
+    """给"基准块 + 面板块"合并打分用的行（与 `sqlite3.Row` 同形状）。
 
-    它同时按**属性**（`_mentions_her` 用 `row["title"]`）与**下标**
-    （`_rank_key` 用 `row["authority"]`）取字段——`sqlite3.Row` 就是这两种都支持，
-    所以这里也得两种都给，否则"复用同一份排序"这件事做不到。
+    它同时按**属性**与**下标**取字段——`sqlite3.Row` 两种都支持，所以这里也得两种都给，
+    否则"检索侧与面板侧共用同一份判档 / 同一个按分数排序"这件事做不到。
     """
 
     source: str
@@ -390,23 +446,38 @@ def _overlap(row: _OperatorRow, tokens: list[str]) -> int:
     return sum(1 for token in tokens if token.casefold() in haystack)
 
 
-def _merge_ranked(rows: list[tuple[_OperatorRow, int]], *, limit: int,
-                  prefer_canon: bool) -> list[_OperatorRow]:
-    """把"基准块 + 面板块"放一起按**既有排序键**重排。
+def _merge_ranked(rows: list[_OperatorRow], tokens: list[str], literal: set[str],
+                  *, prefer_canon: bool) -> list[tuple[int, _OperatorRow]]:
+    """把"基准块 + 面板块"放一起算**同一份分数**：`相关程度 × 权威度`。
 
-    名次（`lexical`）由调用方给：基准块用它自己的名次，面板块按词面重合度折算，
-    这样"同时命中时面板块排前面"是靠 `authority=4` 实现的，而不是靠偷偷插队。
+    2026-10-18 改：原来这里是按 `_rank_key`（authority → 扩展词 → 提到她 → RRF）重排，
+    与检索侧共用那一份排序。用户定下"相关程度3挡 + 乘法"之后，排序只剩一个数，
+    所以这里改成与 `KnowledgeIndex.search` 完全同一条算式（`relevance_tier`）：
+    **面板块与官方语料同一把尺子**，档位只当系数（面板 4 < 官方 5）。
+
+    返回 `[(分数, 行)]`，已按分数降序排好；0 档的块**不返回**（不占名额）。
     """
 
-    from .knowledge_base import _rank_key  # noqa: PLC0415 - 与检索侧共用同一份排序
+    from .knowledge_base import relevance_tier  # noqa: PLC0415 - 与检索侧同一把尺子
 
-    ranked = sorted(
-        rows,
-        key=lambda pair: _rank_key(pair[0], lexical=pair[1], semantic_rank=0,
-                                   has_semantic=False, expansion=0,
-                                   prefer_canon=prefer_canon),
-    )
-    return [row for row, _lexical in ranked[:limit]]
+    scored: list[tuple[int, _OperatorRow]] = []
+    for row in rows:
+        tier = relevance_tier(tokens, literal, row.title, row.content)
+        if tier <= 0:
+            continue
+        score = tier * (row.authority if prefer_canon else 1)
+        scored.append((score, row))
+    scored.sort(key=lambda pair: (-pair[0], -_her_mention(pair[1]), pair[1].source,
+                                  pair[1].title, pair[1].content[:120]))
+    return scored
+
+
+def _her_mention(row: "_OperatorRow") -> int:
+    """并列时的稳定次序之一：先给**写她**的那块（2026-09-28 的实测要求）。"""
+
+    from .knowledge_base import HER_NAME  # noqa: PLC0415 - 只读一个常量
+
+    return 1 if HER_NAME in row.content or HER_NAME in row.title else 0
 
 
 class OperatorKnowledge:
@@ -437,45 +508,50 @@ class OperatorKnowledge:
         try:
             from .knowledge_base import _query_tokens, sanitize_chat_text  # noqa: PLC0415
 
-            tokens = _query_tokens(sanitize_chat_text(query or "", max_length=1000))
+            text = sanitize_chat_text(query or "", max_length=1000)
+            tokens = _query_tokens(text)
+            literal = {token for token in tokens if token in text}
         except Exception:  # noqa: BLE001 - 分词失败就当没有命中，仍返回基准结果
-            tokens = []
+            tokens, literal = [], set()
         if not tokens:
             self.last_operator_hits = 0
             return base
-        scored: list[tuple[_OperatorRow, int]] = []
+        rows: list[_OperatorRow] = []
+        self.last_operator_hits = 0
         for chunk in chunks:
             row = _OperatorRow(source=chunk.source, title=chunk.title,
-                               content=chunk.content, authority=OPERATOR_AUTHORITY)
-            overlap = _overlap(row, tokens)
-            if overlap:
-                # 名次折算：命中越多越靠前（-1 让"至少命中一个词"的块排在第 0 位之前）。
-                scored.append((row, max(0, len(tokens) - overlap - 1)))
-        if not scored:
-            self.last_operator_hits = 0
-            return base
-        self.last_operator_hits = len(scored)
-        merged: list[tuple[_OperatorRow, int]] = []
-        for position, item in enumerate(base):
-            merged.append((_OperatorRow(source=item.source, title=item.title,
-                                        content=item.content, authority=_authority_of(item)),
-                           position))
-        merged.extend(scored)
-        ranked = _merge_ranked(merged, limit=limit, prefer_canon=prefer_canon)
+                               content=chunk.content, authority=chunk.authority)
+            if _overlap(row, tokens):
+                self.last_operator_hits += 1
+            rows.append(row)
+        merged: list[_OperatorRow] = list(rows)
+        for item in base:
+            merged.append(_OperatorRow(source=item.source, title=item.title,
+                                       content=item.content, authority=_authority_of(item)))
+        ranked = _merge_ranked(merged, tokens, literal, prefer_canon=prefer_canon)
         return [KnowledgeItem(source=row.source, title=row.title, content=row.content)
-                for row in ranked]
+                for _score, row in ranked[:limit]]
 
     # --- 编辑（只给面板） -------------------------------------------------
 
     def chunks(self) -> list[OperatorChunk]:
         return self.store.all()
 
-    def add_chunk(self, *, title: str, content: str, note: str = "") -> OperatorChunk:
-        return self.store.add(title=title, content=content, note=note)
+    def add_chunk(self, *, title: str, content: str, note: str = "",
+                  authority: object = None) -> OperatorChunk:
+        """新增一块。`authority` 可选：缺省 4（面板档），只收 1（世界知识）或 4。
+
+        面板那边（`POST /api/knowledge/operator`）把 `authority` 原样递进来即可；
+        写在这条接缝上而不是面板里，是因为"哪些档位允许写"是知识库的口径，不是界面的。
+        """
+
+        return self.store.add(title=title, content=content, note=note, authority=authority)
 
     def update_chunk(self, chunk_id: str, *, title: str | None = None,
-                     content: str | None = None, note: str | None = None) -> OperatorChunk:
-        return self.store.update(chunk_id, title=title, content=content, note=note)
+                     content: str | None = None, note: str | None = None,
+                     authority: object = None) -> OperatorChunk:
+        return self.store.update(chunk_id, title=title, content=content, note=note,
+                                 authority=authority)
 
     def delete_chunk(self, chunk_id: str) -> bool:
         return self.store.delete(chunk_id)

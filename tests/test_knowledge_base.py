@@ -203,30 +203,40 @@ def test_same_authority_prefers_material_about_her() -> None:
         assert "别人的场景" not in results[0].source
 
 
-def test_self_question_falls_back_to_her_dossier_when_nothing_mentions_her() -> None:
-    """极短问句（"你是谁"）谁都没匹配上时，兜底给**关于她本人**的官方资料。"""
+def test_short_self_question_with_no_literal_overlap_is_empty() -> None:
+    """极短自问（"你是谁"）与任何一块都撞不上 → **空态**，不再兜底她的档案。
+
+    依据：2026-10-18 用户裁定「相关程度3挡，012，0永远不调起」——0 档不取。
+    这条测试替换 2026-09-28 那条"兜底她的档案"（那条的注入与查询无关，档位恒为 0）。
+    空态不是故障：她仍然按人格回答，只是这一轮没有额外的资料。
+    """
 
     with tempfile.TemporaryDirectory() as tmp:
         index = build(tmp)
-        results = index.search("你是谁", limit=3)
-        assert results
-        assert any("云茹" in item.content for item in results), [item.title for item in results]
-        assert all(not item.source.startswith("05-同人系列原文/疾风/别人的场景") for item in results[:2])
+        assert index.search("你是谁", limit=3) == []
 
 
-def test_her_fallback_only_fires_for_self_questions() -> None:
-    """同一段资料：问别人时不塞她的档案，问她时才兜底。"""
+def test_no_query_independent_dossier_dump() -> None:
+    """**兜底档案停了**：字面撞不上的块一条都不塞，哪怕这句是在问她本人。
+
+    2026-10-18 的两条用户裁定叠起来的后果：
+      * 「我不介意查库，消息积压了就多条一判」→ 每一轮都查；
+      * 「相关程度3挡，012，0永远不调起」→ 0 档不取。
+    原来那条"问的是她、却全场没提到她时，补 2 条她的档案"是**与查询无关**的注入，
+    它的档位恒为 0，所以现在一条也进不来。留着代码只会让下一次读到这里的人以为它还在生效，
+    因此连实现一起删掉；这条测试钉住"不会偷偷回来"。
+
+    代价（如实写在这里）：极短自问（"你是谁"）现在真的会没料（见下一条），
+    她靠人格自己回答——不再有"档案兜底"。
+    """
 
     with tempfile.TemporaryDirectory() as tmp:
         index = build(tmp)
         plain = index.search("港口区域集结了大量的船只", limit=3)
         assert plain and any("别人的场景" in item.source for item in plain)
-        assert not any(item.source.startswith("02-核心设定/云茹补充资料") for item in plain), \
-            "不是问她的问句，不该给她本人的档案"
-
         mine = index.search("你看到港口区域集结了大量的船只了吗", limit=3)
-        assert any("云茹" in item.content or "云茹" in item.title for item in mine), \
-            "问到她、可召回里一句都没提她时，兜底要给她本人的资料"
+        assert not any(item.source.startswith("02-核心设定/云茹补充资料") for item in mine), \
+            "没有字面重合的档案块不该被'问到她'这件事本身拽进来"
 
 
 # --- 6. 向量那一路（可选、默认关；模型不在这台机器上也能测） -------------------
@@ -524,12 +534,14 @@ def test_persona_construction_sections_are_dropped_whole() -> None:
 # --- 3. 边界（走 PromptSources） --------------------------------------------
 
 
-def test_knowledge_is_only_queried_when_the_judge_says_so() -> None:
-    """判定说"这一句不在问她的世界"时**根本不查知识库**。
+def test_every_reply_queries_the_knowledge_base() -> None:
+    """**每一轮 REPLY 都查知识库**，判定的 `<lore>` 不再决定查不查。
 
-    由来（2026-09-28 实测）：不做门时 79 条真实闲聊里 60% 会召回世界观文本，平均 1300 字；
-    语义门（判定输出 `<lore>YES|NO</lore>`）把误召回压到 0、召回仍有 92%
-    （`data/lore_gate_eval.py`）。
+    依据（用户 2026-10-18 原话）：「我不介意查库，消息积压了就多条一判，ds速度是够的」。
+    旧行为（2026-09-28）是"判定说 NO 就不查"：实测 1,579 条判定里 NO 1,411 条 = 89.4%、
+    YES 只有 20 条 = 1.3%——"问她自己的过去"这条路被系统性跳过。
+    现在引擎调 `collect()` 时连 `knowledge_enabled` 都不传（默认 True），要不要给她看
+    由检索侧的相关度筛决定（0 档不取，见 `relevance_tier`）。
     """
 
     import asyncio
@@ -554,15 +566,18 @@ def test_knowledge_is_only_queried_when_the_judge_says_so() -> None:
     knowledge = Counter()
     sources = PromptSources(knowledge_base=knowledge)
 
-    asyncio.run(sources.collect(context, knowledge_enabled=False))
-    assert knowledge.calls == 0, "门关了就不该查知识库"
-    asyncio.run(sources.collect(context, knowledge_enabled=True))
-    assert knowledge.calls == 1, "门开着才查"
+    material = asyncio.run(sources.collect(context))
+    assert knowledge.calls == 1, "引擎不传 knowledge_enabled 时必须照查"
+    assert material.knowledge_items, "查到了就该进材料"
 
-    # 判定输出：明确 NO 才关；没给这个标签时按 YES（退化成"门不存在"，不会再也翻不到资料）
+    # `<lore>NO</lore>` 只是判定的一条读数，解析结果照样是 False——但它**不再**参与
+    # "查不查"：`collect` 的签名里那个参数生产路径已经没人传了（上面那条断言就是它）。
     assert parse_judge_output("<route>REPLY</route><lore>NO</lore>").lore is False
     assert parse_judge_output("<route>REPLY</route><lore>YES</lore>").lore is True
     assert parse_judge_output("<route>REPLY</route>").lore is True
+    # 端口层那个开关仍然在（测试要显式关掉知识库时用），但它是"端口"不是"判定"。
+    asyncio.run(sources.collect(context, knowledge_enabled=False))
+    assert knowledge.calls == 1, "端口层开关照旧能关（生产路径不传它）"
 
 
 def test_knowledge_reaches_the_prompt_as_bounded_data() -> None:

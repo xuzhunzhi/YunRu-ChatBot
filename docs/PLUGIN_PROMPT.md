@@ -97,8 +97,9 @@ prompt_sources=PromptSources(knowledge_base=build_knowledge_base(),
 3145   build_dialogue_messages(..., prompt_material=...)                   ← 只有回复 agent 用
 ```
 
-后果：**恋人插件想影响"要不要回"和"要不要翻世界观"（`verdict.lore`），这两件事都在
-插件看不到的地方被决定了。** 而 `_judge()` 的 77 行里只有 `identity=`（记忆服务的画像）
+后果：**恋人插件想影响"要不要回"（`verdict.route`），这件事在
+插件看不到的地方被决定**（"要不要翻资料"从 2026-10-18 起已不由判定决定：每一轮都查、
+按相关度取）。而 `_judge()` 的 77 行里只有 `identity=`（记忆服务的画像）
 这一条外部材料。
 
 ### 改法

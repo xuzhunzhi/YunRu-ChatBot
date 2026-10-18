@@ -181,15 +181,22 @@ def test_guard_quote_is_asked_for_and_kept_verbatim() -> None:
     assert parse_judge_output("<guard>UP</guard><guard_reason>insult</guard_reason>").guard_quote == ""
 
 
-def test_judge_gates_the_knowledge_base() -> None:
-    """判定用 `<lore>` 回答"这一句在问她的世界吗"，引擎据此决定要不要翻资料。
+def test_lore_is_only_a_record_now() -> None:
+    """判定仍然输出 `<lore>`，但它**只是记一笔**：不再决定查不查知识库。
 
-    词面门槛做不到这件事：实测召回 100%/闲聊误召回 60%，收紧到"≥2 个词"召回只剩 54%；
-    语义门 92%/0%（`data/lore_gate_eval.py`）。
+    2026-10-18 用户裁定：「我不介意查库，消息积压了就多条一判，ds速度是够的」——
+    每一轮回复都查，按相关度取。判定这一栏的口径原来写着"议论她本人、@ 她、提她名字
+    都不算"，于是"问她自己的过去"这条路被系统性跳过（实测 1,579 条判定：NO 89.4%、
+    YES 1.3%）。现在口径改成"只记一笔，不影响翻资料"，**没有**多花一次调用：
+    标签还是同一个 `<lore>`，只是引擎不再拿它关检索（见
+    `tests/test_knowledge_base.py::test_every_reply_queries_the_knowledge_base`）。
     """
 
-    assert "<lore>YES|NO</lore>" in JUDGE_SYSTEM_PROMPT
-    assert "只是在议论她本人" in JUDGE_SYSTEM_PROMPT or "议论她本人" in JUDGE_SYSTEM_PROMPT
+    assert "<lore>YES|NO</lore>" in JUDGE_SYSTEM_PROMPT, "字段留着：删标签等于动输出协议"
+    assert "不影响" in JUDGE_SYSTEM_PROMPT and "翻资料" in JUDGE_SYSTEM_PROMPT
+    # 旧口径（误导它"只在问设定时才填 YES"）不许回来
+    assert "议论她本人、@ 她、提她名字都不算" not in JUDGE_SYSTEM_PROMPT
+    assert "议论她本人" not in JUDGE_SYSTEM_PROMPT
 
 
 def test_judge_outputs_route_and_topic() -> None:

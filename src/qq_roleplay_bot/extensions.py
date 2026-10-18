@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -17,6 +18,28 @@ MAX_PLUGIN_PROMPT_LENGTH = 2000
 MAX_EXTRA_PROMPT_LENGTH = 4000
 MAX_KNOWLEDGE_ITEMS = 5
 MAX_KNOWLEDGE_ITEM_LENGTH = 3000
+#: `QQBOT_KNOWLEDGE_ITEMS` 的合法范围：上限仍是"最多给几条"，下限 1（0 条等于关掉知识库，
+#: 要关就用别的开关，别用这个数表达）。
+KNOWLEDGE_ITEM_LIMIT_MIN = 1
+KNOWLEDGE_ITEM_LIMIT_MAX = 10
+
+
+def knowledge_item_limit() -> int:
+    """每一轮最多给回复 agent 几条知识（`QQBOT_KNOWLEDGE_ITEMS`，默认 5，夹在 1..10）。
+
+    由来（2026-10-18）：`limit=5` 是在"判定说 YES 才查"的时代定的；改成**每轮都查**之后，
+    名额会不会太多要拿实测的注入字数判断（用户：如果 p90 注入字数 > 3000 就把上限降到 3）。
+    所以把它做成**调用时现读**的配置，不重启就能改。
+    """
+
+    raw = os.environ.get("QQBOT_KNOWLEDGE_ITEMS", "").strip()
+    if not raw:
+        return MAX_KNOWLEDGE_ITEMS
+    try:
+        value = int(raw)
+    except ValueError:
+        return MAX_KNOWLEDGE_ITEMS
+    return max(KNOWLEDGE_ITEM_LIMIT_MIN, min(value, KNOWLEDGE_ITEM_LIMIT_MAX))
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,11 +136,19 @@ class PromptSources:
     async def collect(self, context: PromptContext, *, knowledge_enabled: bool = True) -> PromptMaterial:
         """汇聚一次调用的扩展材料。
 
-        `knowledge_enabled=False` 时**根本不查知识库**——判定说"这一句不在问她的世界"
-        就别去翻资料：实测不做门时 79 条真实闲聊里 60% 会召回世界观文本（平均 1300 字），
-        白白占 prompt 还容易把话题带偏（`data/lore_gate_eval.py`）。
+        **`knowledge_enabled` 已经不再是"判定说要不要查"那道门**（2026-10-18 用户裁定：
+        「我不介意查库，消息积压了就多条一判，ds速度是够的」）。引擎**每一轮 REPLY 都查**，
+        由**相关度**决定给她看哪几条（`knowledge_base.relevance_tier`：0 档一条都不取）。
+        参数保留只为端口层（测试里显式关掉知识库用），**生产路径不再传它**。
+
+        为什么废掉那道门：判定口径写着"议论她本人、@ 她、提她名字都不算"，于是
+        "问她自己的过去"这条路**系统性不检索**——实测 1,579 条判定里 NO 1,411 条
+        （89.4%）、YES 只有 20 条（1.3%）。现在改成"永远查 + 按相关度筛"。
+
+        `limit` 走 `knowledge_item_limit()`（`QQBOT_KNOWLEDGE_ITEMS`，默认 5）。
         """
 
+        limit = knowledge_item_limit()
         fragments: list[PromptFragment] = []
         for plugin in self.plugins:
             try:
@@ -134,14 +165,14 @@ class PromptSources:
             try:
                 results = await self.knowledge_base.search(
                     _bounded(context.message.text, 1000),
-                    limit=MAX_KNOWLEDGE_ITEMS,
+                    limit=limit,
                 )
             except Exception:
                 logger.exception("Stage 3 knowledge lookup failed")
                 results = []
             if not isinstance(results, list):
                 results = []
-            for item in results[:MAX_KNOWLEDGE_ITEMS]:
+            for item in results[:limit]:
                 if not isinstance(item, KnowledgeItem):
                     continue
                 knowledge_items.append(
