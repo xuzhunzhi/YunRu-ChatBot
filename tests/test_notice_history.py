@@ -406,6 +406,90 @@ def test_a_notice_does_not_stop_the_group_background_from_being_seeded() -> None
     assert provider.calls == 1, "只有通知的历史仍然算'还没人说过话'，背景照补"
 
 
+def test_the_first_real_message_still_gets_the_group_background_after_a_notice() -> None:
+    """**这一笔唯一那处"可能让群背景被顶掉"的行为改动，走完整路径的回归测试。**
+
+    用户 2026-10-19 的裁定（逐条拍下来的）：
+
+    > 「无会话状态时建会话 + 改 `_seed_history` 判据——确认，但补一条测试：
+    >  **第一条进来的若是通知、随后第一条真人消息到达时，群背景仍然正常落进历史**。
+    >  加在 `tests/test_notice_history.py` 里，写清依据（用户裁定：允许为通知建会话，
+    >  但不许让它顶掉群背景）。」
+
+    为什么需要它：`_seed_history` 原来的判据是"**历史非空就不补**"。通知现在也会进
+    历史，于是一个群只要先来一条通知（比如一条订阅推送），之后第一条真人消息到达时
+    群背景就**再也不会补**——这是改动前不存在的退化，而且是静默的（她只是"不知道
+    群里之前聊过什么"）。判据改成"还没有任何人说过话"之后，这条用例走
+    `notify` → `handle` 的完整路径钉住它：背景既进了历史，也进了她这一轮的材料。
+
+    与上一条的分工：上一条只钉判据本身（同步、便宜），这一条走真实路径
+    （`handle()` 里 `_seed_history` 与 `state.add` 的先后、名册、prompt 落位）。
+    """
+
+    class Provider:
+        """核心给的补背景口（`conversation_context` 那个形状）。"""
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def collect_seed_messages(self, session_id, group_id, message):
+            self.calls += 1
+            return (
+                IncomingMessage(
+                    message_id="history:1", session_id=session_id, user_id="2002",
+                    text="（背景）昨晚聊到十一点", target=MessageTarget(group_id=GROUP),
+                    sender_name="小L",
+                ),
+                IncomingMessage(
+                    message_id="history:2", session_id=session_id, user_id="2003",
+                    text="（背景）今早她请假了", target=MessageTarget(group_id=GROUP),
+                    sender_name="小M",
+                ),
+            )
+
+    class Judge:
+        """判定说"接"（不然回复那条腿不会跑，也就看不到回复材料）。"""
+
+        async def complete(self, request):
+            return "<route>REPLY</route><topic>聊天</topic>"
+
+    class ReplyClient:
+        def __init__(self) -> None:
+            self.calls: list[object] = []
+
+        async def complete(self, request):
+            self.calls.append(request)
+            return "<decision>REPLY</decision><dialogue>KEEP</dialogue><reply>在。</reply>"
+
+    provider = Provider()
+    client = ReplyClient()
+    engine = engine_for(client=client)
+    engine.judge_client = Judge()
+    engine.context_provider = provider
+
+    # 第一件事：群里先来一条通知。这个群她**还没**说过话（会话状态是这条通知建的）。
+    asyncio.run(runtime._SeamBinder(engine, FakeTransport()).notify(
+        MessageTarget(group_id=GROUP), "今晚八点维护。"))
+    state = engine.sessions.states[SESSION]
+    assert [entry.text for entry in state.history] == ["今晚八点维护。"], "先到的只有那条通知"
+
+    # 随后第一条**真人**消息到达。
+    asyncio.run(engine.handle(message("在吗", message_id="m1", mentioned=True)))
+
+    assert provider.calls == 1, "通知不算'有人说过话'，群背景必须补一次"
+    texts = [entry.text for entry in state.history]
+    assert "（背景）昨晚聊到十一点" in texts
+    assert "（背景）今早她请假了" in texts
+    # 背景真的进了她这一轮看到的材料（不是只躺在内存里）。
+    assert client.calls, "这一轮应当真的走到回复模型"
+    data = "\n".join(part["content"] for part in client.calls[0][1:])
+    assert "（背景）昨晚聊到十一点" in data
+    # 通知还在，而且仍然记成通知（没被背景挤掉、也没被当成她自己的话）。
+    assert "今晚八点维护。" in texts
+    assert any(entry.is_notice for entry in state.history)
+    assert 'speaker="notice"' in _format_history(state.history)
+
+
 def test_the_system_prompt_explains_the_notice_speaker_generically() -> None:
     """system 里那句话：说明 `speaker="notice"` 是什么，且**不绑任何具体人设**。"""
 
