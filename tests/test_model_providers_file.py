@@ -375,6 +375,35 @@ def test_sync_from_file_repoints_live_clients_unless_in_fallback() -> None:
             assert reply_client.provider == "mimo"
 
 
+# --- T7b：主 key 可以声明属于文件里的新家 -------------------------------------
+
+
+def test_the_main_key_can_be_declared_as_a_file_only_family() -> None:
+    """契约 §3.5 的最后一行：`QQBOT_API_PROVIDER` 也要走**合并视图**。
+
+    为什么必须有这条：面板 / 脚本能选到文件里的新家（`relay1`），但"主 key 属于哪一家"
+    这一处原来只认内置表——于是选得到、解析却报"不认识的供应商"。这条钉住两边一致。
+    """
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "model_providers.json"
+        _write_file(path, {"providers": {"relay1": {"base_url": "https://relay.example/v1"}},
+                           "agents": {}})
+        with _isolated(path, QQBOT_API_KEY="sk-main", QQBOT_API_PROVIDER="relay1"):
+            for task in model_config.TASK_NAMES:
+                endpoint = model_config.resolve(task)
+                assert (endpoint.provider, endpoint.base_url, endpoint.api_key) == (
+                    "relay1", "https://relay.example/v1", "sk-main"), task
+            # 声明一个**两边都不认识**的名字：仍然明确报错（不"就近找相似的"）。
+            os.environ["QQBOT_API_PROVIDER"] = "nope"
+            try:
+                model_config.resolve("judge")
+            except model_config.UnknownProvider:
+                pass
+            else:
+                raise AssertionError("声明了不认识的供应商却照样解析出来了")
+
+
 # --- T8：面板下拉框与 model_config 认识的家必须一致 ---------------------------
 
 

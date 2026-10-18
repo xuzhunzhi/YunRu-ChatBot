@@ -768,8 +768,23 @@ def _main_provider(task: str) -> tuple[str, bool]:
 
     declared = _read(COMPAT_PROVIDER_ENV).casefold()
     if declared:
-        return _known_provider(declared, COMPAT_PROVIDER_ENV), True
+        return _known_compat_provider(declared, COMPAT_PROVIDER_ENV), True
     return _default_provider(task), False
+
+
+def _known_compat_provider(provider: str, where: str) -> str:
+    """**声明"主 key 属于哪一家"**时认不认识这个名字：内置表 ∪ 文件里的家。
+
+    为什么这一处允许认文件（而 `_known_provider` 只认内置）：`QQBOT_API_PROVIDER` 是
+    操作者**显式写下的声明**，它不会因为文件里恰好有个同名条目就被悄悄改写；而
+    `KEYS` / `fallback` 那几条链路是**代码里的表**，让它们认文件会让不写进文件的用途
+    也被搬走（§5.1 不允许）。契约 §3.5 明确要求这一处走合并视图。
+    """
+
+    key = str(provider or "").strip().casefold()
+    if key in _providers_file().specs or key in PROVIDERS:
+        return key
+    raise UnknownProvider(f"{where} 绑了一个不认识的供应商：{provider}")
 
 
 def _key_source(task: str) -> _KeySource:
@@ -960,7 +975,15 @@ def _env_base_url_for(task: str, source: _KeySource) -> str:
         # 所以地址与 key 成对。地址取 `QQBOT_API_BASE_URL`；没配地址时取
         # 这一对所属那家的默认地址（`QQBOT_API_PROVIDER` 声明的那家，或本用途自带那家）。
         provider, _declared = _main_provider(task)
-        return (_read(COMPAT_BASE_URL_ENV) or _builtin_base_url(provider)).rstrip("/")
+        if provider in PROVIDERS:
+            # 内置的家：地址取**内置**那一份（文件里同名条目改了地址也不搬走它——
+            # 那条只对"写进文件的那几路"生效，§5.1）。
+            default_url = _builtin_base_url(provider)
+        else:
+            # 声明的是一家**只在文件里**的家（`QQBOT_API_PROVIDER` 指向它）：它的地址
+            # 只能来自文件（契约 §3.5：这一处走合并视图）。
+            default_url = str(_providers_file().specs.get(provider, {}).get("base_url", ""))
+        return (_read(COMPAT_BASE_URL_ENV) or default_url).rstrip("/")
     return _builtin_base_url(source.provider)
 
 

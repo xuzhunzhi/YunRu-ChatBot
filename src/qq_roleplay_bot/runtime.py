@@ -714,9 +714,12 @@ def _apply_live(engine, key: str, value: str, *, config=None) -> bool | None:
             if config is not None:
                 config.values.pop(key, None)
         else:
-            from .model_config import PROVIDERS
+            from .model_config import file_provider_specs, PROVIDERS
 
-            if provider not in PROVIDERS:
+            # 2026-10-18（契约 §3.5）：这一处也走**合并视图**——文件里的新家
+            # （如 `relay1`）同样可以声明"主 key 属于它"，否则面板选得到、解析却报
+            # "不认识的供应商"。
+            if provider not in PROVIDERS and provider not in file_provider_specs():
                 return False
             os.environ[env] = provider
         _reapply_pairing_all()
