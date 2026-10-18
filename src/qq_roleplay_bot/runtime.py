@@ -1616,7 +1616,7 @@ class _SeamBinder:
         return call
 
     async def notify(self, target: object, text: str | None = None) -> str:
-        """通知：**发出去**，然后把这一条记进目标会话的历史（`speaker="notice"`）。
+        """通知：**发出去**，然后让它留在那个会话的**上下文**里（不进历史、不进记忆）。
 
         ## 两种调用形状（老的那个一个字不用改）
 
@@ -1627,29 +1627,33 @@ class _SeamBinder:
           **不收裸字符串**：`"800000001"` 是群号还是 QQ 号，这里猜不出来，
           猜错等于把通知发到别处去——比不发更糟（`_notice_target` 会抛）。
 
-        ## 为什么记历史这件事放在这里（而不是交给插件）
+        ## 为什么这件事在核心做（而不是交给插件）
 
-        用户 2026-10-19：「发送通知这个，包括命令的回复，能不能通过规则让云茹识别成
-        另一个人在说话」→「哎要不还是通知吧，不要当人了」。也就是**发出去的通知要进
-        她的历史**，记成 `speaker="notice"`（不是人、也不是她说的）。
+        用户 2026-10-19 三句口径，按时间顺序（后一句覆盖前一句，别只看第一句）：
 
-        这件事只能在核心做：插件拿不到会话历史（`AGENTS.md` §2.3：插件不许碰对话与
+        1. 「发送通知这个，包括命令的回复，能不能通过规则让云茹识别成另一个人在
+           说话」→「哎要不还是通知吧，不要当人了」——它不该被当成某个人说的话；
+        2. 「通知只在上下文，不进历史」——所以它**不写 `state.history`**；
+        3. 「**上下文要留，只是不进记忆，你别搞混了**」——它在上下文里**每轮都在**
+           （不是只出现一次），而因为不在历史里，**记忆 agent 也提取不到它**。
+
+        这件事只能在核心做：插件拿不到会话状态（`AGENTS.md` §2.3：插件不许碰对话与
         记忆），而"这条到底发出去没有"只有这里知道。
 
-        ## "成功发出才记"
+        ## "成功发出才进上下文"
 
         `_send_or_queue` 的三种结果：
 
-        | 结果 | 记不记 | 为什么 |
+        | 结果 | 进不进 | 为什么 |
         | --- | --- | --- |
-        | `sent` | 记 | 对面收到了 |
-        | `queued` | 记 | 进了补发队列，**它一定会被补发**；补发那条路不会再回调这里，不记就等于永远丢 |
-        | `failed` | **不记** | 队列都没有/满了，这条真的没出去——记进去就是让她以为发过 |
+        | `sent` | 进 | 对面收到了 |
+        | `queued` | 进 | 进了补发队列，**它一定会被补发**；补发那条路不会再回调这里，不进就等于永远丢 |
+        | `failed` | **不进** | 队列都没有/满了，这条真的没出去——进了就是让她以为发过 |
 
         返回值是这三种状态之一（旧版返回 `None`；多这一位是为了让插件能记数，
         `join_approval` 那种忽略返回值的调用方不受影响）。
 
-        进历史的那一份**不是原文**：先过 `notice_text.for_history`（去 CQ 码/@、
+        进上下文的那一份**不是原文**：先过 `notice_text.for_history`（去 CQ 码/@、
         脱敏 QQ 号/路径/凭据、截断 200 字）。见 `_record_notice`。
         """
 
@@ -3055,17 +3059,28 @@ def _notice_target(target: object) -> MessageTarget:
 
 
 def _record_notice(engine, target: MessageTarget, text: str) -> None:
-    """把一条**已经发出去的通知**记进目标会话的历史（`speaker="notice"`）。
+    """把一条**已经发出去的通知**放进目标会话"上下文里常驻的通知清单"。
 
-    三条边界：
+    用户 2026-10-19 的口径（原话「**上下文要留，只是不进记忆，你别搞混了**」）：
 
-    1. **只动历史**。出站那一步已经用原文发完了；这里洗的只是"进历史的那一份"
+    * **不进历史**：不写 `state.history`，所以不落盘、不参与压缩，**也不会被记忆
+      agent 提取到**（它从历史里挑"她记得的事"）；
+    * **进上下文**：`ConversationState.notices` 里常驻，每轮拼材料时渲染出来
+      （`speaker="notice"`，紧挨着 `<history>`、在 DATA 信封里），**不是只出现一次**；
+    * **不设单独上限**：寿命跟会话状态一致（`DialogueSessions.leave` 清空、LRU 淘汰
+      时一起没）。
+
+    四条边界：
+
+    1. **只动那份材料**。出站那一步已经用原文发完了；这里洗的只是"进上下文的那一份"
        （`notice_text.for_history`：去 CQ 码/@、脱敏、截断 200 字）。
-    2. **失败不许冒泡**：记历史失败不能把"已经发出去"变成插件眼里的异常
+    2. **失败不许冒泡**：放进清单失败不能把"已经发出去"变成插件眼里的异常
        （插件会以为自己没发成、再发一遍）。
-    3. **会话状态照常建**：`DialogueSessions.state()` 会新建一个空会话。这不是
-       "顺手多记一点"——通知本来就该在她下次开口时看得见；而"新建会话会让群背景
-       补不进来"那件事在 `_seed_history` 里另有判据（通知不算"有人说过话"）。
+    3. **会建会话状态**：`DialogueSessions.state()` 会新建一个空会话。现在这件事是
+       纯无害的——清单在内存里、不进历史，所以它**不会**影响"这个群要不要补群背景"
+       （`_seed_history` 的判据是"历史非空"，而通知不写历史）。
+    4. **不做上限/过期**：用户明确否掉了（「哪来一天几十条。还有上下文最多500条，
+       怎么撑爆」），这里不要再发明一个。
     """
 
     sessions = getattr(engine, "sessions", None)
@@ -3079,12 +3094,10 @@ def _record_notice(engine, target: MessageTarget, text: str) -> None:
     from .chat_log import session_id_of
 
     session_id = session_id_of(target)
-    clock = getattr(engine, "clock", None)
-    now = float(clock()) if callable(clock) else time.time()
     try:
-        state_of(session_id).record_notice(session_id, target, cleaned, now)
-    except Exception:  # noqa: BLE001 - 记历史失败不许影响出站
-        logger.warning("plugin notice history skipped session=%s", session_id, exc_info=True)
+        state_of(session_id).add_notice(cleaned)
+    except Exception:  # noqa: BLE001 - 放清单失败不许影响出站
+        logger.warning("plugin notice context skipped session=%s", session_id, exc_info=True)
 
 
 def _plugin_action_seams(engine: DialogueEngine, transport: QQTransport):
@@ -3096,9 +3109,10 @@ def _plugin_action_seams(engine: DialogueEngine, transport: QQTransport):
       `purpose="join_approval"` 那一条），再调对面，回执拆成 `data` 返回；
       失败抛异常（`onebot_ws.call_api` 已经把 retcode≠0 变成异常了）。
       插件因此不需要知道回执形状，也绕不开闸门。
-    - `notify(target, text)`：通知——**发出去，并且记进那个会话的历史**
-      （`speaker="notice"`，见 `_SeamBinder.notify`）。老写法 `notify(text)` 仍然可用，
-      收件人是超管。连接断了也不会把这条提示弄丢（走补发队列）。
+    - `notify(target, text)`：通知——**发出去，并且让它留在那个会话的上下文里**
+      （`speaker="notice"`；不进历史、不进记忆，见 `_SeamBinder.notify`）。
+      老写法 `notify(text)` 仍然可用，收件人是超管。连接断了也不会把这条提示弄丢
+      （走补发队列）。
 
     她们（后台插件）拿到的就是这两个函数，拿不到 transport 本身。
 

@@ -23,6 +23,25 @@ from . import dev_config
 
 logger = logging.getLogger(__name__)
 
+# --- 通知：进**上下文**、不进**历史**、因此不进**记忆**（用户 2026-10-19 口径）----
+#
+# 用户原话：「**上下文要留，只是不进记忆，你别搞混了**」。三层必须分清：
+#
+# | 层 | 是什么 | 通知 |
+# | --- | --- | --- |
+# | **会话历史** `state.history` | 谁说了什么、落进状态 | **不进** |
+# | **上下文**（每轮拼进 prompt 的材料） | 她这一轮看得见的东西 | **要留：每轮都在** |
+# | **记忆库** | 记忆 agent 从**历史**提取的"她记得的事" | **不进**（历史里没有它，就提取不到） |
+#
+# ⚠️ 别把"不进历史"读成"只出现一次"：2026-10-19 中途确实有过一版"渲染一次就清空"，
+# 那是**误读**，已经撤掉。通知留下的方式是"每轮拼材料时都渲染一遍"。
+#
+# ⚠️ **也不给它单独发明上限**（用户当天第二次纠正）：没有"最多 3 条"、没有"最近 20 条"、
+# 没有"10 分钟过期"。用户的原话是「哪来一天几十条。还有上下文最多500条，怎么撑爆」——
+# 量级本来就在"每会话几十条"这一档（每条 ≤200 字），而它又**不进**那 500 条的历史，
+# 再叠一层数字只是凭空多一个要维护的判据。寿命跟会话状态一致：
+# 会话被清空/重置（`DialogueSessions.leave`）或者被 LRU 淘汰时，清单一并没了。
+
 
 class ConversationMode(str, Enum):
     IDLE = "idle"
@@ -177,6 +196,16 @@ class ConversationState:
     # **不进持久化**（`to_dict` 是逐字段列出来的），重启后第一轮由
     # `ensure_season_marker()` 现取一个（那一次前缀本来也断）。
     season_marker: str = ""
+    #: 「上下文里常驻的通知」（用户 2026-10-19：「上下文要留，只是不进记忆」）。
+    #:
+    #: 三条边界，别再搞混（这是同一天两次误读换来的）：
+    #: * **不是历史**：它不在 `history` 里，所以不落盘、不参与压缩、**也不会被记忆
+    #:   agent 提取到**（那个 agent 是从历史里挑"她记得的事"的）；
+    #: * **是上下文**：每轮拼材料时都渲染进 prompt（`build_dialogue_messages` 的
+    #:   `notices` 参数），**一直留着**，不是"出现一次就消失"；
+    #: * **不设单独上限**：寿命跟会话状态一致（`DialogueSessions.leave` 清空、
+    #:   LRU 淘汰时整段一起没）。量级见模块头那段：每会话几十条、每条 ≤200 字。
+    notices: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.history = deque(maxlen=self.history_limit)
@@ -418,45 +447,37 @@ class ConversationState:
         )
         self.last_activity_at = now
 
-    def record_notice(self, session_id: str, target: MessageTarget, text: str, now: float,
-                      *, refresh_activity: bool = True) -> bool:
-        """把一条**已经发出去的通知**记进这个会话的历史（`speaker="notice"`）。
+    def add_notice(self, text: str) -> bool:
+        """把一条**已经发出去的通知**放进"上下文里常驻的通知清单"。
 
-        三条口径，都来自用户 2026-10-19 那两句话（「哎要不还是通知吧，不要当人了」·
-        「这个也进，一起当通知」）：
+        用户 2026-10-19 的口径（原话「**上下文要留，只是不进记忆，你别搞混了**」）：
 
-        1. **不是人**：`user_id` 是空串、不进名册、不占名册编号（`note_speaker` 见
-           `is_notice` 直接返回）。渲染成 `speaker="notice"`。
-        2. **不是她自己的话**：与 `record_bot_reply`（`speaker="yunru"`）分开两个方法，
-           而不是共用一个开关——这两件事以后分开改的时候，不会互相绊住。
-        3. **正文已经洗过**：调用方必须递 `notice_text.for_history(...)` 的结果。
-           这里**不再洗第二遍**，但渲染那一步仍会按 DATA 处理（`_format_message`
-           照旧 sanitize + 中和伪造记号）——它来自插件与命令输出，是不可信内容。
+        * **不是历史**：不写 `state.history`，所以不落盘、不参与压缩，**也不会被记忆
+          agent 提取到**（它从历史里挑"她记得的事"，历史里没有这条）；
+        * **是上下文**：每轮拼材料时都由 `notice_texts()` 递进 prompt，**一直留着**；
+        * **不设上限**：清单一进一出，寿命跟会话状态一致（`DialogueSessions.leave`
+          清空、LRU 淘汰时一起没）。别再加"最多 N 条"或"多少分钟过期"——
+          用户当天已经否过一轮（「哪来一天几十条。还有上下文最多500条，怎么撑爆」）。
 
-        `text` 空（洗完之后什么都没剩下）时**不记**：历史里多一条空通知比少一条更糟。
-        返回"记没记"。
+        **不是她自己的话**：渲染成 `speaker="notice"`（没有 `who`、不进名册），
+        与 `record_bot_reply`（`speaker="yunru"`）是两条路。
+
+        正文由调用方先洗（`notice_text.for_history`）；这里**不再洗第二遍**，但渲染
+        那一步仍按 DATA 处理（`_format_message`：sanitize + 中和伪造记号 + 转义）。
+
+        `text` 空（洗完之后什么都没剩下）时**不入列**。返回"入没入列"。
         """
 
         cleaned = (text or "").strip()
         if not cleaned:
             return False
-        self.add(
-            IncomingMessage(
-                message_id=f"notice:{len(self.history)}:{now:.6f}",
-                session_id=session_id,
-                # 空 `user_id` 是**这条的本质**（没有"谁"）。`_message_from_state`
-                # 因此对通知单独放行空 `user_id`，否则重启后这条会被丢掉。
-                user_id="",
-                text=cleaned,
-                target=target,
-                sender_name="",
-                sender_role="notice",
-                is_notice=True,
-            ),
-            now,
-            refresh_activity=refresh_activity,
-        )
+        self.notices.append(cleaned)
         return True
+
+    def notice_texts(self) -> tuple[str, ...]:
+        """这一轮材料里要渲染的通知（**取走的是副本，不清空**——它要一直在）。"""
+
+        return tuple(self.notices)
 
     def as_state(self) -> dict[str, object]:
         """导出可持久化的会话状态；只保留短期语境，不含长期记忆。
@@ -1846,6 +1867,38 @@ def _format_message(message: IncomingMessage, *, index: int | None = None,
     return f"<message {' '.join(attributes)}><text>{text}</text></message>"
 
 
+def _render_notices(notices: tuple[str, ...]) -> str:
+    """把"上下文里常驻的通知"渲染成 `<notices>` 里的几行 `<message>`。
+
+    2026-10-19 的口径（「**上下文要留，只是不进记忆**」）：通知不写进 `state.history`，
+    但**每轮**都由 `ConversationState.notice_texts()` 递过来、渲染在这里——它在上下文
+    里常驻，直到会话状态被清空（**不是**"出现一次就消失"）。
+
+    **复用 `_format_message` 是有意的**：那条渲染路径上挂着 sanitize、伪造记号中和
+    与 `<`/`&` 转义——通知正文来自插件与命令输出，是**不可信内容**，必须和别人说的
+    话同一个待遇。它没有 `who`、没有 `index`：通知既不是哪个人说的，也不该被
+    `<reply_to>` 指到。
+
+    这里造的那个 `IncomingMessage` **只用于渲染**（渲染不看 `target`），不会进任何
+    会话状态——`ConversationState.notices` 里存的是纯文本。
+    """
+
+    lines = [
+        _format_message(
+            IncomingMessage(
+                message_id=f"notice:{index}",
+                session_id="",
+                user_id="",
+                text=text,
+                target=MessageTarget(user_id="notice"),
+                is_notice=True,
+            )
+        )
+        for index, text in enumerate(notices)
+    ]
+    return "<notices>\n" + "\n".join(lines) + "\n</notices>\n"
+
+
 def message_index_of(
     history: list[IncomingMessage],
     current: IncomingMessage,
@@ -2005,6 +2058,14 @@ def build_dialogue_messages(
     #: 的差别只有一处：它每轮都可能不一样，所以放尾巴、并且照旧包短码。
     reaction_material: str = "",
     session_marker: str = "",
+    #: 「上下文里常驻的通知」（用户 2026-10-19：「**上下文要留，只是不进记忆**」）。
+    #:
+    #: 由调用方每轮从 `ConversationState.notice_texts()` 取来（**取副本、不清空**），
+    #: 所以它**每轮都在**，直到会话状态被清空/重置。每一条都渲染成
+    #: `<message speaker="notice">`——与历史那条渲染路径**同一个函数**（同样 sanitize、
+    #: 同样中和伪造记号、同样没有 `who`/`index`），位置紧挨着 `<history>`、在 DATA 信封
+    #: 里面。空元组时**一个字节都不写**：没通知的那一轮请求与改动前逐字相同。
+    notices: tuple[str, ...] = (),
 ) -> list[dict[str, str]]:
     """构造单次模型请求。
 
@@ -2141,7 +2202,14 @@ def build_dialogue_messages(
         + "<history>\n"
         + f"{_format_history(history, seq_of=seq_of, alias_of=alias_of, aliases=aliases, lookup=lookup)}\n"
         + "</history>\n"
-        "--- UNTRUSTED CHAT DATA END ---"
+        # 「上下文里常驻的通知」——位置就挨着 `<history>`（用户 2026-10-19：给它放在
+        # 历史旁边），而且**就在 DATA 信封里面**：它是材料，不是她说过的话。
+        #
+        # 放稳定段而不是易变段，与 history 本身同理：它们都不是"逐轮会变"的东西，
+        # 而是**事件驱动**的（来一条消息/来一条通知才变一次）。所以它和 history 一样
+        # 吃得到前缀缓存；来通知的那一轮稳定段尾部会变一次，下一轮又稳定下来。
+        + (_render_notices(notices) if notices else "")
+        + "--- UNTRUSTED CHAT DATA END ---"
     )
 
     volatile_content = (

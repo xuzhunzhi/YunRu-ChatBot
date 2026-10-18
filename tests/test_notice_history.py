@@ -1,20 +1,27 @@
-"""**发出去的通知要进她的历史，而且记成"通知"，不是"某个人"**。
+"""**通知进上下文、不进历史、因此不进记忆**（用户 2026-10-19 定的口径）。
 
-用户 2026-10-19 定下的口径（原话，别自己改语义）：
+三层必须分清（用户原话：「**上下文要留，只是不进记忆，你别搞混了**」）：
 
-- 「发送通知这个，包括命令的回复，能不能通过规则让云茹识别成另一个人在说话」
-  → 紧接着改口：「哎要不还是通知吧，不要当人了」。
-  所以历史里那一条是 `speaker="notice"`：**既不是她说的**（`speaker="yunru"`），
-  **也不是哪个人说的**（没有 `who`、不进名册、没有 `user_id`）。
-- 「这个也进，一起当通知」：**命令的回复**也记进历史，跟后台插件发的通知同一套。
+| 层 | 是什么 | 通知 |
+| --- | --- | --- |
+| **会话历史** `state.history` | 谁说了什么、落进状态 | **不进** |
+| **上下文**（每轮拼进 prompt 的材料） | 她这一轮看得见的东西 | **要留：每轮都在** |
+| **记忆库** | 记忆 agent 从**历史**提取的"她记得的事" | **不进**（历史里没有它，就提取不到） |
 
-另外两条是同一次交底里的硬要求：
+三轮口径按时间顺序（后一句覆盖前一句）：
 
-- 通知正文是**不可信 DATA**（来自插件与命令输出），渲染照旧 sanitize + 中和伪造记号；
-- 命令回复**进历史的那一份**要脱敏（QQ 号/群号、盘符路径、`sk-` 凭据、邮箱、长数字串）
-  并截断 200 字，而**发给操作者的那一份原文不许变**（`AGENTS.md` §2.1「不记录敏感内容」）。
+1. 「哎要不还是通知吧，不要当人了」——它是**通知**：`speaker="notice"`，没有 `who`、
+   不进名册、没有 `user_id`，也不是她自己的话。
+2. 「这个也进，一起当通知」——**命令的回复**也走同一套。
+3. 「上下文要留，只是不进记忆」——通知**不进 `state.history`**，但在**上下文里每轮
+   都在**（不是"出现一次就消失"），并且**不设单独上限**（寿命跟会话状态一致）。
 
-这个文件把这些逐条钉住，包括"没有会话状态时不许炸"（私聊白名单外那种）。
+⚠️ 同一天中途确实有过一版"渲染一次就清空 + 最多 3 条 + 10 分钟过期"，那是**误读**
+（用户随后两次纠正），已经撤掉；这里的用例钉的是**最终**口径。
+
+这个文件逐条钉住：①不进历史 ②第一轮材料里有它 ③第二、三轮仍然有它
+④记忆侧看不到它 ⑤会话状态重置时清单一并被清 ⑥脱敏与截断仍在
+⑦"通知先到、真人消息后到，群背景仍要补"的回归。
 """
 
 from __future__ import annotations
@@ -26,15 +33,9 @@ from unittest.mock import patch
 import qq_roleplay_bot.notice_text as notice_text
 from qq_roleplay_bot import dev_config, runtime
 from qq_roleplay_bot.command_plugins import CommandRegistry
-from qq_roleplay_bot.stage3_main import (
-    DialogueEngine,
-    _deliver_reply,
-)
-from qq_roleplay_bot.stage3_runtime import (
-    ConversationMode,
-    _format_history,
-    message_index_of,
-)
+from qq_roleplay_bot.memory_model import MemoryMaterial
+from qq_roleplay_bot.stage3_main import DialogueEngine, _deliver_reply
+from qq_roleplay_bot.stage3_runtime import ConversationState
 from qq_roleplay_bot.transport import (
     IncomingMessage,
     MessageNotDelivered,
@@ -66,17 +67,95 @@ class FakeTransport:
         self.sent.append((target, text))
 
 
-def engine_for(transport=None, *, client=None) -> DialogueEngine:
+class Judge:
+    """判定说"接"——不然回复那条腿不会跑，也就看不到回复材料。"""
+
+    async def complete(self, request):
+        return "<route>REPLY</route><topic>聊天</topic>"
+
+
+class ReplyClient:
+    """记下每一次**回复**请求（判定那几条走 `Judge`，不混在这里）。"""
+
+    def __init__(self) -> None:
+        self.calls: list[object] = []
+
+    async def complete(self, request):
+        self.calls.append(request)
+        return "<decision>REPLY</decision><dialogue>KEEP</dialogue><reply>嗯。</reply>"
+
+
+class _EmptyIdentity:
+    """`identity_for` 的返回值：判定那一路只要一句"这个人是谁"的说明，给空串。"""
+
+    def as_judge_note(self, *args, **kwargs) -> str:
+        return ""
+
+    def as_data(self, *args, **kwargs) -> str:
+        return ""
+
+
+class FakeMemory:
+    """记忆侧的替身：只记下**喂进去的东西**（用来证明通知没进记忆那条路）。
+
+    只实现"会被调到"的那几个：入站消息走 `capture`、她自己发过的话走
+    `record_sent_reply`，其余读数一律返回空（这一条用例只关心前两条）。
+    """
+
+    def __init__(self) -> None:
+        self.captured: list[str] = []
+        self.replies: list[str] = []
+
+    def capture(self, message) -> None:
+        self.captured.append(getattr(message, "text", "") or "")
+
+    def record_sent_reply(self, message, text) -> None:
+        self.replies.append(text)
+
+    # --- 判定/回复材料那几条读数：给空 -------------------------------------
+    async def identity_for(self, message):
+        return _EmptyIdentity()
+
+    async def profile_for(self, *args, **kwargs):
+        return ""
+
+    async def retrieve(self, *args, **kwargs):
+        # 记忆侧这次什么都没检索到（**不是**"通知被过滤掉了"——它根本不在检索的
+        # 输入里：检索读的是历史与收件箱，通知不在那两处）。
+        return MemoryMaterial()
+
+    async def care_note(self, *args, **kwargs):
+        return None
+
+    async def own_notes(self, *args, **kwargs):
+        return ()
+
+    def mark_care_noted(self, *args, **kwargs) -> None:
+        return None
+
+    def mark_own_note_noted(self, *args, **kwargs) -> None:
+        return None
+
+    def note_own_words(self, *args, **kwargs) -> None:
+        return None
+
+
+def engine_for(client=None) -> DialogueEngine:
     """一个真引擎（会话表、时钟、扣子都在），模型那条腿换成替身。"""
 
     return DialogueEngine(client or NeverCalled())
 
 
-def notify(group_or_user, text, *, fail: bool = False):
-    """走**真接缝**发一条通知：`runtime._SeamBinder.notify`。
+def talkable_engine() -> tuple[DialogueEngine, ReplyClient]:
+    """能真的走完"说一句话"那条路的引擎（判定 + 回复都用替身）。"""
 
-    这样测的是"核心统一发送 + 记历史"这条生产路径，不是把 `record_notice` 叫一遍。
-    """
+    client = ReplyClient()
+    engine = DialogueEngine(client, judge_client=Judge())
+    return engine, client
+
+
+def notify(group_or_user, text, *, fail: bool = False):
+    """走**真接缝**发一条通知：`runtime._SeamBinder.notify`。"""
 
     engine = engine_for()
     transport = FakeTransport(fail=fail)
@@ -99,24 +178,38 @@ def message(text, *, user_id=OWNER, message_id="m1", session_id=SESSION,
     )
 
 
-# --- 1. 接缝：发到群里，并且真记进了那个会话的历史 ---------------------------
+def data_text(request) -> str:
+    """请求里除 system 之外的全部正文（DATA 区）。"""
+
+    return "\n".join(part["content"] for part in request[1:])
 
 
-def test_the_notify_seam_records_a_notice_in_the_target_session() -> None:
+def system_text(request) -> str:
+    return request[0]["content"]
+
+
+def notices_of(engine) -> list[str]:
+    state = engine.sessions.states.get(SESSION)
+    return list(state.notices) if state else []
+
+
+# --- 1. 接缝：发到群里，**进上下文**而不是写历史 -----------------------------
+
+
+def test_the_notify_seam_keeps_the_notice_in_context_instead_of_history() -> None:
     target = MessageTarget(group_id=GROUP)
     engine, transport, status = notify(target, "群里发一条通知：今晚八点维护。")
 
     assert status == "sent"
     assert transport.sent and transport.sent[-1][0] == target
-    # 正文**原样**发出去（历史里那份才洗过）——这里本来就干净，所以逐字相同。
+    # 正文**原样**发出去（进上下文的那一份才洗过）——这里本来就干净，所以逐字相同。
     assert transport.sent[-1][1] == "群里发一条通知：今晚八点维护。"
 
     state = engine.sessions.states[SESSION]
-    last = state.history[-1]
-    assert last.is_notice is True
-    assert last.is_bot_message is False, "通知不是她自己说的话"
-    assert last.user_id == "", "通知没有'谁'"
-    assert last.text == "群里发一条通知：今晚八点维护。"
+    assert list(state.history) == [], "通知不进历史（用户：上下文要留，只是不进记忆）"
+    assert state.notices == ["群里发一条通知：今晚八点维护。"]
+    # 也不落盘（清单不是 `as_state` 的字段）。
+    assert all("今晚八点维护。" not in str(entry) for entry in state.as_state()["history"])
 
 
 def test_a_notice_never_enters_the_roster() -> None:
@@ -126,7 +219,6 @@ def test_a_notice_never_enters_the_roster() -> None:
     state = engine.sessions.states[SESSION]
     assert state.aliases == {}, "通知不该在名册里占一个编号"
     assert state.roster_lines() == []
-    assert state.alias_of(state.history[-1]) is None
 
 
 def test_the_legacy_single_argument_notify_still_goes_to_the_super_admins() -> None:
@@ -141,44 +233,43 @@ def test_the_legacy_single_argument_notify_still_goes_to_the_super_admins() -> N
     assert [item[0] for item in transport.sent] == [
         MessageTarget(user_id="9001"), MessageTarget(user_id="9002"),
     ]
-    # 每个收件人的私聊会话里各记一条。
     for user_id in ("9001", "9002"):
-        last = engine.sessions.states[f"private:{user_id}"].history[-1]
-        assert last.is_notice is True
+        state = engine.sessions.states[f"private:{user_id}"]
+        assert state.notices == ["审批：有人申请进群"]
+        assert list(state.history) == []
 
 
-# --- 2. "成功发出才记" -------------------------------------------------------
+# --- 2. "成功发出才进上下文" -------------------------------------------------
 
 
-def test_a_lost_message_is_not_recorded_in_her_history() -> None:
-    """确定没送出去（连补发队列都没有）→ 历史里一个字都不该多。"""
+def test_a_lost_message_is_not_put_into_context() -> None:
+    """确定没送出去（连补发队列都没有）→ 上下文里一个字都不该多。"""
 
     engine, transport, status = notify(MessageTarget(group_id=GROUP), "这条发不出去。",
                                        fail=True)
     assert status == "failed"
     assert transport.sent == []
-    assert SESSION not in engine.sessions.states or not engine.sessions.states[SESSION].history
+    assert notices_of(engine) == []
 
 
-def test_nothing_is_recorded_when_redaction_leaves_nothing() -> None:
-    """整条只有一个 @ / CQ 码：洗完成空 → 不记（历史里多一条空通知更糟）。"""
+def test_nothing_is_put_into_context_when_redaction_leaves_nothing() -> None:
+    """整条只有一个 @ / CQ 码：洗完成空 → 不入列（上下文里多一条空通知更糟）。"""
 
     engine, transport, status = notify(MessageTarget(group_id=GROUP), "[CQ:at,qq=123]")
     assert status == "sent"
-    assert len(transport.sent) == 1, "洗的是历史那一份，发出去的仍是原文"
-    assert SESSION not in engine.sessions.states or not engine.sessions.states[SESSION].history
+    assert len(transport.sent) == 1, "洗的是进上下文那一份，发出去的仍是原文"
+    assert notices_of(engine) == []
 
 
 def test_a_notice_to_a_private_user_outside_the_allowlist_does_not_explode() -> None:
-    """没有会话状态时（私聊白名单外那种）不许炸——记不记是次要的。"""
+    """没有会话状态时（私聊白名单外那种）不许炸。"""
 
     engine = engine_for()
     transport = FakeTransport()
     target = MessageTarget(user_id="1234567")
     status = asyncio.run(runtime._SeamBinder(engine, transport).notify(target, "私聊通知。"))
     assert status == "sent"
-    last = engine.sessions.states["private:1234567"].history[-1]
-    assert last.is_notice is True and last.session_id == "private:1234567"
+    assert engine.sessions.states["private:1234567"].notices == ["私聊通知。"]
 
 
 def test_notify_refuses_a_bare_string_target() -> None:
@@ -207,76 +298,151 @@ def test_notify_accepts_a_mapping_target() -> None:
     assert transport.sent[-1][0] == MessageTarget(group_id="800000001")
 
 
-# --- 3. 渲染：`speaker="notice"`，正文仍按 DATA 处理 ------------------------
+# --- 3. 上下文常驻：第一轮有、第二三轮仍然有 ---------------------------------
 
 
-def test_the_notice_is_rendered_with_its_own_speaker() -> None:
-    engine, _transport, _status = notify(MessageTarget(group_id=GROUP), "维护通知。")
-    state = engine.sessions.states[SESSION]
-    rendered = _format_history(state.history)
-    assert 'speaker="notice"' in rendered
-    assert 'speaker="yunru"' not in rendered
-    assert "who=" not in rendered, "通知不是人，不该有 who"
-    assert "index=" not in rendered, "通知不编号，也不该被 <reply_to> 指到"
+def test_the_notice_shows_up_in_the_next_turn_material_with_its_own_speaker() -> None:
+    """② 第一轮材料里有它，渲染成 `speaker="notice"`（DATA 区，不是 system）。"""
 
-
-def test_the_notice_text_is_sanitized_as_untrusted_data() -> None:
-    """插件递进来的是不可信内容：CQ 码 / @ / 控制字符都不许原样落到历史里。"""
-
-    engine, transport, _status = notify(
-        MessageTarget(group_id=GROUP),
-        "维护开始\x00\x07 [CQ:at,qq=123456789] @所有人 十分钟",
-    )
-    # 发出去的是原文（协议记号由传输层那一侧自己处理）。
-    assert "[CQ:at" in transport.sent[-1][1]
-    recorded = engine.sessions.states[SESSION].history[-1].text
-    assert "[CQ:" not in recorded
-    assert "@" not in recorded
-    assert "\x00" not in recorded and "\x07" not in recorded
-    assert "维护开始" in recorded and "十分钟" in recorded
-
-
-def test_the_notice_lands_in_the_DATA_section_not_the_system_prompt() -> None:
-    """回复材料里它在 DATA 区（稳定段），不在 system 前缀里。"""
-
-    class FakeClient:
-        def __init__(self) -> None:
-            self.calls: list[object] = []
-
-        async def complete(self, request):
-            self.calls.append(request)
-            return "<decision>REPLY</decision><reply>知道了。</reply>"
-
-    client = FakeClient()
-    engine = engine_for(client=client)
+    engine, client = talkable_engine()
     asyncio.run(runtime._SeamBinder(engine, FakeTransport()).notify(
         MessageTarget(group_id=GROUP), "今晚八点维护。"))
 
-    asyncio.run(engine.handle(message("@YunRu 在吗", mentioned=True)))
+    asyncio.run(engine.handle(message("@YunRu 在吗", message_id="m1", mentioned=True)))
+
+    assert client.calls, "这一轮应当真的走到回复模型"
     request = client.calls[0]
-    system_prompt = request[0]["content"]
-    data = "\n".join(part["content"] for part in request[1:])
-
-    assert "今晚八点维护。" not in system_prompt
+    assert "今晚八点维护。" not in system_text(request), "system 前缀一个字都不许被改"
+    data = data_text(request)
     assert "今晚八点维护。" in data
-    # 落在 `<history>` 那一段里（不是别的旁路材料）。
-    inside_history = data.split("<history>")[1].split("</history>")[0]
-    assert 'speaker="notice"' in inside_history
-    assert "今晚八点维护。" in inside_history
+    # 位置挨着 `<history>`：就在 `<history>` 那一段的收尾之后、DATA 信封里面。
+    assert '<message speaker="notice">' in data
+    assert data.index("</history>") < data.index("今晚八点维护。")
+    assert data.index("今晚八点维护。") < data.index("--- UNTRUSTED CHAT DATA END ---")
+    # 通知既不是她说的，也不是某个人说的：那一条上没有 who / yunru 的标法。
+    notice_line = next(line for line in data.splitlines() if "今晚八点维护。" in line)
+    assert 'speaker="notice"' in notice_line
+    assert "who=" not in notice_line and 'speaker="yunru"' not in notice_line
 
 
-def test_a_reply_to_cannot_point_at_a_notice() -> None:
-    """通知不参与编号：`<reply_to>` 指到它没有意义。"""
+def test_the_notice_is_still_in_the_second_and_third_turn() -> None:
+    """③ **上下文要留**：第二、第三轮的材料里都还在（不是只出现一次）。"""
 
-    engine, _transport, _status = notify(MessageTarget(group_id=GROUP), "维护通知。")
+    engine, client = talkable_engine()
+    asyncio.run(runtime._SeamBinder(engine, FakeTransport()).notify(
+        MessageTarget(group_id=GROUP), "今晚八点维护。"))
+
+    asyncio.run(engine.handle(message("第一句", message_id="m1", mentioned=True)))
+    asyncio.run(engine.handle(message("第二句", message_id="m2")))
+    asyncio.run(engine.handle(message("第三句", message_id="m3")))
+
+    assert len(client.calls) == 3, "三轮都该走到回复模型"
+    for index in range(3):
+        assert "今晚八点维护。" in data_text(client.calls[index]), f"第 {index + 1} 轮应当看得见"
+        assert 'speaker="notice"' in data_text(client.calls[index])
+
+
+def test_the_notice_never_enters_her_history() -> None:
+    """① 走完整一轮之后，历史里只有真人那条消息——通知一个字都不在。"""
+
+    engine, _client = talkable_engine()
+    asyncio.run(runtime._SeamBinder(engine, FakeTransport()).notify(
+        MessageTarget(group_id=GROUP), "今晚八点维护。"))
+    asyncio.run(engine.handle(message("今晚谁值班？", message_id="m1", mentioned=True)))
+
     state = engine.sessions.states[SESSION]
-    state.add(message("@YunRu 在吗", message_id="m1"), 1.0)
-    mapping = message_index_of(state.history, state.history[-1])
-    # 通知（第 0 条）不编号，真人那条拿到位置编号 1。
-    assert set(mapping) == {"1", "current"}, mapping
+    # 历史里只有"她那一轮真的收发过的东西"：真人那条消息 + 她自己那句回复（`yunru`）。
+    assert [entry.text for entry in state.history if not entry.is_bot_message] == ["今晚谁值班？"]
+    assert not any(entry.is_notice for entry in state.history)
+    assert "今晚八点维护。" not in "\n".join(entry.text for entry in state.history)
 
 
-# --- 4. 命令的回复：同一套（发出去之后 / 记成通知 / 进历史那份脱敏） ---------
+def test_the_memory_side_never_sees_the_notice() -> None:
+    """④ 记忆提取看不到它：记忆侧拿到的是**消息**，通知从来不经过那条路。
+
+    记忆 agent 从历史里挑"她记得的事"：入站消息走 `memory.capture(message)`、
+    她自己发过的话走 `memory.record_sent_reply(...)`。通知既不是入站消息、也不是
+    她的话——它只是上下文里的一行材料，所以两条路都收不到它。
+    """
+
+    memory = FakeMemory()
+    engine, _client = talkable_engine()
+    engine.memory_service = memory
+
+    asyncio.run(runtime._SeamBinder(engine, FakeTransport()).notify(
+        MessageTarget(group_id=GROUP), "今晚八点维护。"))
+    asyncio.run(engine.handle(message("今晚谁值班？", message_id="m1", mentioned=True)))
+
+    assert memory.captured == ["今晚谁值班？"], "喂给记忆侧的只有真人那条消息"
+    assert all("今晚八点维护。" not in text for text in memory.captured)
+    assert all("今晚八点维护。" not in text for text in memory.replies)
+    # 历史里也没有——记忆侧就算去翻历史也翻不到。
+    assert "今晚八点维护。" not in "\n".join(
+        entry.text for entry in engine.sessions.states[SESSION].history)
+
+
+def test_the_notice_text_is_sanitized_as_untrusted_data() -> None:
+    """插件递进来的是不可信内容：CQ 码 / @ / 控制字符都不许原样落进材料里。"""
+
+    engine, client = talkable_engine()
+    asyncio.run(runtime._SeamBinder(engine, FakeTransport()).notify(
+        MessageTarget(group_id=GROUP),
+        "维护开始\x00\x07 [CQ:at,qq=123456789] @所有人 十分钟",
+    ))
+    asyncio.run(engine.handle(message("@YunRu 在吗", message_id="m1", mentioned=True)))
+    data = data_text(client.calls[0])
+    # 当前那句里本来就有 `@YunRu`（那是别人的话），所以只盯**通知那一行**。
+    notice_line = next(line for line in data.splitlines() if "维护开始" in line)
+    assert "[CQ:" not in notice_line
+    assert "@" not in notice_line
+    assert "\x00" not in data and "\x07" not in data
+    assert "维护开始" in data and "十分钟" in data
+
+
+# --- 4. 寿命：跟会话状态一致（不另设上限） ----------------------------------
+
+
+def test_the_notice_list_has_no_separate_cap() -> None:
+    """⑤ 用户明确否掉了"最多 N 条"（「哪来一天几十条……怎么撑爆」）：不设上限。
+
+    这条用例钉的是"入列多少条就留多少条"，防的是有人哪天又凭手感加一个数字回来。
+    """
+
+    state = ConversationState(history_limit=50)
+    for index in range(50):
+        assert state.add_notice(f"通知{index}") is True
+    assert len(state.notices) == 50
+    assert state.notices[0] == "通知0" and state.notices[-1] == "通知49"
+    assert not hasattr(state, "notices_dropped"), "没有上限就没有「丢最旧」这回事"
+
+
+def test_resetting_the_session_clears_the_notice_list() -> None:
+    """⑤' 寿命跟会话状态一致：会话被清空/重置时，清单一并清。"""
+
+    engine, _client = talkable_engine()
+    asyncio.run(runtime._SeamBinder(engine, FakeTransport()).notify(
+        MessageTarget(group_id=GROUP), "今晚八点维护。"))
+    assert engine.sessions.states[SESSION].notices == ["今晚八点维护。"]
+
+    # `/admin clear` 与她主动结束对话走的都是这一条。
+    engine.sessions.leave(SESSION)
+    state = engine.sessions.states[SESSION]
+    assert state.notices == [], "会话重置时通知清单一并被清"
+    assert list(state.history) == []
+
+
+def test_a_queued_notice_is_not_persisted() -> None:
+    """不落盘：重启（`from_state`）之后不该再看见重启前的通知。"""
+
+    state = ConversationState(history_limit=50)
+    state.add_notice("维护通知。")
+    restored = type(state).from_state(state.as_state(), history_limit=50)
+    assert restored is not None
+    assert restored.notices == []
+    assert list(restored.history) == []
+
+
+# --- 5. 命令的回复：同一套（进上下文 / 不写历史 / 进上下文那份脱敏） ---------
 
 
 STATUS_LIKE = (
@@ -300,51 +466,42 @@ class StatusishCommand:
         return ""
 
 
-def _run_command(text=" /statusish") -> tuple[DialogueEngine, FakeTransport, IncomingMessage]:
+def _run_command() -> tuple[DialogueEngine, FakeTransport, IncomingMessage]:
     engine = DialogueEngine(NeverCalled(),
                             command_registry=CommandRegistry((StatusishCommand(),)))
-    outgoing = asyncio.run(engine.handle(message(text.strip())))
+    outgoing = asyncio.run(engine.handle(message("/statusish")))
     assert outgoing is not None, "这条命令必须回话"
     transport = FakeTransport()
-    source = message(text.strip())
-    # `_deliver_reply` 是**唯一**那条"真把它发出去"的路：历史在这里记。
+    source = message("/statusish")
+    # `_deliver_reply` 是**唯一**那条"真把它发出去"的路：上下文在这里收。
     asyncio.run(_deliver_reply(transport, engine, source, [outgoing]))
     return engine, transport, source
 
 
-def test_a_command_reply_is_recorded_as_a_notice_after_it_is_sent() -> None:
+def test_a_command_reply_is_kept_in_context_not_history() -> None:
     engine, transport, source = _run_command()
     state = engine.sessions.states[source.session_id]
-    last = state.history[-1]
-    assert last.is_notice is True
-    assert last.is_bot_message is False
-    assert last.user_id == ""
+    # ① 不进历史
+    assert list(state.history) == []
+    # 进上下文
+    assert len(state.notices) == 1
     # 发给操作者的那一份**原文没变**（该看到的还是完整输出）。
     assert transport.sent[-1][1] == STATUS_LIKE
-    # 进历史的那一份洗过了。
-    assert last.text != STATUS_LIKE
+    # 上下文那一份洗过了。
+    assert state.notices[0] != STATUS_LIKE
 
 
-def test_a_command_reply_does_not_become_her_own_words() -> None:
-    """命令回复不许渲染成 `speaker="yunru"`——她没说过那句话。"""
-
-    engine, _transport, source = _run_command()
-    rendered = _format_history(engine.sessions.states[source.session_id].history)
-    assert 'speaker="notice"' in rendered
-    assert 'speaker="yunru"' not in rendered
-
-
-def test_the_command_reply_history_copy_has_no_numbers_paths_or_keys() -> None:
-    """`/super status` 那类输出进历史后：不含长数字串 / 盘符路径 / `sk-` 片段。"""
+def test_the_context_copy_of_a_command_reply_has_no_numbers_paths_or_keys() -> None:
+    """⑦ 脱敏沿用：`/super status` 那类输出进上下文后没有长数字串 / 盘符路径 / `sk-`。"""
 
     engine, _transport, source = _run_command()
-    recorded = engine.sessions.states[source.session_id].history[-1].text
+    recorded = engine.sessions.states[source.session_id].notices[0]
     assert not re.search(r"\d{6,}", recorded), recorded
     assert not re.search(r"[A-Za-z]:[\\/]", recorded), recorded
     assert "sk-" not in recorded, recorded
     assert "100012345" not in recorded
     assert "run.py" not in recorded, "路径被换成记号之后，文件名也不该留着"
-    # 没被洗光的普通信息还在——否则这条历史等于空的。
+    # 没被洗光的普通信息还在——否则这一份等于空的。
     assert "版本 3 条消息" in recorded
 
 
@@ -363,72 +520,48 @@ def test_a_command_reply_is_truncated_to_two_hundred_chars() -> None:
     outgoing = asyncio.run(engine.handle(message("/longish")))
     source = message("/longish")
     asyncio.run(_deliver_reply(FakeTransport(), engine, source, [outgoing]))
-    recorded = engine.sessions.states[source.session_id].history[-1].text
+    recorded = engine.sessions.states[source.session_id].notices[0]
     assert len(recorded) <= notice_text.MAX_NOTICE_CHARS
     # 截断要看得出来（不是静默少一段）。
     assert recorded.endswith("…")
 
 
-# --- 5. 持久化 / 群背景 / prompt 里那句话 -----------------------------------
+def test_a_command_reply_is_rendered_as_a_notice_not_as_her_words() -> None:
+    """命令回复在材料里是 `speaker="notice"`——她没说过那句话。"""
+
+    engine = DialogueEngine(NeverCalled(),
+                            command_registry=CommandRegistry((StatusishCommand(),)))
+    # 换成能走完一轮的模型替身，然后在同一个会话里说话。
+    engine.judge_client = Judge()
+    client = ReplyClient()
+    engine.client = client
+
+    outgoing = asyncio.run(engine.handle(message("/statusish")))
+    asyncio.run(_deliver_reply(FakeTransport(), engine, message("/statusish"), [outgoing]))
+    asyncio.run(engine.handle(message("第二句", message_id="m2", mentioned=True)))
+
+    data = data_text(client.calls[0])
+    assert 'speaker="notice"' in data
+    assert 'speaker="yunru"' not in data
 
 
-def test_a_notice_survives_a_state_round_trip() -> None:
-    """重启之后"她看过那条通知"这件事还在（空 `user_id` 不许被当成坏记录丢掉）。"""
-
-    engine, _transport, _status = notify(MessageTarget(group_id=GROUP), "维护通知。")
-    state = engine.sessions.states[SESSION]
-    restored = type(state).from_state(state.as_state(), history_limit=50)
-    assert restored is not None
-    last = restored.history[-1]
-    assert last.is_notice is True
-    assert last.user_id == ""
-    assert last.text == "维护通知。"
-
-
-def test_a_notice_does_not_stop_the_group_background_from_being_seeded() -> None:
-    """"历史非空"不许被通知顶掉：群背景只在**还没人说过话**时才补。"""
-
-    class Provider:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def collect_seed_messages(self, session_id, group_id, message):
-            self.calls += 1
-            return []
-
-    provider = Provider()
-    engine = DialogueEngine(NeverCalled())
-    engine.context_provider = provider
-    state = engine.sessions.state(SESSION)
-    state.record_notice(SESSION, MessageTarget(group_id=GROUP), "维护通知。", 10.0)
-
-    asyncio.run(engine._seed_history(message("第一条真人消息", message_id="m9"), state))
-    assert provider.calls == 1, "只有通知的历史仍然算'还没人说过话'，背景照补"
+# --- 6. 群背景那条回归 + system 那句 ----------------------------------------
 
 
 def test_the_first_real_message_still_gets_the_group_background_after_a_notice() -> None:
-    """**这一笔唯一那处"可能让群背景被顶掉"的行为改动，走完整路径的回归测试。**
-
-    用户 2026-10-19 的裁定（逐条拍下来的）：
+    """回归测试：通知先到，群背景照补（用户 2026-10-19 裁定的那一条）。
 
     > 「无会话状态时建会话 + 改 `_seed_history` 判据——确认，但补一条测试：
     >  **第一条进来的若是通知、随后第一条真人消息到达时，群背景仍然正常落进历史**。
     >  加在 `tests/test_notice_history.py` 里，写清依据（用户裁定：允许为通知建会话，
     >  但不许让它顶掉群背景）。」
 
-    为什么需要它：`_seed_history` 原来的判据是"**历史非空就不补**"。通知现在也会进
-    历史，于是一个群只要先来一条通知（比如一条订阅推送），之后第一条真人消息到达时
-    群背景就**再也不会补**——这是改动前不存在的退化，而且是静默的（她只是"不知道
-    群里之前聊过什么"）。判据改成"还没有任何人说过话"之后，这条用例走
-    `notify` → `handle` 的完整路径钉住它：背景既进了历史，也进了她这一轮的材料。
-
-    与上一条的分工：上一条只钉判据本身（同步、便宜），这一条走真实路径
-    （`handle()` 里 `_seed_history` 与 `state.add` 的先后、名册、prompt 落位）。
+    最终口径下这条退化**在结构上不存在**：通知不进 `history`，`_seed_history` 的判据
+    就是原来的"历史非空"，上一轮为通知加的那个特判也撤回了。用例保留，钉的就是
+    "通知不会顶掉群背景"这件事本身。
     """
 
     class Provider:
-        """核心给的补背景口（`conversation_context` 那个形状）。"""
-
         def __init__(self) -> None:
             self.calls = 0
 
@@ -440,54 +573,23 @@ def test_the_first_real_message_still_gets_the_group_background_after_a_notice()
                     text="（背景）昨晚聊到十一点", target=MessageTarget(group_id=GROUP),
                     sender_name="小L",
                 ),
-                IncomingMessage(
-                    message_id="history:2", session_id=session_id, user_id="2003",
-                    text="（背景）今早她请假了", target=MessageTarget(group_id=GROUP),
-                    sender_name="小M",
-                ),
             )
 
-    class Judge:
-        """判定说"接"（不然回复那条腿不会跑，也就看不到回复材料）。"""
-
-        async def complete(self, request):
-            return "<route>REPLY</route><topic>聊天</topic>"
-
-    class ReplyClient:
-        def __init__(self) -> None:
-            self.calls: list[object] = []
-
-        async def complete(self, request):
-            self.calls.append(request)
-            return "<decision>REPLY</decision><dialogue>KEEP</dialogue><reply>在。</reply>"
-
     provider = Provider()
-    client = ReplyClient()
-    engine = engine_for(client=client)
-    engine.judge_client = Judge()
+    engine, client = talkable_engine()
     engine.context_provider = provider
 
-    # 第一件事：群里先来一条通知。这个群她**还没**说过话（会话状态是这条通知建的）。
     asyncio.run(runtime._SeamBinder(engine, FakeTransport()).notify(
         MessageTarget(group_id=GROUP), "今晚八点维护。"))
-    state = engine.sessions.states[SESSION]
-    assert [entry.text for entry in state.history] == ["今晚八点维护。"], "先到的只有那条通知"
+    assert list(engine.sessions.states[SESSION].history) == [], "通知不进历史"
 
-    # 随后第一条**真人**消息到达。
     asyncio.run(engine.handle(message("在吗", message_id="m1", mentioned=True)))
 
-    assert provider.calls == 1, "通知不算'有人说过话'，群背景必须补一次"
-    texts = [entry.text for entry in state.history]
+    assert provider.calls == 1, "群背景必须照补（通知不占历史）"
+    texts = [entry.text for entry in engine.sessions.states[SESSION].history]
     assert "（背景）昨晚聊到十一点" in texts
-    assert "（背景）今早她请假了" in texts
-    # 背景真的进了她这一轮看到的材料（不是只躺在内存里）。
-    assert client.calls, "这一轮应当真的走到回复模型"
-    data = "\n".join(part["content"] for part in client.calls[0][1:])
-    assert "（背景）昨晚聊到十一点" in data
-    # 通知还在，而且仍然记成通知（没被背景挤掉、也没被当成她自己的话）。
-    assert "今晚八点维护。" in texts
-    assert any(entry.is_notice for entry in state.history)
-    assert 'speaker="notice"' in _format_history(state.history)
+    assert "今晚八点维护。" not in texts
+    assert "（背景）昨晚聊到十一点" in data_text(client.calls[0])
 
 
 def test_the_system_prompt_explains_the_notice_speaker_generically() -> None:
@@ -506,7 +608,7 @@ def test_the_system_prompt_explains_the_notice_speaker_generically() -> None:
     assert SYSTEM_PROMPT.index(yunru) < SYSTEM_PROMPT.index(sentence) < SYSTEM_PROMPT.index(yunru) + 200
 
 
-# --- 6. 洗正文那个函数本身 ---------------------------------------------------
+# --- 7. 洗正文那个函数本身 ---------------------------------------------------
 
 
 def test_redaction_masks_five_classes_and_keeps_short_numbers() -> None:
@@ -535,13 +637,3 @@ def test_the_redactor_is_idempotent_on_clean_text() -> None:
     text = "今晚八点维护，预计十分钟。"
     assert notice_text.for_history(text) == text
     assert notice_text.for_history(text) == notice_text.for_history(notice_text.for_history(text))
-
-
-def test_the_history_speaker_constant_is_documented() -> None:
-    """`speaker="notice"` 这个词只在一处生成（渲染那一处），别在别处再拼一遍。"""
-
-    engine, _transport, _status = notify(MessageTarget(group_id=GROUP), "维护通知。")
-    state = engine.sessions.states[SESSION]
-    state.mode = ConversationMode.ACTIVE
-    rendered = _format_history(state.history)
-    assert rendered.count('speaker="notice"') == 1

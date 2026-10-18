@@ -1120,7 +1120,14 @@ class DialogueSessions:
         return True
 
     def leave(self, session_id: str) -> None:
-        self.state(session_id).exit()
+        state = self.state(session_id)
+        state.exit()
+        # 通知清单的寿命**跟会话状态一致**（用户 2026-10-19：不给它单独发明上限）：
+        # 会话被清空/重置（`/admin clear`、她主动结束对话）时，清单一并清。
+        # LRU 淘汰那条路不用在这里处理——整个 `ConversationState` 一起没了。
+        # 注意**不是** `ConversationState.exit()`：那一条也会被"活跃期超时"调到，
+        # 而超时只是"这一轮不聊了"，历史还在，通知没理由跟着消失。
+        state.notices.clear()
         self.trigger(session_id).reset()
 
     def export(self, *, max_sessions: int = 200) -> list[dict[str, object]]:
@@ -2526,16 +2533,15 @@ class DialogueEngine:
     async def _seed_history(self, message: IncomingMessage, state: ConversationState) -> int:
         """把群聊背景补进短期历史；返回并入的条数。
 
-        只在会话里**还没有任何人说过话**时补（新会话的第一条消息），避免每轮都判断；
-    通知（`speaker="notice"`）不算"有人说过话"——见下面那条判据。
+        只在会话里已有的历史为空时补（新会话的第一条消息），避免每轮都判断；
         真正的限流由 provider 自己按群维护。任何失败都只是少一点背景。
+
+        **2026-10-19 回到原来的判据**：通知不再进历史（用户改了口径：「通知只在
+        上下文，不进历史」），所以"历史非空"与"已经有谁说过话"重新是同一件事，
+        上一轮为通知特判的那段（`any(not m.is_notice ...)`）随之撤回。
         """
 
-        if self.context_provider is None or any(not m.is_notice for m in state.history):
-            # 判据是"**她还没见过任何人说话**"，不是"历史列表非空"（2026-10-19 改）：
-            # 通知（`speaker="notice"`）也会进历史，但它不是谁说的话——如果拿"列表非空"
-            # 当判据，一个群只要先来一条通知，之后再也不会补上群背景，那是**改动前没有
-            # 的退化**（用户 2026-10-19 让命令回复也进历史，这类记录会更多）。
+        if self.context_provider is None or state.history:
             return 0
         try:
             seeded = await self.context_provider.collect_seed_messages(
@@ -4811,21 +4817,28 @@ class DialogueEngine:
             self.memory_service.record_sent_reply(message, text)
 
     def record_sent_notice(self, source: IncomingMessage, text: str) -> bool:
-        """**命令的回复发出去之后**，把它记进她这个会话的历史——记成通知。
+        """**命令的回复发出去之后**，把它放进"上下文里常驻的通知清单"。
 
-        用户 2026-10-19：「这个也进，一起当通知」（前半句是「哎要不还是通知吧，
-        不要当人了」）。所以：
+        用户 2026-10-19 三次口径，按时间顺序（前两次的落点都被后一次覆盖，别只读第一条）：
 
-        - 它进历史，但 `speaker="notice"`：**不是她说的**，也不是某个人说的；
-        - 进历史的那一份先过 `notice_text.for_history`（去 CQ/@、脱敏、截断 200 字）；
-        - **发出去的那一份一个字都不动**：操作者该看到的还是命令的完整输出。
-          （所以脱敏只发生在这里，而不是在出站路径上。）
+        1. 「这个也进，一起当通知」（前半句是「哎要不还是通知吧，不要当人了」）
+           —— 命令的回复跟后台通知同一套；
+        2. 「通知只在上下文，不进历史」——所以它**不写 `state.history`**；
+        3. 「**上下文要留，只是不进记忆**」——它在上下文里**每轮都在**（不是只出现
+           一次），而且因为不在历史里，**记忆 agent 也提取不到它**。
+
+        所以这里做三件事，一件都不多：
+
+        - 进上下文的那一份先过 `notice_text.for_history`（去 CQ/@、脱敏、截断 200 字）；
+        - 放进那个会话的通知清单（不设单独上限，寿命跟会话状态一致；见
+          `ConversationState.add_notice`）；
+        - **发出去的那一份一个字都不动**：操作者该看到的还是命令的完整输出
+          （所以脱敏只发生在这里，而不是在出站路径上）。
 
         与 `record_sent_reply` 的分工：那一条是"她真的说过的话"（进长期记忆的证据），
-        这一条**不进记忆**——命令回复不是她的人格台词，不该被记忆维护 agent 当成
-        她的表态收进去。
+        这一条**不进记忆**、**也不进历史**——命令回复不是她的人格台词。
 
-        返回"记没记"（没有会话 id / 洗成空串时不记）。
+        返回"放没放进去"（没有会话 id / 洗成空串时不放）。
         """
 
         session_id = str(getattr(source, "session_id", "") or "")
@@ -4836,17 +4849,16 @@ class DialogueEngine:
             return False
         try:
             state = self.sessions.state(session_id)
-        except Exception:  # noqa: BLE001 - 记历史失败不许影响"已经发出去"这件事
-            logger.warning("Stage 3 notice history skipped: session=%s", session_id, exc_info=True)
+        except Exception:  # noqa: BLE001 - 排材料失败不许影响"已经发出去"这件事
+            logger.warning("Stage 3 notice queued skipped: session=%s", session_id, exc_info=True)
             return False
-        now = self.clock()
-        recorded = state.record_notice(session_id, source.target, cleaned, now)
-        if recorded:
+        added = state.add_notice(cleaned)
+        if added:
             logger.info(
-                "Stage 3 command reply recorded as notice: session=%s chars=%s",
+                "Stage 3 command reply added to notice context: session=%s chars=%s",
                 session_id, len(cleaned),
             )
-        return recorded
+        return added
 
     def _purge_expired_relays(self, now: float) -> None:
         expired = [
@@ -5749,6 +5761,10 @@ class DialogueEngine:
             reaction_material=self._reaction_material(message),
             # 不可信数据的边界记号（空串 = 总闸门关掉了，见上面 `marker`；取法跟档位走）。
             session_marker=marker,
+            # 「上下文里常驻的通知」（2026-10-19 用户：「上下文要留，只是不进记忆」）：
+            # **每轮都渲染**，取的是副本、不清空——它在上下文里常驻到会话被清空为止。
+            # 不进 `state.history`，所以记忆 agent 从历史里也提取不到它。
+            notices=state.notice_texts(),
         )
         self._stats["model_calls"] += 1
         started_at = self.clock()
@@ -6699,10 +6715,11 @@ async def _deliver_reply(
     segmented_sender = getattr(transport, "send_segmented", None)
     origin = f"message:{source.message_id}" if source.message_id else ""
     combined: list[str] = []
-    # 通知（命令的回复）单独收一份：它们进历史时记成 `speaker="notice"`，
-    # 而且进历史的那一份要脱敏 + 截断 200 字（见 `record_sent_notice`）。
+    # 通知（命令的回复）单独收一份：它们**不进历史**，只排进"下一轮材料"
+    # （`speaker="notice"`，用户 2026-10-19：「通知只在上下文，不进历史」），
+    # 排进去的那一份要脱敏 + 截断 200 字（见 `record_sent_notice`）。
     # 与 `combined` 同一口径：**真发出去 / 排进补发队列的**才算——发失败的那条
-    # 一个字都不进历史（她没说过、这次也没送到，记进去就是假信息）。
+    # 一个字都不排（她没说过、这次也没送到，排进去就是假信息）。
     notice_parts: list[str] = []
     connection_down = False
     for index, item in enumerate(outgoing):
@@ -6759,9 +6776,9 @@ async def _deliver_reply(
         # 下一轮会当成什么都没说过——重复比迟到更难看。
         engine.record_sent_reply(source, "\n\n".join(combined))
     if notice_parts:
-        # 命令的回复：**发出去之后**才记进她的历史（2026-10-19 用户「这个也进，
-        # 一起当通知」）。放在这里而不是 `handle()` 里，就是因为"发出去了"这件事
-        # 只有这里知道——命令路径返回值那一刻还没发。
+        # 命令的回复：**发出去之后**才排进"下一轮材料"（2026-10-19 用户「这个也进，
+        # 一起当通知」→ 随后「通知只在上下文，不进历史」）。放在这里而不是 `handle()`
+        # 里，就是因为"发出去了"这件事只有这里知道——命令路径返回值那一刻还没发。
         engine.record_sent_notice(source, "\n\n".join(notice_parts))
 
 
