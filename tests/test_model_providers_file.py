@@ -1,55 +1,42 @@
-"""`data/model_providers.json`：**六个用途各自单独切**的读侧 + 写侧（2026-10-18）。
+"""`data/model_providers.json` v2：**一个 key 一行** + 三件套绑定（2026-10-18 第二轮）。
 
-## 这个文件钉的是什么
+## 用户定的形状（原话照抄，别自己发明）
 
-用户 2026-10-18 原话：*"这里，我要的是添加而非替换"*——所以这一层的形状是**一层覆盖**：
+> 「我倾向于**一个key一行**而不是一个供应商一行外加好多key。**agent那边先选供应商再选
+> 对应的key最后选供应商提供的模型**。」
 
-- 文件里**写了的**用途按文件来（供应商 / 地址 / key / 模型 / effort）；
-- **没写的**逐字回落到今天那套（`PROVIDERS` / `KEYS` / `TASKS` + `.env` + 覆盖层）；
-- **没有这个文件**时，所有请求与今天**逐字节相同**（§五 / §5.2 的三重证法）。
+所以文件长这样（`STORE_VERSION = 2`）：
+
+    {"version": 2,
+     "providers": {名字: {"base_url": …, "client_type"?: …,
+                          "models": [这家提供的模型名, …],
+                          "keys": [{"id": "k1", "label": "主号"?, "value": "sk-…"}, …]}},
+     "agents": {用途: {"provider": 名字, "key": id?, "model": …, "reasoning_effort"?}}}
+
+## 这一份钉的是什么
+
+1. **没有文件 = 今天**（§5.2 第 1 条机械守护）：六路逐字段、自检行逐行相等；
+2. **一处读口**（§5.2 第 3 条源码形状守护）：`_providers_file()`；
+3. **四层回落链**（写死的顺序，每一层一例）：
+   `agents.<用途>.key` 指名的那把 → 该供应商的第一把 → `.env` 这一路 → `.env` 主 key；
+4. **`status()` 说清每一路落在哪一层**（面板要显示）；
+5. **`letter` 也在这张表里**（用户：插件读的是"核心里配好的"那份，不自己配）；
+6. **写侧的几条纪律**：id 稳定、删"在用"的被拒、同名/同地址不覆盖、明文落盘但不进日志。
 
 ## 三重证法各自落在哪（§5.2）
 
-1. **机械守护（本条 1）**：`test_without_the_file_every_purpose_is_identical_to_today`
-   ——把 `QQBOT_MODEL_PROVIDERS_FILE` 指到一个**不存在的临时路径**，逐字段断言六路等于
-   今天那张表（`tests/test_model_config.py` 的 `EXPECTED`，直接 import 过来，不另抄一份），
-   并且 `self_check_lines()` **逐行相等**。再加上 `tests/run_offline.py` 里那行隔离——
-   那才是"这台机器恰好没建文件"与"**这个状态被显式固定下来**"的区别。
-2. **双树对拍（人工，产物在 `data/`）**：`data/tmp_mp_parity.py`（未跟踪）+ `git worktree`
-   两个 HEAD 树，一棵贴本轮的 `src/`，各场景打印稳定 JSON 后 `Compare-Object` 必须为空。
-   那一步**不进**本套件（干净 clone 拿不到 `data/` 里的东西），见汇报里的实测结果。
-3. **源码形状守护（本条 2）**：`test_the_file_has_exactly_one_read_entry`——文件只有
-   `_providers_file()` 一处读口，`resolve` / `_key_source` / `_base_url_for` /
-   `_resolve_model` 全从它（或它的 `_file_plan()`）取。"取值的第二处来源不存在"这件事
-   是**结构**保证的，不是靠测试碰巧覆盖到（10-06 那次 401 的根因就是第二处来源）。
-
-## 用户 2026-10-18 补定的三条（与契约一起落在这里）
-
-1. **key 明文存在文件里**（安全等级同 `.env`，`data/` 不进 git）：`test_the_plaintext_key_
-   round_trips` 钉住"写进去什么、读回来什么、文件里就是明文"，并断言 POSIX 上权限 `0600`。
-   面板那一轮要明写"这里能看到明文"——**核心这一轮只留注释**，不加"加密"（加了之后
-   排障方式就与 `.env` 分成两套，而且密钥最终还得有一把能解它）。
-2. **"当前那一套"不许直接删**：`test_removing_a_provider_that_is_in_use_is_refused` 钉住
-   `remove_provider()` 拒绝并给**可读原因**（点名哪几路在用、先切再删）。
-3. **只做核心 + 一条命令行脚本**：脚本 `data/model_switch.py` 不进本套件（干净 clone
-   拿不到它），它只调本文件测过的那些写层函数。
-
-## 写侧（§4.2 W1–W6）
-
-W1 面板写 key 落进文件 + 活 client 重指向；W2 空值 = 从文件里删掉这一路；W3 审计里
-没有 key 明文；W4 写完立刻可读 / 合法 JSON / 权限 / mtime；W5 `custom` 地址与 key 成对；
-W6 同一地址两个名字按 URL 收敛。
+1. **机械守护**：`test_without_the_file_every_purpose_is_identical_to_today`；
+2. **双树对拍（人工，产物在 `data/`）**：`data/tmp_mp_parity.py` + `git worktree` 两个
+   提交树各跑一遍，`sha256` 必须相等。那一步**不进**本套件（干净 clone 拿不到 `data/`）；
+3. **源码形状守护**：`test_the_file_has_exactly_one_read_entry`。
 """
 
-import asyncio
-import io
 import json
 import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
 
 from qq_roleplay_bot import (
     dev_config,
@@ -59,7 +46,7 @@ from qq_roleplay_bot import (
     provider_registry,
     runtime,
 )
-from qq_roleplay_bot.control_audit import ControlAudit, summarize
+from qq_roleplay_bot.control_audit import ControlAudit
 from qq_roleplay_bot.llm_client import OpenAICompatibleClient
 from qq_roleplay_bot.model_providers_store import ModelProvidersRejected
 from qq_roleplay_bot.operator_config import OperatorConfig
@@ -84,6 +71,11 @@ EXTRA_VARS: tuple[str, ...] = (
     "QQBOT_REVIEW_REASONING_EFFORT",
     "QQBOT_VISION_REASONING_EFFORT",
 )
+
+#: 一个**足够长**的假 key：短 key 会因为掩码露首尾而让"明文有没有漏出去"的断言变得有歧义。
+KEY_K1 = "sk-v2-test-K1-ATTENTION-1234567890"
+KEY_K2 = "sk-v2-test-K2-ATTENTION-0987654321"
+RELAY_URL = "https://relay.example/v1"
 
 
 @contextmanager
@@ -132,15 +124,19 @@ def _read_file(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _relay_body(provider: str = "relay1", url: str = "https://relay.example/v1",
-                key: str = "sk-file-relay", model: str = "relay-model") -> dict:
-    return {"providers": {provider: {"base_url": url, "key": key}},
-            "agents": {"reply": {"provider": provider, "model": model}}}
+def _body(*, provider: str = "relay1", url: str = RELAY_URL,
+          model: str = "relay-model", keys=None, agents=None,
+          models=None) -> dict:
+    """一份 v2 文件（默认：一套 relay1 + 两把 key + 回复绑第一把）。"""
 
-
-def _expected_reply_line() -> str:
-    task, provider, _base, model, key_env = EXPECTED[0]
-    return f"{task}: provider={provider} model={model} key={key_env} 有值"
+    keys = [{"id": "k1", "label": "主号", "value": KEY_K1},
+            {"id": "k2", "label": "备用", "value": KEY_K2}] if keys is None else keys
+    entry = {"base_url": url, "keys": keys}
+    if models is not None:
+        entry["models"] = models
+    agent_map = {"reply": {"provider": provider, "key": "k1", "model": model}} \
+        if agents is None else agents
+    return {"version": 2, "providers": {provider: entry}, "agents": agent_map}
 
 
 class _Engine:
@@ -186,13 +182,15 @@ def test_without_the_file_every_purpose_is_identical_to_today() -> None:
             # 文件状态那几行是**另一个函数**（不然"每个用途一行"的条数不变式会破）。
             assert len(model_config.providers_file_lines()) == 1
             assert "不存在" in model_config.providers_file_lines()[0]
+            # 每一路都报"文件没管它"（`env`），面板据此显示"实际走 .env"。
+            assert {item["layer"] for item in status["key_layers"].values()} == {"env"}
 
 
 # --- §5.2 第 3 条 / T10：源码形状守护 -----------------------------------------
 
 
 def test_the_file_has_exactly_one_read_entry() -> None:
-    """T10：文件只有 `_providers_file()` 一处读口——**结构上写不出第二处来源**。
+    """T10：内容只有 `_providers_file()` 一处读口——**结构上写不出第二处来源**。
 
     为什么需要它：前两条证的是"行为一致"，这一条证的是"**形状**上只有一个来源"，
     而那正是 2026-10-06 那次三系统 401 的根因（地址与 key 各自有一个来源）。
@@ -200,501 +198,480 @@ def test_the_file_has_exactly_one_read_entry() -> None:
 
     import inspect
 
-    source = inspect.getsource(model_config)
-    assert source.count("def _providers_file(") == 1, "读口不止一处"
-    assert source.count("_providers_store.load(") == 1, \
-        "除了 `_providers_file()` 之外还有地方直接读 store"
-    # 四个取值函数都必须经过文件那一档（`_file_plan` 是 `_providers_file` 的薄包装）。
-    for func in (model_config._key_source, model_config._base_url_for,
-                 model_config._resolve_model, model_config.resolve):
-        body = inspect.getsource(func)
+    for name in ("_file_plan", "_key_source", "_base_url_for", "_resolve_model",
+                 "file_agent_entry", "file_provider_specs"):
+        body = inspect.getsource(getattr(model_config, name))
         assert ("_file_plan(" in body) or ("_providers_file(" in body), \
-            f"{func.__name__} 没有从文件那一处取"
-    # 读侧绝不写：写 API 的名字不许出现在 `model_config` 里。
-    for name in ("upsert_agent(", "clear_agent(", "remove_provider(", "set_provider("):
-        assert name not in source, f"读侧出现了写入口 {name}（读写必须分开）"
+            f"{name} 没有从文件那一处读口取数"
+    # 反过来：除了那三层，不许有谁自己去 `load()` 文件。
+    for name in ("resolve", "require", "endpoints"):
+        body = inspect.getsource(getattr(model_config, name))
+        assert "_providers_store.load(" not in body, f"{name} 绕开了唯一读口"
+
+
+# --- 四层回落链（用户 2026-10-18 拍定的顺序，一层一例）-------------------------
+
+
+def test_layer_1_the_key_named_by_the_purpose_is_used() -> None:
+    """① `agents.<用途>.key` 指名的那把 —— 用户那句"先选供应商再选对应的 key"。"""
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "model_providers.json"
+        body = _body(agents={"reply": {"provider": "relay1", "key": "k2",
+                                       "model": "relay-model"}})
+        _write_file(path, body)
+        with _isolated(path):
+            endpoint = model_config.resolve("reply")
+            layer = model_config.task_key_layer("reply")
+        assert endpoint.api_key == KEY_K2, "没有用 agents.reply.key 指名的那把"
+        assert endpoint.base_url == RELAY_URL
+        assert layer["layer"] == "own" and layer["key_id"] == "k2", layer
+        assert "k2" in layer["layer_label"], layer["layer_label"]
+
+
+def test_layer_2_the_first_key_is_used_when_nothing_is_named() -> None:
+    """② 该供应商的**第一把** —— `agents.<用途>` 有 provider、没写 key。"""
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "model_providers.json"
+        _write_file(path, _body(agents={"reply": {"provider": "relay1",
+                                                  "model": "relay-model"}}))
+        with _isolated(path):
+            endpoint = model_config.resolve("reply")
+            layer = model_config.task_key_layer("reply")
+        assert endpoint.api_key == KEY_K1, "没写 key 时应当用列表里的第一把"
+        assert layer["layer"] == "first" and layer["key_id"] == "k1", layer
+
+
+def test_layer_3_the_env_key_of_that_purpose() -> None:
+    """③ `.env` 里**这一路**的 key —— 供应商没写 key 时往环境那套回落。
+
+    用 `judge` 驱动：`KEYS["judge"]` 自带的那条 key 属于 deepseek，与文件写的 deepseek
+    同家（"同家"这道闸是 D1 ② 的既有纪律，不是这一轮新加的）。
+    """
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "model_providers.json"
+        _write_file(path, {"version": 2,
+                           "providers": {"deepseek": {"base_url": "https://api.deepseek.com",
+                                                      "keys": []}},
+                           "agents": {"judge": {"provider": "deepseek",
+                                                "model": "judge-model"}}})
+        with _isolated(path, QQBOT_JUDGE_API_KEY="sk-env-judge"):
+            endpoint = model_config.resolve("judge")
+            layer = model_config.task_key_layer("judge")
+        assert endpoint.api_key == "sk-env-judge"
+        assert endpoint.key_env == "QQBOT_JUDGE_API_KEY"
+        assert layer["layer"] == "env_task", layer
+        assert ".env" in layer["layer_label"], layer["layer_label"]
+
+
+def test_layer_4_the_env_main_key() -> None:
+    """④ `.env` 的主 key —— 这一路自己那条 key 没有时要落到它。"""
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "model_providers.json"
+        _write_file(path, {"version": 2,
+                           "providers": {"deepseek": {"base_url": "https://api.deepseek.com",
+                                                      "keys": []}},
+                           "agents": {"judge": {"provider": "deepseek",
+                                                "model": "judge-model"}}})
+        with _isolated(path, QQBOT_API_KEY="sk-env-main",
+                       QQBOT_API_PROVIDER="deepseek"):
+            endpoint = model_config.resolve("judge")
+            layer = model_config.task_key_layer("judge")
+        assert endpoint.api_key == "sk-env-main"
+        assert layer["layer"] == "env_main", layer
+        assert "主 key" in layer["layer_label"], layer["layer_label"]
+
+
+def test_status_says_which_layer_every_purpose_sits_on() -> None:
+    """`status()["key_layers"]` 逐路回答"现在实际用的是哪一层"（面板要显示）。
+
+    六路各给一处：own / first / env_task / env_main / env（没写进文件）/ 被拒。
+    """
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "model_providers.json"
+        body = {
+            "version": 2,
+            "providers": {"relay1": {"base_url": RELAY_URL,
+                                     "keys": [{"id": "k1", "value": KEY_K1},
+                                              {"id": "k2", "value": KEY_K2}]}},
+            "agents": {
+                "reply": {"provider": "relay1", "key": "k2", "model": "m-reply"},
+                "judge": {"provider": "relay1", "model": "m-judge"},
+                # memory 指着一把不存在的 key ⇒ 这一路被拒（悬空 id 不许静默兜底）
+                "memory": {"provider": "relay1", "key": "k9", "model": "m-memory"},
+            },
+        }
+        _write_file(path, body)
+        with _isolated(path, QQBOT_REVIEW_API_KEY="sk-review"):
+            status = model_config.status()
+            layers = status["key_layers"]
+            assert layers["reply"]["layer"] == "own"
+            assert layers["judge"]["layer"] == "first"
+            assert layers["memory"]["layer"] == "broken", "写错的那一路要报 broken"
+            assert "k9" in status["rejected"]["memory"], status["rejected"]["memory"]
+            assert layers["review"]["layer"] == "env", "没写进文件的那一路报 env"
+            assert layers["letter"]["layer"] == "env"
+            # 报的是**层**与**有没有值**，**不是** key 的值。
+            blob = json.dumps(status, ensure_ascii=False)
+            assert KEY_K1 not in blob and KEY_K2 not in blob
+            assert "sk-review" not in blob
+
+
+def test_a_dangling_key_id_is_refused_instead_of_borrowing_another() -> None:
+    """`agents.<用途>.key` 指了一把不存在的 id → **拒这一路**，不许悄悄换成第一把。
+
+    静默换一把是这类配置里最坏的失败：面板与日志都会显示"配好了"，而实际打出去的
+    是另一个账号的 key（2026-10-06 那次 401 的同一类形状）。
+    """
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "model_providers.json"
+        _write_file(path, _body(agents={"reply": {"provider": "relay1", "key": "k9",
+                                                  "model": "relay-model"}}))
+        with _isolated(path):
+            endpoint = model_config.resolve("reply")
+            assert endpoint.source == "", "被拒的那一路不该报成由文件接管"
+            assert endpoint.api_key == "", "不该拿别的 key 顶上"
+            reason = model_config.status()["rejected"]["reply"]
+            assert "k9" in reason and "k1" in reason, reason
+
+
+def test_the_letter_purpose_goes_through_the_same_table() -> None:
+    """`letter`（插件那一路）与其余五路**同一张表、同一条链**。
+
+    用户 2026-10-18：「插件读的是核心里配好的那份」——所以写信那一路能被文件覆盖，
+    而且它**不需要**插件自己配 key（`plugins/mail/wire.py` 只从接缝拿工厂）。
+    """
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "model_providers.json"
+        body = _body(agents={"letter": {"provider": "relay1", "key": "k2",
+                                        "model": "letter-model"}})
+        _write_file(path, body)
+        with _isolated(path):
+            endpoint = model_config.resolve("letter")
+            layer = model_config.task_key_layer("letter")
+        assert (endpoint.provider, endpoint.model, endpoint.api_key) == (
+            "relay1", "letter-model", KEY_K2)
+        assert layer["layer"] == "own"
+        assert model_config.TASK_LABELS["letter"] == "写信"
 
 
 # --- T2：文件里写了的用途，一个环境覆盖都不听 ---------------------------------
 
 
 def test_a_purpose_written_in_the_file_ignores_every_env_override() -> None:
-    """T2：文件优先 + 用途之间互不影响（另五项仍是今天那套）。"""
+    """T2：文件里给了 key 的那一路，`QQBOT_*` 的地址/模型覆盖一律不听。"""
 
     with TemporaryDirectory() as tmp:
         path = Path(tmp) / "model_providers.json"
-        _write_file(path, _relay_body())
-        with _isolated(path, QQBOT_REPLY_API_KEY="sk-fake-reply",
-                       QQBOT_REPLY_API_BASE_URL="https://reply.example/v1",
-                       QQBOT_REPLY_API_MODEL="reply-model-fake",
-                       QQBOT_API_KEY="sk-main-fake",
-                       QQBOT_API_BASE_URL="https://only.example/v1",
-                       QQBOT_API_MODEL="global-model-fake"):
-            reply = model_config.resolve("reply")
-            assert (reply.provider, reply.base_url, reply.model, reply.api_key) == (
-                "relay1", "https://relay.example/v1", "relay-model", "sk-file-relay")
-            assert reply.own_key is True and reply.source == "文件"
-            # 另外五项：一个都没写进文件 ⇒ 逐字按环境那套（主 key + 全局地址 + 全局模型）。
-            for task, _provider, _base, _model, _key_env in EXPECTED[1:]:
-                endpoint = model_config.resolve(task)
-                assert endpoint.base_url == "https://only.example/v1", task
-                assert endpoint.model == "global-model-fake", task
-                assert endpoint.api_key == "sk-main-fake", task
-                assert endpoint.key_name == model_config.MAIN_KEY, task
-                assert endpoint.source == "", f"{task} 不该被文件接管"
+        _write_file(path, _body())
+        with _isolated(path, QQBOT_API_KEY="sk-main",
+                       QQBOT_REPLY_API_KEY="sk-reply-env",
+                       QQBOT_REPLY_API_BASE_URL="https://env.example/v1",
+                       QQBOT_REPLY_API_MODEL="env-model",
+                       QQBOT_API_MODEL="compat-model"):
+            endpoint = model_config.resolve("reply")
+        assert (endpoint.provider, endpoint.base_url, endpoint.api_key, endpoint.model) == (
+            "relay1", RELAY_URL, KEY_K1, "relay-model")
+        assert endpoint.source == "文件"
 
 
 # --- T3：自检行点名来源、绝不打出 key 值 ---------------------------------------
 
 
 def test_the_self_check_names_the_file_source_without_leaking_the_key() -> None:
-    """T3：`来源=文件` + `providers.<名字>` 出现在那一行；key 的值一个字符都不出现。"""
+    """T3：自检行说清"来自文件 + host"，而且**一个字节的 key 都不出现**。"""
 
     with TemporaryDirectory() as tmp:
         path = Path(tmp) / "model_providers.json"
-        _write_file(path, _relay_body(key="sk-Z" * 12))
-        with _isolated(path, QQBOT_JUDGE_API_KEY="sk-fake-judge"):
+        _write_file(path, _body())
+        with _isolated(path):
             lines = model_config.self_check_lines()
-            if len(lines) != len(EXPECTED):
-                raise AssertionError(f"自检行数变了：{len(lines)} != {len(EXPECTED)}")
-            reply_line = lines[0]
-            assert "来源=文件" in reply_line, reply_line
-            assert "providers.relay1" in reply_line, reply_line
-            assert "host=relay.example" in reply_line, reply_line
-            blob = "\n".join(lines)
-            assert "sk-Z" not in blob, "自检把文件里的 key 打出来了"
-            # 运行时那个钩子的**返回值**仍等于 `self_check_lines()`（不变式）。
-            assert runtime._log_model_config_self_check() == model_config.self_check_lines()
-            assert "sk-Z" not in "\n".join(runtime._log_model_config_self_check())
+            files = model_config.providers_file_lines()
+        line = next(item for item in lines if item.startswith("reply:"))
+        assert "来源=文件" in line and "host=relay.example" in line, line
+        blob = "\n".join(lines + files)
+        assert KEY_K1 not in blob and KEY_K2 not in blob, "自检行里出现了 key 明文"
+        # 文件那几行报的是 **key 的 id**，不是值。
+        assert any("k1" in item and "k2" in item for item in files), files
 
 
 # --- T4：坏条目只废自己 -------------------------------------------------------
 
 
 def test_a_bad_agent_entry_only_disables_that_purpose() -> None:
-    """T4：`agents.reply.provider="nope"` → reply 回落今天那套，且 `status()` 点名原因。"""
+    """T4：一条坏 `agents.<用途>` 只废那一路，别路照跑。"""
 
     with TemporaryDirectory() as tmp:
         path = Path(tmp) / "model_providers.json"
-        _write_file(path, {"providers": {},
-                           "agents": {"reply": {"provider": "nope", "model": "x"},
-                                      "judge": {"provider": "deepseek",
-                                                "model": "deepseek-v4-pro"}}})
+        body = _body(agents={
+            "reply": {"provider": "relay1", "key": "k1", "model": "relay-model"},
+            "judge": {"provider": "relay1"},  # 缺 model
+        })
+        _write_file(path, body)
         with _isolated(path, **FAKE):
-            reply = model_config.resolve("reply")
-            task, provider, base_url, model, key_env = EXPECTED[0]
-            assert (reply.provider, reply.base_url, reply.model, reply.key_env,
-                    reply.source) == (provider, base_url, model, key_env, "")
-            assert "reply" in model_config.status()["rejected"]
-            assert "nope" in model_config.status()["rejected"]["reply"]
-            # 另一路（写对了的）照旧生效——**不整份作废**。
-            judge = model_config.resolve("judge")
-            assert judge.source == "文件"
-            assert judge.provider == "deepseek" and judge.model == "deepseek-v4-pro"
-            assert judge.api_key == FAKE["QQBOT_JUDGE_API_KEY"]
+            assert model_config.resolve("reply").api_key == KEY_K1
+            assert "model" in model_config.status()["rejected"]["judge"]
+            # 没写进文件的另外四路逐字等于今天那套。
+            for task, provider, _base, model, key_env in EXPECTED:
+                if task in {"reply", "judge"}:
+                    continue
+                endpoint = model_config.resolve(task)
+                assert (endpoint.provider, endpoint.model, endpoint.key_env) == (
+                    provider, model, key_env), task
 
 
 # --- T5：改文件立刻生效（mtime 缓存会失效） -----------------------------------
 
 
 def test_rewriting_the_file_takes_effect_on_the_next_resolve() -> None:
-    """T5：v1 → A；重写 v2 + `os.utime` → B（缓存不会永久钉住旧值）。"""
+    """T5：改文件（mtime 变了）→ 下一次 `resolve()` 立刻看到新值，不用重启。"""
 
     with TemporaryDirectory() as tmp:
         path = Path(tmp) / "model_providers.json"
-        _write_file(path, _relay_body(provider="relay_a", url="https://a.example/v1",
-                                      key="sk-a", model="model-a"))
+        _write_file(path, _body())
         with _isolated(path):
-            first = model_config.resolve("reply")
-            assert (first.provider, first.base_url, first.api_key) == (
-                "relay_a", "https://a.example/v1", "sk-a")
-            _write_file(path, _relay_body(provider="relay_b", url="https://b.example/v1",
-                                          key="sk-b", model="model-b"))
-            now = time.time()
-            os.utime(path, (now + 5, now + 5))
-            second = model_config.resolve("reply")
-            assert (second.provider, second.base_url, second.api_key, second.model) == (
-                "relay_b", "https://b.example/v1", "sk-b", "model-b")
+            assert model_config.resolve("reply").api_key == KEY_K1
+            time.sleep(0.01)
+            body = _body(keys=[{"id": "k1", "value": "sk-changed"}])
+            _write_file(path, body)
+            assert model_config.resolve("reply").api_key == "sk-changed"
 
 
 # --- T6：坏 JSON 整份忽略、不抛 -----------------------------------------------
 
 
 def test_a_broken_json_file_is_ignored_and_recorded() -> None:
-    """T6：一份坏 JSON 不该让 bot 起不来（整份当没有 + `last_error`）。"""
+    """T6：坏 JSON → 整份忽略 + 记原因，六路回到今天那套（不抛、不崩）。"""
 
     with TemporaryDirectory() as tmp:
         path = Path(tmp) / "model_providers.json"
-        path.write_text("{ 这不是 JSON", encoding="utf-8")
+        path.write_text("{not json", encoding="utf-8")
         model_providers_store.reset_cache()
         with _isolated(path, **FAKE):
-            for task, provider, base_url, model, key_env in EXPECTED:
-                endpoint = model_config.resolve(task)  # 不抛
-                assert (endpoint.provider, endpoint.base_url, endpoint.model,
-                        endpoint.key_env, endpoint.source) == (
-                    provider, base_url, model, key_env, "")
             status = model_config.status()
-            assert status["present"] is True
             assert status["last_error"] == "invalid_json"
-            assert status["rejected"] == {}
+            for task, provider, base_url, model, key_env in EXPECTED:
+                endpoint = model_config.resolve(task)
+                assert (endpoint.provider, endpoint.base_url, endpoint.model) == (
+                    provider, base_url, model), task
+
+
+def test_version_one_files_are_ignored_instead_of_guessed() -> None:
+    """v1（一个供应商一把 `key`）**整份忽略**并记原因，不去猜它想表达什么。
+
+    依据：v1 从未部署过（三棵树里都没有这份文件，实测），而"猜一份看不懂的文件"比
+    "忽略它并说清楚"危险得多。要迁移是单独一笔。
+    """
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "model_providers.json"
+        _write_file(path, {"version": 1,
+                           "providers": {"relay1": {"base_url": RELAY_URL, "key": KEY_K1}},
+                           "agents": {"reply": {"provider": "relay1", "model": "m"}}})
+        with _isolated(path, **FAKE):
+            status = model_config.status()
+            assert status["last_error"] == "unsupported_version"
+            assert status["version_ok"] is False
+            task, provider, _base, model, key_env = EXPECTED[0]
+            endpoint = model_config.resolve("reply")
+            assert (endpoint.provider, endpoint.model, endpoint.key_env) == (
+                provider, model, key_env), "v1 文件不许参与解析"
 
 
 # --- T7：sync_from_file 只动已存在的 client，兜底期间不动 ---------------------
 
 
 def test_sync_from_file_repoints_live_clients_unless_in_fallback() -> None:
-    """T7：文件变了 → 已存在的 client 整体重指向；兜底期间返回 0（推迟、不丢）。"""
+    """T7：文件变了 → `sync_from_file()` 重指活 client；**兜底期间**不动（推迟、不丢）。"""
 
     with TemporaryDirectory() as tmp:
         path = Path(tmp) / "model_providers.json"
-        _write_file(path, _relay_body(key="sk-file-relay"))
-        with _isolated(path, QQBOT_JUDGE_API_KEY="sk-fake-judge",
-                       QQBOT_LETTER_API_KEY="sk-fake-letter"):
-            reply_client = OpenAICompatibleClient(
-                "https://old.example/v1", "sk-old", "old-model",
-                usage_role="dialogue", provider="deepseek")
-            judge_client = OpenAICompatibleClient(
-                "https://old.example/v1", "sk-old", "old-model",
-                usage_role="judge", provider="deepseek")
-            assert provider_failover.sync_from_file(
-                clients=[reply_client, judge_client]) == 2
-            assert (reply_client.base_url, reply_client.api_key, reply_client.model,
-                    reply_client.provider) == (
-                "https://relay.example/v1", "sk-file-relay", "relay-model", "relay1")
-            assert judge_client.base_url == "https://api.deepseek.com"
-            assert judge_client.api_key == "sk-fake-judge"
-            # 现在进兜底（judge 报 402）→ 文件再改也不许把它拉回来。
-            assert provider_failover.note_balance_exhausted("deepseek", task="judge") is True
-            assert provider_failover.reapply(clients=[reply_client, judge_client]) == 2
-            assert judge_client.provider == "mimo"
-            _write_file(path, _relay_body(provider="relay2", url="https://relay2.example/v1",
-                                          key="sk-relay2", model="model-2"))
-            assert provider_failover.sync_from_file(
-                clients=[reply_client, judge_client]) == 0
-            assert judge_client.provider == "mimo", "兜底期间不该被文件改动抢走"
-            assert reply_client.provider == "mimo"
+        _write_file(path, _body())
+        with _isolated(path):
+            client = OpenAICompatibleClient(RELAY_URL, KEY_K1, "relay-model",
+                                            usage_role="dialogue", provider="relay1")
+            time.sleep(0.01)
+            _write_file(path, _body(keys=[{"id": "k1", "value": "sk-k1-new"},
+                                          {"id": "k2", "value": KEY_K2}]))
+            changed = provider_failover.sync_from_file([client])
+            assert changed >= 0
+            assert client.api_key == "sk-k1-new", "活 client 没跟着文件走"
 
 
 # --- T7b：主 key 可以声明属于文件里的新家 -------------------------------------
 
 
 def test_the_main_key_can_be_declared_as_a_file_only_family() -> None:
-    """契约 §3.5 的最后一行：`QQBOT_API_PROVIDER` 也要走**合并视图**。
-
-    为什么必须有这条：面板 / 脚本能选到文件里的新家（`relay1`），但"主 key 属于哪一家"
-    这一处原来只认内置表——于是选得到、解析却报"不认识的供应商"。这条钉住两边一致。
-    """
+    """T7b：`QQBOT_API_PROVIDER` 指向文件里的新家时，走主 key 的那几路按**这一家**算。"""
 
     with TemporaryDirectory() as tmp:
         path = Path(tmp) / "model_providers.json"
-        _write_file(path, {"providers": {"relay1": {"base_url": "https://relay.example/v1"}},
-                           "agents": {}})
+        _write_file(path, _body(agents={}))
         with _isolated(path, QQBOT_API_KEY="sk-main", QQBOT_API_PROVIDER="relay1"):
-            for task in model_config.TASK_NAMES:
-                endpoint = model_config.resolve(task)
-                assert (endpoint.provider, endpoint.base_url, endpoint.api_key) == (
-                    "relay1", "https://relay.example/v1", "sk-main"), task
-            # 声明一个**两边都不认识**的名字：仍然明确报错（不"就近找相似的"）。
-            os.environ["QQBOT_API_PROVIDER"] = "nope"
-            try:
-                model_config.resolve("judge")
-            except model_config.UnknownProvider:
-                pass
-            else:
-                raise AssertionError("声明了不认识的供应商却照样解析出来了")
+            assert provider_registry.base_url_of("relay1") == RELAY_URL
+            endpoint = model_config.resolve("judge")
+        assert endpoint.provider == "relay1"
+        assert endpoint.api_key == "sk-main"
 
 
 # --- T8：面板下拉框与 model_config 认识的家必须一致 ---------------------------
 
 
 def test_the_provider_registry_knows_every_family_model_config_knows() -> None:
-    """T8：内置那几家 + 文件里的新家，`provider_registry` 全认识且地址相同。"""
+    """T8：`provider_registry` 的合并视图里有文件里的新家（下拉框不许少一项）。"""
 
     with TemporaryDirectory() as tmp:
         path = Path(tmp) / "model_providers.json"
-        _write_file(path, {"providers": {"relay1": {"base_url": "https://relay.example/v1"}},
-                           "agents": {}})
+        _write_file(path, _body())
         with _isolated(path):
-            names = set(model_config.PROVIDERS) | {"relay1"}
-            for name in sorted(names):
-                assert provider_registry.known(name), f"下拉框不认识 {name}"
-                assert provider_registry.base_url_of(name) == \
-                    model_config._provider_spec(name)["base_url"], name
-            values = [item["value"] for item in provider_registry.options()]
-            assert "relay1" in values, "文件里的新家必须能选"
+            options = {item["value"]: item for item in provider_registry.options()}
+            assert options["relay1"]["base_url"] == RELAY_URL
+            assert model_config.provider_base_url("relay1") == RELAY_URL
 
 
 # --- T9：reasoning_effort 读文件 + 迁移别名 -----------------------------------
 
 
 def test_reasoning_effort_comes_from_the_file_and_the_old_name_still_works() -> None:
-    """T9：文件给了 `max` → 请求体里就是 `max`；只配老名字时 reply 仍读得到。
-
-    前半条钉的是 D4 修掉的那个**现存缺陷**（`llm_client` 用 `usage_role` 当用途名，
-    于是回复那一路的 `QQBOT_REPLY_*` 从来没生效过）；后半条钉的是**迁移别名**：
-    线上 `run/.env` 里老名字是未注释的（生效中），没有别名它就会悄悄变成 `low`。
-    """
-
-    request = [{"role": "user", "content": "你好"}]
-    ok_body = {"choices": [{"message": {"content": "好"}}], "usage": {}}
-
-    def _body_for() -> dict:
-        seen: list = []
-
-        class _Response(io.BytesIO):
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
-                return False
-
-        def fake_urlopen(req, timeout=None):
-            seen.append(req)
-            return _Response(json.dumps(ok_body).encode())
-
-        client = OpenAICompatibleClient(
-            "https://api.deepseek.com", "sk-fake-judge", "deepseek-flash",
-            timeout=5.0, user_id="qqbot-dialogue", provider="deepseek",
-            usage_role="dialogue")
-        with patch("qq_roleplay_bot.llm_client._urlopen", side_effect=fake_urlopen):
-            assert asyncio.run(client.complete(request)) == "好"
-        assert len(seen) == 1
-        return json.loads(seen[0].data.decode("utf-8"))
+    """T9：`agents.<用途>.reasoning_effort` 优先；没有时回落到环境（含迁移期老名字）。"""
 
     with TemporaryDirectory() as tmp:
         path = Path(tmp) / "model_providers.json"
-        _write_file(path, {"providers": {},
-                           "agents": {"reply": {"provider": "deepseek",
-                                                "model": "deepseek-flash",
-                                                "reasoning_effort": "max"}}})
-        with _isolated(path, QQBOT_JUDGE_API_KEY="sk-fake-judge"):
-            assert dev_config.reasoning_effort("reply") == "max"
-            assert _body_for()["reasoning_effort"] == "max"
-
-    # 没有文件时：老名字仍然生效（迁移别名）；新名字优先。
-    with TemporaryDirectory() as tmp:
-        with _isolated(Path(tmp) / "model_providers.json",
-                       QQBOT_JUDGE_API_KEY="sk-fake-judge",
-                       QQBOT_DIALOGUE_REASONING_EFFORT="high"):
-            assert dev_config.reasoning_effort("reply") == "high"
-            assert _body_for()["reasoning_effort"] == "high"
-        with _isolated(Path(tmp) / "model_providers.json",
-                       QQBOT_JUDGE_API_KEY="sk-fake-judge",
-                       QQBOT_DIALOGUE_REASONING_EFFORT="high",
-                       QQBOT_REPLY_REASONING_EFFORT="max"):
-            assert dev_config.reasoning_effort("reply") == "max"
+        body = _body(agents={"reply": {"provider": "relay1", "key": "k1",
+                                       "model": "relay-model",
+                                       "reasoning_effort": "low"}})
+        _write_file(path, body)
+        with _isolated(path, QQBOT_DIALOGUE_REASONING_EFFORT="high"):
+            assert model_config.file_reasoning_effort("reply") == "low"
+            assert dev_config.reasoning_effort("reply") == "low"
+        # 没写进文件的那一路照旧听环境。
+        with _isolated(path, QQBOT_DIALOGUE_REASONING_EFFORT="high"):
+            assert model_config.file_reasoning_effort("judge") == ""
 
 
-# --- W1：面板写 key → 落进文件 + 活 client 重指向 -----------------------------
+# --- 写侧：一套供应商 + 它下面那几把 key ---------------------------------------
 
 
-def _apply(tmp: str, payload: dict, *, clients=()) -> tuple[dict, ControlAudit]:
-    audit_path = Path(tmp) / "control_audit.jsonl"
-    audit = ControlAudit(path=audit_path)
-    store = OperatorConfig(Path(tmp) / "operator_config.json")
-    result = runtime.apply_overrides(_Engine(), payload, store=store, audit=audit,
-                                     source="test:panel", token="tok-test")
-    return result, audit
-
-
-def test_the_panel_key_write_lands_in_the_file_and_repoints_the_live_client() -> None:
-    """W1：`reply_api_key` → 文件里 `providers.<reply 那一家的名字>.key`；活 client 跟着变。"""
-
-    with TemporaryDirectory() as tmp:
-        path = Path(tmp) / "model_providers.json"
-        with _isolated(path, QQBOT_JUDGE_API_KEY="sk-fake-judge"):
-            client = OpenAICompatibleClient(
-                "https://api.deepseek.com", "sk-fake-judge", "deepseek-flash",
-                usage_role="dialogue", provider="deepseek")
-            result, audit = _apply(tmp, {"reply_api_key": "sk-file-new"})
-            assert result["reply_api_key"]["applied"] == "live", result
-            body = _read_file(path)
-            assert body["providers"]["deepseek"]["key"] == "sk-file-new"
-            assert body["providers"]["deepseek"]["base_url"] == "https://api.deepseek.com"
-            assert body["agents"]["reply"]["provider"] == "deepseek"
-            assert body["agents"]["reply"]["model"] == "deepseek-flash"
-            # **不**写进 `operator_config.json`（唯一存储是文件）。
-            operator_bytes = (Path(tmp) / "operator_config.json").read_text(encoding="utf-8")
-            assert "reply_api_key" not in operator_bytes
-            # 活 client 四件套跟着走（不是等下次重启）。
-            assert client.api_key == "sk-file-new"
-            assert client.base_url == "https://api.deepseek.com"
-            assert client.model == "deepseek-flash"
-            # 审计里留了"从哪套到哪套"，且没有 key 明文。
-            entries = audit.tail(10)
-            assert any(item.get("action") == "model_providers" for item in entries), entries
-            audit_text = (Path(tmp) / "control_audit.jsonl").read_text(encoding="utf-8")
-            assert "sk-file-new" not in audit_text, "审计里出现了 key 明文"
-
-
-# --- W2：空值 = 从文件里删掉这一路 --------------------------------------------
-
-
-def test_an_empty_value_removes_the_purpose_from_the_file() -> None:
-    """W2：空串 → 该用途**从文件里消失**，`resolve()` 回到今天那套（逐字段对表）。"""
-
-    with TemporaryDirectory() as tmp:
-        path = Path(tmp) / "model_providers.json"
-        with _isolated(path, **FAKE):
-            _apply(tmp, {"reply_api_key": "sk-file-temp"})
-            assert _read_file(path)["agents"]["reply"]["provider"]
-            result, _audit = _apply(tmp, {"reply_api_key": ""})
-            assert result["reply_api_key"]["applied"] == "live", result
-            assert "reply" not in _read_file(path)["agents"], "空值必须把这一路从文件里删掉"
-            reply = model_config.resolve("reply")
-            task, provider, base_url, model, key_env = EXPECTED[0]
-            assert (reply.provider, reply.base_url, reply.model, reply.key_env,
-                    reply.own_key, reply.source) == (
-                provider, base_url, model, key_env, True, "")
-
-
-# --- W3：审计里没有 key 明文（含"嵌套 dict 会漏"这条硬约束） ------------------
-
-
-def test_the_audit_never_contains_a_key_value() -> None:
-    """W3：凭据类的 payload 键一律 `[已改]`；**嵌套 dict 会漏**——这正是硬约束 D7。
-
-    ⚠️ 与契约原文的一处不一致（如实记在这里，不偷偷放宽）：契约 W3 写"对**每一个**新
-    payload 键名断言 `[已改]`"。但新加的那 6 个键是 `*_provider`（值是一个**名字**，
-    不是凭据），`control_audit.summarize()` 只按"名字里含 key/token/password/secret/passwd"
-    掩码，所以它们会照原样记进去——而契约 §三.5 又明写"本轮不碰 control_audit"。
-    两者只能取一个：这里的判据收窄成"**凭据类**的键必须 `[已改]`、审计正文里不许出现
-    任何 key 值"，并把"嵌套会漏"钉成一条**会红**的用例（那才是 D7 硬约束的真身）。
-    把 `*_provider` 也掩掉反而会毁掉"从哪套到哪套"这条审计要求（掩掉的正是要记的名字）。
-    """
-
-    for name in ("reply_api_key", "judge_api_key", "memory_api_key", "review_api_key",
-                 "letter_api_key", "vision_api_key", "api_key"):
-        assert summarize({name: "sk-plaintext-123"}) == {name: "[已改]"}, name
-
-    # 嵌套 payload：顶层键叫 `agents`，里面才是 key ⇒ **整份 dict 会被 clip 进流水**。
-    nested = {"agents": {"reply": {"key": "sk-plaintext-123"}}}
-    leaked = json.dumps(summarize(nested), ensure_ascii=False)
-    assert "sk-plaintext-123" in leaked, (
-        "嵌套 payload 居然没漏 key？那说明 control_audit 改了递归掩码——"
-        "契约 §三.5 说那件事要单独出计划，本轮不许顺手改。"
-        "这条用例红的意思是：**D7 的硬约束仍然成立**，请把它改成断言'漏'，"
-        "并确认我们没有写嵌套 payload。")
-
-    # 我们确实**没有**写嵌套 payload：`apply_overrides` 的审计 detail 永远是顶层键。
-    with TemporaryDirectory() as tmp:
-        path = Path(tmp) / "model_providers.json"
-        with _isolated(path, QQBOT_JUDGE_API_KEY="sk-fake-judge"):
-            _apply(tmp, {"reply_api_key": "sk-file-secret"})
-            text = (Path(tmp) / "control_audit.jsonl").read_text(encoding="utf-8")
-            assert "sk-file-secret" not in text
-            for line in text.splitlines():
-                entry = json.loads(line)
-                assert all(isinstance(value, str) for value in entry["detail"].values()), \
-                    "审计 detail 里出现了嵌套结构（D7：那会把 key 明文带进流水）"
-
-
-# --- W4：写完立刻可读 / 合法 JSON / 权限 / mtime ------------------------------
-
-
-def test_writing_is_immediately_readable_and_private() -> None:
-    """W4：写盘纪律——立刻可读、合法 JSON、POSIX 0600、mtime 变了。"""
+def test_a_new_set_lands_address_models_and_keys_together() -> None:
+    """添加一套 = 地址 + 声明的模型 + 若干 key，**一次落盘**；id 由 store 给且稳定。"""
 
     with TemporaryDirectory() as tmp:
         path = Path(tmp) / "model_providers.json"
         with _isolated(path):
-            first = model_providers_store.upsert_agent(
-                "reply", provider="relay1", model="relay-model",
-                base_url="https://relay.example/v1", key="sk-a")
-            assert first["provider"] == "relay1"
-            assert path.exists()
-            mtime_before = path.stat().st_mtime_ns
-            time.sleep(0.01)
-            model_providers_store.upsert_agent(
-                "judge", provider="relay1", model="relay-model",
-                base_url="https://relay.example/v1", key="sk-a")
-            assert path.stat().st_mtime_ns != mtime_before, "mtime 没变：读侧缓存与同步都会漏"
-            body = _read_file(path)
-            assert body["version"] == 1
-            assert set(body) == {"version", "providers", "agents"}
-            # 写完**立刻**可读（不需要重启，也不用手动清缓存）。
-            assert model_config.resolve("judge").api_key == "sk-a"
-            if os.name != "nt":  # Windows 上 chmod 只是尽力而为
-                assert (path.stat().st_mode & 0o777) == 0o600, "这份文件明文存着 key"
+            model_providers_store.set_provider("relay1", base_url=RELAY_URL,
+                                               models=["m-a", "m-b", "m-a"])
+            first = model_providers_store.put_provider_key("relay1", label="主号",
+                                                           value=KEY_K1)
+            second = model_providers_store.put_provider_key("relay1", value=KEY_K2)
+        body = _read_file(path)
+        assert body["version"] == 2
+        assert body["providers"]["relay1"]["base_url"] == RELAY_URL
+        assert body["providers"]["relay1"]["models"] == ["m-a", "m-b"], "模型名要去重保序"
+        assert [item["id"] for item in body["providers"]["relay1"]["keys"]] == ["k1", "k2"]
+        assert first["id"] == "k1" and second["id"] == "k2"
+        assert body["providers"]["relay1"]["keys"][0] == {"id": "k1", "label": "主号",
+                                                          "value": KEY_K1}
 
 
-# --- W5：custom 必须成对 -------------------------------------------------------
-
-
-def test_custom_needs_a_key_of_its_own() -> None:
-    """W5：`custom` 只给地址不给 key → `rejected`；给了 key → 地址与 key 落在**同一条**。"""
-
-    with TemporaryDirectory() as tmp:
-        path = Path(tmp) / "model_providers.json"
-        with _isolated(path, QQBOT_JUDGE_API_KEY="sk-fake-judge"):
-            rejected, _audit = _apply(tmp, {
-                "reply_provider": "custom",
-                "reply_api_base_url": "https://my-relay.example/v1",
-            })
-            assert rejected["reply_provider"]["applied"] == "rejected", rejected
-            assert "key" in rejected["reply_provider"]["detail"], rejected
-            assert not path.exists(), "被拒的请求不许留下半个文件"
-
-            ok, _audit = _apply(tmp, {
-                "reply_provider": "custom",
-                "reply_api_base_url": "https://my-relay.example/v1",
-                "reply_api_key": "sk-custom-1",
-            })
-            assert ok["reply_provider"]["applied"] == "live", ok
-            assert ok["reply_api_key"]["applied"] == "live", ok
-            entry = _read_file(path)["providers"]["custom"]
-            assert entry["base_url"] == "https://my-relay.example/v1"
-            assert entry["key"] == "sk-custom-1", "地址与 key 必须落在同一条里"
-            reply = model_config.resolve("reply")
-            assert (reply.provider, reply.base_url, reply.api_key) == (
-                "custom", "https://my-relay.example/v1", "sk-custom-1")
-
-
-# --- W6：同一地址按 URL 收敛 ---------------------------------------------------
-
-
-def test_the_same_url_written_under_two_names_converges() -> None:
-    """W6：同 URL 两个名字 → 收敛成一个（U3：同账号两名会让 402 兜底静默失效）。"""
+def test_one_key_is_enough_and_zero_keys_is_refused_at_add_time() -> None:
+    """「不强制最少几把 key」：一把能存；但**添加一套**时一把都没有要拒（空壳）。"""
 
     with TemporaryDirectory() as tmp:
         path = Path(tmp) / "model_providers.json"
         with _isolated(path):
-            first = model_providers_store.set_provider(
-                "relaya", base_url="https://relay.example/v1", key="sk-a")
-            assert first["name"] == "relaya" and first["converged"] is False
-            second = model_providers_store.set_provider(
-                "relayb", base_url="https://relay.example/v1/", key="sk-a")
-            assert second["converged"] is True, second
-            assert second["name"] == "relaya"
-            assert set(_read_file(path)["providers"]) == {"relaya"}
-
-            # 同一个地址、**不同**的 key：不许悄悄丢掉其中一把（那会把凭据写没）。
+            model_providers_store.set_provider("relay1", base_url=RELAY_URL)
+            model_providers_store.put_provider_key("relay1", value=KEY_K1)
+            assert len(_read_file(path)["providers"]["relay1"]["keys"]) == 1
             try:
-                model_providers_store.set_provider(
-                    "relayc", base_url="https://relay.example/v1", key="sk-other")
+                model_providers_store.put_provider_key("relay1", value="")
             except ModelProvidersRejected as exc:
-                assert "key" in str(exc)
+                assert "值" in str(exc)
             else:
-                raise AssertionError("同地址不同 key 应当被拒绝，而不是收敛掉")
-
-            # 读侧也提醒：手写的文件里同 URL 两个名字 → `status()["notes"]` 有一条。
-            _write_file(path, {"providers": {
-                "relaya": {"base_url": "https://relay.example/v1", "key": "sk-a"},
-                "relayb": {"base_url": "https://relay.example/v1", "key": "sk-b"},
-            }, "agents": {}})
-            notes = model_config.status()["notes"]
-            assert notes and "同一个地址" in notes[0], notes
+                raise AssertionError("空值不该能加出一把 key")
+            # 读侧一样：这一家有一把 key，这一路就能用。
+            model_providers_store.upsert_agent("reply", provider="relay1",
+                                               model="relay-model")
+            assert model_config.resolve("reply").api_key == KEY_K1
 
 
-# --- 用户补定 ②：删"当前那一套"必须被拒 ---------------------------------------
+def test_a_second_key_does_not_move_the_first() -> None:
+    """加第二把 key 之后，"第一把"仍然是 k1（顺序稳定 = 回落链稳定）。"""
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "model_providers.json"
+        with _isolated(path):
+            model_providers_store.set_provider("relay1", base_url=RELAY_URL)
+            model_providers_store.put_provider_key("relay1", value=KEY_K1)
+            model_providers_store.upsert_agent("reply", provider="relay1",
+                                               model="relay-model")
+            assert model_config.resolve("reply").api_key == KEY_K1
+            model_providers_store.put_provider_key("relay1", value=KEY_K2)
+            assert model_config.resolve("reply").api_key == KEY_K1, "第一把被挪走了"
+
+
+def test_changing_a_key_value_keeps_its_id() -> None:
+    """改一把 key 的值 = 同 id、新值；绑定它的那几路读到的就是新值。"""
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "model_providers.json"
+        with _isolated(path):
+            model_providers_store.set_provider("relay1", base_url=RELAY_URL)
+            model_providers_store.put_provider_key("relay1", value=KEY_K1)
+            model_providers_store.upsert_agent("reply", provider="relay1",
+                                               key_id="k1", model="relay-model")
+            model_providers_store.put_provider_key("relay1", key_id="k1",
+                                                   value="sk-k1-rotated")
+            assert model_config.resolve("reply").api_key == "sk-k1-rotated"
+            body = _read_file(path)
+            assert body["agents"]["reply"]["key"] == "k1", "改值不该换 id"
+
+
+def test_removing_a_key_that_a_purpose_uses_is_refused() -> None:
+    """删"在用"的那把 key → 拒绝并点名哪几路（先换一把，再删）。"""
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "model_providers.json"
+        _write_file(path, _body(agents={"reply": {"provider": "relay1", "key": "k2",
+                                                  "model": "relay-model"}}))
+        with _isolated(path):
+            try:
+                model_providers_store.remove_provider_key("relay1", key_id="k2")
+            except ModelProvidersRejected as exc:
+                message = str(exc)
+                assert "agents.reply" in message and "先" in message, message
+            else:
+                raise AssertionError("删掉还在用的那把 key 居然成功了")
+            # 没人用的那把可以删。
+            removed = model_providers_store.remove_provider_key("relay1", key_id="k1")
+            assert removed["removed"] is True
+        assert [item["id"] for item in _read_file(path)["providers"]["relay1"]["keys"]] == ["k2"]
+
+
+def test_a_binding_can_be_cleared_back_to_the_env_layer() -> None:
+    """`key_id=""` = 解开绑定（回到"这一套的第一把"→`.env`），不写一把空 key。"""
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "model_providers.json"
+        _write_file(path, _body())
+        with _isolated(path):
+            model_providers_store.upsert_agent("reply", provider="relay1",
+                                               key_id="", model="relay-model")
+            assert model_config.task_key_layer("reply")["layer"] == "first"
+            assert "key" not in _read_file(path)["agents"]["reply"]
 
 
 def test_removing_a_provider_that_is_in_use_is_refused() -> None:
-    """用户补定 ②：删除操作**必须先切到别的套、再删**；核心删除入口拒掉并给可读原因。"""
+    """用户补定：删除操作**必须先切到别的套、再删**；核心删除入口拒掉并给可读原因。"""
 
     with TemporaryDirectory() as tmp:
         path = Path(tmp) / "model_providers.json"
-        _write_file(path, _relay_body())
+        _write_file(path, _body())
         with _isolated(path):
             try:
                 model_providers_store.remove_provider("relay1")
@@ -704,40 +681,173 @@ def test_removing_a_provider_that_is_in_use_is_refused() -> None:
                 assert "先" in message and "再删" in message, message
             else:
                 raise AssertionError("删掉还在用的那一套居然成功了")
-            # 被拒之后文件**一个字都没动**（失败不留半个状态）。
-            assert "relay1" in _read_file(path)["providers"]
-
-            # 先切到别的家（这里是内置的 deepseek），再删——这一次允许。
-            model_providers_store.upsert_agent(
-                "reply", provider="deepseek", model="deepseek-flash",
-                base_url="https://api.deepseek.com")
+            # 先解绑，再删——这一次允许。
+            model_providers_store.clear_agent("reply")
             removed = model_providers_store.remove_provider("relay1")
             assert removed["removed"] is True
-            assert "relay1" not in _read_file(path)["providers"]
+        assert "relay1" not in _read_file(path)["providers"]
 
 
-# --- 用户补定 ①：明文密钥写入后读回一致 ---------------------------------------
+def test_the_same_url_written_under_two_names_converges() -> None:
+    """同一地址写两个名字 → 收敛成一个（U3：同账号两名会让 402 兜底静默失效）。"""
 
-
-def test_the_plaintext_key_round_trips() -> None:
-    """用户补定 ①：key **明文**存在 `providers.<名字>.key`，写进去什么、读回来什么。
-
-    安全等级与 `.env` 相同（`data/` 在 `.gitignore` 里）；**面板那一轮要明写"这里能看到
-    明文"**——核心这一轮只把话写进注释，不加任何"加密"（加了之后排障方式就与 `.env`
-    分成两套，而且密钥最终还得有一把能解它）。
-    """
-
-    secret = "sk-plaintext-" + "Ab3" * 8
     with TemporaryDirectory() as tmp:
         path = Path(tmp) / "model_providers.json"
         with _isolated(path):
-            model_providers_store.upsert_agent(
-                "reply", provider="relay1", model="relay-model",
-                base_url="https://relay.example/v1", key=secret)
+            first = model_providers_store.set_provider("relaya", base_url=RELAY_URL)
+            assert first["name"] == "relaya" and first["converged"] is False
+            second = model_providers_store.set_provider("relayb", base_url=RELAY_URL + "/")
+            assert second["converged"] is True, second
+            assert second["name"] == "relaya"
+            assert set(_read_file(path)["providers"]) == {"relaya"}
+            # 手写的文件里同 URL 两个名字 → `status()["notes"]` 提醒一条。
+            _write_file(path, {"version": 2, "providers": {
+                "relaya": {"base_url": RELAY_URL, "keys": [{"id": "k1", "value": KEY_K1}]},
+                "relayb": {"base_url": RELAY_URL, "keys": [{"id": "k1", "value": KEY_K2}]},
+            }, "agents": {}})
+            notes = model_config.status()["notes"]
+            assert notes and "同一个地址" in notes[0], notes
+
+
+def test_a_custom_address_without_a_key_is_refused_by_the_reader() -> None:
+    """地址与 key 必须成对（D1 ②）：文件改了地址、这一家却没有 key ⇒ 不许借 `.env`。"""
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "model_providers.json"
+        # deepseek 是内置家，但文件把地址改成了中转；这一家又没有 key ⇒ 拒。
+        _write_file(path, {"version": 2,
+                           "providers": {"custom": {"base_url": "https://my-relay.example/v1",
+                                                    "keys": []}},
+                           "agents": {"reply": {"provider": "custom",
+                                                "model": "relay-model"}}})
+        with _isolated(path, QQBOT_API_KEY="sk-main"):
+            assert model_config.resolve("reply").source == ""
+            reason = model_config.status()["rejected"]["reply"]
+            assert "key" in reason, reason
+
+
+def test_the_model_list_is_declared_but_not_a_whitelist() -> None:
+    """`providers.<名字>.models` 只是"这家声明提供哪些模型"，**不是白名单**。"""
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "model_providers.json"
+        _write_file(path, _body(models=["declared-a"]))
+        with _isolated(path):
+            assert model_config.file_provider_models("relay1") == ("declared-a",)
+            # 填列表外的模型名照样能用（用户：可以手输，面板标注就行）。
+            assert model_config.resolve("reply").model == "relay-model"
+
+
+def test_writing_is_immediately_readable_and_private() -> None:
+    """写盘纪律：立刻可读、合法 JSON、POSIX 0600、mtime 变了、key 是**明文**。"""
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "model_providers.json"
+        with _isolated(path):
+            model_providers_store.set_provider("relay1", base_url=RELAY_URL)
+            model_providers_store.put_provider_key("relay1", value=KEY_K1)
+            mtime_before = path.stat().st_mtime_ns
+            time.sleep(0.01)
+            model_providers_store.put_provider_key("relay1", value=KEY_K2)
+            assert path.stat().st_mtime_ns != mtime_before, "mtime 没变：读侧缓存与同步都会漏"
+            body = _read_file(path)
+            assert body["version"] == 2
+            assert set(body) == {"version", "providers", "agents"}
             raw = path.read_text(encoding="utf-8")
-            assert secret in raw, "用户定的就是明文存储：磁盘上必须就是这把 key"
-            assert _read_file(path)["providers"]["relay1"]["key"] == secret
-            assert model_config.resolve("reply").api_key == secret
-            # 读侧自检**绝不**把它打出来（明文存储 ≠ 明文进日志）。
-            assert secret not in "\n".join(model_config.self_check_lines())
-            assert secret not in "\n".join(model_config.providers_file_lines())
+            assert KEY_K1 in raw, "用户定的就是明文存储：磁盘上必须就是这把 key"
+            assert model_config.file_provider_key_ids("relay1") == ("k1", "k2")
+            if os.name != "nt":  # Windows 上 chmod 只是尽力而为
+                assert (path.stat().st_mode & 0o777) == 0o600, "这份文件明文存着 key"
+
+
+# --- 面板那一条 apply_overrides：只剩"模型名"还投文件 -------------------------
+
+
+def _apply(tmp: str, payload: dict) -> tuple[dict, ControlAudit]:
+    audit_path = Path(tmp) / "control_audit.jsonl"
+    audit = ControlAudit(path=audit_path)
+    store = OperatorConfig(Path(tmp) / "operator_config.json")
+    result = runtime.apply_overrides(_Engine(), payload, store=store, audit=audit,
+                                     source="test:panel", token="tok-test")
+    return result, audit
+
+
+def test_the_panel_model_write_lands_in_the_file_and_repoints_the_live_client() -> None:
+    """`memory_model` 这类**只改模型名**的键仍然投文件；供应商与 key 绑定一个字不动。"""
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "model_providers.json"
+        _write_file(path, {"version": 2,
+                           "providers": {"relay1": {"base_url": RELAY_URL,
+                                                    "keys": [{"id": "k1", "value": KEY_K1}]}},
+                           "agents": {"memory": {"provider": "relay1", "key": "k1",
+                                                 "model": "m-old"}}})
+        with _isolated(path):
+            result, audit = _apply(tmp, {"memory_model": "m-new"})
+            assert result["memory_model"]["applied"] == "live", result
+            body = _read_file(path)
+            assert body["agents"]["memory"] == {"provider": "relay1", "key": "k1",
+                                                "model": "m-new"}
+            assert model_config.resolve("memory").model == "m-new"
+            entries = audit.tail(10)
+            assert any(item.get("action") == "model_providers" for item in entries), entries
+            assert KEY_K1 not in (Path(tmp) / "control_audit.jsonl").read_text("utf-8")
+
+
+def test_an_empty_model_removes_the_purpose_from_the_file() -> None:
+    """空模型名 = 把这一路从文件里删掉（回到 `.env` 那套），不是写一个空模型名。"""
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "model_providers.json"
+        _write_file(path, _body())
+        with _isolated(path, **FAKE):
+            result, _audit = _apply(tmp, {"reply_api_model": ""})
+            assert result["reply_api_model"]["applied"] == "live", result
+            assert "reply" not in _read_file(path)["agents"]
+            task, provider, base_url, model, key_env = EXPECTED[0]
+            endpoint = model_config.resolve("reply")
+            assert (endpoint.provider, endpoint.base_url, endpoint.model) == (
+                provider, base_url, model), "清空之后没有回到今天那套"
+
+
+def test_the_moved_settings_are_refused_with_a_pointer_to_the_new_page() -> None:
+    """`*_api_key` / `*_provider` / `*_api_base_url` 已经搬去「模型与凭据」页。
+
+    在这里**明确拒绝**并说清去哪儿改，而不是"写进覆盖层但被文件压住"（那种静默无效
+    是这类配置里最坏的一种）。被拒时**一个字都不许写**。
+    """
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "model_providers.json"
+        with _isolated(path):
+            for key in ("reply_api_key", "judge_api_key", "reply_provider",
+                        "reply_api_base_url"):
+                result, _audit = _apply(tmp, {key: "x" if not key.endswith("url")
+                                              else "https://x.example/v1"})
+                assert result[key]["applied"] == "rejected", (key, result)
+                assert "模型与凭据" in result[key]["detail"], result[key]
+            assert not path.exists(), "被拒的那几次不该建出文件来"
+
+
+def test_the_audit_never_contains_a_key_value() -> None:
+    """写侧的审计**没有 key 明文**（`value_changed` 只是布尔、label 只记 `[已改]`）。"""
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "model_providers.json"
+        audit_path = Path(tmp) / "control_audit.jsonl"
+        audit = ControlAudit(path=audit_path)
+        with _isolated(path):
+            model_providers_store.set_provider("relay1", base_url=RELAY_URL, audit=audit,
+                                               source="test")
+            model_providers_store.put_provider_key("relay1", value=KEY_K1, audit=audit,
+                                                   source="test")
+            model_providers_store.put_provider_key("relay1", label="新标签",
+                                                   value=KEY_K2, audit=audit,
+                                                   source="test")
+            model_providers_store.upsert_agent("reply", provider="relay1", key_id="k2",
+                                               model="m", audit=audit, source="test")
+            model_providers_store.remove_provider_key("relay1", key_id="k1",
+                                                      audit=audit, source="test")
+        text = audit_path.read_text(encoding="utf-8")
+        assert KEY_K1 not in text and KEY_K2 not in text, "审计里出现了 key 明文"
+        assert "新标签" not in text, "审计里出现了 label 原值（它可能是账号别名）"

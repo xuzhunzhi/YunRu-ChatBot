@@ -260,34 +260,35 @@ def _log_mail_recipient_self_check() -> list[str]:
 #: 面板上**投给文件**的键 → `(用途, 这个键管哪一项)`。
 #:
 #: 契约 §3.5 的落点：这些键必须在 `SETTINGS` 查表**之前**被接管（那一张表的语义是
-#: "写进 `os.environ`"，正是本轮要退掉的那条路）。**显式枚举、不许通配**：前缀匹配会
-#: 破掉 `operator_config.py:33-34`"白名单就是能力边界"那条性质——将来谁往 SETTINGS
-#: 加一个 `xxx_api_key`，它会**悄悄**改投文件，没人会发现。
+#: "写进 `os.environ`"，正是要退掉的那条路）。**显式枚举、不许通配**：前缀匹配会破掉
+#: `operator_config.py:33-34`"白名单就是能力边界"那条性质。
 #:
-#: 键名全部复用现有的（U1）：6 个新的 `*_provider` + 原有的 `*_api_key` /
-#: `*_api_base_url` / `*_api_model`。`judge` / `memory` / `review` 三路在面板上本来就
-#: 只有 key 与 `memory_model`（`operator_config.SETTINGS` 里没有它们的地址/模型键），
-#: 所以这里也**不加新键**——换它们的供应商用 `*_provider`，模型沿用文件/当前那一个。
+#: ⚠️ 2026-10-18 第二轮（新形状：key 是供应商下的列表、用途由 `agents.<用途>` 绑
+#: `provider → key → model`）：这里**只剩"模型名"一类**。
+#:
+#: - `*_api_key` / `*_provider` 换成 `ui.model_provider_key` / `ui.model_provider_bind`；
+#: - `*_api_base_url` 也一起搬走：**地址是供应商的属性**，不是某一路的属性。新形状里
+#:   没有"只给 reply 换地址"这件事（要给一个地址，就加一套供应商再把那一路绑过去）。
+#:   老的那种写法留着只会造出"这一路的地址与这一路的 key 不同源"的半条——正是要消灭的。
 _FILE_SETTINGS: dict[str, tuple[str, str]] = {
-    "reply_provider": ("reply", "provider"),
-    "letter_provider": ("letter", "provider"),
-    "judge_provider": ("judge", "provider"),
-    "memory_provider": ("memory", "provider"),
-    "review_provider": ("review", "provider"),
-    "vision_provider": ("vision", "provider"),
-    "reply_api_key": ("reply", "key"),
-    "letter_api_key": ("letter", "key"),
-    "judge_api_key": ("judge", "key"),
-    "memory_api_key": ("memory", "key"),
-    "review_api_key": ("review", "key"),
-    "vision_api_key": ("vision", "key"),
-    "reply_api_base_url": ("reply", "base_url"),
-    "letter_api_base_url": ("letter", "base_url"),
-    "vision_api_base_url": ("vision", "base_url"),
     "reply_api_model": ("reply", "model"),
     "letter_api_model": ("letter", "model"),
     "memory_model": ("memory", "model"),
     "vision_api_model": ("vision", "model"),
+}
+
+#: 这些键**已经搬到面板「模型与凭据」那一页**（密钥一行一把 / 绑定一行三件套）。
+#:
+#: 留着它们当"能写进覆盖层"是个陷阱：文件里的 `agents.<用途>` 一旦写了，覆盖层就被压住，
+#: 于是"我明明填了 key"与"它根本没生效"会同时成立。所以这里**明确拒绝**并指向新页面——
+#: 拒绝比静默无效好（与 `operator_config` 的"白名单就是能力边界"同一条思路）。
+_MOVED_SETTINGS: dict[str, str] = {
+    **{f"{task}_api_key": task for task in
+       ("reply", "letter", "judge", "memory", "review", "vision")},
+    **{f"{task}_provider": task for task in
+       ("reply", "letter", "judge", "memory", "review", "vision")},
+    **{f"{task}_api_base_url": task for task in
+       ("reply", "letter", "vision")},
 }
 
 #: `*_api_key` 这项配置 → 它管哪个用途（"key 有没有值"的回显要按文件 ∪ 覆盖层判）。
@@ -304,16 +305,10 @@ _SECRET_SETTING_TASK: dict[str, str] = {
 def _file_value(field: str, value: object) -> str:
     """把面板传来的值归一化（**不**走 `operator_config.normalize`：新键不在白名单里）。
 
-    只有三种：名字 / 地址 / 模型名，都是字符串；`secret` 那一项允许空串（= 删掉这一路）。
+    只有两种：地址 / 模型名，都是字符串；空串 = "把这一路从文件里删掉"（D12）。
     """
 
-    if isinstance(value, bool):
-        text = "1" if value else "0"
-    else:
-        text = str(value or "")
-    text = " ".join(text.split())
-    if field == "provider":
-        return text.casefold()
+    text = " ".join(str(value or "").split())
     return text
 
 
@@ -339,14 +334,17 @@ def _sync_after_write(task: str) -> None:
 def _apply_file_settings(engine, task: str, fields: dict[str, str],
                          keys: list[str], *, config, audit, source: str,
                          token: str) -> dict[str, object]:
-    """把一个用途的几项面板改动**一次写进文件**，然后让活 client 重指向。
+    """把一路的**模型名**改动写进文件，然后让活 client 重指向。
 
-    契约 D11/D13：一次 `os.replace` 写全 `providers.<名字>` + `agents.<用途>`；
-    生效不靠"把面板给的原始值盖到 client 上"（那会造出地址与 key 不来自同一条），
-    而是写完之后 `provider_failover.sync_from_file()` 重新 `resolve()` 一遍。
+    2026-10-18 第二轮之后的形状：这里**只剩 `model` 一个字段**。供应商与 key 的绑定走
+    `ui.model_provider_bind`（每路一行：供应商 → key → 模型）；地址是供应商的属性，
+    走「模型与凭据」页给那一套改，不在这一条路上。
 
-    `fields` 是**字段名 → 归一化后的值**（provider/key/base_url/model），`keys` 是这些值
-    来自哪几个面板键名（回执要按面板键逐个回，`apply_overrides` 要给它们同一个 detail）。
+    - **清空（空串）** = 把这一路从文件里删掉（D12：回到 `.env` 那套），不造半条；
+    - **改模型** = `agents.<用途>.model`，`provider` / `key` 绑定一个字不动。
+
+    生效不靠"把面板值盖到 client 上"，而是写完之后 `sync_from_file()` 重新 `resolve()`
+    一遍（D13）。
     """
 
     from . import model_config
@@ -354,91 +352,31 @@ def _apply_file_settings(engine, task: str, fields: dict[str, str],
 
     endpoint = model_config.resolve(task)  # 当前这一路（文件有就按文件，否则按环境）
     entry = model_config.file_agent_entry(task)
-    provider_in = fields.get("provider", "")
-    key_given = "key" in fields
-    key_value = fields.get("key", "")
 
-    # D12：**空值 = 把该用途从文件里删掉**（回到环境变量那套），不是"写一个空 key"。
-    if key_given and not key_value and not provider_in \
-            and "base_url" not in fields and "model" not in fields:
+    # D12：**空值 = 把这一路从文件里删掉**（回到环境变量那套）。
+    if "model" in fields and not fields["model"]:
         try:
             result = clear_agent(task, audit=audit, source=source, token=token)
         except ModelProvidersRejected as exc:
             return {"applied": "rejected", "detail": str(exc), "keys": keys}
         _sync_after_write(task)
         popped = _drop_operator_values(config, keys)
-        detail = f"已从模型供应商文件里删掉 {task}（回到 .env 那套）"
+        detail = f"已把模型名清空 ⇒ {task} 从模型供应商文件里删掉（回到 .env 那套）"
         if popped:
             detail += "；旧覆盖项已清理"
         return {"applied": "live", "detail": detail, "keys": keys,
                 "cleared": bool(result.get("cleared"))}
 
-    # 文件里**没有**"只有地址、没有模型"这种形状（`agents.<用途>` 必须 provider + model，
-    # `providers.<名字>` 必须 base_url）。所以面板把地址或模型清空 = **把这一路从文件里
-    # 删掉**（与 D12 的空 key 语义一致），而不是造一个读侧一定会拒的半条。
-    blank_fields = [name for name in ("base_url", "model")
-                    if name in fields and not fields[name]]
-    if blank_fields:
-        if provider_in:
-            return {"applied": "rejected",
-                    "detail": "换供应商必须同时给模型名与地址（不许只清一项）", "keys": keys}
-        try:
-            clear_agent(task, audit=audit, source=source, token=token)
-        except ModelProvidersRejected as exc:
-            return {"applied": "rejected", "detail": str(exc), "keys": keys}
-        _sync_after_write(task)
-        popped = _drop_operator_values(config, keys)
-        detail = (f"已把 {'、'.join(blank_fields)} 清空 ⇒ {task} 从模型供应商文件里删掉"
-                  "（回到 .env 那套）")
-        if popped:
-            detail += "；旧覆盖项已清理"
-        return {"applied": "live", "detail": detail, "keys": keys, "cleared": True}
-
-    provider = provider_in or str(entry.get("provider", "") or "") or endpoint.provider
+    provider = str(entry.get("provider", "") or "") or endpoint.provider
     if not provider:
         return {"applied": "rejected", "detail": "说不清要写哪一家（provider 为空）", "keys": keys}
-    file_specs = model_config.file_provider_specs()
-    file_has = model_config.file_provider_has_key(provider)
-    if provider == "custom":
-        # U2：`custom` 必须命名、地址与 key **成对**落进同一个 `providers.<名字>`。
-        # 只给地址不给 key → rejected（这一条是用户拍定的）。
-        base_url = fields.get("base_url", "") or str(
-            (file_specs.get("custom") or {}).get("base_url", "") or "")
-        if not base_url:
-            return {"applied": "rejected", "detail": "自定义地址要先填地址", "keys": keys}
-        if key_given and not key_value:
-            return {"applied": "rejected",
-                    "detail": "自定义地址要先填 key（地址与 key 必须成对）", "keys": keys}
-        if not key_given and not file_has:
-            return {"applied": "rejected",
-                    "detail": "自定义地址要先填 key（地址与 key 必须成对）", "keys": keys}
-    else:
-        try:
-            base_url = fields.get("base_url", "") or model_config.provider_base_url(provider)
-        except model_config.UnknownProvider:
-            return {"applied": "rejected",
-                    "detail": f"不认识的供应商：{provider}", "keys": keys}
     model = fields.get("model", "") or str(entry.get("model", "") or "") or endpoint.model
     if not model:
         return {"applied": "rejected", "detail": "模型名为空", "keys": keys}
-    # **地址与 key 必须成对**（D13）：文件里这一家还没有 key、而这次也没给 key 时，
-    # 一个"地址与内置不同"的条目到了读侧会被**拒掉**（D1 的闸），写完等于没写。
-    # 与其留一个"面板说成功、实际不生效"的半条，不如当场拒掉并说清先填什么。
-    key_will_exist = (key_given and bool(key_value)) or file_has
-    if not key_will_exist:
-        try:
-            builtin_url = model_config.builtin_provider_base_url(provider)
-        except model_config.UnknownProvider:
-            builtin_url = ""
-        if base_url.rstrip("/") != builtin_url.rstrip("/"):
-            return {"applied": "rejected",
-                    "detail": (f"providers.{provider} 还没有 key：先把 key 填上"
-                               "（地址与 key 必须成对），或者先只填 key 再改地址"),
-                    "keys": keys}
     try:
         written = upsert_agent(
-            task, provider=provider, model=model, base_url=base_url,
-            key=key_value if key_given else None,
+            task, provider=provider, model=model,
+            base_url=model_config.provider_base_url(provider),
             audit=audit, source=source, token=token,
         )
     except ModelProvidersRejected as exc:
@@ -451,8 +389,6 @@ def _apply_file_settings(engine, task: str, fields: dict[str, str],
               f"{written['provider']}（模型 {written['model']}）")
     if written.get("converged"):
         detail += f"；同一地址已有 {written['provider']}，按地址收敛（用户 U3）"
-    if provider != endpoint.provider and "model" not in fields:
-        detail += f"；模型名沿用 {model}（新家不一定有它，请一并确认模型名）"
     if popped:
         detail += "；旧覆盖项已清理"
     return {"applied": "live", "detail": detail, "keys": keys}
@@ -511,10 +447,13 @@ def apply_overrides(engine, payload: dict[str, object], *,
     - **空值 = 回落**：留空的 key 类配置会被写进覆盖层，含义是"清掉这一项"，
       而不是"把空 key 设上去"。这与 `agent_api_key` 的回落语义一致。
     - **重启项如实标注**：`restart_required` 就是不生效，面板必须照实显示。
-    - **六个用途的供应商 / key / 地址 / 模型改投文件**（2026-10-18 契约 §3.5）：
-      它们在进白名单查表之前就被 `_FILE_SETTINGS` 接管，写进
-      `data/model_providers.json`（唯一存储），然后同步重指向活 client。
-      所以它们**不会**再被写进 `os.environ` 或 `operator_config.json`。
+    - **六个用途的模型 / 地址改投文件**（2026-10-18 契约 §3.5）：它们在进白名单查表之前
+      就被 `_FILE_SETTINGS` 接管，写进 `data/model_providers.json`（唯一存储），然后同步
+      重指向活 client，所以**不会**再被写进 `os.environ` 或 `operator_config.json`。
+    - **已经搬去「模型与凭据」页的那几个键（`_MOVED_SETTINGS`）在这里明确拒绝**，
+      并说清去哪儿改。为什么不是"留着它顺手写进覆盖层"：文件里的 `agents.<用途>` 一旦
+      写了就会压住覆盖层，于是"我明明填了 key"与"它根本没生效"会同时成立——静默无效
+      是这类配置里最坏的一种。
     """
 
     config = store if store is not None else operator_config.shared()
@@ -523,9 +462,19 @@ def apply_overrides(engine, payload: dict[str, object], *,
     explicit_url = str(payload.get("api_base_url", "") or "").strip()
     # ⓪ **投给文件的键先接管**——必须排在 `SETTINGS` 查表之前（那张表的语义是
     #    "写进 os.environ"，正是本轮要退掉的那条路）。
+    for key in list(payload):
+        task = _MOVED_SETTINGS.get(str(key))
+        if task is None:
+            continue
+        applied[str(key)] = {"applied": "rejected", "detail": (
+            f"{key} 这一项已经搬到面板「模型与凭据」页：那一页每路一行，"
+            "依次选供应商 → key → 模型（用户 2026-10-18：「agent那边先选供应商再选"
+            "对应的key最后选供应商提供的模型」）。在这里改不会生效，所以直接拒掉")}
     file_groups: dict[str, dict[str, str]] = {}
     file_keys: dict[str, list[str]] = {}
     for key in list(payload):
+        if str(key) in applied:
+            continue
         routing = _FILE_SETTINGS.get(str(key))
         if routing is None:
             continue
@@ -1189,6 +1138,364 @@ def _exact_text(value: object) -> str:
     return text
 
 
+# --- 模型供应商：面板那一组接缝的只读视图（2026-10-18）------------------------
+#
+# 用户原话：「**这里，我要的是添加而非替换**」，以及同一天的「每个agent一把key，
+# 一个供应商下最少两把，用来跟agent一一对应」。所以面板那一页是**多套并存**的管理面：
+# 一份清单 + **每套六格 + main** + 加一套 + 切当前 + 删一套。这一小段只负责"把文件里的
+# 事实说清楚"，写是 `_SeamBinder.model_provider_*` 那几个方法的事（它们转发给
+# `model_providers_store` 的正式写层）。
+#
+# **密钥在这里就被掐掉**（只给掩码与长度）。理由写一遍省得下次有人"顺手把值传出去
+# 让面板自己掩"：那种约定活不过下一轮——已经在 2026-10-06 的 `mask_settings` 上
+# 见过一次（面板那一侧掩了，另一条路没掩）。测试按"整份 JSON 里不含明文"钉住。
+
+
+def _mask_provider_key(value: object) -> str:
+    """密钥的展示形式。**8 位以内全星号**（首尾都不给，短 key 露两个字符就露太多）。
+
+    长度也一并返回（`_provider_key_view`）：操作者要能分清"没填"与"填了一把"，
+    而这两件事在 4+4 的掩码上可能长得一样。
+    """
+
+    text = str(value or "")
+    if not text:
+        return ""
+    if len(text) <= 8:
+        return "*" * len(text)
+    return f"{text[:4]}…{text[-4:]}"
+
+
+def _provider_key_view(value: object) -> dict[str, object]:
+    """**一格** key 的事实：**有没有 / 多长 / 掩码**，没有明文。
+
+    参数从"一个条目的 dict"改成"一把 key 的值"（2026-10-18 第二轮）：一个条目下现在有
+    七格，掩码要按格给——面板的每一行才知道自己那一格填过什么、填了几个字符。
+    """
+
+    key = str(value or "")
+    return {"present": bool(key), "length": len(key), "masked": _mask_provider_key(key)}
+
+
+#: 写信那一行的小字（用户 2026-10-18：插件读的是"核心里配好的"那份）。
+LETTER_ROW_NOTE = "由 mail 插件使用（它不自己配 key，只从核心接缝拿客户端）"
+
+
+def _provider_key_rows(provider_keys) -> list[dict[str, object]]:
+    """一套供应商的 key 行（面板「密钥」那一块的**平铺列表**，一 key 一行）。
+
+    只给 `id / label / 掩码 / 长度`，**没有明文**。`used_by`（被哪几路用着）由调用方
+    按 `agents.<用途>.key` 填——那是"用途 → key"这一层关系唯一存在的地方（用户
+    2026-10-18：key 是供应商下的一个列表，用途绑哪把写在 agents 里）。
+    """
+
+    rows: list[dict[str, object]] = []
+    for item in provider_keys or ():
+        rows.append({
+            "id": str(getattr(item, "id", "") or ""),
+            "label": str(getattr(item, "label", "") or ""),
+            **_provider_key_view(getattr(item, "value", "")),
+        })
+    return rows
+
+
+def _binding_rows(tasks: tuple[str, ...]) -> list[dict[str, object]]:
+    """**各路绑定**（每路一行）：`provider → key → model` 三件套 + 现在实际落在哪一层。
+
+    读三处，**各读各的、不互相猜**：
+
+    - `provider` / `key` / `model`：文件里 `agents.<用途>` 的**原始绑定**（没写就是空串，
+      面板据此把下拉框留空 ="不指定"）；
+    - `layer` / `layer_label` / `present` / `reason`：`model_config.task_key_layer()`
+      ——**四层回落链的唯一实现**。不在面板这一侧另算一遍：两份实现必然漂移，而漂移的
+      结果正好是最坏的那种（面板说"绑的是 k1"、实际打的是 `.env` 主 key）。
+    - `model_declared`：这个模型名在不在 `providers.<那一家>.models` 里（空列表 = 那一家
+      没声明过模型，这一项报 `None`="说不清"，面板就不标红）。
+    """
+
+    from . import model_config
+    from . import model_providers_store as store
+
+    view = store.load()
+    agents = dict(getattr(view, "agents", {}) or {})
+    models = dict(getattr(view, "models", {}) or {})
+    rows: list[dict[str, object]] = []
+    for task in tasks:
+        entry = dict(agents.get(task) or {})
+        provider = str(entry.get("provider", "") or "").strip().casefold()
+        key_id = str(entry.get("key", "") or "").strip()
+        model = str(entry.get("model", "") or "").strip()
+        try:
+            layer = model_config.task_key_layer(task)
+        except Exception:  # noqa: BLE001 - 一路算不出来不该让整页打不开
+            layer = {}
+        declared = tuple(models.get(provider, ()) or ())
+        key_label = ""
+        if provider and key_id:
+            for item in (getattr(view, "keys", {}) or {}).get(provider, ()) or ():
+                if str(getattr(item, "id", "") or "") == key_id:
+                    key_label = str(getattr(item, "label", "") or "")
+                    break
+        rows.append({
+            "task": task,
+            "label": model_config.TASK_LABELS.get(task, task),
+            "note": LETTER_ROW_NOTE if task == "letter" else "",
+            "provider": provider,
+            "key": key_id,
+            "key_label": key_label,
+            "model": model,
+            #: 这一路现在**实际**用的是哪一层 key（四层里的一层，或 "env" = 没写进文件）。
+            "layer": str(layer.get("layer") or ""),
+            "layer_label": str(layer.get("layer_label") or ""),
+            "present": bool(layer.get("present")),
+            "reason": str(layer.get("reason") or ""),
+            "source": str(layer.get("source") or ""),
+            #: 这个模型名在这一家声明的模型里吗（`None` = 那一家没声明过模型）。
+            "model_declared": (model in declared) if declared else None,
+        })
+    return rows
+
+
+def _model_name_list(models: object) -> tuple[list[str] | None, str]:
+    """把面板给的"这一家声明提供哪些模型"整理成模型名列表；`None` = **不动这一项**。
+
+    三种输入：`None`（不改）/ 空串或空列表（清空声明）/ 列表或逗号分隔的字符串。
+    **模型名允许是列表外的值**（用户 2026-10-18：模型可以手输，面板会标注"不在该供应商
+    声明的模型里"）——所以这一份只是"声明的清单"，**不是白名单**，别拿它去卡写入。
+    """
+
+    if models is None:
+        return None, ""
+    if isinstance(models, str):
+        items: list[object] = [part for part in models.replace("，", ",").split(",")]
+    elif isinstance(models, (list, tuple)):
+        items = list(models)
+    elif models == "":
+        return [], ""
+    else:
+        return None, "「声明的模型」要写成数组或逗号分隔的字符串"
+    names: list[str] = []
+    for item in items:
+        text = " ".join(str(item or "").split())
+        if not text:
+            continue
+        if len(text) > 200:
+            return None, f"模型名太长（超过 200 字符）：{text[:20]}…"
+        if text in names:
+            continue
+        names.append(text)
+    return names, ""
+
+
+def _task_legacy_keys(task: str) -> list[str]:
+    """一路的**旧式面板键**（`reply_provider` / `reply_api_key` / …）。
+
+    写文件时顺手把 `operator_config.json` 里同名旧值清掉（D8：不清的话，将来把那一项
+    从文件里删掉时旧值会**悄悄复活**——"我明明删了"）。这一份也用在"搬走的那几个键"的
+    拒绝理由里，避免两处各写一份清单。
+    """
+
+    return [f"{task}_provider", f"{task}_api_key", f"{task}_api_base_url",
+            f"{task}_api_model"]
+
+
+def _provider_key_list(keys: object) -> tuple[list[dict[str, str]], str]:
+    """把面板给的"这一套的若干把 key"整理成 `[{id?, label?, value}]`；不合法就给原因。
+
+    **形状**：列表，一项一把。`id` 可选（不给就由 store 按 `k1/k2/…` 自动给），
+    `label` 可选，`value` 必填（空值的项直接忽略——"一把没有值的 key 不是 key"）。
+
+    **不限制最少几把**（用户 2026-10-18："不强制最少几把 key，填一把也行"），
+    但**至少要有一把**：只写地址、一把 key 都没有的条目在读侧会被拒（地址与 key 必须
+    成对），那样加进来就是个用不了的空壳，不如当场说清。
+    """
+
+    if keys is None or keys == "":
+        return [], ""
+    if isinstance(keys, dict):
+        # 宽容另一种形状：`{id: value}`（人手工调接口时省事）。
+        keys = [{"id": str(slot), "value": value} for slot, value in keys.items()]
+    if not isinstance(keys, (list, tuple)):
+        return [], "「若干 key」要写成 [{value: …}, …]（一项一把 key）"
+    cleaned: list[dict[str, str]] = []
+    for index, item in enumerate(keys):
+        if isinstance(item, str):
+            item = {"value": item}
+        if not isinstance(item, dict):
+            return [], f"第 {index + 1} 把 key 不是对象（要写成 {{value: …}}）"
+        value = " ".join(str(item.get("value") or "").split())
+        if not value:
+            continue
+        entry = {"value": value}
+        key_id = str(item.get("id") or "").strip()
+        if key_id:
+            entry["id"] = key_id
+        label = " ".join(str(item.get("label") or "").split())
+        if label:
+            entry["label"] = label
+        cleaned.append(entry)
+    return cleaned, ""
+
+
+def _model_providers_view() -> dict[str, object]:
+    """`ui.model_providers()` 的实现：**密钥清单** + **各路绑定** + 被拒原因。
+
+    为什么放在**模块级函数**而不是接缝方法里：`_SeamBinder` 那一族的每个方法都该是
+    "转发一层"，读视图这段有几十行判断，塞进类里会让那一族不再一眼看得出"它们只是转发"。
+
+    两块（用户 2026-10-18 定的页面结构）：
+
+    - `providers[].keys`：**平铺的 key 列表**（一家下面一行一把），每行带
+      `id / label / 掩码 / 长度 / 被哪几路用着`；
+    - `bindings[]`：**每路一行**的 `provider → key → model` 绑定 + "现在实际落在哪一层"。
+
+    **没有文件**时返回 `providers: []`、`bindings` 里全是"没写进文件"（不是报错）：
+    面板第一次打开时文件往往还不存在，那时"一个都没有"是**正确答案**。
+    """
+
+    from . import model_config
+    from . import model_providers_store as store
+
+    snapshot = store.load()
+    status = model_config.status()
+    tasks = tuple(model_config.TASK_NAMES)
+    file_agents = dict(getattr(snapshot, "agents", {}) or {})
+
+    # 每一套被哪几路用着（按 `agents.<用途>.provider`）；每一把 key 又被哪几路用着
+    # （按 `agents.<用途>.key`）。这两张表是"删除按钮能不能点"的唯一依据。
+    used_by_provider: dict[str, list[str]] = {}
+    used_by_key: dict[tuple[str, str], list[str]] = {}
+    for task in tasks:
+        entry = file_agents.get(task) or {}
+        name = str(entry.get("provider", "") or "").strip().casefold()
+        if not name:
+            continue
+        used_by_provider.setdefault(name, []).append(task)
+        key_id = str(entry.get("key", "") or "").strip()
+        if key_id:
+            used_by_key.setdefault((name, key_id), []).append(task)
+
+    providers: list[dict[str, object]] = []
+    raw_providers = dict(getattr(snapshot, "providers", {}) or {})
+    keys_by_name = dict(getattr(snapshot, "keys", {}) or {})
+    models_by_name = dict(getattr(snapshot, "models", {}) or {})
+    for name in sorted(raw_providers):
+        entry = raw_providers.get(name) or {}
+        key_rows = _provider_key_rows(keys_by_name.get(name))
+        for row in key_rows:
+            row["used_by"] = list(used_by_key.get((name, row["id"]), ()))
+        blocked = _provider_remove_blocker(name, used_by_provider.get(name, ()))
+        providers.append({
+            "name": name,
+            "base_url": str(entry.get("base_url", "") or ""),
+            "client_type": str(entry.get("client_type", "") or ""),
+            # 这家声明的模型名（面板第三级下拉框就是它；空 = 没声明，只能手输）。
+            "models": list(models_by_name.get(name, ()) or ()),
+            "used_by": list(used_by_provider.get(name, ())),
+            # 平铺的 key 列表（**一家下面一行一把**）：id / label / 掩码 / 长度 / 被谁用。
+            "keys": key_rows,
+            "key_count": len(key_rows),
+            "can_remove": not blocked,
+            "remove_reason": blocked,
+        })
+
+    return {
+        "path": str(status.get("path", "")),
+        "present": bool(status.get("present")),
+        "last_error": str(status.get("last_error", "") or ""),
+        "version_ok": bool(status.get("version_ok", True)),
+        "tasks": list(tasks),
+        "providers": providers,
+        #: 每路一行的绑定（`provider → key → model` + 实际落在哪一层）。
+        "bindings": _binding_rows(tasks),
+        #: 供应商下拉框的选项：内置那几家 + 文件里的新家（文件里的**优先**，
+        #: 与 `provider_registry` 合并视图同一口径）。
+        "options": _provider_options(),
+        "file_agents": {task: dict(file_agents.get(task) or {}) for task in tasks
+                        if task in file_agents},
+        # 文件里写了但这一路用不了（key 悬空 / 缺 key / 不认识的供应商）。
+        "rejected": dict(status.get("rejected") or {}),
+        "issues": list(status.get("issues") or ()),
+        # 同一个地址两个名字（用户 U3：会让 402 余额兜底静默失效）。
+        "notes": list(status.get("notes") or ()),
+    }
+
+
+def _provider_options() -> list[dict[str, object]]:
+    """供应商下拉框的数据：**只给名字与地址**（公开信息），**一个 key 都不给**。
+
+    内置那几家在前（面板一直以来的顺序），文件里的新家排在后面；同名由文件那一条覆盖
+    地址（与 `model_config._provider_spec` 同一口径：面板显示的就是这一趟真会打过去的
+    地址）。`in_file` 让面板知道"这一家在文件里有没有条目"——没有的话它的 key 下拉框
+    是空的（那份 key 只能在 `.env` 里）。
+    """
+
+    from . import model_config
+
+    specs = model_config.file_provider_specs()
+    try:
+        from . import provider_registry
+
+        builtin = list(provider_registry.options())
+    except Exception:  # noqa: BLE001 - 下拉框不该因为这份表读不到而打不开
+        builtin = []
+    if not builtin:
+        builtin = [{"value": name, "label": name, "base_url": spec["base_url"]}
+                   for name, spec in model_config.PROVIDERS.items()]
+    options: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for item in builtin:
+        name = str(item.get("value") or "").strip().casefold()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        spec = specs.get(name)
+        options.append({
+            "value": name,
+            "label": str(item.get("label") or name),
+            "base_url": (spec or {}).get("base_url") or str(item.get("base_url") or ""),
+            "in_file": spec is not None,
+        })
+    for name in sorted(specs):
+        if name in seen:
+            continue
+        seen.add(name)
+        options.append({"value": name, "label": name,
+                        "base_url": specs[name]["base_url"], "in_file": True})
+    return options
+
+
+def _provider_remove_blocker(name: str, used_by: object = ()) -> str:
+    """删这一套会不会有问题 → 原因（空串 = 可以删）。**视图与写口共用这一处判断**。
+
+    两条（第一条是用户 2026-10-18 定的，第二条是上一轮那道补充）：
+
+    1. **还有 `agents.<用途>` 指着它** → 拒绝（先切走再删，否则那几路悄悄掉回 `.env`）；
+    2. `.env` 的 `QQBOT_API_PROVIDER` 正声明着它、而它只存在于文件里 → 也拒绝
+       （删掉之后走主 key 的那几路会**当场解析不出来**）。
+
+    为什么把它抽出来：面板要**预先**把删除按钮禁用并写明原因，而写口要真的拒绝——
+    两处各写一遍的话，迟早出现"按钮能点、点了报错"或者更坏的"按钮说安全、实际删了出事"。
+    """
+
+    import os
+
+    from .model_config import COMPAT_PROVIDER_ENV, PROVIDERS
+
+    clean = str(name or "").strip().casefold()
+    users = [str(task) for task in (used_by or ())]
+    if users:
+        return ("还被 " + "、".join(f"agents.{task}" for task in sorted(users))
+                + " 用着：先在「各路绑定」里把它们换到别家，再删")
+    declared = os.environ.get(COMPAT_PROVIDER_ENV, "").strip().casefold()
+    if clean and clean == declared and clean not in PROVIDERS:
+        return (f"{COMPAT_PROVIDER_ENV} 现在声明着 {clean}（主 key 属于那一家），"
+                "而它只存在于这份文件里：删掉之后走主 key 的那几路会当场解析不出来。"
+                "先把 .env 里那一行（或面板「供应商」那个字段）改掉，再删。")
+    return ""
+
+
+
 class _SeamBinder:
     """给插件造接缝。**注意：它挡不住恶意插件，这一点必须说清。**
 
@@ -1691,6 +1998,17 @@ class _SeamBinder:
             # 「群聊」页每张卡片里的发送框（**操作者的话**，不是她发言）：
             # 见 `ui_notice` 与 `plugins.UiSeams.notice` 的说明。
             notice=self.ui_notice,
+            # 「模型与凭据」页（2026-10-18 用户：「添加而非替换」+「一个key一行」）：
+            # 一组六口——读清单 / 加一套 / 加或改一把 key / 删一把 key / 绑一路 / 删一套。
+            # **密钥只给掩码与长度**，写一律走 `model_providers_store` 的正式写层
+            # （审计也在那一层落）。面板因此**读不到也写不到**
+            # `data/model_providers.json`（AGENTS §2.3）。
+            model_providers=self.model_providers,
+            model_provider_add=self.model_provider_add,
+            model_provider_key=self.model_provider_key,
+            model_provider_key_remove=self.model_provider_key_remove,
+            model_provider_bind=self.model_provider_bind,
+            model_provider_remove=self.model_provider_remove,
         )
 
     async def ui_groups(self) -> tuple[dict[str, object], ...]:
@@ -1726,6 +2044,313 @@ class _SeamBinder:
         if not callable(notifier):
             return {"ok": False, "reason": "这一版核心还没有面板通知这条路，先更新核心。"}
         return dict(notifier(group_id, text, at_user_ids))
+
+    # --- 模型供应商（`ui.model_providers*`，2026-10-18）-----------------------
+    #
+    # 用户原话：「**这里，我要的是添加而非替换**」，以及「**每个agent一把key，一个供应商下
+    # 最少两把，用来跟agent一一对应**」。所以面板「模型」那一页拿到的是**一组五口**：
+    # 读清单 / 加一套 / 改某一套的几格 key / 切当前 / 删一套——**没有"编辑已有那套的
+    # 地址"这一口**，那正是"替换"的形状（地址与 key 要改就删了重加，那是一步明确的动作）。
+    #
+    # 三条边界都在这里落地，别只记住第一条：
+    #
+    # 1. **面板拿不到文件**：它不读也不写 `data/model_providers.json`，只调这五个函数
+    #    （AGENTS §2.3 的既有硬边界：面板只能调装配点注入的闭包）。
+    # 2. **写只走一处实现**：`set_provider` / `upsert_agent` / `remove_provider`——
+    #    这一族**不自己拼 JSON**。两个写者两套纪律正是契约 §3.1 作废 B7 的原因
+    #    （"脚本写的能生效、面板写的不能"最难查）。
+    # 3. **审计在写层落**（`control_audit`，`source="panel"`）：这一层不重复记，
+    #    记两笔等于同一件事两条记录（与 `ui_set_group_memory` / `ui_notice` 同一条处理）。
+
+    def _provider_audit(self):
+        """写这一族要用那份审计。取不到就 `None`（store 的 `_audit` 对 None 是空操作）。"""
+
+        return getattr(self._require(), "control_audit", None)
+
+    def model_providers(self) -> dict[str, object]:
+        """只读清单（见 `_model_providers_view`）：**密钥只有掩码与长度，没有明文**。
+
+        没有文件时返回 `providers: []`——那不是错误（面板第一次打开时文件往往还没建）。
+        """
+
+        return _model_providers_view()
+
+    def model_provider_add(self, name: str, base_url: str, keys: object = None,
+                           client_type: str = "", models: object = None
+                           ) -> dict[str, object]:
+        """**添加一套**（`providers.<名字>`）+ 它下面那几把 key（一次落盘）。
+
+        与 store 的 `set_provider()`（那是 upsert）**差一步**：这里先查同名与同地址，
+        有一个就**拒绝**。为什么不在 store 里加一个 `add_provider(create_only=True)`：
+        脚本那边"同名改地址"是它唯一的改法；而面板这一侧要的恰恰是"绝不覆盖"。
+        两边的差别写成一行判断，比在写层多一个开关更不容易被误用。
+
+        `keys` 是**列表**（`[{label?, value}, …]`，"一个key一行"），至少一把：只写地址、
+        一把 key 都没有的条目在读侧会被拒（地址与 key 必须成对），那是加了个空壳。
+        `models` 是这家**声明的模型名**（面板第三级下拉框的数据源，可空 = 只能手输）。
+        """
+
+        from . import model_providers_store as store
+        from .model_providers_store import ModelProvidersRejected
+
+        clean = str(name or "").strip()
+        snapshot = store.load()
+        existing = {str(item).strip().casefold()
+                    for item in (getattr(snapshot, "providers", {}) or {})}
+        if clean.casefold() in existing:
+            return {"ok": False, "reason": (
+                f"providers.{clean} 已经有一套了。这里是「添加」，同名**不会覆盖**"
+                "（用户 2026-10-18：「我要的是添加而非替换」）——换一个名字再加，"
+                "或者先把那一套删掉。要给它加 key，用「密钥」那一块的「加一把」。")}
+        url = str(base_url or "").strip().rstrip("/")
+        if url:
+            same_url = [item for item, spec in
+                        (getattr(snapshot, "providers", {}) or {}).items()
+                        if str(spec.get("base_url", "") or "").rstrip("/") == url]
+            if same_url:
+                return {"ok": False, "reason": (
+                    f"地址 {url} 已经属于 providers.{same_url[0]}（同一个账号写成两个名字会"
+                    "让 402 余额兜底静默失效，用户 U3）。要加 key 就在那一套下面加，"
+                    "或者先把那一套删掉。")}
+        entries, bad = _provider_key_list(keys)
+        if bad:
+            return {"ok": False, "reason": bad}
+        if not entries:
+            return {"ok": False, "reason": (
+                "添加一套至少要有一把 key：地址与 key 要成对落进同一个 providers.<名字>。"
+                "（只写地址的那一条，读侧会拒掉，等于加了个用不了的空壳。"
+                "填一把就够——「不强制最少几把 key」是用户定的口径。）")}
+        model_names, bad = _model_name_list(models)
+        if bad:
+            return {"ok": False, "reason": bad}
+        try:
+            written = store.set_provider(
+                clean, base_url=base_url, models=model_names,
+                client_type=str(client_type or "").strip() or None,
+                audit=self._provider_audit(), source="panel")
+        except ModelProvidersRejected as exc:
+            return {"ok": False, "reason": str(exc)}
+        written_name = str(written.get("name") or clean)
+        added: list[str] = []
+        failed: list[str] = []
+        for entry in entries:
+            try:
+                result = store.put_provider_key(
+                    written_name, label=entry.get("label", ""),
+                    value=entry["value"], audit=self._provider_audit(), source="panel")
+                added.append(str(result.get("id") or ""))
+            except ModelProvidersRejected as exc:
+                failed.append(str(exc))
+        note = str(written.get("note") or "")
+        result: dict[str, object] = {
+            "ok": not failed, "name": written_name,
+            "converged": bool(written.get("converged")),
+            "key_ids": added, "note": note,
+        }
+        if failed:
+            # **半成功要如实说**：这一套已经加进去了，只是那几把 key 没全落上。
+            # 不假装整条失败（那会让人再点一次、撞上"同名已存在"）。
+            result["reason"] = (f"providers.{written_name} 已经加上了，但这几把 key 没落上："
+                                + "；".join(failed) + "。可以稍后在「密钥」里逐个补。")
+            return result
+        message = f"已添加 providers.{written_name}（{len(added)} 把 key）"
+        if note:
+            message += f"（{note}）"
+        if model_names:
+            message += f"；声明的模型：{'、'.join(model_names)}"
+        result["message"] = message
+        return result
+
+    def model_provider_key(self, name: str, key_id: str = "", label: object = None,
+                           value: object = None) -> dict[str, object]:
+        """**加一把 / 改一把** key（`ui.model_provider_key`）。
+
+        两种用途、同一条口：
+
+        - `key_id=""` → **追加一把**（追加到列表末尾；"第一把"因此永远是文件里最上面那把）；
+        - `key_id="k2"` → **改那一把**的 `label` / `value`；`None` = 不动那一项
+          （面板只拿得到掩码，空输入框就是"没改"，不是"清空"——真要删用
+          `model_provider_key_remove`）。
+
+        **不限制最少几把**：删到只剩一把、或者一把都没有都允许删到底（后者只是那几路
+        会往 `.env` 回落，面板上会显示"实际用的是 .env 那一层"）。删"还在用"的那把由
+        `model_provider_key_remove` 拒。
+        """
+
+        from . import model_providers_store as store
+        from .model_providers_store import ModelProvidersRejected
+
+        clean = str(name or "").strip().casefold()
+        snapshot = store.load()
+        providers = dict(getattr(snapshot, "providers", {}) or {})
+        if clean not in providers:
+            return {"ok": False, "reason": (
+                f"文件里没有 providers.{clean or '（空名字）'} 这一套"
+                f"（现有的：{'、'.join(sorted(providers)) or '一个都没有'}）。"
+                "先在「添加一套」里把这一家加进来，再给它加 key。")}
+        try:
+            written = store.put_provider_key(
+                clean, key_id=str(key_id or "").strip(),
+                label=None if label is None else str(label),
+                value=None if value is None else str(value),
+                audit=self._provider_audit(), source="panel")
+        except ModelProvidersRejected as exc:
+            return {"ok": False, "reason": str(exc)}
+        key = str(written.get("id") or "")
+        created = bool(written.get("created"))
+        # 改了一把 key 的值 ⇒ 用到它的那几路要重指向（`resolve()` 会拿到新值）。
+        touched = [task for task, entry in (getattr(snapshot, "agents", {}) or {}).items()
+                   if str(entry.get("provider", "") or "").strip().casefold() == clean
+                   and str(entry.get("key", "") or "").strip() == key]
+        if not touched:
+            # 没被任何一路指明，但它可能是某几路的"第一把"（没写 key 的那些）——
+            # 那是"这一家的顺序变了"，最稳的做法是这一套被谁用着就重指谁。
+            touched = [task for task, entry in (getattr(snapshot, "agents", {}) or {}).items()
+                       if str(entry.get("provider", "") or "").strip().casefold() == clean]
+        for task in touched:
+            _sync_after_write(task)
+        message = (f"已加一把 key（{key}）" if created else f"已更新 key {key}")
+        return {"ok": True, "name": clean, "id": key, "created": created,
+                "count": int(written.get("count") or 0), "message": message}
+
+    def model_provider_key_remove(self, name: str, key_id: str) -> dict[str, object]:
+        """**删一把** key。**还有 `agents.<用途>.key` 指着它就拒绝**（点名哪几路）。"""
+
+        from . import model_providers_store as store
+        from .model_providers_store import ModelProvidersRejected
+
+        clean = str(name or "").strip().casefold()
+        try:
+            removed = store.remove_provider_key(
+                clean, key_id=str(key_id or "").strip(),
+                audit=self._provider_audit(), source="panel")
+        except ModelProvidersRejected as exc:
+            return {"ok": False, "reason": str(exc)}
+        key = str(removed.get("id") or key_id)
+        # 删掉的那把可能是某几路的"第一把"（它们没写 key）⇒ 那几路要重指向。
+        for task, entry in (getattr(store.load(), "agents", {}) or {}).items():
+            if str(entry.get("provider", "") or "").strip().casefold() == clean:
+                _sync_after_write(str(task))
+        return {"ok": True, "name": clean, "id": key,
+                "count": int(removed.get("count") or 0),
+                "message": f"已删掉 providers.{clean} 的 key {key}"}
+
+    def model_provider_bind(self, task: str, provider: object, key: object = None,
+                            model: object = None) -> dict[str, object]:
+        """**把一路绑成 `provider → key → model`**（`ui.model_provider_bind`）。
+
+        用户 2026-10-18 那句话的落点：「agent那边先选供应商再选对应的key最后选供应商
+        提供的模型」。所以这一口收的就正是这三样，缺一不可（除了"解绑"那种情况）。
+
+        `provider` 传空串 = **这一路解开绑定**（回到 `.env` 那套，同一件事的另一个方向）；
+        那时 `key` / `model` 一律忽略。
+
+        校验（都在核心这一侧，**不信面板**）：
+
+        - 用途名必须是那六个之一；
+        - 供应商必须是内置表或文件里认识的（`UnknownProvider` 的措辞原样给出去）；
+        - `key` 必须是**那一家真有的 id**（悬空 id 会让这一路当场没有 key，而日志上
+          看着只是"没配"）。
+        """
+
+        from . import model_config
+        from . import model_providers_store as store
+        from .model_providers_store import ModelProvidersRejected
+
+        clean_task = str(task or "").strip().casefold()
+        if clean_task not in model_config.TASK_NAMES:
+            return {"ok": False, "reason": (
+                f"不认识的用途：{task!r}（只有 {'、'.join(model_config.TASK_NAMES)}）")}
+        clean_provider = str(provider or "").strip().casefold()
+        if not clean_provider:
+            try:
+                cleared = store.clear_agent(clean_task, audit=self._provider_audit(),
+                                            source="panel")
+            except ModelProvidersRejected as exc:
+                return {"ok": False, "reason": str(exc)}
+            _sync_after_write(clean_task)
+            _drop_operator_values(operator_config.shared(), _task_legacy_keys(clean_task))
+            return {"ok": True, "task": clean_task, "cleared": bool(cleared.get("cleared")),
+                    "message": f"{clean_task} 不再由文件管：回到 .env 那套"}
+        try:
+            base_url = model_config.provider_base_url(clean_provider)
+        except model_config.UnknownProvider as exc:
+            return {"ok": False, "reason": str(exc)}
+        text_model = " ".join(str(model or "").split())
+        if not text_model:
+            return {"ok": False, "reason": (
+                f"{clean_task} 选了供应商 {clean_provider}，就必须一起选一个模型名"
+                "（用户 2026-10-18：先选供应商、再选 key、最后选它提供的模型）")}
+        text_key = "" if key is None else str(key or "").strip()
+        if text_key:
+            known = model_config.file_provider_key_ids(clean_provider)
+            if not known:
+                return {"ok": False, "reason": (
+                    f"providers.{clean_provider} 在文件里还没有 key（这一家现在只在 .env 那套"
+                    "里）：先在「密钥」里给它加一把，或者换一个 supplier")}
+            if text_key not in known:
+                return {"ok": False, "reason": (
+                    f"providers.{clean_provider} 里没有 id={text_key} 这把 key"
+                    f"（它现在有：{'、'.join(known)}）")}
+        try:
+            written = store.upsert_agent(
+                clean_task, provider=clean_provider, model=text_model,
+                key_id=(None if key is None else text_key), base_url=base_url,
+                audit=self._provider_audit(), source="panel")
+        except ModelProvidersRejected as exc:
+            return {"ok": False, "reason": str(exc)}
+        _sync_after_write(clean_task)
+        _drop_operator_values(operator_config.shared(), _task_legacy_keys(clean_task))
+        declared = model_config.file_provider_models(clean_provider)
+        out: dict[str, object] = {
+            "ok": True, "task": clean_task, "provider": str(written.get("provider") or ""),
+            "key": str(written.get("key_id") or ""), "model": text_model,
+            "model_declared": (text_model in declared) if declared else None,
+        }
+        message = (f"{clean_task} → {out['provider']}（key "
+                   f"{out['key'] or '（第一把）'} / 模型 {text_model}）")
+        if declared and text_model not in declared:
+            message += "；这个模型名不在它声明的模型里（应当能用，但请确认那一家确实有它）"
+        out["message"] = message
+        return out
+
+    def model_provider_remove(self, name: str) -> dict[str, object]:
+        """删掉一套。**还有用途指着它就拒绝**（store 那边点名哪几路，原因原样递出去）。
+
+        另外补了一道（比用户那三条口径**多出来的**，写在汇报里让人裁决）：
+        如果 `.env` 里 `QQBOT_API_PROVIDER` 正声明着它，也拒绝。理由是那个声明会让
+        `model_config.resolve()` 认这个名字，删掉之后**走兼容档的那几路当场解析不出来**
+        （`UnknownProvider`）——那与"那几路悄悄掉回环境那套"是同一类事故，
+        只是这次发生在"解析"而不是"取值"上。
+
+        `QQBOT_API_PROVIDER` 那一判与面板上的"禁用 + 原因"**共用**
+        `_provider_remove_blocker()`：两处各写一遍，迟早出现"按钮能点、点了报错"
+        或者更坏的"按钮说安全、实际删了出事"。
+        """
+
+        from . import model_providers_store as store
+        from .model_providers_store import ModelProvidersRejected
+
+        clean = str(name or "").strip().casefold()
+        snapshot = store.load()
+        agents = dict(getattr(snapshot, "agents", {}) or {})
+        users = [task for task, entry in agents.items()
+                 if str(entry.get("provider", "") or "").strip().casefold() == clean]
+        blocked = _provider_remove_blocker(clean, users)
+        if blocked and not users:
+            # 只有 `QQBOT_API_PROVIDER` 那一条会走到这里（"还在用"那条由 store 自己拒，
+            # 它点名的措辞更具体，见 `remove_provider`）。排在 store 之前说，是因为
+            # store 不认识"环境里声明了它"这件事（它只读文件）。
+            return {"ok": False, "reason": blocked}
+        try:
+            removed = store.remove_provider(clean, audit=self._provider_audit(),
+                                            source="panel")
+        except ModelProvidersRejected as exc:
+            return {"ok": False, "reason": str(exc)}
+        # **不需要** `_sync_after_write`：能删的前提是没有任何 `agents.<用途>` 指着它，
+        # 所以每一路的 `resolve()` 结果一个字都没变（删完再重指向是空操作）。
+        return {"ok": True, "name": str(removed.get("name") or clean),
+                "message": f"已删掉 providers.{removed.get('name') or clean}"}
 
     # --- LearnedSeams（她学来的东西：金句 / 黑话）--------------------------
     #

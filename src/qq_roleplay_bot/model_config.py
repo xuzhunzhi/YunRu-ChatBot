@@ -311,6 +311,16 @@ class _FilePlan:
     reasoning_effort: str = ""
     #: 这一份是从哪一档来的（自检行里打出来，人一眼能看出"文件到底生效没有"）。
     origin: str = ""
+    #: 这把 key 来自**回落链的第几层**（`KEY_LAYER_*`；空串 = 这条不在那几层里）。
+    #:
+    #: 为什么要一个字段而不是从 `key_env` 的字符串里猜：`_FilePlan` 的另一半消费者是
+    #: `status()` 与面板那一页的小字（"这一路现在实际用的是哪一层"），靠字符串前缀猜
+    #: 会在下一个人改措辞时**静默**变成"这一路没有来源"。
+    key_layer: str = ""
+    #: 给人看的那句话（"agents.reply 指定的那把（k1）" / ".env 主 key" …）。
+    key_layer_label: str = ""
+    #: 这一路绑到的那把 key 的 id（走文件那两层的才有；空串 = 没绑）。
+    key_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -320,8 +330,12 @@ class _FileView:
     snapshot: object
     #: 供应商名 → `{base_url, client_type}`（**剥掉 key**，与 `PROVIDERS` 同形状）。
     specs: dict[str, dict[str, str]]
-    #: 供应商名 → key（明文，**只在本模块内用来解析，不许进日志/自检**）。
-    keys: dict[str, str]
+    #: 供应商名 → **这家声明的模型名**（面板第三级下拉框就是它）。
+    models: dict[str, tuple[str, ...]]
+    #: 供应商名 → **key 列表**（`ProviderKey`：id / label / 明文值）。
+    #:
+    #: 明文值**只在本模块内用来解析**，不许进日志/自检（`status()` 只报 id）。
+    keys: dict[str, tuple[object, ...]]
     #: 用途名 → 原始条目（未校验；`_file_plan` 负责校验并给原因）。
     agents: dict[str, dict[str, str]]
     issues: tuple[str, ...] = ()
@@ -335,16 +349,14 @@ _VIEW_KEY: object = None
 def _build_file_view(snapshot: object) -> _FileView:
     providers = getattr(snapshot, "providers", {}) or {}
     specs: dict[str, dict[str, str]] = {}
-    keys: dict[str, str] = {}
     for name, entry in providers.items():
         spec = {"base_url": str(entry.get("base_url", "") or "")}
         client_type = str(entry.get("client_type", "") or "")
         spec["client_type"] = client_type or "openai"
         specs[name] = spec
-        key = str(entry.get("key", "") or "")
-        if key:
-            keys[name] = key
-    return _FileView(snapshot=snapshot, specs=specs, keys=keys,
+    return _FileView(snapshot=snapshot, specs=specs,
+                     models=dict(getattr(snapshot, "models", {}) or {}),
+                     keys=dict(getattr(snapshot, "keys", {}) or {}),
                      agents=dict(getattr(snapshot, "agents", {}) or {}),
                      issues=tuple(getattr(snapshot, "issues", ()) or ()))
 
@@ -378,6 +390,150 @@ def _host_of(url: str) -> str:
     return parts.netloc or ""
 
 
+# --- 一路 key 的**四层回落链**（2026-10-18 用户拍定，写死在这里）------------------
+#
+# 用户原话：「agent那边先选供应商再选对应的key最后选供应商提供的模型」，以及"key 是
+# 一个供应商下的列表"。于是"这一路实际用的是哪把 key"有**固定的四层**，顺序不许改、
+# 也不许加第五层：
+#
+#   ① `agents.<用途>.key`       —— 文件里**指名**的那把（`agents.<用途>` 这一条写全了）
+#   ② 该供应商的 `第一把 key`   —— `agents.<用途>.provider` 有、但没写 `key`
+#   ③ `.env` 里**这一路**的 key  —— 供应商都没指定（这一路没写进文件）
+#   ④ `.env` 的**主 key**       —— 今天那套的兜底
+#
+# ③ 里面还留着今天那套自己的两小步（`_env_key_source` 的"同家另一条"），**没有**把它
+# 拆成第五、第六层：那不是这一轮定的事，改了就是顺手改今天的行为（T1 那条"没有文件时
+# 逐字节相同"会当场红）。所以 ③ 报出来的名字可能是"借来的那一条"（例如 letter 借
+# judge），`key_env` / 小字标签里看得见。
+#
+# 每一层都要能回答"这一路现在实际用的是哪一层"（面板「各路绑定」每行的小字就是它）——
+# 所以这些 `KEY_LAYER_*` 常量是**契约**，别只当字符串用。
+KEY_LAYER_OWN = "own"                 # agents.<用途> 指名的那把 key
+KEY_LAYER_FIRST = "first"             # 该供应商的第一把 key
+KEY_LAYER_ENV_TASK = "env_task"       # .env 的{用途} key
+KEY_LAYER_ENV_MAIN = "env_main"       # .env 主 key
+#: 这一路**没写进文件**（整条走今天那套）——不是上面那几层，是"文件没管它"。
+KEY_LAYER_ENV = "env"
+#: 这一路**写错了**（`agents.<用途>.key` 指了一个不存在的 id）。既不是某一层，也不是
+#: "没写"：要原样把原因报出来，让人去改那个 id——绝不能悄悄换成"第一把"（换一把 =
+#: 拿另一个账号的 key 去打，2026-10-06 那次 401 的同一类形状）。
+KEY_LAYER_BROKEN = "broken"
+
+#: 用途 → 面板/小字里的中文说法。`letter` 是**插件那一路**（mail 写信），
+#: 它跟其余五路同一张表（用户 2026-10-18：插件读的是"核心里配好的"那份）。
+TASK_LABELS: dict[str, str] = {
+    "reply": "对话",
+    "judge": "判定",
+    "memory": "记忆",
+    "review": "审核",
+    "vision": "识图",
+    "letter": "写信",
+}
+
+#: 顺带给面板那一页的"格子里有哪些行"：`main` 之外就是这六路（顺序即面板顺序）。
+KEY_GRID_TASKS: tuple[str, ...] = ("reply", "judge", "memory", "review", "vision", "letter")
+
+
+def _layer_label(task: str, layer: str, key_id: str = "") -> str:
+    """一层的**人话**（面板小字 / `status()` / 拒绝原因都用它，只此一份）。"""
+
+    name = TASK_LABELS.get(task, task)
+    if layer == KEY_LAYER_OWN:
+        return f"{name}绑定的那一把 key" + (f"（{key_id}）" if key_id else "")
+    if layer == KEY_LAYER_FIRST:
+        return "该供应商的第一把 key" + (f"（{key_id}）" if key_id else "")
+    if layer == KEY_LAYER_ENV_TASK:
+        return f".env 的{name} key"
+    if layer == KEY_LAYER_ENV_MAIN:
+        return ".env 主 key"
+    if layer == KEY_LAYER_ENV:
+        return ".env 那套（这一路没写进文件）"
+    return ""
+
+
+@dataclass(frozen=True)
+class _KeyPick:
+    """一次"这一路该用哪把 key"的结果：**哪一层 + 值 + id + 来源名 + （不能用时）为什么**。"""
+
+    layer: str
+    label: str
+    value: str
+    #: 与 `_FilePlan.key_name` / `key_env` 同一个口径（`文件:providers.X.k1` / 变量名）。
+    name: str
+    env: str
+    own: bool
+    key_id: str = ""
+    reason: str = ""
+
+
+def _provider_key(view: _FileView, provider: str, key_id: str) -> object | None:
+    """这一家里 id 为 `key_id` 的那把 key；没有就 `None`。"""
+
+    for item in view.keys.get(provider, ()) or ():
+        if str(getattr(item, "id", "") or "") == key_id:
+            return item
+    return None
+
+
+def _provider_key_ids(view: _FileView, provider: str) -> list[str]:
+    return [str(getattr(item, "id", "") or "") for item in view.keys.get(provider, ()) or ()]
+
+
+def _file_key_pick(provider: str, task: str, entry: dict[str, str],
+                   view: _FileView) -> _KeyPick:
+    """按**四层回落链**算这一路（`agents.<用途>` 这一条 × 那一套）的 key。
+
+    ①② 是纯文件（地址与 key 出自同一条 `providers.<名字>`，天然"成对"）；③④ 是借
+    `.env`，所以**必须**过"同家"那道闸（D1 ②：不许让文件改了地址却借 `.env` 里别家的
+    key——那正是 2026-10-06 那次三系统 401 的形状）。闸不过不是"没有 key"，而是"这一层
+    用不了"，`reason` 里说清是哪一层、属于谁。
+
+    这个函数是**唯一**算这几层的地方：`_plan_from_entry`（解析）与 `_task_layer()`
+    （`status()` / 面板小字）都调它。两份实现必然漂移，而漂移的结果是"面板说在用 A、
+    实际打的是 B"。
+    """
+
+    task = str(task or "").strip().casefold()
+    wanted = str(entry.get("key", "") or "").strip()
+    if wanted:
+        found = _provider_key(view, provider, wanted)
+        if found is None:
+            return _KeyPick(KEY_LAYER_BROKEN, "", "", "", "", False, reason=(
+                f"agents.{task}.key = {wanted}，但 providers.{provider} 里没有这个 id"
+                f"（它现在有：{'、'.join(_provider_key_ids(view, provider)) or '一把都没有'}）"))
+        return _KeyPick(KEY_LAYER_OWN, _layer_label(task, KEY_LAYER_OWN, wanted),
+                        str(getattr(found, "value", "") or ""),
+                        f"文件:providers.{provider}.{wanted}",
+                        f"文件:providers.{provider}.{wanted}", True, key_id=wanted)
+    first = _provider_key(view, provider, _provider_key_ids(view, provider)[0]) \
+        if _provider_key_ids(view, provider) else None
+    if first is not None:
+        first_id = str(getattr(first, "id", "") or "")
+        return _KeyPick(KEY_LAYER_FIRST, _layer_label(task, KEY_LAYER_FIRST, first_id),
+                        str(getattr(first, "value", "") or ""),
+                        f"文件:providers.{provider}.{first_id}",
+                        f"文件:providers.{provider}.{first_id}", True, key_id=first_id)
+    source = _env_key_source(task)
+    if not source.value:
+        return _KeyPick("", "", "", "", "", False, reason=(
+            f"agents.{task} 只写了供应商 {provider}，它没有 key，"
+            "环境里也没有这一路可用的 key"))
+    if source.is_main:
+        declared, _stated = _main_provider(task)
+        if declared != provider:
+            return _KeyPick("", "", "", "", "", False, reason=(
+                f"环境里的主 key 属于 {declared}，与 agents.{task} 写的 {provider} "
+                "不是同一家（地址与 key 必须成对）"))
+        return _KeyPick(KEY_LAYER_ENV_MAIN, _layer_label(task, KEY_LAYER_ENV_MAIN),
+                        source.value, source.name, source.env, False)
+    if source.provider != provider:
+        return _KeyPick("", "", "", "", "", False, reason=(
+            f"环境里那条 key 属于 {source.provider}，与 agents.{task} 写的 {provider} "
+            "不是同一家（地址与 key 必须成对）"))
+    return _KeyPick(KEY_LAYER_ENV_TASK, _layer_label(task, KEY_LAYER_ENV_TASK),
+                    source.value, source.name, source.env, False)
+
+
 def _file_plan(task: str) -> _FilePlan | None:
     """这个用途在文件里有没有一份**可用**的计划；没有（没写 / 写坏了）返回 `None`。
 
@@ -407,11 +563,13 @@ def _plan_from_entry(task: str, entry: dict[str, str],
                      view: _FileView) -> tuple[_FilePlan | None, str]:
     """把一个 `agents.<用途>` 条目算成一份来源，或者给出**为什么不能用**。
 
-    这一段的顺序就是契约 D1（"宽松带闸"）：
-    ① 文件里写了这一家、而且有 key → 用它（最高优先，压过环境）；
-    ② 写了这一家、没写 key → 只有地址与内置那条**完全相同**时，才允许借该用途的
-       环境变量 key（挡死"文件改了地址却借 .env 的 key"——那是 2026-10-06 的形状）；
-    ③ 这一家**不在**文件里 → 走内置表 + 环境变量（= 今天）。
+    顺序就是契约 D1（"宽松带闸"）叠上 2026-10-18 那四层回落链：
+    ① `agents.<用途>.key` 指名的那把 → 用它（地址与 key 出自同一条，成对）；
+    ② 没写 `key` → 该供应商的**第一把**（同样是文件里的，成对）；
+    ③ 这一家没有 key → 只有地址与内置那条**完全相同**时，才允许借 `.env`（挡死
+       "文件改了地址却借 .env 的 key"——那是 2026-10-06 的形状）；借的时候按
+       `.env 这一路` → `.env 主 key` 两层次序，且必须同家；
+    ④ 这一家**不在**文件里（只写了"用哪家"）→ 走内置表 + 环境变量（= 今天）。
     """
 
     provider = str(entry.get("provider", "") or "").strip().casefold()
@@ -423,39 +581,42 @@ def _plan_from_entry(task: str, entry: dict[str, str],
         return None, "缺 model（文件里写了的用途必须自己给模型名）"
     if provider in view.specs:
         base_url = view.specs[provider]["base_url"].rstrip("/")
-        key = view.keys.get(provider, "")
-        if key:
+        pick = _file_key_pick(provider, task, entry, view)
+        if pick.layer in (KEY_LAYER_OWN, KEY_LAYER_FIRST):
+            # ①②：key 与地址出自**同一条** `providers.<名字>` ⇒ 成对，直接用。
             return _FilePlan(task=task, provider=provider, base_url=base_url, model=model,
-                             api_key=key, key_name=f"文件:providers.{provider}",
-                             key_env=f"文件:providers.{provider}", own_key=True,
-                             reasoning_effort=effort, origin="文件"), ""
+                             api_key=pick.value, key_name=pick.name, key_env=pick.env,
+                             own_key=True, reasoning_effort=effort, origin="文件",
+                             key_layer=pick.layer, key_layer_label=pick.label,
+                             key_id=pick.key_id), ""
+        if pick.layer == KEY_LAYER_BROKEN:
+            # 这一路**写错了**（指名了一把不存在的 key）。先报这个原因：说成"没有 key、
+            # 地址又不是内置那一条"会把人引到地址上去，而实际要改的是那个 id。
+            return None, pick.reason
+        # ③：要借 `.env` 了。地址不是内置那一条 ⇒ 不许借（否则就是"文件改地址、
+        # 借 .env 的 key"那种混搭）。这条闸排在家门闸之前，与改动前逐字一致。
         builtin = PROVIDERS.get(provider)
         if builtin is None or builtin["base_url"].rstrip("/") != base_url:
-            return None, (f"providers.{provider} 没写 key，而地址又不是内置那一条"
+            return None, (f"providers.{provider} 还没有 key，而地址又不是内置那一条"
                           "（不许让文件改了地址却借 .env 里的 key）")
-        source = _env_key_source(task)
-        if not source.value:
-            return None, f"providers.{provider} 没写 key，环境里也没有这一路可用的 key"
-        if source.is_main:
-            declared, _stated = _main_provider(task)
-            if declared != provider:
-                return None, (f"环境里的主 key 属于 {declared}，与文件写的 {provider}"
-                              " 不是同一家（地址与 key 必须成对）")
-        elif source.provider != provider:
-            return None, (f"环境里那条 key 属于 {source.provider}，与文件写的 {provider}"
-                          " 不是同一家（地址与 key 必须成对）")
+        if not pick.value:
+            return None, pick.reason
         return _FilePlan(task=task, provider=provider, base_url=base_url, model=model,
-                         api_key=source.value, key_name=source.name, key_env=source.env,
-                         own_key=source.own, reasoning_effort=effort,
-                         origin="文件·借环境 key"), ""
+                         api_key=pick.value, key_name=pick.name, key_env=pick.env,
+                         own_key=False, reasoning_effort=effort,
+                         origin="文件·借环境 key",
+                         key_layer=pick.layer, key_layer_label=pick.label), ""
     if provider in PROVIDERS:
         source = _env_key_source(task)
         base_url = _env_base_url_for(task, source)
         actual = source.provider or _default_provider(task)
+        # 这一档 key 全来自 `.env`（文件只写了"用哪家"）：层号按 `.env` 那两层报。
+        layer = KEY_LAYER_ENV_MAIN if source.is_main else KEY_LAYER_ENV_TASK
         return _FilePlan(task=task, provider=actual, base_url=base_url, model=model,
                          api_key=source.value, key_name=source.name, key_env=source.env,
                          own_key=source.own, reasoning_effort=effort,
-                         origin="文件·家回落"), ""
+                         origin="文件·家回落",
+                         key_layer=layer, key_layer_label=_layer_label(task, layer)), ""
     return None, f"不认识的供应商 {provider}（文件 providers 与内置表里都没有）"
 
 
@@ -478,22 +639,75 @@ def file_has_agent(task: str) -> bool:
 
 
 def file_has_key(task: str) -> bool:
-    """这个用途的 key 是从**文件里那条 provider** 取的（不是借环境的）。"""
+    """这个用途的 key **来自文件**（`agents.<用途>` 指名的那把，或该供应商的第一把）。
+
+    为什么把"借 `.env`"排除在外（这一格的两个调用方都不许它算进来）：
+    `dev_config.review_enabled()` 用这条判"review 配了没有"，它刻意不算"借 judge 那把"
+    ——算进来会让"只配了一把主 key"的机器**突然自动开风格审核**（每条回复多一次调用），
+    正是那条用例明确否掉的形状。`runtime._build_client_overrides()` 用它是给面板回
+    "这一项（按路的）配了没有"。所以：**文件里这一路真的有 key** 才算。
+    """
 
     plan = _file_plan(str(task or "").strip().casefold())
-    return plan is not None and plan.own_key and plan.key_env.startswith("文件:providers.")
+    return plan is not None and plan.key_layer in (KEY_LAYER_OWN, KEY_LAYER_FIRST)
 
 
 def file_agent_entry(task: str) -> dict[str, str]:
-    """文件里那个用途的原始条目（没写返回空 dict）。写侧拿它兜"沿用现有的模型名"。"""
+    """文件里那个用途的原始条目（没写返回空 dict）。写侧拿它兜"沿用现有的模型名/key"。"""
 
     return dict(_providers_file().agents.get(str(task or "").strip().casefold()) or {})
 
 
 def file_provider_has_key(name: str) -> bool:
-    """文件里这一家**有没有 key**（写侧判"自定义地址能不能只改地址"用；不返回值）。"""
+    """文件里这一家**有没有 key**（写侧判"改地址时地址与 key 成不成对"用；不返回值）。"""
 
     return bool(_providers_file().keys.get(str(name or "").strip().casefold()))
+
+
+def file_provider_models(name: str) -> tuple[str, ...]:
+    """文件里这一家**声明的模型名**（面板第三级下拉框用；没声明返回空元组）。"""
+
+    return tuple(_providers_file().models.get(str(name or "").strip().casefold(), ()))
+
+
+def file_provider_key_ids(name: str) -> tuple[str, ...]:
+    """文件里这一家的 key **id 列表**（顺序即"第一把"的顺序；不含值）。"""
+
+    return tuple(str(getattr(item, "id", "") or "")
+                 for item in _providers_file().keys.get(
+                     str(name or "").strip().casefold(), ()) or ())
+
+
+def task_key_layer(task: str) -> dict[str, object]:
+    """**这一路**现在实际用的是哪一层 key（`status()` 与面板每行的小字都用它）。
+
+    也是"面板说的与实际打的是不是同一把"这条判据的唯一来源——所以它**不另算一遍**，
+    而是调解析用的那个 `_file_key_pick()`。
+
+    **绝不返回 key 的值**：这里只回答"哪一层、有没有值、来源名、为什么用不了"。
+    面板要显示"填过没有"由 runtime 那侧的掩码/长度负责（它从 store 读，不从这拿）。
+    """
+
+    task_name = str(task or "").strip().casefold()
+    view = _providers_file()
+    entry = view.agents.get(task_name)
+    if entry is None:
+        return {"task": task_name, "label": TASK_LABELS.get(task_name, task_name),
+                "layer": KEY_LAYER_ENV, "layer_label": _layer_label(task_name, KEY_LAYER_ENV),
+                "present": bool(_key_source(task_name).value), "key_id": "",
+                "source": "", "reason": ""}
+    pick = _file_key_pick(str(entry.get("provider", "") or "").strip().casefold(),
+                          task_name, entry, view)
+    return {
+        "task": task_name,
+        "label": TASK_LABELS.get(task_name, task_name),
+        "layer": pick.layer or "",
+        "layer_label": pick.label,
+        "present": bool(pick.value),
+        "key_id": pick.key_id,
+        "source": pick.env,
+        "reason": pick.reason,
+    }
 
 
 def providers_file_path() -> str:
@@ -530,6 +744,12 @@ def providers_file_lines() -> list[str]:
         lines.append("模型供应商文件·地址: " + "、".join(
             f"{name}@{_host_of(spec['base_url']) or '?'}"
             for name, spec in sorted(view.specs.items())))
+    if view.keys:
+        # 只报 **key 的 id 与"谁是第一把"**，绝不打值（多 key 之后这一行就是"哪一家有
+        # 几把 key、第一把是谁"的现场证据；打值等于一次泄露好几把）。
+        lines.append("模型供应商文件·key: " + "、".join(
+            f"{name}[{'/'.join(str(getattr(item, 'id', '') or '') for item in items)}]"
+            for name, items in sorted(view.keys.items())))
     rejected = {task: why for task in TASK_NAMES if (why := _file_rejection(task))}
     if rejected:
         lines.append("模型供应商文件·被拒: " + "；".join(
@@ -545,6 +765,10 @@ def status() -> dict[str, object]:
     `rejected` 是"文件里写了但这一路用不了"的用途 → 原因。为什么不在
     `model_providers_store.status()` 里算它：store **不认识 `TASK_NAMES`**（契约 §3.4，
     两份用途名清单必然漂移），所以"哪几路生效/被拒"只能在这一层算。
+
+    `key_layers` 是"这一路的 key 现在实际来自哪一层"（见 `KEY_LAYER_*`）；没写进文件的
+    那几路报 `env`（"文件没管它"），不是那几层里的任何一层。
+    `key_ids` 报的是**key 的 id**（哪一家有哪几把），**不是值**。
     """
 
     view = _providers_file()
@@ -563,9 +787,27 @@ def status() -> dict[str, object]:
         "effective": effective,
         "rejected": rejected,
         "unknown_agents": sorted(set(view.agents) - set(TASK_NAMES)),
+        #: 用途 → `{layer, label, from_file, present, key_id, source}`（"key 来自哪一层"）。
+        "key_layers": {task: _task_layer(task) for task in TASK_NAMES},
+        #: 供应商 → **key 的 id 列表**（顺序即"第一把"的顺序；不是值）。
+        "key_ids": {name: [str(getattr(item, "id", "") or "") for item in items]
+                    for name, items in sorted(view.keys.items())},
+        #: 供应商 → 它声明的模型名。
+        "provider_models": {name: list(names)
+                            for name, names in sorted(view.models.items())},
         "issues": list(getattr(snapshot, "issues", ()) or ()),
         "notes": list(getattr(snapshot, "duplicate_urls", ()) or ()),
     }
+
+
+def _task_layer(task: str) -> dict[str, object]:
+    """`status()["key_layers"]` 的一行：这一路**实际**用的那把 key 来自哪一层。"""
+
+    layer = task_key_layer(task)
+    plan = _file_plan(str(task or "").strip().casefold())
+    return {"layer": layer["layer"], "label": layer["layer_label"],
+            "from_file": plan is not None, "present": bool(layer["present"]),
+            "key_id": str(layer.get("key_id") or ""), "source": str(layer.get("source") or "")}
 
 
 class UnknownTask(ValueError):

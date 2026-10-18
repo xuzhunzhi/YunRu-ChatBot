@@ -600,6 +600,52 @@ class UiSeams:
     #: `reason` 要**原样**显示给操作者（用户：拒绝原因别吞成"操作失败"）。
     notice: object = None
 
+    # --- 模型供应商（2026-10-18 用户：「添加而非替换」+「一个key一行」）-------
+    #
+    # 下面六个是**一组**：读清单 / 加一套 / 加或改一把 key / 删一把 key /
+    # 把一路绑成 provider→key→model / 删一套。面板「模型与凭据」那一页只调这六个；
+    # 它**读不到也写不到** `data/model_providers.json`（那份文件只有核心的
+    # `model_providers_store` 能碰，AGENTS §2.3 的既有硬边界）。
+    #
+    # 五条一起记住（少一条这一组就变味）：
+    #
+    # 1. **密钥只给掩码与长度**（`model_providers` 里 `providers[].keys[]` 的
+    #    `masked` / `length`），明文一个字节都不出这一层——理由不是"面板不可信"，
+    #    而是"漏一次就再也收不回来"，而且这种约定靠人记一定会破，所以由**接缝自己**
+    #    掐掉（测试逐个钉住"整份 JSON 里不含明文"）。
+    # 2. **key 是供应商下的一个列表**（用户：「我倾向于一个key一行而不是一个供应商一行
+    #    外加好多key」）：每把有 `id`（稳定，`agents.<用途>.key` 指的就是它）与可选
+    #    `label`。**不按用途命名**，也不限制最少几把。
+    # 3. **用途与 key 的关系写在 `agents.<用途>.key` 里**，不是写在 key 上：所以"绑一路"
+    #    是一口单独的写（`model_provider_bind`，`provider → key → model` 三件套）。
+    # 4. **同名不覆盖 / 在用的不许删**：`add` 见同名（或同地址）就拒绝；删 key / 删一套
+    #    时，还有 `agents.<用途>` 指着就拒绝并点名哪几路（用户 2026-10-18 补定：
+    #    先切走、再删）。直接删的后果是那几路悄悄掉回别的来源。
+    # 5. **写一律走 `model_providers_store` 的正式写层**（`set_provider` /
+    #    `put_provider_key` / `remove_provider_key` / `upsert_agent` /
+    #    `remove_provider`），每次写都在那一层落 `control_audit`（`source="panel"`）——
+    #    这一组**不自己拼 JSON**（两个写者两套纪律正是契约 §3.1 作废 B7 的原因）。
+    #:
+    #: `() -> dict`：**只读**。`providers[]`（每套：名字 / 地址 / 声明的模型 /
+    #: **平铺的 key 列表**（id、label、掩码、长度、被哪几路用着）/ 能不能删）、
+    #: `bindings[]`（每路一行：provider / key / model + **现在实际落在哪一层**）、
+    #: `options[]`（供应商下拉框）。**没有这个文件时返回空清单，不报错**。
+    model_providers: object = None
+    #: `(name, base_url, keys, client_type="", models=None) -> dict`：**添加一套**。
+    #: `keys` 是列表 `[{label?, value}, …]`（至少一把）；`models` 是这家声明的模型名。
+    #: 同名或同地址**绝不覆盖**（都拒绝，并说清换什么）。
+    model_provider_add: object = None
+    #: `(name, key_id="", label=None, value=None) -> dict`：加一把（`key_id=""` 追加到
+    #: 末尾）或改一把（`None` = 那一项不动）。返回 `{"ok","id","created","count"}`。
+    model_provider_key: object = None
+    #: `(name, key_id) -> dict`：删一把。**还有 agents.<用途>.key 指着它就拒绝**。
+    model_provider_key_remove: object = None
+    #: `(task, provider, key=None, model=None) -> dict`：把**一路**绑成
+    #: `provider → key → model`。`provider=""` = 解开绑定（回到 `.env` 那套）。
+    model_provider_bind: object = None
+    #: `(name) -> dict`：删掉一套。**还有用途指着它就拒绝**（原因原样给操作者）。
+    model_provider_remove: object = None
+
 
 @dataclass(frozen=True, slots=True)
 class LearnedSeams:

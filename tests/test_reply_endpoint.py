@@ -329,42 +329,63 @@ def test_the_three_reply_settings_are_in_the_whitelist() -> None:
     assert SETTINGS["reply_api_base_url"]["kind"] == "str"
 
 
-def test_the_panel_can_point_only_the_reply_agent_elsewhere() -> None:
-    """面板只动回复这一路（判据没变；**存储变了**）。
+def test_the_panel_can_change_only_the_reply_model() -> None:
+    """面板只动回复这一路（判据没变；**能动的项变了**）。
 
-    ⚠️ 2026-10-18（契约 §3.5）：这三个键从"写 `operator_config.json` + `os.environ`"
-    改成**写 `data/model_providers.json`**（用户拍定的唯一存储）。所以下面关于**落盘位置**
-    的期望值跟着改；判据一个字没松——"只动回复这一路"、"另外几路一个字不动"、
-    "立刻生效（不用重启）"仍然逐条钉着。
+    ⚠️ 2026-10-18（契约 §3.5 → 第二轮"一个key一行"）：`reply_api_key` /
+    `reply_api_base_url` / `reply_provider` 这三项**已经搬到面板「模型与凭据」页**
+    （那一页是"每路一行：供应商 → key → 模型"）。留在这里的只有**模型名**：
+    `agents.reply.model` 仍然是"只属于回复这一路"的一项，所以它照旧走 `apply_overrides`
+    → 文件。判据一个字没松：**只动回复这一路**、另外几路一字不动、立刻生效。
+
+    被搬走的那几项在下面**当场拒绝**并指向新页面——静默无效比拒绝坏得多。
     """
 
     with tempfile.TemporaryDirectory() as tmp, _env(env_file_key=""):
         dialogue, judge = _client("dialogue"), _client("judge")
-        applied = apply_overrides(_Engine(), {
+        moved = apply_overrides(_Engine(), {
             "reply_api_base_url": "https://reply.example/v1",
             "reply_api_key": "sk-reply-fake",
-            "reply_api_model": "reply-model-fake",
+            "reply_provider": "deepseek",
         }, store=_operator(tmp))
-        assert applied["reply_api_base_url"]["applied"] == "live"
-        assert applied["reply_api_key"]["applied"] == "live"
-        assert applied["reply_api_model"]["applied"] == "live"
-        assert (dialogue.base_url, dialogue.api_key, dialogue.model) == (
-            "https://reply.example/v1", "sk-reply-fake", "reply-model-fake")
+        for key in ("reply_api_base_url", "reply_api_key", "reply_provider"):
+            assert moved[key]["applied"] == "rejected", moved
+            assert "模型与凭据" in moved[key]["detail"], moved[key]
+            assert "sk-reply-fake" not in moved[key]["detail"], "拒绝理由里带出了明文"
+        # 被拒的那几项**一个字节都没写**（文件不该被建出来）。
+        assert not Path(os.environ["QQBOT_MODEL_PROVIDERS_FILE"]).exists()
+
+        # 一份能让回复那一路**真的解析出来**的文件：一个供应商 + 一把 key + 绑定。
+        Path(os.environ["QQBOT_MODEL_PROVIDERS_FILE"]).write_text(json.dumps({
+            "version": 2,
+            "providers": {"deepseek": {"base_url": "https://api.deepseek.com",
+                                       "keys": [{"id": "k1", "value": "sk-file-reply"}]}},
+            "agents": {"reply": {"provider": "deepseek", "key": "k1",
+                                 "model": "old-model"}},
+        }), encoding="utf-8")
+        model_providers_store.reset_cache()
+
+        applied = apply_overrides(_Engine(), {"reply_api_model": "reply-model-fake"},
+                                  store=_operator(tmp))
+        assert applied["reply_api_model"]["applied"] == "live", applied
+        # 模型换了 ⇒ 回复那个活 client 跟着变（地址与 key 仍按 `resolve()` 那一套）。
+        assert dialogue.model == "reply-model-fake"
+        assert (dialogue.base_url, dialogue.api_key) == (
+            model_config.resolve("reply").base_url, model_config.resolve("reply").api_key)
         # 判定那一路一个字都没动
         assert (judge.base_url, judge.api_key, judge.model) == (
             "https://old.example", "sk-old", "old-model")
-        # 落进**文件**（唯一存储），重启之后还是这一套：
+        # 落进**文件**（唯一存储）：只有 `agents.reply.model` 变了，绑定一个字没动。
         body = json.loads(Path(os.environ["QQBOT_MODEL_PROVIDERS_FILE"]).read_text("utf-8"))
-        assert body["agents"]["reply"] == {
-            "provider": "deepseek", "model": "reply-model-fake"}
-        assert body["providers"]["deepseek"]["base_url"] == "https://reply.example/v1"
-        assert body["providers"]["deepseek"]["key"] == "sk-reply-fake"
+        assert body["agents"]["reply"] == {"provider": "deepseek", "key": "k1",
+                                           "model": "reply-model-fake"}
+        assert body["agents"].keys() == {"reply"}, "顺手把别路写进文件了"
+        assert body["providers"]["deepseek"]["keys"] == [{"id": "k1",
+                                                          "value": "sk-file-reply"}]
         # **不再**写覆盖层与环境变量（"唯一存储"这句的机械判据）。
         stored = OperatorConfig(Path(tmp) / "operator_config.json").load()
-        assert "reply_api_base_url" not in stored
         assert "reply_api_model" not in stored
-        assert "reply_api_key" not in stored
-        assert "QQBOT_REPLY_API_BASE_URL" not in os.environ
+        assert "QQBOT_REPLY_API_MODEL" not in os.environ
 
 
 def test_a_global_change_does_not_clobber_the_reply_endpoint() -> None:
@@ -406,35 +427,37 @@ def test_a_global_change_never_moves_a_task_that_has_its_own_key() -> None:
             model_config.provider_base_url("deepseek")
 
 
-def test_clearing_the_reply_endpoint_falls_back_to_the_main_pair() -> None:
-    """清空地址 = 把回复这一路**从文件里删掉**，回落到今天那套（D12 的同一条语义）。
+def test_clearing_the_reply_model_falls_back_to_the_env_layer() -> None:
+    """清空模型名 = 把回复这一路**从文件里删掉**，回落到今天那套（D12 的同一条语义）。
 
-    2026-10-18（契约 §3.5 / D12）：文件里没有"只有地址没有模型"这种形状，所以清空
-    `reply_api_base_url` 不是"写一个空地址"，而是**删掉 `agents.reply`**——于是它回到
-    `.env` + 兼容档那一套。判据"回落之后与 `resolve()` 一致、环境里没留空串、覆盖层里
-    没留那条"一个字没松。
+    2026-10-18（第二轮）：能在「调参」页动的那一项只剩 `reply_api_model`。文件里没有
+    "只有 provider 没有模型"这种形状，所以清空模型名不是"写一个空模型名"，而是**删掉
+    `agents.reply`**——于是它回到 `.env` + 兼容档那一套。判据"回落之后与 `resolve()`
+    一致、环境里没留空串、覆盖层里没留那条"一个字没松。
     """
 
-    with tempfile.TemporaryDirectory() as tmp, _env(QQBOT_JUDGE_API_KEY="sk-judge-fake"):
+    with tempfile.TemporaryDirectory() as tmp, _env(env_file_key="",
+                                                    QQBOT_JUDGE_API_KEY="sk-judge-fake"):
         dialogue = _client("dialogue")
         store = _operator(tmp)
-        # 写"这一路"必须**成对**：只给地址不给 key，读侧会拒（地址与 key 必须同源），
-        # 写侧也因此拒（见 `runtime._apply_file_settings` 的那道闸）——所以这里三样一起给。
-        first = apply_overrides(_Engine(), {
-            "reply_api_base_url": "https://reply.example/v1",
-            "reply_api_key": "sk-file-reply",
-            "reply_api_model": "reply-model-fake",
-        }, store=store)
-        assert first["reply_api_key"]["applied"] == "live", first
-        assert dialogue.base_url == "https://reply.example/v1"
-        applied = apply_overrides(_Engine(), {"reply_api_key": ""}, store=store)
-        assert applied["reply_api_key"]["applied"] == "live"
+        path = Path(os.environ["QQBOT_MODEL_PROVIDERS_FILE"])
+        path.write_text(json.dumps({
+            "version": 2,
+            "providers": {"deepseek": {"base_url": "https://api.deepseek.com",
+                                       "keys": [{"id": "k1", "value": "sk-file-reply"}]}},
+            "agents": {"reply": {"provider": "deepseek", "key": "k1",
+                                 "model": "reply-model-fake"}},
+        }), encoding="utf-8")
+        model_providers_store.reset_cache()
+        assert model_config.resolve("reply").model == "reply-model-fake"
+        assert model_config.resolve("reply").api_key == "sk-file-reply"
+        applied = apply_overrides(_Engine(), {"reply_api_model": ""}, store=store)
+        assert applied["reply_api_model"]["applied"] == "live"
         # 清掉之后回到**环境那套**：judge 那条 key（deepseek）。
-        assert dialogue.base_url == model_config.resolve("reply").base_url, \
-            "清掉之后要回落 reply 那条 key 自己那一对"
+        assert dialogue.model == model_config.resolve("reply").model
+        assert dialogue.model == "deepseek-flash"
         assert dialogue.base_url == "https://api.deepseek.com"
         assert dialogue.api_key == "sk-judge-fake"
-        path = Path(os.environ["QQBOT_MODEL_PROVIDERS_FILE"])
         body = json.loads(path.read_text("utf-8")) if path.exists() else {"agents": {}}
         assert "reply" not in body["agents"], "清空之后文件里还留着这一路"
         assert "QQBOT_REPLY_API_BASE_URL" not in os.environ, "环境里留下了空串"
