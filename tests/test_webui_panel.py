@@ -772,77 +772,78 @@ class PanelSeamImportTests(unittest.TestCase):
 
 
 class LayoutIsCssDrivenTests(unittest.TestCase):
-    """左栏宽度：**由 CSS 驱动、跨断点连续**。
+    """左栏宽度：**由 CSS 驱动、两档之间没有"按比例"的中间档**。
 
     由来（2026-10-06 用户）："从**平板视图切换到大屏视图**时，左边栏会缩回去，变得很窄"。
-    先说清**实测**的结论（无头 Edge + CDP，在**同一个文档**里改视口）：
-    `document.querySelector(".rail").getAttribute("style")` 全程都是空串、`body.className`
-    也是空串——**不是**残留内联宽度，也不是类没摘。真正的原因是 CSS 两档宽度不连续：
-    中等档 `40%` 在 1099px 处约 425px，而宽屏档写的是 240px（Miuix 平板栏那个 token），
-    于是越过 1100px 时栏体从 ~386px 掉到 240px。
+    当时的原因是 CSS 两档宽度不连续（中等档 40% ≈ 425px、宽屏档 240px，过界掉 44%），
+    于是把宽屏档改成 426px 去"接住"它。
 
-    这里钉两条**能在离线套件里算出来**的判据（真机宽度只能靠截图/CDP，见提交信息里的数）：
+    ⚠️ 2026-10-19 第三轮（用户判词："你这个就不是 miuix 的标准组件"）：左栏换成 Miuix
+    `NavigationRail` 之后，**宽度只有文档里的两个数**——`ExpandedWidth = 240` /
+    `MinWidth = 80`，中间没有"按比例分"的那一档（那一档本身就是自造的）。
+    所以这条用例改成钉住新的那两条：
 
-    1. 宽屏档的固定宽度 ≥ 中等档在断点处的宽度（否则一过界就"缩回去"）；
+    1. 两档都是**固定 px**（不许出现比例宽度），且展开那一档要够宽到放得下
+       `IconSize 28 + ExpandedItemIconTextSpacing 16 + 至少一个 16sp 字的标签`；
     2. 布局不许由 JS 写内联尺寸驱动（那才会真的出现"跨断点残留"这一整类 bug）。
     """
-
-    #: 中等档那条媒体查询的上界（`max-width: 1099px`）。
-    BREAKPOINT_MAX = 1099
 
     @staticmethod
     def _asset(name: str) -> str:
         return resources.files("qq_roleplay_bot.plugins.webui.webui").joinpath(
             name).read_text(encoding="utf-8")
 
-    def _body_padding(self, css: str) -> int:
-        """`body` 的左右内边距——下面那条算术要用它（百分比针对内层宽度解析）。"""
-
-        for block in re.findall(r"\nbody\s*\{([^}]*)\}", css):
-            found = re.search(r"\bpadding:\s*(\d+)px", block)
-            if found:
-                return int(found.group(1))
-        self.fail("app.css 里找不到 body 的 padding")
-
-    def test_the_wide_tier_keeps_the_width_the_medium_tier_ends_with(self) -> None:
+    def test_the_rail_has_exactly_two_documented_widths(self) -> None:
         css = self._asset("app.css")
-        padding = self._body_padding(css)
-        self.assertEqual(padding, 18,
-                         "body 内边距变了：这条用例下面的算术（断点 − 2×内边距）要跟着改")
-
-        wide = re.search(r"\.rail\s*\{([^}]*)\}", css)
-        self.assertIsNotNone(wide, "找不到 .rail 的基础样式")
-        fixed_px = re.search(r"flex:\s*0 0 (\d+)px", wide.group(1))
-        self.assertIsNotNone(
-            fixed_px,
-            "宽屏档的 .rail 必须是**固定宽度**（flex: 0 0 <N>px）——写成百分比就不是"
-            "'到达一定尺寸后固定宽度'了")
-
-        medium = re.search(
-            r"@media \(min-width: 700px\) and \(max-width: (\d+)px\)\s*\{(.*?)\n\}",
-            css, re.S)
-        self.assertIsNotNone(medium, "找不到中等档那条媒体查询")
-        ratio = re.search(r"\.rail\s*\{[^}]*flex:\s*0 0 ([\d.]+)%", medium.group(2))
-        self.assertIsNotNone(ratio, "中等档的 .rail 应当是 40% 那种比例宽度")
-
-        at_breakpoint = float(ratio.group(1)) / 100 * (self.BREAKPOINT_MAX - 2 * padding)
-        self.assertGreaterEqual(
-            float(fixed_px.group(1)), at_breakpoint - 2.0,
-            f"宽屏档 {fixed_px.group(1)}px 比中等档在断点处的 {at_breakpoint:.0f}px 窄："
-            "窗口从平板宽度拉到大屏时左栏会**缩回去**（用户 2026-10-06 报的那个 bug）")
+        self.assertRegex(css, r"--miu-rail-expanded-w:\s*240px",
+                         "展开档不是 `NavigationRailDefaults.ExpandedWidth = 240.dp`")
+        self.assertRegex(css, r"--miu-rail-min-w:\s*80px",
+                         "收起档不是 `NavigationRailDefaults.MinWidth = 80.dp`")
+        rail = re.search(r"\.rail\s*\{([^}]*)\}", css)
+        self.assertIsNotNone(rail, "找不到 .rail 的基础样式")
+        self.assertRegex(rail.group(1), r"flex:\s*0 0 var\(--miu-rail-expanded-w\)",
+                         "左栏宽度没有引展开档那个令牌")
+        self.assertRegex(css, r"body\[data-rail=\"collapsed\"\] \.rail\s*\{[^}]*"
+                              r"flex-basis:\s*var\(--miu-rail-min-w\)",
+                         "收起档没有落到 80px 那个令牌上")
+        # **不许再出现"按比例分宽度"**：那一档是上一轮自造的中间档，正是"缩回去"的根源。
+        self.assertNotRegex(css, r"\.rail\s*\{[^}]*flex:\s*0 0 [\d.]+%",
+                            "又出现了按比例分的左栏宽度（自造的中间档）")
+        # 展开档要放得下"图标 + 间距 + 一个 16sp 字的标签"：240 − 2×12(外边距) − 2×14(内边距)
+        # − 28(图标) − 16(间距) = 144 ≥ 16sp×2 个字（一个字约 16px）。
+        room = 240 - 2 * 12 - 2 * 14 - 28 - 16
+        self.assertGreaterEqual(room, 32,
+                                f"展开档只剩 {room}px 给标签，一个 16sp 的标签放不下")
 
     def test_the_frontend_never_writes_inline_sizes(self) -> None:
-        """`app.js` 里不该有 `.style.<属性> = …` 这种赋值。
+        """`app.js` 里不该有 `.style.<属性> = …` 这种赋值（**唯一例外**：弹层锚定）。
 
-        面板的布局全靠 class + CSS（换页签、切阅读态、切主题都是 `classList`）。
+        面板的布局全靠 class + CSS（换页签、切档位、切主题都是 `classList`）。
         一旦有人开始"量一下再写死宽度"，跨断点就会留下内联宽度——那正是这次被怀疑的机制
         （实测不是它，但它确实是**真正会出现那类 bug** 的写法）。这条用例把那条路堵上。
+
+        ⚠️ 例外只有三处、且都在 `openDropdown()` 里：`minWidth` / `left` / `top`。
+        理由：Miuix 的下拉是**贴着触发它的那一行**弹出来的，而网页里没有"锚点定位"这件
+        事（`anchor-name` 的支持面还不够），只能在被点的那一刻量一下触发器的矩形。
+        那三个数**不参与页面排版**（弹层是 `position: fixed` 的瞬态浮层，关掉就没了），
+        与用例要禁的"把布局宽度从 JS 写死"不是一回事。别处一律不许写。
         """
 
         js = self._asset("app.js")
-        writes = re.findall(r"\.style\.[A-Za-z]+\s*[^=]*=[^=]", js)
-        self.assertEqual(writes, [], f"app.js 里出现了内联样式写入：{writes}")
+        writes = re.findall(r"\.style\.([A-Za-z]+)\s*[^=]*=[^=]", js)
+        allowed = {"minWidth", "left", "top"}          # 只有弹层那三行
+        self.assertEqual([name for name in writes if name not in allowed], [],
+                         f"app.js 里出现了内联样式写入：{writes}")
         self.assertNotIn(".style.setProperty(", js, "app.js 里出现了内联样式写入")
+        # 例外只许长在 `openDropdown()` 里：量一下它的函数体，别处不许出现这三样。
+        body = js[js.index("function openDropdown("):js.index("\nfunction ", js.index("function openDropdown(") + 1)]
+        for name in allowed:
+            self.assertIn(f".style.{name} = ", body,
+                          f"弹层锚定没有出现在 `openDropdown()` 里（`{name}`）")
+        elsewhere = js.replace(body, "")
+        for name in allowed:
+            self.assertNotIn(f".style.{name} = ", elsewhere,
+                             f"`{name}` 的内联写入跑到 `openDropdown()` 外面来了")
 
 
 if __name__ == "__main__":

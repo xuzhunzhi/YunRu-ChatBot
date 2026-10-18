@@ -43,6 +43,7 @@
 
   --surface: #f7f7f7;              /* surface */
   --on-surface: #000000;           /* onSurface */
+  --on-surface-container: #000000; /* onSurfaceContainer（NavigationRailItem 的 tint 用它） */
   --surface-variant: #ffffff;      /* surfaceVariant */
   /* 2026-10-19（对齐 Miuix 组件层）：`--surface-container` 是 Miuix **Card 的默认底色**
      （`CardDefaults.defaultColors` → `surfaceContainer`），浅色 #FFFFFF / 深色 #242424。
@@ -119,6 +120,7 @@
     --on-background-variant: #787e96;
     --surface: #000000;              /* surface */
     --on-surface: #f2f2f2;
+    --on-surface-container: rgba(255, 255, 255, 0.9);  /* onSurfaceContainer 0xE6FFFFFF */
     --surface-variant: #242424;
     --surface-container: #242424;    /* surfaceContainer（Card 默认底色） */
     --surface-container-high: #2d2d2d;
@@ -156,6 +158,7 @@
   --on-background-variant: #787e96;
   --surface: #000000;
   --on-surface: #f2f2f2;
+  --on-surface-container: rgba(255, 255, 255, 0.9);
   --surface-variant: #242424;
   --surface-container: #242424;
   --surface-container-high: #2d2d2d;
@@ -234,6 +237,9 @@
   --miu-row-pad-y: 16px;     /* 同上（竖直方向也是 16dp——上一轮的 10px 已撤回） */
   --miu-row-gap: 8px;        /* Component.kt 里的 spacerPx = 8.dp（start/center/end 之间） */
   --miu-end-cap: 60%;        /* endHardCap = 剩余宽度 × 6/10——控件只收窄、不折行 */
+  /* 右端的起点：`start` 槽（图标 22 + spacer 8）。`endHardCap` 的式子要减掉它，
+     见 `.pref-end` 那一段（`Component.kt` 的 `widthAfterStart`）。 */
+  --miu-start-slot: 30px;
 
   /* 卡片：`CardDefaults.InsideMargin = PaddingValues(0.dp)`——**卡片自己不留边**。
      边由卡里的每一块（"行"）给：`.card-row` / `.pref` 各承担一份 InsideMargin。 */
@@ -285,6 +291,58 @@
   --miu-badge-h: 16px;       /* LargeSize（带内容的徽标最小 16dp） */
   --miu-badge-pad-x: 4px;    /* BadgeWithContentHorizontalPadding */
 
+  /* --- 左栏：`NavigationRailDefaults`（`navigationrail.md` 同名那一节） --------
+   * 2026-10-19 第三轮：左栏换成 Miuix 的 `NavigationRail`。这一组**一个数都没有
+   * 我自己编**，每个都对得上文档里的常量名（注释就是那个名字）。
+   * 文档没写的三处（分组标题、选中指示色、折叠时组标题怎么办）在下面用到的地方
+   * 单独标了"文档没写"，理由写在那一段。 */
+  --miu-rail-min-w: 80px;             /* MinWidth —— 收起 */
+  --miu-rail-expanded-w: 240px;       /* ExpandedWidth —— 展开 */
+  --miu-rail-vpad: 24px;              /* VerticalPadding（整列上下） */
+  --miu-rail-header-gap: 24px;        /* HeaderSpacing（header 之后） */
+  --miu-rail-icon: 28px;              /* IconSize */
+  --miu-rail-gap: 4px;                /* IconTextSpacing（收起：图标与文字） */
+  --miu-rail-item-vpad: 12px;         /* ItemVerticalPadding（每项上下） */
+  --miu-rail-label: 12px;             /* LabelFontSize = 12.sp（收起态的字号） */
+  --miu-rail-label-expanded: 16px;    /* ExpandedLabelFontSize = 16.sp */
+  --miu-rail-margin: 12px;            /* ExpandedItemHorizontalMargin */
+  --miu-rail-radius: 16px;            /* ExpandedItemCornerRadius（选中药丸） */
+  --miu-rail-ind-vpad: 4px;           /* CollapsedIndicatorVerticalPadding */
+  --miu-rail-pad-x: 14px;             /* ExpandedItemContentHorizontalPadding */
+  --miu-rail-pad-y: 14px;             /* ExpandedItemContentVerticalPadding */
+  --miu-rail-gap-expanded: 16px;      /* ExpandedItemIconTextSpacing */
+
+  /* --- 顶栏：`TopAppBarDefaults`（`topappbar.md`） --------------------------- */
+  --miu-appbar-h: 52px;               /* CollapsedHeight */
+  --miu-appbar-title-pad: 26px;       /* TitlePadding */
+  --miu-appbar-icon-pad: 16px;        /* NavigationIconPadding / ActionIconPadding */
+  --miu-appbar-large-bottom: 4px;     /* LargeTitleBottomPadding（无副标题时） */
+  --miu-appbar-subtitle-bottom: 8px;  /* SubtitleBottomPadding（有副标题时，两者都适用） */
+
+  /* --- 输入框：`TextFieldDefaults`（`textfield.md`） ------------------------ */
+  --miu-field-r: 16px;                /* CornerRadius */
+  --miu-field-pad: 16px;              /* InsideMargin = DpSize(16.dp, 16.dp) */
+  /* TextField 没有"总高"这个常量（高度由 textStyle + InsideMargin 推）。
+     单行输入的最小高度取同族的 `SearchBarDefaults.InputFieldMinHeight = 45.dp`
+     （`searchbar.md`）——文档里唯一给出的"单行输入框最小高度"，见报告"自己定的"。 */
+  --miu-field-min-h: 45px;            /* SearchBarDefaults.InputFieldMinHeight */
+
+  /* --- 提示气泡：`PlainTooltip`（`tooltip.md` §TooltipDefaults 常量） ------ */
+  --miu-tip-r: 12px;                  /* PlainTooltipCornerRadius */
+  --miu-tip-max-w: 200px;             /* PlainTooltipMaxWidth */
+  --miu-tip-pad: 8px 12px;            /* PlainTooltipInsideMargin */
+  --miu-tip-gap: 8px;                 /* SpacingBetweenTooltipAndAnchor */
+
+  /* --- 加载：`InfiniteProgressIndicator`（`progressindicator.md`） ---------- */
+  --miu-spin-size: 20px;              /* DefaultInfiniteProgressIndicatorSize */
+  --miu-spin-stroke: 2px;             /* DefaultInfiniteProgressIndicatorStrokeWidth */
+  --miu-spin-dot: 2px;                /* DefaultInfiniteProgressIndicatorOrbitingDotSize */
+
+  /* --- 下拉项：`DropdownDefaults` 文档**只给了 `DropdownColors` 的字段名**，
+   * 没给几何与色值（`overlaydropdownmenu.md` §DropdownColors）。所以这里的几何
+   * 按 `BasicComponent` 那一行来（`--miu-row-min-h` / `--miu-row-gap` / 圆角
+   * `--miu-r-card`），颜色见 `.miu-dropdown` 那一段的注释。 */
+
   /* 字号阶（theme/TextStyles.kt，一个不多一个不少） */
   --miu-fs-title1: 32px;     /* Title1 */
   --miu-fs-title2: 24px;     /* Title2 */
@@ -324,20 +382,20 @@
  *      260ms 位移），所以换页签时内容淡入 + 轻微上移，卡片再接一个错开的延迟。
  *   3. 悬停只做亮度变化、时长取 `--dur-150`，不抢按压那一下的戏。
  */
-button, nav button, input, select, textarea, .tag {
+button, input, select, textarea, .tag {
   transition: transform var(--dur-press) var(--spring-press),
               background var(--dur-150) var(--ease-fast-out-slow-in),
               color var(--dur-150) var(--ease-fast-out-slow-in),
               box-shadow var(--dur-200) var(--ease-fast-out-slow-in);
 }
-button:active, nav button:active {
+button:active {
   transform: scale(0.94);        /* SinkFeedback.sinkAmount */
   transition-duration: 90ms;     /* 按下要快；弹回才走整条弹簧 */
   transition-timing-function: var(--ease-fast-out-slow-in);
 }
 
 /* 页签指示：TabRow 的指示条是 `tween(200)` */
-nav button.on {
+.miu-tabrow__tab.on {
   transition: background var(--dur-200) var(--ease-fast-out-slow-in),
               color var(--dur-200) var(--ease-fast-out-slow-in);
 }
@@ -364,12 +422,42 @@ section.card:nth-of-type(5) { animation-delay: 160ms; }
   to { opacity: 1; transform: none; }
 }
 
-/* 加载态：一条会呼吸的提示（Miuix 的 ProgressIndicator 是来回扫的条） */
+/* --- 加载态：Miuix `InfiniteProgressIndicator`（`progressindicator.md`） -------
+ *
+ * 三个常数都是文档里的：直径 20dp、轨道描边 2dp、绕行的点 2dp；颜色文档写的是
+ * `Color.Gray`（没有对应的主题令牌），这里取灰的那一档
+ * `--on-surface-container-variant`（#959595 / #737373）。
+ * 转一圈的时长文档没给——取 1s 线性（自定项，见报告）。
+ * 上一版是"一句会呼吸的灰字"，那不是 Miuix 里的任何组件。 */
 .loading {
+  display: flex;
+  align-items: center;
+  gap: var(--miu-row-gap);
   color: var(--text-3);
-  animation: breathe 1.6s var(--ease-sin-out) infinite;
 }
-@keyframes breathe { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
+.miu-infinite {
+  flex: 0 0 auto;
+  position: relative;
+  width: var(--miu-spin-size);
+  height: var(--miu-spin-size);
+  border-radius: 50%;
+  border: var(--miu-spin-stroke) solid var(--on-surface-container-variant);
+  box-sizing: border-box;
+  animation: miu-spin 1s linear infinite;
+}
+/* 绕行的点（`orbitingDotSize = 2dp`）：挂在轨道的上沿，整体转 */
+.miu-infinite::before {
+  content: "";
+  position: absolute;
+  top: calc(var(--miu-spin-stroke) * -1 - var(--miu-spin-dot));
+  left: 50%;
+  width: var(--miu-spin-dot);
+  height: var(--miu-spin-dot);
+  margin-left: calc(var(--miu-spin-dot) / -2);
+  border-radius: 50%;
+  background: var(--primary);        /* `LinearProgressIndicator` 的 foregroundColor */
+}
+@keyframes miu-spin { to { transform: rotate(360deg); } }
 
 /* 表格行悬停 */
 tbody tr { transition: background var(--dur-150) var(--ease-fast-out-slow-in); }
@@ -428,168 +516,302 @@ body {
   }
 }
 
-/* --- 布局：左侧侧边栏 + 右侧详情 --------------------------------------------
+/* --- 布局：`NavigationRail` + 内容（2026-10-19 第三轮） ----------------------
  *
- * 用户 2026-10-01："实际上这种宽屏就应该做左侧侧边栏+右侧详情，你去参考小米平板的
- * 设置页"。所以不再是"顶部一排页签 + 居中单栏"，而是：
+ * 用户判词：**"你这个就不是 miuix 的标准组件"**。上一版左栏是我自造的（470/426px、
+ * 卡片套卡片、每项"彩色实心方块图标 + 文字 + 右箭头"）。Miuix 里那个东西叫
+ * `NavigationRail`，这一版**逐条**按它的规格重画：
  *
- *   ┌──────────┬────────────────────────────┐
- *   │ 侧栏 426 │ 内容（独立滚动）           │
- *   │ 品牌     │ 大标题 + 副标题    [刷新]  │
- *   │ 页签列表 │ 卡片                       │
- *   │（只有导航）                           │
- *   └──────────┴────────────────────────────┘
+ *   ┌────────┬───────────────────────────────┐
+ *   │ Rail   │ TopAppBar（大标题 + 副标题）   │
+ *   │ 240/80 │ Card / Card / Card             │
+ *   │ 分割线 │ （只有内容，导航在左）         │
+ *   └────────┴───────────────────────────────┘
  *
- * 侧栏自己也是一块"浮起来的表面"（圆角 16dp + 一层淡阴影），而不是给整页换底色——
- * Miuix 的 surface 有语义，靠改底色做分区会把层级搞乱（这也是之前"按钮和背景
- * 糊在一起"的同一个根因）。
+ * 每个数值 → 出处（`navigationrail.md` §NavigationRailDefaults，同名常量）：
  *
- * 行内边距与圆角取自 Miuix `NavigationRailDefaults`：VerticalPadding 24dp、
- * ExpandedItemHorizontalMargin 12dp、ExpandedItemContentHorizontalPadding 14dp、
- * ExpandedItemCornerRadius 16dp。
+ *   宽 展开 240 / 收起 80        ExpandedWidth / MinWidth
+ *   整列上下内边距 24            VerticalPadding
+ *   header 之后 24               HeaderSpacing
+ *   图标 28                      IconSize
+ *   图标↔文字 收起 4 / 展开 16   IconTextSpacing / ExpandedItemIconTextSpacing
+ *   每项上下 12                  ItemVerticalPadding
+ *   标签 收起 12sp / 展开 16sp   LabelFontSize / ExpandedLabelFontSize
+ *   展开项左右外边距 12          ExpandedItemHorizontalMargin
+ *   选中药丸圆角 16              ExpandedItemCornerRadius
+ *   收起时指示块包住图标 4       CollapsedIndicatorVerticalPadding
+ *   展开项内边距 14×14           ExpandedItemContentHorizontalPadding/VerticalPadding
+ *   底色 surface                 `color` 参数的默认值 `MiuixTheme.colorScheme.surface`
+ *   与内容之间一条分割线         `showDivider = true`（画的是 `VerticalDivider`，
+ *                                即 `DividerDefaults.Thickness = 0.75.dp` +
+ *                                `dividerLine` —— 见 `divider.md`）
+ *   内容列可滚动                 `scrollState`（源码里是 `verticalScroll`）
  *
- * ⚠️ **宽度不再取那个 240dp**（`ExpandedWidth`）：那是**平板**栏的 dp 值，放在网页的
- * 宽屏档比中等档窄一大截，跨断点会"缩回去"（用户 2026-10-06 报的正是这个）。
- * 现在宽度由断点算出来，见 `.rail` 的 `flex` 与下面的"响应式：三档"那一段。
+ * 颜色与字重来自 `NavigationRail.kt::NavigationRailItem`（文档只写了"选中药丸"，
+ * 没写它的色号）：选中指示 `surfaceContainerHigh`、图标与文字 `onSurfaceContainer`、
+ * 字重 Medium。三样都在源码里，不是估的。
+ *
+ * ⚠️ 文档没写的三处（都写在用到的地方，也在报告里单列）：
+ *   ① 分组标题——`NavigationRail` 只有一个 `header`，没有"组标题"这个概念；
+ *   ② 收起态的分组标题怎么办；
+ *   ③ 悬停/按下的反馈色（文档只提 `LocalIndication`，没给色值）。
  */
 
 body {
+  /* Scaffold：`containerColor` 默认 `MiuixTheme.colorScheme.surface`
+     （`scaffold.md` §Scaffold 属性），所以整页底色就是 `surface`。 */
   display: flex;
-  align-items: flex-start;
-  gap: 18px;
-  padding: 18px;
+  align-items: stretch;
+  gap: 0;                           /* 栏体与内容之间只有那条 `VerticalDivider` */
+  padding: 0;
   min-height: 100vh;
   box-sizing: border-box;
+  background: var(--surface);       /* surface：页面这一层 */
 }
 
+/* --- 左栏本体 ---------------------------------------------------------------
+ * 结构照源码：`Row(背景 = color) { Column(verticalScroll, padding(vertical=24)) …;
+ * VerticalDivider }`。所以：
+ *   · 底色 = `surface`（与页面同一层——它不是卡片，自造的那层圆角+阴影整个撤掉了：
+ *     `SurfaceDefaults.ShadowElevation = 0.dp`，Miuix 的 `showDivider` 就是靠**线**
+ *     分区，不靠投影）；
+ *   · 右边那条线 = `VerticalDivider`（0.75px + dividerLine）；
+ *   · 宽度只由 `body[data-rail]` 两档决定（见下面 `@media`）。 */
 .rail {
   position: sticky;
-  top: 18px;
-  /* 宽屏档的**固定宽度**。426px 不是随手取的数：它等于中等档那条 40% 在断点那一点的
-     值——`40% × (1100 − 36) = 425.6`（36 是 body 左右各 18px 的内边距，百分比针对
-     内层宽度解析）。两边**在断点上一样宽**，所以窗口从平板宽度拉到大屏时栏体
-     既不长也不缩，只是"到此为止不再变宽"，那才是"固定宽度"要的效果。
-     原来写的是 240px（Miuix `ExpandedWidth` 那个平板 token）：它比中等档在断点处的
-     值小 44%，于是越过 1100px 时栏体从 ~419px 掉到 240px——用户 2026-10-06 报的
-     "左栏缩回去、变得很窄"就是这一下（CDP 实测：1000px 时 386px、1440px 时 240px，
-     内联 style 前后都是空串，不是残留内联宽度）。 */
-  flex: 0 0 426px;
-  max-height: calc(100vh - 36px);
+  top: 0;
+  flex: 0 0 var(--miu-rail-expanded-w);   /* ExpandedWidth = 240 */
+  height: 100vh;
+  max-height: 100vh;
+  display: flex;
+  box-sizing: border-box;
+  background: var(--surface);             /* color 参数默认值 = surface */
+  border-right: var(--miu-divider-w) solid var(--divider);  /* showDivider + DividerDefaults */
+}
+body[data-rail="collapsed"] .rail { flex-basis: var(--miu-rail-min-w); }  /* MinWidth = 80 */
+
+/* 内容列：`verticalScroll(scrollState)` + `padding(vertical = VerticalPadding)` */
+.rail-scroll {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  padding: 24px 0 16px;             /* VerticalPadding */
-  background: var(--surface-variant);
-  border-radius: var(--radius-card);
-  box-shadow: var(--rail-shadow);
+  align-items: center;                    /* 源码的 horizontalAlignment = CenterHorizontally */
+  padding: var(--miu-rail-vpad) 0;        /* VerticalPadding = 24 */
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* header 槽 = 品牌（Miuix 的 `header` 就是放 Logo/FAB 的槽，文档没给它的字号）。
+   字号沿用 `TextStyles` 的 Title2（24sp），与内容区的大标题同族。
+   `HeaderSpacing = 24` 是它**后面**那一口气，所以用 padding-bottom 表达。 */
+.rail-brand {
+  flex: 0 0 auto;
+  width: 100%;
+  padding: 0 var(--miu-rail-margin) var(--miu-rail-header-gap);
+  text-align: center;
   box-sizing: border-box;
 }
-
-.rail-brand { padding: 0 20px 20px; }
 .rail-brand h1 {
   margin: 0;
-  font-size: 24px;                  /* title3 */
+  font-size: var(--miu-fs-title2);        /* Title2 = 24sp（文档没给，取字号阶） */
   font-weight: 700;
   line-height: 1.2;
-  letter-spacing: 0.5px;
+  color: var(--on-surface-container);     /* 与条目同一个 tint */
+  white-space: nowrap;
 }
-.rail-sub { margin: 2px 0 0; color: var(--text-3); font-size: 13px; }
-
-/* 页签列表：就是 NavigationRail 的条目——选中态是一枚 surfaceContainerHigh 药丸 */
-nav {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 0 12px;                  /* ExpandedItemHorizontalMargin */
-  overflow-y: auto;
-  flex: 1 1 auto;
-  /* **"下面还有"的提示**（2026-10-06 截图核对时发现的问题）：
-   *
-   * 全局把滚动条藏掉了（用户 2026-10-01 要求："能改掉 webui 里面的翻页滚动条吗"），
-   * 于是侧栏列表比栏体长的时候**没有任何线索**——1440×900 上"插件 / 系统"两张卡
-   * 整个在可视区之外，看起来就像侧栏到此为止，用户不会知道要滚。
-   *
-   * 一条很淡的底部渐隐就是 HyperOS 那种"回收边"的做法，也正好补上藏掉的滚动条
-   * 该给的那点暗示。它跟着栏体走（不随内容滚），所以滚到底时最后一行会被轻微压暗
-   * ——18px 的过渡，看得出有内容、又不至于把字吃掉。
-   */
-  mask-image: linear-gradient(to bottom, #000 calc(100% - 18px), transparent 100%);
-  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 18px), transparent 100%);
-}
-/* --- 左栏卡片（2026-10-03 新架构的骨架）-------------------------------------
- *
- * 依据见 app.js 的 `CARDS`：左栏是一列卡片，每张卡片 = 一个功能区，
- * 卡里的项（群聊/私聊、每个插件）就**平级地**排在卡片里。
- * 这里只加"卡片外壳"的样式，**已有的 tab 药丸样式原样复用**（`nav button` 是
- * 后代选择器，卡片里的按钮照样命中）——所以这次没动任何既有视觉。
- */
-.rail-card {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 6px 0 10px;
-}
-.rail-card + .rail-card {
-  /* 半透明灰：深浅两套主题都成立，不用额外造令牌 */
-  border-top: 1px solid rgba(128, 128, 128, 0.18);
-  margin-top: 4px;
-}
-.rail-card-title {
-  margin: 0;
-  padding: 4px 12px 2px;            /* 与 nav 的 ExpandedItemHorizontalMargin 对齐 */
-  font-size: var(--miu-fs-footnote2);
-  font-weight: 600;
-  letter-spacing: 0.5px;
-  color: var(--text-3);
-}
-.rail-card.is-active .rail-card-title { color: var(--primary); }
-.rail-card-items {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+.rail-sub {
+  margin: 2px 0 0;
+  color: var(--on-background-variant);    /* 次级文字：`SmallTitle.textColor` 那一档 */
+  font-size: var(--miu-fs-footnote1);
+  white-space: nowrap;
 }
 
-/* --- 图标（图形来自 Miuix 官方图标库，见 app.js 的 ICONS） ------------------ */
-.icon {
+/* --- 收起/展开按钮（`NavigationRailState.toggle()`） ------------------------
+ * 几何出自 `NavigationRail.kt::NavigationRailExpandToggle`（文档只说"带切换按钮"）：
+ * 56×56（IconSize + ExpandedItemContentPadding×2 两个方向）、图标 28、
+ * 横向位置 `ExpandedItemHorizontalMargin` = 12（收起与展开**同一个 x**）。
+ * 它就是 `IconButton`：默认底色 `Color.Unspecified`（透明）、圆角 40dp（= 药丸）。 */
+.rail-toggle-slot {
   flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
-  display: block;
+  align-self: flex-start;
+  margin-left: var(--miu-rail-margin);
+  /* HeaderSpacing：切换按钮之后也是 24（源码里 toggle 与 header 各跟一个） */
+  margin-bottom: var(--miu-rail-header-gap);
 }
-/* 侧栏条目的图标：NavigationRailDefaults.IconSize = 28dp */
-nav button .icon { width: 22px; height: 22px; }
+.rail__toggle {
+  width: 56px;
+  height: 56px;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--miu-r-pill);       /* IconButtonDefaults.CornerRadius = 40dp */
+  background: transparent;                /* IconButton 的 backgroundColor 默认 Unspecified */
+  color: var(--on-surface-container);     /* 源码里 toggle 图标的 tint */
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+/* 悬停/按下的反馈：文档只提 `LocalIndication`（水波纹），没给色值——web 上没有水波纹，
+   用 `secondaryContainer` 顶上（`Colors.kt` 里现成的一档）。**自定项，见报告。** */
+.rail__toggle:hover { background: var(--secondary-container); }
 
-.rail-label { flex: 1 1 auto; }
+/* --- 条目 --------------------------------------------------------------------
+ * 一个 DOM 形状、两套几何：
+ *   展开：flex 行，[12 外边距][14 内边距][28 图标][16][16sp 文字][14 内边距][12]
+ *   收起：flex 列，[12 上下内边距][指示块 56×36（图标 28 + 左右 14、上下 4）]
+ *         [4][12sp 文字]
+ * 两者都由上面的令牌算出来，没有写死的裸数。 */
+#tabs {
+  flex: 1 1 auto;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  min-width: 0;
+}
 
-nav button {
+/* 一组 = 一个 `SmallTitle` + 若干条目。收起态放不下组标题（80px 里 28px 的
+   SmallTitle 内边距就没了一半），所以那一档用 `Divider` 分组——见下面。 */
+.rail__group {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* 组标题 = `SmallTitle`（`smalltitle.md`）：`InsideMargin = PaddingValues(28.dp, 8.dp)`、
+   subtitle（14sp **Bold**）、颜色 `onBackgroundVariant`。**同一个类**页内也在用
+   （`.pref-group-title`），一处实现。
+   ⚠️ 文档没写"分组标题怎么放进 NavigationRail"（它没有这个概念）——这是我自己
+   拼的：`SmallTitle` 的定位就是"小型分组标题"，配 `Card` 用；放在栏里同样成立。 */
+.rail__group-title {
+  flex: 0 0 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rail__item {
+  /* 展开档的几何：`ExpandedItemHorizontalMargin` + `ExpandedItemContentPadding`。
+     高度不写死：`padding: 14` + 内容（图标 28 / 标签 16sp 行高）自然就是 56，
+     与源码 `expandedHeight = 14×2 + max(iconH, labelH)` 同一条式子。 */
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 10px;                        /* IconTextSpacing 是 4dp，文字前再留一点更透气 */
-  width: 100%;
-  text-align: left;
-  padding: 12px 14px;               /* ExpandedItemContent*Padding（简化成更贴文字的一档）*/
-  min-height: 0;                    /* 不受 ButtonDefaults.MinHeight 约束，条目要更矮 */
+  gap: var(--miu-rail-gap-expanded);      /* ExpandedItemIconTextSpacing = 16 */
+  margin: 0 var(--miu-rail-margin);       /* ExpandedItemHorizontalMargin = 12 */
+  padding: var(--miu-rail-pad-y) var(--miu-rail-pad-x);   /* 14 × 14 */
+  min-height: 0;                          /* 不受 ButtonDefaults.MinHeight 约束 */
   min-width: 0;
-  border-radius: var(--radius-tab);
+  border: 0;
+  border-radius: var(--miu-rail-radius);  /* ExpandedItemCornerRadius = 16 */
   background: transparent;
-  color: var(--on-surface);
-  font-size: var(--miu-fs-body1);
-  font-weight: 500;
+  color: var(--on-surface-container);     /* 源码的 tint */
+  font-size: var(--miu-rail-label-expanded);  /* ExpandedLabelFontSize = 16sp */
+  font-weight: 500;                       /* FontWeight.Medium（源码） */
+  line-height: 1.4;
+  text-align: start;
+  cursor: pointer;
 }
-nav button:hover { background: var(--secondary-container); }
-/* 选中药丸：Miuix `NavigationRail` 的选中指示色是 `surfaceContainerHigh`，
-   但我们的侧栏条目是**装在一张 Card 里**的（`surfaceContainer`），而深色下
-   `surfaceContainerHigh` 与 `surfaceContainer` 都是 #242424——照抄会让"选中"在深色里
-   完全看不见。所以这里取 `--miu-container`（= `surfaceContainerHighest`：
-   浅色 #E8E8E8 / 深色 #2D2D2D），**两套主题里都真的比卡片高一档**（见文件末尾第 ⑨ 条）。 */
-nav button.on { background: var(--miu-container); color: var(--on-surface); }
-nav button.on:hover { background: var(--miu-container); }
+/* 选中药丸：`surfaceContainerHigh`（源码 `NavigationRailItem.indicatorColor`）。
+   栏底色是 `surface`，所以这一档在两套主题里都真的看得出（浅 #F7F7F7 → #E8E8E8，
+   深 #000000 → #242424）。上一版之所以改成 `surfaceContainerHighest`，是因为
+   条目当时装在**卡片**里（卡是 surfaceContainer，深色下与 High 同值）——现在没有卡了。 */
+.rail__item.on { background: var(--surface-container-high); }
+/* 悬停：同上（文档没给，取 `secondaryContainer`，与按钮同一档）。自定项。 */
+.rail__item:not(.on):hover { background: var(--secondary-container); }
+
+/* 指示块：展开时它是**透明的 28 方框**（药丸由条目自己画，整行都是点击区），
+   收起时它是包住图标的那 56×36 圆角块（`CollapsedIndicatorVerticalPadding` = 4，
+   横向 `ExpandedItemContentHorizontalPadding` = 14 —— 两个都是源码里的名字）。 */
+.rail__indicator {
+  flex: 0 0 auto;
+  width: var(--miu-rail-icon);
+  height: var(--miu-rail-icon);
+  display: grid;
+  place-items: center;
+  border-radius: var(--miu-rail-radius);
+  background: transparent;
+}
+.rail__indicator .icon { width: var(--miu-rail-icon); height: var(--miu-rail-icon); }
+
+.rail__label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- 收起档：`MinWidth = 80` -------------------------------------------------
+ * 几何来自 `NavigationRail.kt` 的两个分支（`NavigationRailItem` 的 Column 版与
+ * `NavigationRailItemExpandable` 的 collapsed 端），两者算出来是同一组数：
+ *   条目 = padding(vertical = ItemVerticalPadding 12) + [指示块 56×36] + 4 + 12sp 标签
+ *   指示块 x = (80 − 56) / 2 = 12          （`collapsedIconX - leadingInset`）
+ *   图标   x = (80 − 28) / 2 = 26          （居中）
+ * 也就是说：**收起态保留 12sp 的标签，放在图标下面**——这是文档/源码里的行为，
+ * 不是"我选了不显示"（`LabelFontSize = 12.sp` 这个常量存在的理由就是它）。 */
+body[data-rail="collapsed"] .rail__item {
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--miu-rail-gap);               /* IconTextSpacing = 4 */
+  margin: 0;
+  padding: var(--miu-rail-item-vpad) 0;   /* ItemVerticalPadding = 12 */
+  border-radius: 0;                       /* 收起态的药丸在指示块上，不在条目上 */
+  background: transparent;
+}
+body[data-rail="collapsed"] .rail__item.on { background: transparent; }
+body[data-rail="collapsed"] .rail__indicator {
+  width: calc(var(--miu-rail-icon) + var(--miu-rail-pad-x) * 2);   /* 28 + 14×2 = 56 */
+  height: calc(var(--miu-rail-icon) + var(--miu-rail-ind-vpad) * 2); /* 28 + 4×2 = 36 */
+  border-radius: var(--miu-rail-radius);
+}
+body[data-rail="collapsed"] .rail__item.on .rail__indicator {
+  background: var(--surface-container-high);   /* 选中指示块（源码同色） */
+}
+body[data-rail="collapsed"] .rail__item:not(.on):hover { background: transparent; }
+body[data-rail="collapsed"] .rail__item:not(.on):hover .rail__indicator {
+  background: var(--secondary-container);
+}
+body[data-rail="collapsed"] .rail__label {
+  flex: 0 0 auto;
+  width: 100%;
+  font-size: var(--miu-rail-label);       /* LabelFontSize = 12sp */
+  text-align: center;
+}
+
+/* 收起档的**分组分隔**：没有组标题，用 `Divider`（`divider.md`）把组分开。
+   ⚠️ 文档没写这一处（NavigationRail 里没有"分组"）——这是我自己定的：组标题在
+   80px 里放不下，而"组与组要能分开"这条信息不能丢，`HorizontalDivider` 是
+   Miuix 里表达这件事的那个组件（`Thickness 0.75` + `dividerLine` + 两侧 16 缩进）。 */
+body[data-rail="collapsed"] .rail__group + .rail__group {
+  position: relative;
+  margin-top: 8px;
+  padding-top: 8px;
+}
+body[data-rail="collapsed"] .rail__group + .rail__group::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  /* 两侧缩进：`divider.md` §带内边距的分割线 给的是 `padding(horizontal = 16.dp)` */
+  left: var(--miu-divider-inset);
+  right: var(--miu-divider-inset);
+  border-top: var(--miu-divider-w) solid var(--divider);
+}
+body[data-rail="collapsed"] .rail__group-title {
+  /* 收起档**不显示**组标题（80px 放不下 SmallTitle 的 28px 横向内边距）。
+     它是 `display:none` 而不是删掉：展开档要用同一个节点。 */
+  display: none;
+}
+/* 展开档：组与组之间不画线（`SmallTitle` 自己就是分隔）。 */
 
 /* 左栏底部那块（bot 在运行 / 活快照 / 刷新 / 深色 / 退出）**已撤掉**（2026-10-06，
    用户："左边边栏下面的这个卡片不明所以，我为什么要在左边栏显示……这个不应该在
    system 页面吗"）。左栏从此**只放导航**（那是用户一开始就定的规格："在左边切换
    设置项"）。那几样东西分别搬去了：本体状态 → 总览「运行」卡；刷新 → 每一页的内容区
-   顶栏（`#refresh`）；深色 → 设置页的「面板」分组；退出登录 → 账号页。
-   所以这里连 `.rail-foot` / `.rail-actions` 的样式一起删了，不是留一段死 CSS。 */
+   顶栏（`#refresh`）；深色 → 设置页的「面板」分组；退出登录 → 账号页。 */
 
 /* --- 右侧内容 -------------------------------------------------------------- */
 
@@ -598,40 +820,57 @@ nav button.on:hover { background: var(--miu-container); }
   min-width: 0;                     /* 关键：不然里面的长表格会把侧栏挤扁/整页横向滚动 */
   display: flex;
   flex-direction: column;
+  /* `Scaffold` 的 content 边距：`smalltitle.md` 的示例就是
+     `Card(modifier = Modifier.padding(horizontal = 12.dp))`——12 是卡片离屏边的距离。
+     于是卡片里的字距屏边 = 12 + 卡内 16 = 28，与顶栏的 `TitlePadding = 26` 只差 2px
+     （顶栏自己再加 14 见 `.page-head`，26 正好落地）。 */
+  padding: 0 12px var(--miu-rail-vpad);
+  box-sizing: border-box;
   color: var(--on-background);
 }
 
-/* 内容区顶栏：`[返回] 标题+副标题 ……… [刷新]`。
-   `#back` 只在窄屏的阅读态出现（见文件末尾），桌面/中等屏它 `display:none`，
-   标题自然贴左；「刷新」用 `margin-left:auto` 顶到右边，与标题同一行。 */
+/* --- 内容区顶栏 = Miuix `TopAppBar`（`topappbar.md`） ------------------------
+ *
+ * 用的是**大标题**那一档（`TopAppBar`，不是 `SmallTopAppBar`）：面板每一页都有一个
+ * 页名 + 一句说明，Miuix 里 `title = 页名`、`subtitle = 那句说明`。
+ *
+ * 每个数值 → 出处（`TopAppBarDefaults`，`topappbar.md` 同名那一节）：
+ *   `CollapsedHeight = 52`          → `min-height`（折叠态那一行的高度；
+ *                                     大标题形态的总高文档没给，由内容撑开）
+ *   `TitlePadding = 26`             → 大标题的水平内边距（这里用左右 14，
+ *                                     因为 `.content` 已经给了 12：12 + 14 = 26）
+ *   `SubtitleBottomPadding = 8`     → 副标题下方
+ *   `LargeTitleBottomPadding = 4`   → 无副标题时大标题下方
+ *   底色 `surface` / 标题色 `onSurface` / 副标题色 `onSurfaceVariantSummary`
+ *                                   → 文档里 `color` / `titleColor` / `subtitleColor` 的默认值
+ *
+ * ⚠️ 大标题的字号文档**没给**（只给了几何与颜色）。取 `TextStyles` 的 Title1（32sp）
+ * —— 它就是字号阶里最大的一档，也是面板原来那个 `<h1>` 的档位（见报告"自己定的"）。 */
 .page-head {
-  margin-bottom: 18px;              /* 16 → 18：标题区与第一张卡之间多一口气（外观返工） */
+  flex: 0 0 auto;
   display: flex;
-  align-items: flex-start;
+  align-items: flex-end;            /* 大标题贴底：TopAppBar 是从底边长上来的 */
   gap: 12px;
+  min-height: var(--miu-appbar-h);  /* CollapsedHeight = 52 */
+  padding: 12px 14px 0;             /* 左右 14 + `.content` 的 12 = TitlePadding 26 */
+  box-sizing: border-box;
 }
 .page-head-main { flex: 1 1 auto; min-width: 0; }
-#refresh {
-  flex: 0 0 auto;
-  margin-left: auto;
-  min-width: 0;
-  padding: 9px 14px;
-  font-size: 14px;
-  white-space: nowrap;
-}
 .page-head h2 {
   margin: 0;
-  font-size: 32px;                  /* title1 */
+  font-size: var(--miu-fs-title1);  /* Title1 = 32sp（文档没给，见上面那条） */
   font-weight: 700;
   line-height: 1.2;
+  color: var(--on-surface);         /* titleColor 默认值 */
 }
 .page-nav {
-  margin: 8px 0 0;                  /* 6 → 8：标题与副标题别再贴着（外观返工） */
-  /* 副标题是这一页的"一句话说明"，原来 0.6 黑 13px 偏淡 → 0.8 黑 13.5px */
-  color: var(--text-2);
-  font-size: var(--miu-fs-body2);
+  margin: 6px 0 var(--miu-appbar-subtitle-bottom);  /* SubtitleBottomPadding = 8 */
+  color: var(--text-3);             /* subtitleColor = onSurfaceVariantSummary */
+  font-size: var(--miu-fs-body2);   /* 14sp：`body2` 那一档（文档没给字号） */
   min-height: 20px;
 }
+/* 有副标题时大标题下面还有 4dp 的 `LargeTitleBottomPadding`；面板每页都有副标题
+   （`TAB_NOTES` 里每条都有），所以那 4dp 由副标题那 8dp 覆盖，不叠加。 */
 
 .bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 
@@ -646,43 +885,55 @@ nav button.on:hover { background: var(--miu-container); }
    里删掉了，样式却留着——`grep -n 'class="token' app.js index.html` 一处都没有，
    是死代码（顺带一提：用户这次给的规格里也写着"不要底部 token 框"）。删掉。 */
 
-input[type=password], input[type=text], input[type=number], textarea, select {
-  background: var(--secondary-variant);
-  color: var(--on-secondary-variant);
-  border: none;
-  border-radius: var(--radius-control);
-  padding: 10px 16px;
+/* --- 输入框 = Miuix `TextField`（`textfield.md`） ---------------------------
+ *
+ * 三个色 + 两个几何全部是文档里的：
+ *   圆角 16          `TextFieldDefaults.CornerRadius = 16.dp`
+ *   内边距 16×16     `TextFieldDefaults.InsideMargin = DpSize(16.dp, 16.dp)`
+ *   底色             `textFieldColors().backgroundColor` = `secondaryContainer`
+ *   文字             `textColor`（`textStyle = main` → onBackground 那一档）
+ *   聚焦描边         `borderColor` = `primary`（文档 §textFieldColors 表）
+ *
+ * `min-height: 45` 是**借的**：`TextField` 没有"总高"这个常量（高度 = textStyle 行高 +
+ * InsideMargin），文档里唯一的单行输入最小高度是 `SearchBarDefaults.InputFieldMinHeight`
+ * = 45.dp（`searchbar.md`）。这一条在报告"自己定的"里单列。
+ *
+ * 原来写的是 `background: secondaryVariant` + `--radius-control`：色号错了（那是
+ * `disabledSecondaryVariant` 那一族），聚焦描边也是自造的 `tertiaryContainer` + 2px 阴影。
+ * 原生 `<select>` 的样式在那条 `appearance: none` 里——**它现在其实看不见**：
+ * `decorateSelects()` 会给每个 select 盖上 Miuix 下拉的触发器（见 `.miu-select__trigger`），
+ * 原生那个被 `.miu-select__native` 藏起来当状态源。 */
+input[type=password], input[type=text], input[type=number],
+input[type=search], textarea, select {
+  background: var(--secondary-container);   /* textFieldColors().backgroundColor */
+  color: var(--on-background);
+  border: 1px solid transparent;     /* 聚焦时才染色（borderColor = primary） */
+  border-radius: var(--miu-field-r); /* CornerRadius = 16 */
+  padding: 10px var(--miu-field-pad);/* InsideMargin 的水平那一半 */
   font: inherit;
-  font-size: var(--miu-fs-body1);
-  min-height: var(--min-control-h);
+  font-size: var(--miu-fs-headline1);/* textStyle = main（17sp） */
+  min-height: var(--miu-field-min-h);/* 见上面那条"借来的 45" */
   min-width: 0;
-  transition: background 0.18s ease, box-shadow 0.18s ease;
+  transition: background var(--dur-150) var(--ease-fast-out-slow-in),
+              border-color var(--dur-150) var(--ease-fast-out-slow-in);
 }
 input[type=password]:focus, input[type=text]:focus, input[type=number]:focus,
-textarea:focus, select:focus {
+input[type=search]:focus, textarea:focus, select:focus {
   outline: none;
-  background: var(--secondary);
-  box-shadow: 0 0 0 2px var(--tertiary-container);
+  border-color: var(--primary);      /* borderColor = primary */
 }
 textarea {
-  border-radius: var(--radius-control);
   width: 100%;
   min-height: 96px;
-  padding: 12px 14px;
+  padding: var(--miu-field-pad);
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: var(--miu-fs-footnote1);
   line-height: 1.7;
   resize: vertical;
 }
-select {
-  appearance: none;
-  padding-right: 36px;
-  background-image: linear-gradient(45deg, transparent 50%, var(--text-3) 50%),
-                    linear-gradient(135deg, var(--text-3) 50%, transparent 50%);
-  background-position: calc(100% - 19px) 50%, calc(100% - 14px) 50%;
-  background-size: 5px 5px, 5px 5px;
-  background-repeat: no-repeat;
-}
+/* 原生 select：只当**状态源**（`.miu-select__native` 才是它真正的样子） */
+select { appearance: none; }
+.miu-select__native { display: none; }
 
 button {
   min-height: var(--min-control-h);
@@ -701,6 +952,11 @@ button {
   /* Miuix `TextStyles.button` = 17sp（与 main/headline1 同档）。原来写 16——那是
      `body1` 的档，按钮在 Miuix 里跟正文一样大。 */
   font-size: var(--miu-fs-headline1);
+  /* 按钮上的字**不许折行**：Miuix 的 `Button` 里那行 `Text` 永远是单行，而
+     `endHardCap` 会把它收窄——不收 nowrap 的话"编辑"在窄档里会被劈成"编 / 辑"
+     两行（390 实测）。收窄到放不下时该做的是"少放控件 / 挪进 `bottomAction`"，
+     不是让字折（`Component.kt` 那条 `endHardCap` 的注释说的也是这个）。 */
+  white-space: nowrap;
   cursor: pointer;
   transition: transform 0.12s ease, background 0.18s ease, opacity 0.18s ease;
 }
@@ -850,15 +1106,21 @@ button:disabled { opacity: 0.38; cursor: not-allowed; transform: none; }
   line-height: 1.5;
 }
 .pref-end {
-  /* 控件在右端：`endHardCap` 是"剩余宽 × 6/10"的上限，**宽了只收窄、不折行**。
-     这里**没有**窄屏分支：`endHardCap` 本身在任何宽度下都成立，Miuix 不会因为
-     窗变窄就把控件挪到下一行（上一轮 699px / 1099px 那两条断点已删）。 */
+  /* 控件在右端。上限**不是**"整行的 60%"，而是 `Component.kt` 里那条
+   *   `endHardCap = (width − startWidth − startSpacer − spacerPx) × 6 / 10`
+   * 也就是"**扣掉左侧图标与两处 8dp 间隔之后**剩下那段的 6/10"。
+   * 上一轮这里写的是 `max-width: 60%`（按整行算），于是带图标的行里 end 能吃到
+   * 整行 60% + 左边 30px 的图标，正文被压得比规范更窄——**"计数/URL 在行尾挤着"**
+   * 那一类就是这么来的（用户 2026-10-19 第三轮指出）。这里按源码的式子算：
+   *   start 槽 = 图标 22 + spacer 8 = 30，再加上 end 前面那个 spacer 8。
+   * 这里**没有**窄屏分支：`endHardCap` 在任何宽度下都成立，Miuix 不会因为窗变窄就
+   * 把控件挪到下一行（上一轮 699px / 1099px 那两条断点已删）。 */
   flex: 0 1 auto;
   margin-left: auto;
   display: flex;
   align-items: center;
   gap: var(--miu-row-gap);
-  max-width: var(--miu-end-cap);
+  max-width: calc((100% - var(--miu-start-slot) - var(--miu-row-gap)) * 6 / 10);
   min-width: 0;
 }
 .pref-end select, .pref-end input[type=text], .pref-end input[type=password] {
@@ -871,12 +1133,16 @@ button:disabled { opacity: 0.38; cursor: not-allowed; transform: none; }
   min-width: 0;
   padding-top: var(--miu-row-gap);  /* Spacer(8.dp) */
 }
-/* 值是一段文字（没有控件可放）时，右端用次级文字，不要跟标题抢 */
+/* 值是一段文字（没有控件可放）时，右端用次级文字，不要跟标题抢。
+   长串（令牌 / 路径 / URL）在 60% 上限里**折行**：`endHardCap` 只收窄控件，
+   文字折行是它自己的事——不折就会画到标题上（`table-layout: fixed` 那次同款事故）。 */
 .pref-value {
   color: var(--text-3);
   font-family: var(--mono);
   font-size: var(--miu-fs-footnote1);
   overflow-wrap: anywhere;
+  min-width: 0;
+  text-align: end;
 }
 /* 面板覆盖过的项：标题后面一个小蓝点（比在左边挂一道蓝条轻得多） */
 .pref-dot {
@@ -1076,6 +1342,27 @@ section.card > .row { margin-bottom: 0; }
  * 代价：auto 模式会按内容分配列宽，fixed 是等分。所以需要宽窄不同的表格用
  * `col` 显式给宽度（见 .cols-time / .cols-json 等）。
  */
+/* 表格外那一层：**可横向滚**（2026-10-19 第三轮）。
+ *
+ * 为什么非要有它：`table-layout: fixed` 只固定列宽、不裁内容，单元格放不下的字溢出到
+ * 表格框外，而**表格不是滚动容器**——那点溢出会直接顶宽整个文档。左栏占掉 80px 之后
+ * 内容栏只剩 ~292px，390 档实测记忆页 `scrollWidth 473 > 390`（就是它）。
+ * 包一层 `overflow-x: auto` 之后，溢出落在这一层里，页面不动。
+ * Miuix 没有表格组件（`docs/components/` 47 个里没有 table 类），所以这里只解决
+ * "别把页面顶宽"，不假装它是某个 Miuix 组件。 */
+.miu-table-wrap { overflow-x: auto; min-width: 0; }
+.miu-table-wrap::-webkit-scrollbar { width: 0; height: 0; }
+.miu-table-wrap { scrollbar-width: none; }
+/* 表格**不许比"每列还读得出东西"的那个宽度更窄**：`table-layout: fixed` 之下列宽一旦
+   小于单元格的最小内容宽，字就画到旁边那一列上（用户 2026-10-07 报的"知识库文字重叠"
+   就是这一类）。`min-content` 在 fixed 布局下不生效（实测 390 档表格仍是 260），
+   所以给一个下限。600 是**量出来的**：放到 390/504 两档实测，最宽的那张表（记忆记录
+   7 列）要 577px 才不叠字，取 600 留一点余量。
+   ⚠️ 文档里没有表格组件，560 是**我自己定的**（见报告）。
+   窄档里表格保住这个宽度、由外层 `.miu-table-wrap` 横向滚，页面不动。 */
+:root { --miu-table-min: 600px; }
+.miu-table-wrap > table { min-width: var(--miu-table-min); }
+
 table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: var(--miu-fs-headline1); }
 th, td {
   text-align: left;
@@ -1838,6 +2125,146 @@ code {
   to { opacity: 1; transform: translate(-50%, 0); }
 }
 
+/* --- 下拉 = Miuix `OverlayDropdownMenu`（`overlaydropdownmenu.md`） ----------
+ *
+ * Miuix 没有原生 `<select>`。它那个组件是**一行 `BasicComponent`**（点一下弹出
+ * `DropdownPopup`），选项是 `DropdownItem`（`text` / `selected` / `summary` / `icon`），
+ * 选中项带一枚指示图标。面板这一层只换皮：原生 `<select>` 留着当状态源，
+ * 触发器是"当前值 + 下箭头"，弹出层是 `DropdownItem` 列表。
+ *
+ * 触发器的取值/箭头颜色用的是文档里那两档：
+ *   值   `onSurfaceVariantSummary`（`BasicComponentDefaults.summaryColor()`）
+ *   箭头 `onSurfaceVariantActions`（`arrowpreference.md` §箭头着色说明：
+ *        "当 enabled = true 时使用 onSurfaceVariantActions"）
+ *
+ * ⚠️ `DropdownDefaults` 的**色值与几何文档没给**（`overlaydropdownmenu.md` 只列了
+ * `DropdownColors` 的七个字段名，没有默认值）。所以弹出层这一块：
+ *   底 `surfaceContainer`（Card 那一档）、选中项底 `secondaryContainer`（与
+ *   `switchpreference` 示例里 `endActions` 的次级面同族）、行高取 `--miu-row-min-h`
+ *   的一半 48px（**这一处是自定的**，见报告）。 */
+.miu-select__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+  min-height: 32px;                        /* 行尾控件的紧凑档（自定，见报告） */
+  padding: 4px 2px;
+  border: 0;
+  border-radius: var(--miu-r-control);
+  background: transparent;
+  color: var(--text-3);                    /* onSurfaceVariantSummary */
+  font-size: var(--miu-fs-headline1);
+  text-align: end;
+}
+.miu-select__trigger:hover { background: var(--secondary-container); }
+.miu-select__value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.miu-select__chevron {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  color: var(--text-4);                    /* onSurfaceVariantActions（箭头那一档） */
+}
+/* 箭头图形用 Miuix 的 ChevronForward，转 90° 向下（下拉的方向） */
+.miu-select__chevron .icon { width: 12px; height: 12px; transform: rotate(90deg); }
+
+/* 弹出层宿主（`Scaffold` 的 `popupHost`）。它是**固定定位的空层**，
+   里面只有当前打开的那一个弹出框，所以不吃事件。 */
+.miu-popup-host {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+}
+.miu-dropdown {
+  position: fixed;
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 6px;                            /* 菜单自带的一圈留白（自定） */
+  border-radius: var(--miu-r-card);         /* CardDefaults.CornerRadius = 16 */
+  background: var(--surface-container);     /* Card 那一档 */
+  border: 1px solid var(--outline);
+  box-shadow: var(--miu-snack-shadow);      /* 与 Snackbar 同一档 dropShadow */
+  animation: layer-in var(--dur-200) var(--spring-menu);
+}
+.miu-dropdown__item {
+  display: flex;
+  align-items: center;
+  gap: var(--miu-row-gap);
+  width: 100%;
+  min-height: 44px;                        /* 自定（见报告）：比 56 的行矮一档，弹出层更紧凑 */
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--miu-r-tab);          /* TabRowDefaults.TabRowCornerRadius = 12 */
+  background: transparent;
+  color: var(--on-surface);
+  font-size: var(--miu-fs-headline1);
+  text-align: start;
+}
+.miu-dropdown__item:hover { background: var(--secondary-container); }
+.miu-dropdown__item.on { background: var(--secondary-container); }
+.miu-dropdown__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.miu-dropdown__check {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  color: var(--primary);                   /* selectedIndicatorColor */
+}
+.miu-dropdown__check .icon { width: 16px; height: 16px; }
+
+/* --- 悬停提示 = Miuix `PlainTooltip`（`tooltip.md`） ------------------------
+ *
+ * `data-tip="…"`（原来是原生 `title=`）。数值全在 `tooltip.md` §TooltipDefaults：
+ *   圆角 12、最大宽 200、内边距 12×8、与锚点间距 8、反色表面（底色 `onSecondaryVariant`、
+ *   文字 `secondaryVariant`）。
+ * ⚠️ 字号文档没给（`PlainTooltip` 的内容是 `content: @Composable`，字号由调用方定）：
+ * 取 `body2`（14sp）。**自定项**。 */
+[data-tip] { position: relative; }
+[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  z-index: 70;
+  top: calc(100% + var(--miu-tip-gap));    /* SpacingBetweenTooltipAndAnchor = 8，Below */
+  left: 0;
+  /* `width: max-content` 必须写：伪元素的包含块是**锚点自己**（只有 56px 宽），
+     不写它就会被收成锚点那么宽、"收起导航栏"折成两行（第一版就是这么错的）。
+     气泡本来就该比锚点宽。 */
+  width: max-content;
+  max-width: var(--miu-tip-max-w);         /* PlainTooltipMaxWidth = 200 */
+  padding: var(--miu-tip-pad);             /* 12 × 8 */
+  border-radius: var(--miu-tip-r);         /* 12 */
+  background: var(--on-secondary-variant); /* plainTooltipContainerColor */
+  color: var(--secondary-variant);         /* plainTooltipContentColor */
+  font-size: var(--miu-fs-body2);          /* 见上面那条"文档没给字号" */
+  font-weight: 400;
+  line-height: 1.4;
+  white-space: normal;
+  text-align: start;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-150) var(--ease-fast-out-slow-in);
+}
+[data-tip]:hover::after,
+[data-tip]:focus-visible::after { opacity: 1; }
+
 /* --- 卡里的提示块（Miuix `Card(colors = defaultColors(color = <容器那一档>))`）
  * 明文警告这类"要注意但不拦路"的一段话。Miuix 没有 info surface，最接近的做法就是
  * **换一档底色的 Card**（`card.md` §Advanced Usage 的 "Custom Style Card" 就是这样写的：
@@ -1912,68 +2339,29 @@ code {
   to { opacity: 1; transform: none; }
 }
 
-/* --- 响应式：三档（2026-10-03 用户要求）-------------------------------------
+/* --- 响应式（2026-10-19 第三轮：唯一的"档"是 NavigationRail 的两档）--------
  *
- *   宽屏（≥1100px）   ：左栏**固定宽度** 426px
- *   中等（700–1099px） ：左 : 右 = **4 : 6**
- *   窄屏（<700px）     ：**只显示左栏**——点进卡内某一项才切到右栏，
- *                        右栏顶部出现「返回」回到卡片列表
+ * Miuix 的 `NavigationRail` 只有两个宽度：`MinWidth = 80`（收起）与
+ * `ExpandedWidth = 240`（展开），对应文档里 `expanded` 的两个取值。所以这里**不再有**
+ * "4 : 6"那种自造的中间档——中间宽度直接落进收起档：
  *
- * ### 为什么宽屏档是 426px（2026-10-06 修的那条"左栏缩回去"）
+ *     ≥1100px   展开 240（1280 上占 18.75%，内容还有 ~1028）
+ *     <1100px   收起 80 （1024 上占 7.8%，内容还有 ~932；390 上是 310）
  *
- * 那两条规则**必须在断点上对上**，否则窗口一过界栏体就会跳一下。中等档的 40% 在
- * 1099px 处是 `0.4 × (1099 − 36) ≈ 425px`，所以宽屏档取 426px：跨界只差 1px，
- * 之后固定在 426px（1920、2560 上也不再长）。
- * 原来宽屏档是 240px，比 425px 小 44% —— 从平板宽度拉到大屏，栏体从 ~419px 掉到
- * 240px，用户看到的就是"缩回去、变得很窄"。
- * 实测（无头 Edge + CDP，**同一个文档**里改视口，`Emulation.setDeviceMetricsOverride`）：
+ * 断点为什么是 1100：它原来是"宽屏 / 中等"那条分界，现在表示"给不给导航 240px"。
+ * 1024 上 240 要吃掉 23.4%（内容剩 760，那几张七列表格就不够读了），所以 1024 走收起档。
+ * **收起档不是"阉割版"**：它保留 12sp 的图标下文字（`LabelFontSize`），点那颗
+ * Sidebar 按钮就展开（`NavigationRailState.toggle()`）——两种形态都是 Miuix 的规格。
  *
- *     改之前：1440 → rail 240px ｜ 1000 → rail 386px ｜ 1440 → rail 240px（掉 38%）
- *     改之后：1440 → rail 426px ｜ 1000 → rail 386px ｜ 1440 → rail 426px（不再掉）
- *
- * 两个方向的 `document.querySelector(".rail").getAttribute("style")` 全程都是空串
- * ——**不是**残留内联宽度，是这两档的宽度本身不连续（一度怀疑是 JS 量了之后写死的）。
- *
- * ### 为什么窄屏阈值是 700（而不是 600）
- *
- * CSS 断点看的是 **CSS 像素宽 = 物理宽 ÷ 缩放（DPR）**。用户给的参考是
- * "手机上比较典型的分辨率是 1200p"，于是：
- *
- *     DPR 2.0  → 600 CSS px   ← 阈值取 600 时它**正好落进中等档**，手机上会出现双栏
- *     DPR 2.5  → 480
- *     DPR 2.75 → 436
- *     DPR 3.0  → 400
- *
- * 真机常见的 CSS 宽是 360–440（Pixel 7 = 412、小米 13 = 393、iPhone 14 Pro Max = 430），
- * 而下一档是 iPad mini 的 **744**——**中间这段是空的**，取 700 落在空档里，两边都不擦边。
- * （真要改这个数，先看面板页脚那行"视口 × DPR × 当前档"：那是**真值**，别再赌机型。）
- *
- * ⚠️ 这一档**替换**掉了原来 `max-width: 900px` 的"把侧栏横过来"那版：
- * 横过来的页签条跟"功能区分卡片 + 卡内 tab"的新结构不搭，而且用户要的是
- * 窄屏**只留左栏**（不是左右堆叠）。
+ * ⚠️ JS 里 `RAIL_EXPANDED_MIN` 是同一个数，两处必须一起改。
+ * 宽度本身由 `body[data-rail]` 决定（JS 写成 expanded/collapsed），不用媒体查询——
+ * 否则"用户手动收起"会被一条 `@media` 无条件覆盖回去。
  */
-@media (min-width: 700px) and (max-width: 1099px) {
-  .rail { flex: 0 0 40%; }          /* 4 : 6 的左半 */
-  .content { flex: 1 1 60%; }       /* 右半（min-width:0 在基础样式里已有） */
-  .page-head h2 { font-size: 28px; }
-  /* 卡片内边距**不再随档位变**：`CardDefaults.InsideMargin = 0` 在任何宽度下都成立，
-     边由卡里各行自己的 InsideMargin 16dp 给（这里原来写 18px/16px，已删）。 */
-}
 
 @media (max-width: 699px) {
-  body { padding: 10px; gap: 10px; }
-  .rail {
-    position: static;
-    flex: 1 1 auto;
-    width: 100%;
-    max-height: none;
-  }
-  /* 看卡片列表时右栏整个让位；点进某项才切过去 */
-  .content { display: none; }
-  body.is-reading .rail { display: none; }
-  body.is-reading .content { display: flex; }
-  body.is-reading #back { display: inline-flex; }
-  .page-head h2 { font-size: 24px; }
+  /* 窄屏（手机）：栏体已经收起 80，内容区不再额外加左右边距（310px 里每一 px 都要用）。 */
+  .content { padding-left: 8px; padding-right: 8px; }
+  .page-head { padding-left: 10px; padding-right: 6px; }
   /* 一格一行（`.grid` 在基础样式里是 flex，见那一段的说明）。
      ⚠️ 这里要把 `span-2` / `span-3` 也一起压回整行：那两个选择器比 `.grid .kv`
      多一个类，**特异性更高**——不点名的话，窄屏上"填洞"的那一格会留着 2/3 宽，
@@ -1993,121 +2381,6 @@ code {
   .cols-knowledge col:nth-child(2) { width: 26%; }
   .cols-knowledge col:nth-child(3) { width: 44%; }
 }
-
-/* 宽屏以下（内容栏 < 约 800px）：表格里的 `nowrap` 一律放开。
- *
- * 为什么：`table-layout: fixed` 只固定列宽、**不裁内容**，所以 `nowrap` 的单元格
- * 一放不下就**画到旁边那一列上**（就是用户 2026-10-07 报的"知识库文字重叠"那一类）。
- * 门槛不是拍的——是量出来的：内容栏宽度 = 窗口 − 480（实测 1280 → 800、1100 → 618），
- * 而面板里最宽的那几张表（用量账本 6 列、记忆记录 7 列）要 800px 才装得下那些
- * "不该折"的读数（时间戳、"565,000 / 347,000"、会话 id）。所以 1280 那一档保留
- * `nowrap`（不该折的读数别折），再窄就让它们折行——折行只是难看，叠字是读错。
- */
-@media (max-width: 1279px) {
-  td.nowrap, th.nowrap { white-space: normal; overflow-wrap: anywhere; }
-}
-
-/* 「返回」只在窄屏的"阅读态"出现——桌面与中等屏没有这个概念。
- * `white-space: nowrap` + `flex: 0 0 auto` 是 390 这一档量出来的：不给的话那颗按钮
- * 会被挤成两行（"返" / "回"），看着像标题被压坏了（截图核对）。 */
-#back {
-  display: none;
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-
-/* --- 侧栏条目：照小米「设置」列表的样子（2026-10-04 用户给了参考图）---------
- *
- * 参考图（小米手机设置）的样子是：**平铺行**，不是带框的药丸；每行左边一枚
- * **圆角图标块**，右边一枚灰色箭头 `›`，**只有当前这一项**有底色。
- *
- * 之前为什么不对：全局 `button` 的边框漏到了侧栏条目上，于是**每一行**都被画成
- * 带框的胖药丸——既不像列表，也看不出选中态（用户原话："你这啥雷霆啊"）。
- */
-.rail-card-items button {
-  border: 0;                        /* 关键：掐掉从全局 button 漏进来的边框 */
-  background: transparent;
-  gap: 12px;
-  padding: 0 8px;
-  min-height: 46px;                 /* 列表行的高度（参考图里就是这么高） */
-  border-radius: var(--miu-r-tab);  /* Miuix 只有 8/12/16/32/50 四档圆角，10px 那档不存在 */
-  font-size: var(--miu-fs-body1);
-  font-weight: 400;
-}
-.rail-card-items button:hover { background: var(--secondary-container); }
-.rail-card-items button.on {
-  background: var(--secondary-container);
-  font-weight: 600;                 /* 只有当前这一项加重 */
-}
-/* 左边那枚圆角图标块（参考图里每项一个颜色，这里统一主色浅底+白图标） */
-.rail-chip {
-  flex: 0 0 auto;
-  width: 32px;
-  height: 32px;
-  border-radius: var(--miu-r-tab);  /* 10px 不在 Miuix 的圆角档里，取 12 */
-  display: grid;
-  place-items: center;
-  background: var(--primary-container);
-  color: var(--on-primary);
-}
-.rail-chip .icon { width: 18px; height: 18px; }
-/* 右边那枚箭头 ›：用两条边画，不依赖图标库里那个 chevron 的方向 */
-.rail-chevron {
-  flex: 0 0 auto;
-  width: 7px;
-  height: 7px;
-  margin-left: 2px;
-  border-right: 2px solid var(--text-3);
-  border-bottom: 2px solid var(--text-3);
-  transform: rotate(-45deg);
-}
-
-/* --- 左栏照小米「设置」页的**格局**（2026-10-04 用户第二次给参考图后）-------
- *
- * 参考图的格局是：**页面灰底 + 每一组是一张白色圆角卡 + 卡内是平铺行**
- * （行更高、左边一枚圆角图标块、右边一枚箭头 ›），**组与组之间是留白**，不是分隔线。
- *
- * 我之前是"整个侧栏一块白 + 组之间画一条分隔线"，所以怎么调都不像——
- * 问题在格局，不在行高。
- */
-.rail {
-  background: transparent;               /* 让 body 的灰底透出来 */
-  box-shadow: none;
-  padding: 18px 0 0;
-}
-nav { padding: 0 12px; }
-
-.rail-card {
-  background: var(--surface-variant);    /* 浅色下就是白——"一组一张卡" */
-  /* 2026-10-06 外观返工：卡片与左侧灰底之间加一圈 outline 描边（同 `section.card`）
-     ——只靠 #FFFFFF/#F7F7F7 的差别，五张卡片看起来是一片糊在一起的白。 */
-  border: 1px solid var(--outline);
-  border-radius: var(--radius-card);
-  margin: 0 0 14px;                      /* 组间留白：12 → 14 */
-  padding: 8px 6px 10px;
-}
-.rail-card + .rail-card {
-  border-top: 1px solid var(--outline);  /* 每张卡都有自己的轮廓（上面那条不再靠分隔线） */
-  margin-top: 0;
-}
-
-.rail-card-title {
-  padding: 12px 14px 6px;
-  font-size: 13px;
-  font-weight: 600;                      /* 500 → 600：分组标题要压得住下面的行 */
-  letter-spacing: 0.2px;
-}
-
-.rail-card-items button {
-  min-height: 52px;                      /* 参考图里的行高 */
-  font-size: 16px;
-  font-weight: 500;
-  padding: 0 10px;
-  gap: 14px;
-}
-.rail-chip { width: 38px; height: 38px; border-radius: 12px; }
-.rail-chip .icon { width: 20px; height: 20px; }
-.rail-chevron { width: 8px; height: 8px; }
 
 /* **同一张卡下面的项是平级的**（2026-10-06 用户两条口径，两处都算）：
  *   *"webui那里，人物画像和记忆 tab 是同等级的，都在记忆卡片下"*

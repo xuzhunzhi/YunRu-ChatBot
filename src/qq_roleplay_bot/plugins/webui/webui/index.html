@@ -33,28 +33,34 @@
 
 <!-- 宽屏布局照小米平板的设置页：**左边侧栏、右边详情**（用户 2026-10-01：
      "实际上这种宽屏就应该做左侧侧边栏+右侧详情，你去参考小米平板的设置页"）。
-     侧栏那一套尺寸取自 Miuix 的 NavigationRail（ExpandedWidth 240dp、
-     选中药丸圆角 16dp、条目左右外边距 12dp、内边距 14dp）。 -->
+
+     2026-10-19 第三轮（用户判词："你这个就不是 miuix 的标准组件"）：这一个 `aside`
+     现在**就是** Miuix 的 `NavigationRail`（`navigationrail.md`）——
+     宽屏展开 240、窄屏收起 80，几何逐条对着 `NavigationRailDefaults`（见 app.css）。
+     上一版那套"卡片套卡片 + 蓝色实心方块图标 + 右箭头 + 470px"整个删掉了。
+     `aside` 里**只有导航**（静态部分连一颗按钮都没有：那颗收起/展开的按钮由
+     `drawRailToggle()` 画进 `#rail-toggle-slot`，它是 `#tabs` 之外唯一的块）。 -->
 <aside class="rail">
-  <div class="rail-brand">
-    <h1>云茹</h1>
-    <p class="rail-sub">控制面板</p>
+  <div class="rail-scroll">
+    <div id="rail-toggle-slot" class="rail-toggle-slot"></div>
+    <div class="rail-brand">
+      <h1>云茹</h1>
+      <p class="rail-sub">控制面板</p>
+    </div>
+    <nav id="tabs" aria-label="页面导航"></nav>
   </div>
-  <nav id="tabs" aria-label="页面导航"></nav>
 </aside>
 
 <main class="content">
+  <!-- 这就是 Miuix 的 `TopAppBar`（`topappbar.md`）：`title` = 大标题、
+       `subtitle` = 那一行说明。`navigationIcon` 槽**空着**——面板没有"上一层"可回
+       （左栏任何宽度下都在，点它就能换页），所以槽里什么都不放，不摆一个假的返回键。
+       `actionIconPadding` 那一侧的常驻「刷新」上一轮已被用户点名删掉。 -->
   <header class="page-head">
-    <!-- 窄屏（手机）下左栏与内容分开显示，这个按钮负责退回卡片列表。
-         桌面与中等屏由 CSS 隐藏（那里两栏同时在，不需要"返回"）。 -->
-    <button id="back" class="icon-btn" type="button" title="返回卡片列表">← 返回</button>
     <div class="page-head-main">
       <h2 id="page-title">总览</h2>
       <p id="page-nav" class="page-nav"></p>
     </div>
-    <!-- 右上角那个常驻「刷新」**删掉了**（2026-10-06 用户："右上角的刷新先删掉反正，
-         这个太丑了"）。**没有换成别的常驻控件**——功能不裸删：读不到的时候由那一页
-         自己长出「重试」（见 app.js 的 `errorCard()`），平时页面上不占位置。 -->
   </header>
   <p id="error" class="error" hidden></p>
   <section id="view">加载中…</section>
@@ -65,6 +71,11 @@
     <span id="viewport" class="dim"></span>
   </footer>
 </main>
+
+<!-- `Scaffold` 的 `popupHost`（`MiuixPopupHost`）：下拉/弹层都渲染在这一个宿主里
+     （`overlaydropdownmenu.md` 的前提就是"必须在 Scaffold 里"）。
+     面板只有一个宿主，层级由它自己管，不去每个调用点挂弹层。 -->
+<div id="popup-host" class="miu-popup-host"></div>
 
 <script src="/app.js"></script>
 </body>

@@ -279,6 +279,8 @@ const ICONS = {
   deny_list: "1286.4 1286.4|M686.2 205.2L668.2 243.2Q664.2 252.2 658.7 255.2Q653.2 258.2 641.2 258.2H223.2Q204.2 258.2 198.7 263.7Q193.2 269.2 193.2 289.2V322.2V333.2Q193.2 351.2 194.2 364.7Q195.2 378.2 199.2 388.2Q207.2 412.2 225.2 426.2Q234.2 432.2 244.2 437.7Q254.2 443.2 267.2 449.2L278.2 453.2Q427.2 510.2 592.2 510.2Q622.2 510.2 662.2 507.2Q679.2 505.2 688.2 519.2L710.2 555.2Q719.2 569.2 710.2 580.2Q701.2 591.2 685.2 592.2Q657.2 594.2 602.2 594.2Q511.2 594.2 423.7 579.2Q336.2 564.2 253.2 535.2Q217.2 523.2 199.7 515.2Q182.2 507.2 165.2 493.2Q152.2 480.2 138.7 461.7Q125.2 443.2 118.2 427.2Q110.2 407.2 108.7 384.7Q107.2 362.2 107.2 312.2V303.2Q107.2 263.2 108.7 246.2Q110.2 229.2 115.2 217.2Q128.2 194.2 151.2 182.2Q163.2 176.2 180.2 174.7Q197.2 173.2 237.2 173.2H660.2Q677.2 173.2 684.2 183.7Q691.2 194.2 686.2 205.2M816.2 363.2Q816.2 396.2 831.2 426.2L1018.2 238.2Q1005.2 231.2 988.7 227.7Q972.2 224.2 955.2 224.2Q917.2 224.2 885.2 242.7Q853.2 261.2 834.7 293.2Q816.2 325.2 816.2 363.2M1179.2 363.2Q1179.2 424.2 1148.7 475.7Q1118.2 527.2 1067.2 557.2Q1016.2 587.2 955.2 587.2Q894.2 587.2 842.7 557.2Q791.2 527.2 760.7 475.7Q730.2 424.2 730.2 363.2Q730.2 302.2 760.7 250.7Q791.2 199.2 842.7 169.2Q894.2 139.2 955.2 139.2Q1016.2 139.2 1067.7 169.2Q1119.2 199.2 1149.2 250.7Q1179.2 302.2 1179.2 363.2M955.2 501.2Q993.2 501.2 1025.2 482.7Q1057.2 464.2 1075.7 432.2Q1094.2 400.2 1094.2 363.2Q1094.2 329.2 1078.2 299.2L892.2 486.2Q917.2 501.2 955.2 501.2M842.2 916.2Q842.2 978.2 811.2 1031.7Q780.2 1085.2 726.7 1116.2Q673.2 1147.2 611.2 1147.2Q549.2 1147.2 496.2 1116.2Q443.2 1085.2 412.2 1031.7Q381.2 978.2 381.2 916.2Q381.2 854.2 412.2 801.2Q443.2 748.2 496.2 717.2Q549.2 686.2 611.2 686.2Q673.2 686.2 726.7 717.2Q780.2 748.2 811.2 801.2Q842.2 854.2 842.2 916.2M468.2 916.2Q468.2 955.2 487.2 988.2Q506.2 1021.2 539.2 1040.2Q572.2 1059.2 611.2 1059.2Q651.2 1059.2 684.2 1040.2Q717.2 1021.2 736.2 988.2Q755.2 955.2 755.2 916.2Q755.2 877.2 736.2 844.2Q717.2 811.2 684.2 792.2Q651.2 773.2 611.2 773.2Q572.2 773.2 539.2 792.2Q506.2 811.2 487.2 844.2Q468.2 877.2 468.2 916.2",
   approve_rule: "1148.4 1148.4|M606.7 144.7V671.7Q606.7 700.7 622.7 724.7L793.7 978.7Q804.7 993.7 802.2 1011.2Q799.7 1028.7 786.2 1040.7Q772.7 1052.7 754.7 1052.7H165.7Q147.7 1052.7 134.7 1040.7Q121.7 1028.7 119.2 1011.7Q116.7 994.7 126.7 978.7L297.7 724.7Q314.7 701.7 314.7 671.7V298.7Q314.7 274.7 326.2 253.7Q337.7 232.7 357.7 219.7L533.7 105.7Q548.7 95.7 565.7 98.2Q582.7 100.7 594.7 113.7Q606.7 126.7 606.7 144.7M399.7 319.7V674.7Q399.7 726.7 370.7 770.7L247.7 952.7Q244.7 957.7 247.2 962.7Q249.7 967.7 255.7 967.7H665.7Q670.7 967.7 673.7 962.2Q676.7 956.7 673.7 952.7L550.7 770.7Q520.7 724.7 520.7 674.7V229.7Q520.7 215.7 506.7 224.7L421.7 279.7Q411.7 286.7 405.7 297.2Q399.7 307.7 399.7 319.7M1031.7 501.7V526.7Q1031.7 542.7 1023.2 549.2Q1014.7 555.7 997.7 555.7H801.7Q783.7 555.7 775.7 549.2Q767.7 542.7 767.7 524.7V501.7Q767.7 484.7 775.7 477.7Q783.7 470.7 801.7 470.7H997.7Q1015.7 470.7 1023.7 477.7Q1031.7 484.7 1031.7 501.7M1031.7 283.7V308.7Q1031.7 324.7 1023.2 331.2Q1014.7 337.7 997.7 337.7H801.7Q783.7 337.7 775.7 331.2Q767.7 324.7 767.7 306.7V283.7Q767.7 266.7 775.7 259.7Q783.7 252.7 801.7 252.7H997.7Q1015.7 252.7 1023.7 259.7Q1031.7 266.7 1031.7 283.7M1031.7 704.7V729.7Q1031.7 745.7 1023.2 752.2Q1014.7 758.7 997.7 758.7H801.7Q783.7 758.7 775.7 752.2Q767.7 745.7 767.7 727.7V704.7Q767.7 687.7 775.7 680.7Q783.7 673.7 801.7 673.7H997.7Q1015.7 673.7 1023.7 680.7Q1031.7 687.7 1031.7 704.7",
   credential: "1281.6 1281.6|M978.8 123.8Q1024.8 146.8 1047.8 192.8Q1059.8 215.8 1062.3 248.3Q1064.8 280.8 1064.8 357.8V563.8Q1064.8 640.8 1062.3 673.3Q1059.8 705.8 1047.8 728.8Q1024.8 773.8 978.8 796.8Q964.8 803.8 947.8 807.3Q930.8 810.8 905.8 812.8V909.8Q905.8 981.8 870.3 1042.8Q834.8 1103.8 773.8 1139.3Q712.8 1174.8 640.8 1174.8Q568.8 1174.8 507.8 1139.3Q446.8 1103.8 411.3 1042.8Q375.8 981.8 375.8 909.8V812.8Q326.8 809.8 301.8 796.8Q279.8 785.8 262.3 768.3Q244.8 750.8 233.8 728.8Q221.8 705.8 219.3 673.3Q216.8 640.8 216.8 563.8V357.8Q216.8 280.8 219.3 248.3Q221.8 215.8 233.8 192.8Q256.8 146.8 301.8 123.8Q324.8 111.8 357.8 109.3Q390.8 106.8 467.8 106.8H813.8Q890.8 106.8 923.3 109.3Q955.8 111.8 978.8 123.8M345.8 200.8Q322.8 212.8 310.8 235.8Q304.8 246.8 303.3 262.8Q301.8 278.8 301.8 310.8V321.8V599.8Q301.8 639.8 303.3 656.3Q304.8 672.8 310.8 684.8Q322.8 707.8 345.8 719.8Q357.8 725.8 374.8 727.3Q391.8 728.8 430.8 728.8H849.8Q889.8 728.8 906.3 727.3Q922.8 725.8 934.8 719.8Q958.8 707.8 970.8 684.8Q975.8 672.8 977.3 656.3Q978.8 639.8 978.8 599.8V321.8Q978.8 281.8 977.8 264.8Q976.8 247.8 970.8 235.8Q958.8 212.8 934.8 200.8Q922.8 194.8 906.3 193.3Q889.8 191.8 849.8 191.8H430.8Q391.8 191.8 374.8 193.3Q357.8 194.8 345.8 200.8M640.8 1089.8Q689.8 1089.8 730.8 1065.3Q771.8 1040.8 795.8 999.8Q819.8 958.8 819.8 909.8V814.8H460.8V909.8Q460.8 958.8 485.3 999.8Q509.8 1040.8 550.8 1065.3Q591.8 1089.8 640.8 1089.8",
+  sidebar: "1224 1224|M1001.2 199.5Q1054.5 226.4 1081.4 279.7Q1095.1 306.8 1098.5 344.8Q1101.8 382.8 1101.8 471.9V752.1Q1101.8 841.2 1098.5 879.2Q1095.1 917.2 1081.4 944.3Q1054.5 997.6 1001.2 1024.5Q974.1 1038.2 936.1 1041.6Q898.1 1044.9 809 1044.9H415Q325.9 1044.9 287.4 1041.6Q248.9 1038.2 221.9 1024.5Q169.6 997.6 141.6 944.3Q128.1 917.2 125.1 879.2Q122.2 841.2 122.2 752.1V471.9Q122.2 382.8 125.1 344.8Q128.1 306.8 141.6 279.7Q169.6 226.4 221.9 199.5Q248.9 185.8 287.4 182.4Q325.9 179.1 415 179.1H809Q898.1 179.1 936.1 182.4Q974.1 185.8 1001.2 199.5M263.7 275.6Q234.7 291.6 218.7 320.7Q211.2 335.7 209.3 357.4Q207.5 379.1 207.5 429.8V793.3Q207.5 844.8 209.3 866.1Q211.2 887.4 218.7 902.4Q235.5 933.4 263.7 947.4Q278.8 955 300.5 956.8Q322.2 958.6 372.9 958.6H521V264.4H372.9Q322.2 264.4 300.5 266.3Q278.8 268.1 263.7 275.6M445.6 830.9V857.3Q445.6 871.1 438.1 878.6Q430.7 886 416.8 886H316.5Q304.3 886 295.6 879.5Q286.8 872.9 286.8 859.1V829.1Q286.8 815.2 295.6 808.7Q304.3 802.2 316.5 802.2H416.8Q430.7 802.2 438.1 810Q445.6 817.9 445.6 830.9M606.4 958.6H850.2Q901.7 958.6 923 956.8Q944.3 955 960.3 947.4Q974.3 939.9 986 928.6Q997.7 917.3 1004.4 902.4Q1011.9 887.4 1013.7 866.1Q1015.5 844.8 1015.5 793.3V429.8Q1015.5 379.1 1013.7 357.4Q1011.9 335.7 1004.4 320.7Q991.1 292.4 960.3 275.6Q944.3 268.1 923 266.3Q901.7 264.4 850.2 264.4H606.4M445.6 685.8V712.2Q445.6 726 438.1 733.4Q430.7 740.9 416.8 740.9H316.5Q304.3 740.9 295.6 734.4Q286.8 727.9 286.8 713.9V684Q286.8 670.2 295.6 663.6Q304.3 657 316.5 657H416.8Q430.7 657 438.1 664.9Q445.6 672.7 445.6 685.8M445.6 541.7V568Q445.6 581.9 438.1 589.4Q430.7 596.9 416.8 596.9H316.5Q304.3 596.9 295.6 590.3Q286.8 583.7 286.8 569.9V539.9Q286.8 526 295.6 519.4Q304.3 512.8 316.5 512.8H416.8Q430.7 512.8 438.1 520.8Q445.6 528.7 445.6 541.7",
+  search: "1204.8 1204.8|M726.9 366.4Q746.9 378.4 754.9 377.9Q762.9 377.4 776.9 363.4L1027.9 112.4Q1038.9 101.4 1049.4 100.9Q1059.9 100.4 1071.9 112.4L1088.9 129.4Q1100.9 141.4 1100.9 150.9Q1100.9 160.4 1088.9 172.4L834.9 427.4Q822.9 439.4 823.4 446.9Q823.9 454.4 836.9 473.4Q870.9 522.4 889.4 580.9Q907.9 639.4 907.9 702.4Q907.9 811.4 853.9 903.9Q799.9 996.4 707.4 1050.4Q614.9 1104.4 505.9 1104.4Q396.9 1104.4 304.4 1050.4Q211.9 996.4 157.9 903.9Q103.9 811.4 103.9 702.4Q103.9 593.4 157.9 500.9Q211.9 408.4 304.4 354.4Q396.9 300.4 505.9 300.4Q565.9 300.4 622.4 317.4Q678.9 334.4 726.9 366.4M188.9 702.4Q188.9 788.4 231.4 861.4Q273.9 934.4 346.9 976.9Q419.9 1019.4 505.9 1019.4Q591.9 1019.4 664.4 976.9Q736.9 934.4 779.4 861.4Q821.9 788.4 821.9 702.4Q821.9 616.4 779.4 543.4Q736.9 470.4 664.4 427.9Q591.9 385.4 505.9 385.4Q419.9 385.4 346.9 427.9Q273.9 470.4 231.4 543.4Q188.9 616.4 188.9 702.4",
   chevron: "1207.2 1207.2|M362.6 1099.6L333.6 1071.6Q326.6 1063.6 326.1 1052.6Q325.6 1041.6 333.6 1033.6L764.6 602.6L333.6 170.6Q325.6 162.6 326.6 152.6Q327.6 142.6 336.6 133.6L354.6 115.6Q368.6 101.6 379.1 101.1Q389.6 100.6 399.6 110.6L873.6 583.6Q881.6 591.6 881.6 602.6Q881.6 613.6 874.6 620.6L397.6 1097.6Q389.6 1105.6 379.6 1106.1Q369.6 1106.6 362.6 1099.6",
   time: "1240.8 1240.8|M850.9 220.8L902 142.2Q910.8 128.7 918.6 124.8Q926.5 120.8 940.9 120.8H985.7Q1000.7 120.8 1006.2 129.9Q1011.7 138.9 1004.4 150.1L922.9 275.8Q986.8 336.5 1022.1 418.5Q1057.5 500.5 1057.5 592.3Q1057.5 710.8 998.7 811.4Q940 912 839.4 971.2Q738.9 1030.4 620.5 1030.4Q502 1030.4 401.4 971.2Q300.8 912 242.1 811.4Q183.4 710.8 183.4 592.3Q183.4 500.5 218.7 418.5Q254 336.5 318 275.8L237.2 151.9Q228.3 137.1 235.6 129Q242.9 120.8 255.3 120.8H304.5Q324.2 120.8 336.1 138.6L390.1 220.8Q495.5 155.4 620.5 155.4Q745.5 155.4 850.9 220.8M221.4 900.1L425.9 1047.8Q435.9 1055.6 436.1 1062.7Q436.2 1069.7 426.7 1077.9Q411.2 1091.8 392.4 1100.9Q373.5 1110 352.6 1114Q312.8 1119.9 276.4 1105.8Q240 1091.7 214.8 1061.6Q189.5 1031.5 183.6 991.6Q176.8 950.5 194.9 907.1Q199.1 897 205.8 895.5Q212.4 894 221.4 900.1M587.1 584.7V863.9Q587.1 888.6 615.6 888.6H626.1Q639.8 888.6 646.7 882.2Q653.6 875.8 653.6 863.9V625.6H832.6Q844.4 625.6 851.3 618.7Q858.2 611.8 858.2 599.9V584.9Q858.2 572.9 851.3 566.1Q844.4 559.2 832.6 559.2H613.6Q600.6 559.2 593.9 565.9Q587.1 572.5 587.1 584.7M1045.2 905.4Q1064.1 950.6 1057.2 991.6Q1051.3 1031.5 1026.2 1061.6Q1001 1091.7 964.5 1105.8Q928 1119.9 888.2 1114Q847.2 1106.9 814.2 1077.9Q805.4 1069.9 804.8 1062.7Q804.1 1055.6 813.1 1049.6L1022.2 898.3Q1029.4 894 1035.7 896Q1042 898 1045.2 905.4",
   ok: "1282.8 1282.8|M441.9 201.4L112.9 686.4Q106.9 695.4 108.9 705.9Q110.9 716.4 119.9 722.4L149.9 744.4Q158.9 750.4 169.9 748.4Q180.9 746.4 186.9 737.4L474.9 307.4Q477.9 303.4 482.9 302.9Q487.9 302.4 490.9 306.4L1097.9 1092.4Q1104.9 1101.4 1115.9 1102.9Q1126.9 1104.4 1135.9 1097.4L1163.9 1074.4Q1172.9 1067.4 1174.4 1056.4Q1175.9 1045.4 1168.9 1036.4L518.9 198.4Q508.9 186.4 494.4 182.4Q479.9 178.4 465.4 183.4Q450.9 188.4 441.9 201.4",
@@ -287,7 +289,6 @@ const ICONS = {
   add: "1168.8 1168.8|M629.9 124.4V1044.4Q629.9 1056.4 622.9 1063.9Q615.9 1071.4 600.9 1071.4H568.9Q555.9 1071.4 548.4 1063.4Q540.9 1055.4 540.9 1044.4V124.4Q540.9 111.4 548.9 104.4Q556.9 97.4 569.9 97.4H601.9Q614.9 97.4 622.4 104.4Q629.9 111.4 629.9 124.4M1043.9 629.4H124.9Q112.9 629.4 105.4 622.4Q97.9 615.4 97.9 600.4V566.4Q97.9 553.4 105.9 545.9Q113.9 538.4 124.9 538.4H1043.9Q1056.9 538.4 1063.9 546.4Q1070.9 554.4 1070.9 567.4V601.4Q1070.9 614.4 1063.9 621.9Q1056.9 629.4 1043.9 629.4",
 };
 // <<< ICONS-END
-
 /* 图标怎么用：`icon("home")` 出一段内联 SVG。
  *
  * 图形全部来自 Miuix 官方图标库（`miuix-icons`），由 `data/tmp_miuix_icons.py`
@@ -793,6 +794,110 @@ function snackbar(text, options = {}) {
   snackTimer = setTimeout(() => { box.hidden = true; }, options.duration || 4000);
 }
 
+/* ---------- 下拉：Miuix `OverlayDropdownMenu` 的形态（2026-10-19 第三轮） ----
+ *
+ * 面板里有 18 处 `<select>`（供应商 / key / 模型 / 每路绑定 / 看哪个群 / 语感…）。
+ * **Miuix 没有原生 select**，对应组件是 `OverlayDropdownMenu`
+ * （`overlaydropdownmenu.md`）：一行 `BasicComponent`（标题 + 摘要 + 右端当前值），
+ * 点开一个弹出层，里面是 `DropdownItem`（`text` / `selected` / `summary` / `icon`），
+ * 选中项带一枚指示图标。它的前提是"必须在 `Scaffold` 里（`MiuixPopupHost`）"——
+ * 面板的 `#popup-host` 就是那个宿主（见 index.html）。
+ *
+ * **怎么接的**：保留原生 `<select>` 当"状态与事件的唯一真相"（18 处 `change` 绑定
+ * 一行没改），在它后面插一个触发器 + 一个弹出层，选中时写回 `select.value` 并派发
+ * `change`。⚠️ 文档里**没有**"拿一个隐形的原生 select 当状态源"这种写法——这是
+ * 我自己定的适配层，理由与代价写在报告的「文档没写」那一节第 4 条。
+ */
+let dropState = null;                 // { trigger, select, sync } | null
+
+function dropdownHost() {
+  let host = $("popup-host");
+  if (!host) {
+    host = document.createElement("div");
+    host.id = "popup-host";
+    host.className = "miu-popup-host";
+    document.body.appendChild(host);
+  }
+  return host;
+}
+
+function closeDropdown() {
+  const host = $("popup-host");
+  if (host) host.innerHTML = "";
+  if (dropState) dropState.trigger.setAttribute("aria-expanded", "false");
+  dropState = null;
+}
+
+/* 把一块 DOM 里的每个原生 `<select>` 盖成一个 Miuix 下拉。
+ *
+ * 为什么不改 18 处调用点：每处的副作用都不一样（改供应商要重画、改语感要重算、
+ * 改模型要落盘……），那些逻辑在 `bind()` 的委托里，`change` 一冒泡就跑。
+ * 把"值变了要做什么"搬进渲染层是最容易搞坏的一步，所以这里只换**皮**。 */
+function decorateSelects(root) {
+  if (!root) return;
+  root.querySelectorAll("select:not([data-miu])").forEach((sel) => {
+    sel.dataset.miu = "1";
+    sel.classList.add("miu-select__native");
+    sel.tabIndex = -1;
+    const trigger = document.createElement("button");
+    trigger.type = "button";
+    trigger.className = "miu-select__trigger";
+    trigger.setAttribute("aria-haspopup", "listbox");
+    trigger.setAttribute("aria-expanded", "false");
+    trigger.innerHTML = '<span class="miu-select__value"></span>'
+      + `<span class="miu-select__chevron" aria-hidden="true">${icon("chevron")}</span>`;
+    const sync = () => {
+      const option = sel.options[sel.selectedIndex];
+      trigger.querySelector(".miu-select__value").textContent = option ? option.textContent : "";
+      trigger.disabled = Boolean(sel.disabled);
+      trigger.setAttribute("aria-label", sel.getAttribute("aria-label") || "");
+    };
+    sync();
+    sel.addEventListener("change", sync);
+    trigger.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (dropState && dropState.trigger === trigger) { closeDropdown(); return; }
+      closeDropdown();
+      openDropdown(sel, trigger);
+    });
+    sel.after(trigger);
+  });
+}
+
+/* 弹出层：`DropdownItem` 的列表。位置锚在触发器上（Miuix 的 `DropdownPopup`
+ * 就是贴着那一行往下弹），宽度不小于触发器，超高就自己滚（文档的 `maxHeight`）。 */
+function openDropdown(sel, trigger) {
+  const host = dropdownHost();
+  const items = [...sel.options];
+  host.innerHTML = '<div class="miu-dropdown" role="listbox"></div>';
+  const list = host.querySelector(".miu-dropdown");
+  list.innerHTML = items.map((option, index) => {
+    const on = index === sel.selectedIndex;
+    return `<button type="button" class="miu-dropdown__item${on ? " on" : ""}"`
+      + ` role="option" aria-selected="${on ? "true" : "false"}"`
+      + ` data-index="${index}"${option.disabled ? " disabled" : ""}>`
+      + `<span class="miu-dropdown__text">${esc(option.textContent)}</span>`
+      + (on ? `<span class="miu-dropdown__check" aria-hidden="true">${icon("ok")}</span>` : "")
+      + "</button>";
+  }).join("");
+  const box = trigger.getBoundingClientRect();
+  list.style.minWidth = `${Math.max(Math.round(box.width), 160)}px`;
+  list.style.left = `${Math.round(Math.min(box.left, window.innerWidth - 24))}px`;
+  list.style.top = `${Math.round(box.bottom + 4)}px`;
+  list.addEventListener("click", (event) => {
+    const item = event.target.closest("[data-index]");
+    if (!item || item.disabled) return;
+    const index = Number(item.dataset.index);
+    closeDropdown();
+    if (index !== sel.selectedIndex) {
+      sel.selectedIndex = index;
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  });
+  trigger.setAttribute("aria-expanded", "true");
+  dropState = { trigger, select: sel };
+}
+
 function table(columns, rows, options = {}) {
   if (!rows || !rows.length) return `<p class="hint">（没有数据）</p>`;
   // 列宽：`col` 元素在 `table-layout: fixed` 下是唯一说了算的东西。
@@ -813,8 +918,15 @@ function table(columns, rows, options = {}) {
     }).join("");
     return `<tr>${cells}</tr>`;
   }).join("");
-  return `<table${options.cols ? ` class="${options.cols}"` : ""}>${colgroup}`
-    + `<thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+  // 外面那层 `.miu-table-wrap` 是**必须**的（2026-10-19 第三轮，左栏占掉 80px 之后
+  // 内容栏只剩 ~292px）：`table-layout: fixed` 只固定列宽、不裁内容，单元格里放不下的
+  // 字会溢出到表格框外，而**表格不是滚动容器**——那点溢出会直接顶宽整个文档
+  // （390 实测：记忆页 scrollWidth 473 > 390）。包一层可横向滚的容器之后，
+  // 溢出落在那一层里，页面不动。Miuix 没有表格组件（见 app.css 那段说明），
+  // 所以这里只解决"别把页面顶宽"，不假装它是某个 Miuix 组件。
+  return '<div class="miu-table-wrap">'
+    + `<table${options.cols ? ` class="${options.cols}"` : ""}>${colgroup}`
+    + `<thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
 function ts(seconds) {
@@ -1106,7 +1218,7 @@ async function viewMemory() {
     `<div class="pref-summary"><code class="copyable mono">${esc(row.id)}</code>` +
     `<span class="group-badge${row.dialogue_on ? " on" : ""}">对话${
       row.dialogue_on ? "开" : "关"}</span></div>`,
-    `<label class="row-switch" title="这个群的记忆开关">
+    `<label class="row-switch" data-tip="这个群的记忆开关">
        <span class="switch-text">记忆</span>
        <input class="switch group-memory-switch" type="checkbox" data-id="${esc(row.id)}"
          data-on="${row.memory_on ? 1 : 0}"${row.memory_on ? " checked" : ""}
@@ -1763,7 +1875,7 @@ const MOVED_TO_MODEL_PAGE = [
 function prefTitle(text, overridden) {
   // 面板覆盖过的项在主标题后面点一个小蓝点（原来左边有一道蓝条，配上表格很重）
   return `<div class="pref-title">${esc(text)}${
-    overridden ? '<span class="pref-dot" title="面板改过这一项"></span>' : ""}</div>`;
+    overridden ? '<span class="pref-dot" data-tip="面板改过这一项"></span>' : ""}</div>`;
 }
 
 function prefSummary(field, hint) {
@@ -1803,7 +1915,7 @@ function settingsRow(field, label, hint, flags, glyph) {
     esc(field.current || "未设置")}" aria-label="${esc(label)}">`;
   const clear = field.overridden
     ? `<button type="button" class="pref-clear" data-key="${esc(key)}"
-         title="把这一项从面板覆盖层里去掉">清除</button>`
+         data-tip="把这一项从面板覆盖层里去掉">清除</button>`
     : "";
   return prefRow(head, input + clear, { icon: glyph });
 }
@@ -1942,7 +2054,7 @@ function providerBlock(p) {
     // 右端只放那一颗删除——`endHardCap` 60% 是给**控件**的上限，
     // 不是给一排输入框的（那一排走下面的 `bottomAction`）。
     `<button class="m-del" data-name="${esc(p.name)}"${
-  p.can_remove ? "" : ` disabled title="${esc(p.remove_reason || "")}"`}>删除这一套</button>`,
+  p.can_remove ? "" : ` disabled data-tip="${esc(p.remove_reason || "")}"`}>删除这一套</button>`,
     { icon: "credential", extra: " model-src" });
   const keys = (p.keys || []).map((k) => prefRow(
     `<div class="pref-title">${esc(k.id)}${
@@ -2137,9 +2249,9 @@ async function viewGroup() {
     `<div class="pref-summary"><code class="copyable mono">${esc(row.id)}</code>` +
     // 记忆那个**只读**：面板没有按群开关记忆的接缝，所以只显示、不给控件。
     `<span class="group-badge${row.memory_on ? " on" : ""}"
-      title="要改去「记忆」页（这里只显示）">记忆${
+      data-tip="要改去「记忆」页（这里只显示）">记忆${
       row.memory_on ? "开" : "关"}</span></div>`,
-    `<label class="row-switch" title="这个群的对话开关">
+    `<label class="row-switch" data-tip="这个群的对话开关">
        <span class="switch-text">对话</span>
        <input class="switch group-switch" type="checkbox" data-id="${esc(row.id)}"
          data-on="${row.dialogue_on ? 1 : 0}"${row.dialogue_on ? " checked" : ""}
@@ -2178,9 +2290,9 @@ async function viewActions() {
     <td class="nowrap">${num(session.history_size)}</td><td>${esc(session.topic || "")}</td>
     <td><button class="clear-session" data-id="${esc(session.session_id)}">清空这一段</button></td></tr>`).join("");
   return card("短期会话", `<p class="hint">清掉之后，下一次说话会重新起话题（长期记忆不受影响）。</p>`
-      + `<table class="cols-sessions">
+      + `<div class="miu-table-wrap"><table class="cols-sessions">
         <thead><tr><th class="nowrap">会话</th><th class="nowrap">模式</th><th class="nowrap">条数</th><th>话题</th><th></th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="5" class="hint">没有会话</td></tr>'}</tbody></table>`)
+        <tbody>${rows || '<tr><td colspan="5" class="hint">没有会话</td></tr>'}</tbody></table></div>`)
     + card("关系两轴（人工纠偏）", `<div class="row">
         <input id="aff-user" type="text" placeholder="QQ 号" size="14">
         <select id="aff-axis"><option value="closeness">closeness</option>
@@ -2215,8 +2327,8 @@ async function viewHistory() {
         <div class="pref-summary"><code class="copyable mono">${esc(ts(r.at))}</code>
           · 来自 ${esc(r.source || "—")}</div>
       </div>
-      ${r.token ? `<div class="pref-end"><span class="pref-value">令牌 ${esc(r.token)}</span></div>` : ""}
       <div class="pref-bottom">
+        ${r.token ? `<div class="pref-value">令牌 ${esc(r.token)}</div>` : ""}
         <div class="preview">${esc(JSON.stringify(r.detail || {}, null, 0))}</div>
       </div>
     </div>`).join("");
@@ -3013,10 +3125,10 @@ function renderPluginBlock(block) {
     </tr>`).join("");
     return card(block.title || "群管理动作", `<p class="hint">以<b>云茹自己</b>的名义执行（她的 QQ 由核心查）；
        她不是那个群的群主时，群主动作会被核心挡回来。全部动作都要二次确认。</p>
-       <table class="cols-actions">
+       <div class="miu-table-wrap"><table class="cols-actions">
        <thead><tr><th class="nowrap">族</th><th class="nowrap">动作</th><th class="nowrap">目标</th>
          <th>参数</th><th class="nowrap">消息 id</th><th class="nowrap">群号</th><th></th></tr></thead>
-       <tbody>${actionRows}</tbody></table>`);
+       <tbody>${actionRows}</tbody></table></div>`);
   }
   return '<p class="hint pref-empty">这个面板不认识这种块（kind）——它需要在新版面板里才有得画。</p>';
 }
@@ -3113,19 +3225,16 @@ function showViewport() {
   const dpr = window.devicePixelRatio || 1;
   let band = "未知";
   const rail = document.querySelector(".rail");
-  const content = document.querySelector(".content");
   if (rail && window.getComputedStyle) {
     const style = window.getComputedStyle(rail);
-    const contentHidden = content
-      && window.getComputedStyle(content).display === "none";
     const basis = style.flexBasis || "";
-    if (contentHidden) band = "窄屏（只留左栏）";
-    // ⚠️ 判据是"左栏定宽还是按比例"，**不许把那个数写死**：这里原来比的是
-    // `basis === "240px"`（宽屏档变 426px 之后这句就永远不成立），于是 1440 / 1267
-    // 这些**宽屏**窗口被这行字说成"中等（左栏 426px）"——而中等档根本不是 426px，
-    // 是 40%（截图核对时读到的）。定宽 → `px`，按比例 → 百分比，一眼分得开。
-    else if (/px$/.test(basis)) band = `宽屏（左栏定宽 ${basis}）`;
-    else if (basis && basis !== "auto") band = `中等（左栏 ${basis}）`;
+    // 判据是"左栏现在多宽"，**不许把那个数写死**：这两个宽度由
+    // `NavigationRailDefaults` 的 240 / 80 决定，而档位是 `body[data-rail]` 上的
+    // 那个词（展开 / 收起）。所以这里读**实际算出来的 flex-basis** + 档位名，
+    // 两样都改了它跟着改。
+    const mode = document.body.dataset.rail === "collapsed" ? "收起" : "展开";
+    if (/px$/.test(basis)) band = `${mode}（左栏 ${basis}）`;
+    else if (basis && basis !== "auto") band = `${mode}（左栏 ${basis}）`;
   }
   box.textContent = `视口 ${width}×${height} · DPR ${dpr} · ${band}`;
 }
@@ -3265,7 +3374,7 @@ function personLabel(key, data) {
 //: 页面上的**设计说明**都收进这个「?」：点开（或悬停）才出现，默认不占地方
 //: （用户 2026-10-09："删掉页面上的设计说明段"——每节最多留一行必要说明）。
 function noteTip(text) {
-  return `<details class="note-tip"><summary title="说明" aria-label="这一页怎么用">?</summary>
+  return `<details class="note-tip"><summary data-tip="说明" aria-label="这一页怎么用">?</summary>
     <p class="hint">${text}</p></details>`;
 }
 
@@ -3633,11 +3742,16 @@ async function viewAccount() {
     `<div class="pref-title">${esc(title)}</div>`,
     `<span class="pref-value">${esc(value)}</span>`, { icon: glyph })).join("");
 
+  // 供应商那一行：**地址放标题下面那一行（摘要），不放行尾**（2026-10-19 第三轮）。
+  // 用户看出来的毛病："`登录失败 6 次` 那种计数在行尾挤着 URL"——`BasicComponent` 的
+  // 右端是 `endHardCap = (剩余宽) × 6/10`（`Component.kt` 里那条），一个
+  // `https://…` 塞进去就把标题挤成两三行；而地址是"这一路打哪儿"的说明、不是控件，
+  // 按 `BasicComponent` 的摘要位（title 下面那一行）放才是它的位置。
   const providerRows = (settings.providers || []).map((p) => prefRow(
     `<div class="pref-title">${esc(p.label || p.value)}</div>`
-    + (p.value === current ? '<div class="pref-summary">当前在用</div>' : ""),
-    `<span class="pref-value">${esc(p.base_url || "自定义")}</span>`,
-    { icon: "credential" })).join("");
+    + `<div class="pref-summary">${esc(p.base_url || "自定义")}${
+      p.value === current ? " · 当前在用" : ""}</div>`,
+    "", { icon: "credential" })).join("");
 
   return profileCard
     + card("面板登录", `<div class="pref-list">${loginRow}</div>`)
@@ -3740,33 +3854,79 @@ const VIEWS = {
   plugins: () => viewPluginList(),
 };
 
+/* ---------- 左栏 = Miuix `NavigationRail`（2026-10-19 第三轮） ---------------
+ *
+ * 由来（用户判词）：**"你这个就不是 miuix 的标准组件"**。上一版左栏是我自造的：
+ * 470px 宽、卡片套卡片、每一项是"蓝色实心方块图标 + 文字 + 右箭头"的胶囊行。
+ * Miuix 里那个东西叫 `NavigationRail`，规格在 `navigationrail.md` 的
+ * 「NavigationRailDefaults 对象」那一节（数值与出处见 app.css 的 `.rail` 那一段）。
+ *
+ * 两档形态对应文档里 `NavigationRail` 的两个重载：
+ *   · 固定布局（`expanded = true/false`）——宽度与项几何由 CSS 的
+ *     `body[data-rail="expanded"|"collapsed"]` 决定；
+ *   · 可切换布局（`state: NavigationRailState`）——那个收起/展开按钮就是
+ *     `NavigationRailDefaults` 旁边的 `state.toggle()`，这里由 `#rail-toggle` 承担。
+ * 默认档：宽屏（≥1100px）展开、否则收起（见 app.css 里那条 `@media`）。
+ *
+ * 分组标题**不在** NavigationRail 的规格里（它只有一个 `header`，通常是 Logo/FAB），
+ * 所以组标题用 `SmallTitle`（`smalltitle.md`）——收起态放不下标题，那一段由
+ * `Divider`（`divider.md`）分隔，几何见 app.css。
+ */
+const RAIL = { expanded: false };
+
+//: NavigationRail 的断点：宽屏展开 240、否则收起 80（两个宽度都是文档里的常量）。
+//: 为什么是 1100：与面板原来那条"宽屏 / 中等"的分界一致（见 app.css 的响应式那一段），
+//: 换成 NavigationRail 之后它表示"要不要给导航 240px"——1280 上占 18.75%（够），
+//: 1024 上占 23.4%（不够，且 240 一占，内容栏只剩 760），所以 1024 走收起档。
+const RAIL_EXPANDED_MIN = 1100;
+
+function railDefault() {
+  return window.matchMedia(`(min-width: ${RAIL_EXPANDED_MIN}px)`).matches;
+}
+
+//: 把当前档位写到 `body[data-rail]`（CSS 只认这一个开关），并重画那颗按钮。
+function applyRail() {
+  document.body.dataset.rail = RAIL.expanded ? "expanded" : "collapsed";
+  drawRailToggle();
+}
+
+/* 收起/展开按钮 = 文档「可切换布局」那一节的 toggle。
+ *
+ * 几何出自 `NavigationRail.kt::NavigationRailExpandToggle`（文档只写了"带切换按钮"，
+ * 没给尺寸）：`minWidth = IconSize + ExpandedItemContentHorizontalPadding × 2` = 56、
+ * `minHeight = IconSize + ExpandedItemContentVerticalPadding × 2` = 56，图标 28，
+ * 横向位置 `ExpandedItemHorizontalMargin` = 12（收起与展开**同一个 x**）。
+ * 图标是 `MiuixIcons.Basic.Sidebar`（源码里就是它），走同一个图标生成器。 */
+function drawRailToggle() {
+  const slot = $("rail-toggle-slot");
+  if (!slot) return;
+  const tip = RAIL.expanded ? "收起导航栏" : "展开导航栏";
+  slot.innerHTML = `<button type="button" id="rail-toggle" class="rail__toggle"`
+    + ` aria-expanded="${RAIL.expanded ? "true" : "false"}"`
+    + ` aria-label="${tip}" data-tip="${tip}">${icon("sidebar")}</button>`;
+}
+
 function drawTabs() {
-  // 左栏 = 一列**卡片**：卡片标题是功能区，卡内是自己的 tab 条。
-  // 布局依据见 `CARDS` 上面那段注释（用户 2026-10-03 定的）。
-  // 插件卡的条目是动态的（`cards()` 会问 `state.plugins`）。
-  //
-  // **左栏只放导航**（用户 2026-10-06："在左边切换设置项"）：卡里只有 tab 按钮，
-  // 没有操作类控件——`bot 在运行` / `活快照` 去了 `viewOverview`，深色去了 `viewSettings`，
-  // 退出去了 `viewAccount`；而**刷新那颗按钮已经整个删掉**了（用户当天："右上角的刷新
-  // 先删掉反正，这个太丑了"），重画当前页只由"换页签"和"失败态里的重试"触发。
-  // 所以这里出现的每个 `<button>` 都必须带 `data-tab`。
-  // 卡里的每一项都用**同一个模板**画：同一张卡下面的条目在栏里就是**同级的并列项**
-  // （2026-10-06 用户："人物画像和记忆 tab 是同等级的，都在记忆卡片下"，
-  // "金句黑话同理"）。所以这里**没有**"某几项缩进/变小"的分支——谁要再给某一张卡里的
-  // 某一项单开一档，`SubLevelEntriesTests` 会红。
+  // 左栏 = `NavigationRail` 的条目，**只有导航**（用户 2026-10-06："在左边切换设置项"）。
+  // 所以这里出现的每个 `<button>` 都必须带 `data-tab`（`RailNavigationTests` 钉着）。
+  // 分组来自 `CARDS`：同一组里的条目在栏里是**同级并列项**（2026-10-06 用户：
+  // "人物画像和记忆 tab 是同等级的，都在记忆卡片下"、"金句黑话同理"）——
+  // 所以这里**没有**"某几项缩进/变小"的分支。
+  // 插件组的条目是动态的（`cards()` 会问 `state.plugins`）。
   $("tabs").innerHTML = cards().map((entry) => {
-    const ids = cardItems(entry);
-    const on = ids.includes(state.tab);
     const items = entry.items.map((item) => {
       const id = itemId(item);
-      return `<button data-tab="${id}" class="${state.tab === id ? "on" : ""}">`
-        + `<span class="rail-chip">${icon(id)}</span>`
-        + `<span class="rail-label">${esc(labelOf(id))}</span>`
-        + '<span class="rail-chevron" aria-hidden="true"></span></button>';
+      const on = state.tab === id;
+      return `<button type="button" class="rail__item${on ? " on" : ""}"`
+        + ` data-tab="${id}"${on ? ' aria-current="page"' : ""}`
+        + ` aria-label="${esc(labelOf(id))}">`
+        + `<span class="rail__indicator">${icon(id)}</span>`
+        + `<span class="rail__label">${esc(labelOf(id))}</span></button>`;
     }).join("");
-    return `<section class="rail-card${on ? " is-active" : ""}">`
-      + `<h2 class="rail-card-title">${esc(entry.title)}</h2>`
-      + `<div class="rail-card-items">${items}</div></section>`;
+    // 组标题 = `SmallTitle`（与页面里的分组标题同一个类，一处实现）
+    return '<div class="rail__group">'
+      + `<div class="pref-group-title rail__group-title">${esc(entry.title)}</div>`
+      + items + "</div>";
   }).join("");
 }
 
@@ -3787,8 +3947,13 @@ async function render() {
     ? `插件 · ${labelOf(state.tab)}` : labelOf(state.tab);
   $("page-nav").textContent = note;
   if (!state.overview) {
-    // 第一次进来先给个"在加载"的样子（原来是一句静止的"加载中…"，看着像卡住了）
-    $("view").innerHTML = '<div class="card loading">正在读取面板数据…</div>';
+    // 第一次进来先给个"在加载"的样子。**加载指示用 Miuix `InfiniteProgressIndicator`**
+    // （`progressindicator.md`：环形轨道 2dp 描边 + 绕行的点 2dp，直径 20dp，
+    // 颜色默认 `Color.Gray`——这里取灰的那一档令牌 `onSurfaceContainerVariant`）。
+    // 原来是一句会呼吸的灰字（自造的动画），既不是 Miuix 的组件，也说不清"在不在动"。
+    $("view").innerHTML = '<div class="card loading">'
+      + '<span class="miu-infinite" role="progressbar" aria-label="正在读取"></span>'
+      + "正在读取面板数据…</div>";
   }
   try {
     await refreshHealth();            // 顶栏徽章与页签无关，每轮都刷
@@ -3805,6 +3970,10 @@ async function render() {
     $("view").innerHTML = paneBar(state.tab) + errorCard(error);
     replayEnter();
   }
+  // 每一页重画之后，把这一页里的原生 `<select>` 盖成 Miuix 下拉
+  // （`decorateSelects` 的由来见它上面那段）。放在最后：`#view` 的 innerHTML
+  // 三条路（加载 / 成功 / 失败）都已经落定了。
+  decorateSelects($("view"));
 }
 
 /* 这一页**读不到**时给的失败态：一句实话 + 一个「重试」。
@@ -3959,9 +4128,11 @@ function init() {
   if (landing.raw && landing.tab !== landing.raw) {
     writePaneHash(landing.tab, landing.pane);
   }
-  // 深链接（`#memory` 这种）在窄屏上应当直接进内容态，否则手机打开会停在卡片列表，
-  // 看着像"链接没生效"。桌面/中等屏这行没有视觉效果。
-  if (landing.raw) document.body.classList.add("is-reading");
+  // 深链接（`#memory` 这种）直接落到那一页——现在两条栏**任何宽度下都在**
+  // （左栏是收起 80 的 NavigationRail），所以不需要"先切到内容态"这一步了：
+  // 2026-10-19 第三轮把窄屏那套"只留左栏、点进去再返回"的模式撤掉了
+  // （它是自造左栏的一部分，Miuix 的 NavigationRail 没有"点一下就消失"的形态）。
+  if (landing.raw) rememberPane(landing.tab, landing.pane);
   // 主题与退出的**按钮**原来是左栏底部那两颗（`#theme` / `#signout`），2026-10-06
   // 撤掉左栏那块之后它们分别搬去了设置页（开关 `#panel-theme`）与账号页（按钮
   // `#signout`）——那两样都长在**页面内容**里，`init()` 这一刻 DOM 里还没有，
@@ -3986,11 +4157,27 @@ function init() {
   // 右上角那颗常驻「刷新」**已经删掉**（2026-10-06 用户："右上角的刷新先删掉反正，
   // 这个太丑了"）——所以这里没有它的绑定；重画当前页现在只有两个入口：
   // 换页签（下面的 tabs 点击 / hashchange），以及失败态里的「重试」（`bind()`）。
-  // 窄屏（手机）是"左栏 / 内容"二选一：点卡内 tab 进内容态，「返回」退回卡片列表。
-  // 桌面与中等屏两栏同时在，`is-reading` 不产生任何视觉差异（CSS 里只在 <600px 生效）。
-  const reading = (on) => document.body.classList.toggle("is-reading", on);
-  const back = $("back");
-  if (back) back.addEventListener("click", () => reading(false));
+  //
+  // 左栏的收起/展开：按钮是 `drawRailToggle()` 画进 `#rail-toggle-slot` 的，所以监听
+  // 挂在 `#tabs` 外层的 `#rail`（委托），重画之后不用重绑。这一下对应
+  // `navigationRailState.toggle()`（`navigationrail.md` §NavigationRailState）。
+  const rail = document.querySelector(".rail");
+  if (rail) {
+    rail.addEventListener("click", (event) => {
+      if (!event.target.closest("#rail-toggle")) return;
+      RAIL.expanded = !RAIL.expanded;
+      applyRail();
+    });
+  }
+  // 下拉弹出层的收尾：点空白处 / 按 Esc 都关（Miuix 的 popup 是"点外面就收"）。
+  document.addEventListener("click", (event) => {
+    if (!dropState) return;
+    if (event.target.closest(".miu-dropdown") || event.target.closest(".miu-select__trigger")) return;
+    closeDropdown();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeDropdown();
+  });
   $("tabs").addEventListener("click", (event) => {
     const button = event.target.closest("[data-tab]");
     if (!button) return;
@@ -3999,7 +4186,6 @@ function init() {
     // 页面得跟地址栏说的一致；`rememberPane()` 对没有子页签的页签什么都不做）。
     rememberPane(state.tab, "");
     location.hash = state.tab;
-    reading(true);
     drawTabs();
     render();
   });
@@ -4020,11 +4206,13 @@ function init() {
     if (landing.tab !== landing.raw) writePaneHash(landing.tab, landing.pane);
     if (!moved) return;
     state.tab = landing.tab;
-    reading(true);
     drawTabs();
     render();
   });
   bind();
+  // 左栏先定档（`body[data-rail]` 是 CSS 唯一认的那个开关），再画条目与那颗切换按钮。
+  RAIL.expanded = railDefault();
+  applyRail();
   drawTabs();
   // 登录门（2026-10-04 用户："打开 webui 首先打开登录页而非在左下角输入令牌"）：
   // **先验一次本地令牌**，过了才画面板；没过就停在登录页，不浪费一次 401 渲染。
@@ -4046,10 +4234,16 @@ function init() {
   });
   // 页脚读数：初始化时一次，之后改窗口大小（或手机转屏）跟着更新。
   showViewport();
+  let railWide = railDefault();
   window.addEventListener("resize", () => {
-    // 回到宽屏就把"阅读态"清掉（2026-10-04 审查 F2）：它只在窄屏有视觉意义，
-    // 留着会让"窄屏看详情 → 拉宽 → 再拉窄"**直接回到详情**、跳过卡片列表。
-    if (window.matchMedia("(min-width: 700px)").matches) reading(false);
+    // **只在跨过断点时**回到该宽度下的默认档（宽屏展开 / 窄屏收起）：不然用户手动
+    // 收起一次，随手一拉窗口就被改回去了。同一宽度里他选的档一直留着。
+    const wide = railDefault();
+    if (wide !== railWide) {
+      railWide = wide;
+      RAIL.expanded = wide;
+      applyRail();
+    }
     showViewport();
   });
 }

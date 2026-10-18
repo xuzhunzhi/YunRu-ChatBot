@@ -332,6 +332,13 @@ class LeftRailTests(unittest.TestCase):
         「不许有常驻控件」的准确判据是：顶栏里除了窄屏那个 `#back`（它在桌面/中等屏
         `display:none`、只在窄屏阅读态出现，**不是常驻**），不许再有别的按钮/输入；
         而且 `app.js` 里也不许留着 `#refresh` 的绑定（删就要删干净）。
+
+        ⚠️ 2026-10-19 第三轮（用户判词："你这个就不是 miuix 的标准组件"）：顶栏改成
+        Miuix `TopAppBar` 之后，**那颗 `#back` 连同"窄屏只留左栏、点进去再返回"那套
+        模式一起撤掉了**——左栏现在是 `NavigationRail`，任何宽度下都在（收起 80 /
+        展开 240），没有"退回去"这一步。所以判据从"`#back` 是唯一的例外"收紧成
+        **"顶栏里一个控件都没有"**（标题 + 副标题两个文本节点），另外加一条"左栏不许
+        被任何规则藏起来"——这一条正是那个例外消失之后该守的东西。
         """
 
         html = _asset("index.html")
@@ -342,18 +349,19 @@ class LeftRailTests(unittest.TestCase):
         head = re.search(r'<header class="page-head">(.*?)</header>', html, re.S)
         self.assertIsNotNone(head, "index.html 里找不到内容区顶栏 `<header class=\"page-head\">`")
         buttons = re.findall(r"<button[^>]*>", head.group(1))
-        for tag in buttons:
-            self.assertIn('id="back"', tag,
-                          f"内容区顶栏里出现了常驻控件：{tag}——要做事的话让"
-                          "**失败态自己长入口**（见 `errorCard()`）")
+        self.assertEqual(
+            buttons, [],
+            f"内容区顶栏里出现了控件：{buttons}——`TopAppBar` 这一版只放标题与副标题；"
+            "要做事的话让**失败态自己长入口**（见 `errorCard()`）")
         for control in ("<input", "<select", "<textarea"):
             self.assertNotIn(control, head.group(1),
                              f"内容区顶栏里出现了 {control}（那是常驻控件）")
-        # `#back` 凭什么不算常驻：它在基础样式里是隐藏的，只在窄屏阅读态才出现。
-        self.assertRegex(css, r"#back\s*\{\s*display:\s*none",
-                         "`#back` 不再是「平时不出现」的那个返回按钮了")
-        self.assertRegex(css, r"@media \(max-width: 699px\)[\s\S]*?body\.is-reading #back",
-                         "`#back` 不再只由窄屏阅读态显出来")
+        self.assertNotIn('id="back"', html,
+                         "`#back` 已经随窄屏阅读态一起撤掉了（左栏任何宽度下都在）")
+        self.assertNotIn("is-reading", js, "窄屏阅读态那套 class 还留在 JS 里")
+        self.assertNotRegex(
+            css, r"\.rail\s*\{[^}]*display:\s*none",
+            "左栏又被某条规则藏起来了（`NavigationRail` 在任何宽度下都在）")
         self.assertNotIn('$("refresh")', js,
                          "`#refresh` 的绑定还留着（按钮已经删了，别留死代码）")
 
@@ -1287,19 +1295,32 @@ class KnowledgeTableLayoutTests(unittest.TestCase):
     def test_the_users_own_window_width_falls_in_the_wide_tier(self) -> None:
         """**1267×796 是用户真实的窗口**——把那个宽度钉进档位。
 
-        判据：中等档的上界必须 **小于 1267**（于是 1267 落在宽屏档：左栏固定 426px、
-        剩下的全给内容），而且内容区**不许有 `max-width`**（有的话 1267 这个尺寸上
-        内容会白白少一截、表格更容易挤）。档位一改，这个尺寸上的排版就得重新看过。
+        ⚠️ 2026-10-19 第三轮：档位从"三档（宽屏 426 / 中等 4:6 / 窄屏只留左栏）"改成
+        `NavigationRail` 的**两档**（展开 240 / 收起 80，两个数都是 `navigationrail.md`
+        里的 `ExpandedWidth` / `MinWidth`）。判据跟着改，但**没有放宽**：
+        ① 用户的 1267 必须落在**展开档**（断点 ≤1267，且断点就是 JS 那个数）；
+        ② 左栏展开宽度必须是文档里的 240（不是自造的 426）；
+        ③ 收起档必须是文档里的 80；
+        ④ 内容区**不许有 `max-width`**（1267 这个尺寸上内容不能白白少一截）。
         """
 
-        medium = re.search(r"@media \(min-width: 700px\) and \(max-width: (\d+)px\)", self.css)
-        self.assertIsNotNone(medium, "找不到中等档那条媒体查询")
-        self.assertLess(
-            int(medium.group(1)), 1267,
-            f"中等档的上界是 {medium.group(1)}px，1267 就落进中等档了——"
-            "用户的窗口会被当成平板处理")
-        self.assertRegex(self.css, r"\.rail\s*\{[^}]*flex:\s*0 0 426px",
-                         "宽屏档的左栏不是固定 426px")
+        self.assertRegex(self.css, r"--miu-rail-expanded-w:\s*240px",
+                         "展开档不是文档里的 `ExpandedWidth = 240dp`")
+        self.assertRegex(self.css, r"--miu-rail-min-w:\s*80px",
+                         "收起档不是文档里的 `MinWidth = 80dp`")
+        self.assertRegex(self.css, r"\.rail\s*\{[^}]*flex:\s*0 0 var\(--miu-rail-expanded-w\)",
+                         "左栏的宽度没有引展开档那个令牌")
+        # 断点：CSS 里没有"三档"了，档位由 JS 写 `body[data-rail]`；断点那个数只在 JS 里。
+        self.assertNotRegex(self.css, r"\.rail\s*\{\s*flex:\s*0 0 40%",
+                            "又出现了「按比例分宽度」的自造档")
+        wide = _uncomment(_function_body(self.js, "railDefault"))
+        self.assertRegex(wide, r"min-width: \$\{RAIL_EXPANDED_MIN\}px",
+                         "`railDefault()` 没有用那个断点常量")
+        self.assertRegex(self.js, r"const RAIL_EXPANDED_MIN = (\d+);",
+                         "找不到断点常量 `RAIL_EXPANDED_MIN`")
+        threshold = int(re.search(r"const RAIL_EXPANDED_MIN = (\d+);", self.js).group(1))
+        self.assertLessEqual(threshold, 1267,
+                             f"断点是 {threshold}px，用户的 1267 落进了收起档")
         # 页脚那行"视口 … · 档位"的话**不许把档位判据写死成一个数**：
         # 它原来比的是 `basis === "240px"`，宽屏改成 426px 之后 1440/1267 被说成"中等"
         # （截图核对读到的原话："视口 1267×796 · DPR 1 · 中等（左栏 426px）"）。
@@ -2293,18 +2314,24 @@ class MiuixFirstTests(unittest.TestCase):
 
     # ---------- ④ endHardCap 60%，不加断点 ----------
     def test_the_end_slot_is_always_capped_at_sixty_percent(self) -> None:
-        """④ `endHardCap = 60%`，**任何宽度下都是 60%**。依据源码 `Component.kt`：
+        """④ `endHardCap`，**任何宽度下都按源码那条式子算**。依据源码 `Component.kt`：
 
             val endHardCap = (widthAfterStart - spacerPx).coerceAtLeast(0) * 6 / 10
 
-        窄屏上标题被压成三行是**规范结果**。上一轮在 `max-width: 699px` 与
-        `max-width: 1099px` 各写了一条「控件另起一行」的断点（还写过
-        `.audit-item .pref-end { max-width: 40% }`）——这一轮全删，判据钉住「没有」。"""
+        ⚠️ 2026-10-19 第三轮（用户："`登录失败 6 次` 那种计数在行尾挤着 URL"）：
+        上一轮这里写的是 `max-width: 60%`（按**整行**算），比源码偏宽——那条式子要先
+        减掉 `start` 槽（图标 + 间隔）和两处 8dp 的 spacer。所以判据改成"**按那条式子
+        算**"，另外两条不变：不许有第二个上限、不许在媒体查询里改它。
+        窄屏上标题被压成三行仍然是**规范结果**。"""
 
         self.assertRegex(self.bare, r"--miu-end-cap:\s*60%", "上限不是 60%")
-        self.assertRegex(self.bare,
-                         r"\.pref-end\s*\{[^}]*max-width:\s*var\(--miu-end-cap\)",
-                         "`.pref-end` 没有用 60% 那个令牌")
+        self.assertRegex(
+            self.bare,
+            r"\.pref-end\s*\{[^}]*max-width:\s*calc\(\(100% - var\(--miu-start-slot\)"
+            r" - var\(--miu-row-gap\)\) \* 6 / 10\)",
+            "`.pref-end` 的上限不是「剩余宽 × 6/10」（`Component.kt` 的 `endHardCap`）")
+        self.assertRegex(self.bare, r"--miu-start-slot:\s*30px",
+                         "`start` 槽（图标 22 + spacer 8）没有落成令牌")
         self.assertNotRegex(self.bare, r"\.pref-main\s*\{[^}]*flex:\s*1\s+1\s+100%",
                             "又出现「窄屏把标题改成整行」的覆盖了")
         end_rule = re.search(r"\.pref-end\s*\{([^}]*)\}", self.bare, re.S)
@@ -2316,6 +2343,11 @@ class MiuixFirstTests(unittest.TestCase):
                              "媒体查询里又在改 `.pref-end`（那是自己发明的断点）")
             self.assertNotIn(".pref-main", block,
                              "媒体查询里又在改 `.pref-main`（那是自己发明的断点）")
+        # 长值（URL / 令牌 / 路径）**不进 end 槽**：用户 2026-10-19 原话
+        # "`登录失败 6 次` 那种计数在行尾挤着 URL"。end 是给控件的，长串走标题下那一行
+        # （`BasicComponent` 的 summary / `bottomAction`）。
+        self.assertNotRegex(self.js, r'class="pref-value">\$\{esc\(p\.base_url',
+                            "供应商地址又回到行尾了（那是把标题挤成三行的那个写法）")
 
     # ---------- ⑤ 状态不是胶囊 ----------
     def test_status_is_text_not_a_pill(self) -> None:
@@ -2472,12 +2504,15 @@ class MiuixFirstTests(unittest.TestCase):
             self.assertIsNotNone(rule, "`" + selector + "` 那条规则不见了")
             self.assertIn("var(--miu-container)", rule.group(1),
                           "`" + selector + "` 还在用深色下与卡片同值的那个 token")
-        # 侧栏那条选中药丸：同一个 `selector` 在文件里出现多次（还有一条是过渡动画），
-        # 所以按"这一条规则里的 background"认，不按先出现的那条。
-        picked = re.findall(r"(?m)^nav button\.on\s*\{([^}]*)\}", self.bare)
-        self.assertTrue(picked, "`nav button.on` 那条规则不见了")
-        self.assertTrue(any("background: var(--miu-container)" in body for body in picked),
-                        "侧栏选中药丸还在用深色下与卡片同值的那个 token")
+        # 侧栏那条选中药丸：2026-10-19 第三轮换了**依据**——左栏现在是 Miuix
+        # `NavigationRail`（底色 `surface`），不是"装在卡片里的自造条目"，所以选中药丸
+        # 按源码 `NavigationRailItem.indicatorColor` 用 `surfaceContainerHigh`
+        # （`surface` → `surfaceContainerHigh`：浅 #F7F7F7→#E8E8E8、深 #000000→#242424，
+        # 两套主题里都看得出）。判据钉住的仍是"它引的是哪一个 token"。
+        picked = re.findall(r"(?m)^\.rail__item\.on\s*\{([^}]*)\}", self.bare)
+        self.assertTrue(picked, "`.rail__item.on` 那条规则不见了")
+        self.assertTrue(any("background: var(--surface-container-high)" in body for body in picked),
+                        "左栏选中药丸不是 `surfaceContainerHigh`（源码里那个 indicatorColor）")
 
     def test_pref_row_has_exactly_one_definition(self) -> None:
         """`prefRow()` 只能有**一个**定义。
