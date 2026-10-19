@@ -44,6 +44,9 @@ from .ask_when_unsure import (
     has_specific_claim,
     material_haystack,
 )
+# 「有人拿工具式的称呼叫她」这一轮要不要递一句话（2026-10-20）：判据与那句话都在
+# `stance_hints.py`（纯正则、0 次模型调用，**只影响回复材料的一句话，不碰判定**）。
+from .stance_hints import TOOL_VOCATIVE_NOTE, looks_like_tool_vocative
 from .dialogue_judge import (
     OFFENSE_CODES,
     JudgeVerdict,
@@ -1473,6 +1476,10 @@ class DialogueEngine:
             # 话里有具体断言、三处都没有根据，于是被打回重写一次"的次数。
             # （关掉 `ask_when_unsure` 开关时两者恒为 0。只有计数，没有正文。）
             "clarify_quiet", "reply_grounding_rewrites",
+            # 「有人拿工具式的称呼叫她」（2026-10-20）：这一轮往易变段递了那一句的**条数**。
+            # 它是**分母**（命中有多常见），不是错误计数——长期为 0 才说明判据没在工作。
+            # 只有计数，**不记正文、也不记那个称呼**。
+            "reply_tool_vocative_hints",
             # 「她把过往说成事实」（2026-10-18 加）：`reply_past_claim_hits` 是判据命中的
             # 次数（含"最长片段太短、按口径放行"的那几例，它是分母）；`..._rewrites` 是
             # 材料里对不上、**打回重写一次**的次数；`..._unfixed` 是重写之后**仍对不上、
@@ -2256,6 +2263,48 @@ class DialogueEngine:
                 return (f"（他早说过以后都{where}——顺口应一句「还是照老规矩」就行，"
                         f"别再问一遍。）\n")
         return ""
+
+    def _tool_vocative_note(self, message: IncomingMessage) -> str:
+        """这一轮有人拿工具式的称呼叫她 → 在易变段递**一句**（没有就空串）。
+
+        ## 由来（2026-10-20 生产日志，群 `908696203` 凌晨）
+
+        04:32:48 "bot你帮我看看 我睡了"、04:33:51 "bot你敢不敢总结我们刚才的对话"——
+        两次这么叫她，**她两次都顺着接了**（等于默认了这个称呼）。用户口径：
+        *"不接这个称呼，但也不装没听见"*（反问 / 把话头拨回去 / 只回正题、态度冷一点）。
+
+        ## 为什么落在这里，而不是人格正文 / 判定
+
+        * **不进人格正文**：人格每轮都在，往那里写等于每轮提醒她有这么个身份（§2.2
+          "prompt 里的措辞会被角色吸收"）。只有这一轮真有人这么叫她，才加这一句。
+        * **不进判定**：用户明确"不要影响判定"（`lore` 那条已废弃，别碰）。判定有它自己的
+          agent 与 `guard`；这里只改回复材料，`build_dialogue_messages` 也只有回复这条路
+          在调（判定走 `dialogue_judge`）。
+        * **走既有的 `clarify_note` 口子**：那个口子本来就是"一句话进易变段"，
+          说明与限制写在同一处（见调用点）；不为这一句另造接口。
+        * 那一句**不提那个称呼**（`TOOL_VOCATIVE_NOTE` 里连那三个字母都没有）——
+          提它等于又提醒一次。
+
+        ## 只认**这一轮新到的消息正文**
+
+        用户口径：*"只对这一轮新到的消息正文判断，历史不算"*。所以这里只看
+        `message.text`：历史里出现过那种称呼，不代表这一轮还在这么叫——拿历史再判一次
+        就是每轮都加一句，正是要避免的。
+
+        ## 一轮只加一句
+
+        判据返回的是 bool，同一句里命中几处都只算一次；这个函数一轮只被调用一次
+        （`_model_path` 每条消息只走一次）。所以"多条命中不重复加"是结构上成立的。
+        """
+
+        if not looks_like_tool_vocative(message.text or ""):
+            return ""
+        self._stats["reply_tool_vocative_hints"] += 1
+        # 只记条数与 session：**不记正文、不记那个称呼**（§2.1"不记录敏感内容"的同一条纪律）。
+        logger.info(
+            "Stage 3 stance: 这一轮有一句拿工具式的称呼在叫她 session=%s",
+            message.session_id)
+        return TOOL_VOCATIVE_NOTE
 
     def _apply_guard_signal(self, verdict: JudgeVerdict, message: IncomingMessage,
                             *, seq=None, who_alias=None) -> bool:
@@ -5833,7 +5882,16 @@ class DialogueEngine:
             # 用户否掉的就是它）。`clarify_note` 这个口子留着（它只进易变段），
             # 现在由**核心**的提醒流程用它说一句话（正在等他给邮箱时才有；见
             # `_remind_ask_note`）——**插件一个字都不进 prompt**。
-            clarify_note=self._remind_ask_note(message),
+            #
+            # 同一处的第二句话（2026-10-20）：这一轮要是有人拿工具式的称呼叫她
+            # （"bot你帮我看看"），就往这里加**一句**"别接那个称呼、也别装没听见"。
+            # 两条**彼此独立**（一条是提醒待办，一条是分寸），所以是相加、不是覆盖；
+            # 各自由自己那一条判据决定要不要出现，**没有命中时这一处与改动前逐字相同**
+            # （`+" "` 也没有：空串相加就是原样）。为什么放易变段、为什么不进判定，
+            # 见 `_tool_vocative_note` 的说明；那一句的逐字文案在 `stance_hints` 里。
+            clarify_note=(
+                self._remind_ask_note(message) + self._tool_vocative_note(message)
+            ),
             # 「她自己的老习惯」（2026-10-06 金句学习）：按眼前这句的语境挑几条**材料**
             # 进 DATA 段。关掉开关 / 还没学出东西时是空串，请求与改动前逐字相同。
             # 2026-10-11 起它**缓存在会话状态上**（只在压缩或过了几小时才重算），

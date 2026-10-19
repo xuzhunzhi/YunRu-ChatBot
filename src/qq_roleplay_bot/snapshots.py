@@ -109,6 +109,10 @@ class EngineSnapshot:
     # 只有计数，没有正文。
     clarify_quiet: int = 0
     reply_grounding_rewrites: int = 0
+    # 「有人拿工具式的称呼在叫她」（2026-10-20）：这一轮往易变段递了那一句的**条数**。
+    # 它是**分母**（这种叫法有多常见），不是错误计数——长期为 0 才说明判据没在工作。
+    # 只有计数，**不记正文、也不记那个称呼**。
+    reply_tool_vocative_hints: int = 0
     # 「她把过往说成事实」（2026-10-18 交底、2026-10-19 接线；同一个
     # `ask_when_unsure` 开关下，关掉它这三个数恒为 0）：
     # `reply_past_claim_hits` 是判据命中的次数（**分母**：含"最长片段太短、按口径放行"

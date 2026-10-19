@@ -49,6 +49,9 @@ COUNTER_NAMES = (
     # 材料里对不上于是打回重写一次的次数、以及重写之后仍对不上**照发**的次数。
     # 三者都只记数，**不记正文**；与 `data_marker_drops` 不同，这一关从不丢回复。
     "reply_past_claim_hits", "reply_past_claim_rewrites", "reply_past_claim_unfixed",
+    # 「有人拿工具式的称呼在叫她」（2026-10-20）：这一轮往易变段递了那一句的条数。
+    # 只有计数，**不记正文、也不记那个称呼**。
+    "reply_tool_vocative_hints",
     # 不可信数据边界（`data_boundary`）：`data_marker_retries` 是"回复里抄了当轮短码、
     # 被打回重写一次"的条数；`data_marker_drops` 是"重写又抄、于是这一条没发出去"的条数。
     # 两者都只记数，**不记短码、不记正文**。
