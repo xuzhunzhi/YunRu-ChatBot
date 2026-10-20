@@ -69,6 +69,20 @@ def test_judge_is_told_not_to_speak() -> None:
     assert "不要写角色台词" in JUDGE_SYSTEM_PROMPT
 
 
+def test_guard_is_only_a_tone_reference_and_never_a_threshold() -> None:
+    """用户 2026-10-20：**防备只作语气参考、不参与接不接**，且不给任何接话阈值。
+
+    这条口径必须写在判定 prompt 的措辞里，不是只写在代码注释里。
+    旧的那句"只有防备到留意/戒备才明显更少主动开口"正是在拿档位当阈值，已删除。
+    """
+
+    assert "防备只作语气参考，不参与接不接" in JUDGE_SYSTEM_PROMPT
+    for gone in ("留意/戒备", "才明显更少主动开口"):
+        assert gone not in JUDGE_SYSTEM_PROMPT, gone
+    for banned in ("以上才接", "达到", "阈值", ">= 50", "≥50"):
+        assert banned not in JUDGE_SYSTEM_PROMPT, banned
+
+
 def test_judge_does_not_wake_her_for_talk_about_her_machinery() -> None:
     """别人在**背后议论**她的实现/机制/频率/是不是机器人时不该让她凑上去；
     **当面打探她怎么做的**（要她的说法或来历）这一轮不接；但**问她本人**

@@ -86,10 +86,14 @@ class MemoryOps:
             raise MemoryOpRejected("增量只能填 -1、0 或 1")
         # `apply_affinity` 是**唯一的写入路径**，它返回空串表示生效，否则是拒绝码。
         # 这里把拒绝码原样抛出去让人看到（不做"部分生效"，也不静默改小）。
+        #
+        # `manual=True`（2026-10-20）：人点按钮时手上没有"哪句话"，而写入路径从
+        # 这一天起要求模型那两条路必须带原话。超管手动是用户明确留下的例外
+        # （"除超管手动设定的路径"），也只在这一处传——模型那两条路永远不传。
         refusal = self.store.apply_affinity(
             target, closeness=step if name == "closeness" else 0,
             guardedness=step if name == "guardedness" else 0,
-            reason="面板人工调整", source=self.source,
+            reason="面板人工调整", source=self.source, manual=True,
         )
         if refusal:
             raise MemoryOpRejected(f"这次调整被拒（{refusal}）")

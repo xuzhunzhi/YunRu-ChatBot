@@ -584,9 +584,9 @@ def test_a_wrapped_segment_has_the_exact_expected_shape() -> None:
     assert _wrapped('<memory scope="user_group" subject="100" about="100">'
                     "他提过这件事。</memory>\n") not in volatile, "旧形状回来了（没有出处）"
     assert _wrapped("--- 你与这个人 ---\n"
-                    "亲近：熟络——聊得起来，你愿意多说两句。\n"
-                    "防备：收着——有些事你不想展开，点到为止。\n"
-                    "（这是你现在对他的分寸：亲近决定你愿意说多少，防备决定你收着多少。）\n"
+                    "好感：刚打过照面——记不住，也没偏向。\n"
+                    "防备：正常分寸——该说说，该停停。\n"
+                    "（这是你现在对他的分寸：好感决定你愿意说多少，防备决定你收着多少。）\n"
                     "--- 你与这个人 ---\n") in volatile
     assert _wrapped("--- 你写给他的信 ---\n"
                     "你今天早些时候给他写了一封信（主题：汇报），信里是这样说的：\n"

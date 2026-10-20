@@ -79,19 +79,18 @@ from .remind import (
 )
 from .trigger import IdleTrigger, MessageDeduplicator
 from .stage3_runtime import (
-    CLOSENESS_LABELS,
     ConversationMode,
     ConversationState,
     DecisionKind,
     DialogueStatus,
     DialogueDecision,
-    GUARDEDNESS_LABELS,
     Stance,
     build_dialogue_messages,
     build_roster_lines,
     message_index_of,
     parse_dialogue_output,
 )
+from .relationship_tiers import guard_tier, likes_tier
 from .transport import (
     IncomingMessage,
     MessageNotDelivered,
@@ -409,10 +408,14 @@ def _unique_clients(clients) -> list[object]:
     return unique
 
 
-def _level_name(labels: tuple[str, ...], value: int) -> str:
-    """档位名（不含行为说明）。`/super affinity` 只给人看名字。"""
+def _level_name(tier, value: int) -> str:
+    """档位名（不含行为说明）。`/super affinity` 只给人看名字。
 
-    return labels[max(0, min(len(labels) - 1, int(value)))].split("——")[0]
+    2026-10-20：档位从 0..3 四档变成 22 + 7 档，文字的唯一来源是
+    `relationship_tiers`；这里只把"数值 → 名字"这一步收一处，别在两处手写索引。
+    """
+
+    return tier(value).name
 
 
 def _token_count(value: int) -> str:
@@ -2320,19 +2323,25 @@ class DialogueEngine:
           "探机制"只是当轮不接，说完就过去，不该留成她对这个人的长久态度
           （用户原话：*"聊机制她不回不就好了"*）。
         * `<guard>UP</guard>` + `guard_reason` 在 `GUARD_RAISING_OFFENSES` 里
-          （冒犯性言论 / 阴阳怪气）：写防备 +1——**这就是"被冒犯立刻变冷"的全部实现**：
-          同一条回复就已经按新的分寸在说了（缓存失效在这一处）。
+          （冒犯性言论 / 阴阳怪气）：写防备 **+8**（新刻度的单次最大提升）——
+          这就是"被冒犯立刻变冷"的全部实现。**2026-10-20 起它不再"降一档"**：
+          防备一档宽 10，+8 让下一次越界才跨进「有点端着」；这是用户批准的新
+          刻度带来的节奏（一次冒犯不再直接改一档）。
         * `<guard>UP</guard>` 而由头不在表里（判定把玩笑读成了越界）、或者干脆没给由头：
           **不写**，只加一个计数。**政策留在核心**，提示词漂了也拦得住。
 
         两者互斥：`PROBE` 先返回，所以探机制既不会压回复又顺手写防备这种事不会发生。
 
-        ## 证据句（2026-10-16）
+        ## 证据句（2026-10-16，2026-10-20 起是硬要求）
 
         `verdict.guard_quote` 是判定抄回来的"触发它的那一句"，**已经在 `_judge` 里核过**
-        "它真的在这一轮的输入里"。这里只把它连同定位信息（`seq` / 说话人别名）交给
+        "它真的在这一轮的输入里"。这里把它连同定位信息（`seq` / 说话人别名）交给
         `MemoryStore.apply_affinity(evidence=...)`，由存储那一侧做两级脱敏、截断、
         落旁表（见 `MemoryStore._evidence_row`）。
+
+        **核不过 / 没抄 → 这次写入被拒**（`affinity_rejected_no_evidence`），
+        防备一点都不动：宁可这一轮不变冷，也不留一条事后查不了的关系变动。
+        旧行为是"证据存不下、档位照升"，那正是全库只有 1 条证据的原因。
 
         为什么 `seq` / `who_alias` 由调用方递进来而不在这里算：只有调用方手里有
         `ConversationState`（序号与名册别名都在那儿），这里只认识一条消息。
@@ -2366,10 +2375,10 @@ class DialogueEngine:
             rejection = store.apply_affinity(
                 # 依据写**固定的那句中文**（表在 `dialogue_judge.OFFENSE_CODES`），
                 # 不把判定可能写歪的自由文本原样落库。
-                user_id, guardedness=1, reason=OFFENSE_CODES.get(offense, offense),
+                user_id, guardedness=8, reason=OFFENSE_CODES.get(offense, offense),
                 source="judge",
                 # "到底是哪句话"（2026-10-16）：原话已在 `_judge` 核过，这里只递过去。
-                # 空串 = 判定没抄/核不过 → 不传（旁表一条都不写）。
+                # 空串 = 判定没抄/核不过 → 存储层拒绝这次写入（2026-10-20 收紧）。
                 evidence=({"quote": verdict.guard_quote,
                            "who_alias": "" if who_alias is None else str(who_alias),
                            "seq": seq} if verdict.guard_quote else None),
@@ -2383,8 +2392,7 @@ class DialogueEngine:
             logger.info("Stage 3 guard signal rejected: reason=%s user=%s", rejection, user_id)
         else:
             self._stats["guard_raised"] += 1
-            if verdict.guard_quote:
-                self._stats["evidence_stored"] += 1
+            self._stats["evidence_stored"] += 1
             logger.info("Stage 3 guard raised: user=%s", user_id)
         return False
 
@@ -3378,18 +3386,18 @@ class DialogueEngine:
             if reset:
                 changed = store.reset_relationship(user_id, reason=f"超管重置 by={message.user_id}")
                 self._stance_cache.pop(user_id, None)
-                lines.append(f"{user_id}：{'已按回默认档（生疏 + 如常）' if changed else '本来就是默认档'}")
+                lines.append(f"{user_id}：{'已按回默认档（陌生人 + 正常分寸）' if changed else '本来就是默认档'}")
                 continue
             detail = store.relationship_detail(user_id)
             closeness = int(detail["closeness"])
             guardedness = int(detail["guardedness"])
             lines.append(
-                f"{user_id}：亲近 {_level_name(CLOSENESS_LABELS, closeness)}，"
-                f"防备 {_level_name(GUARDEDNESS_LABELS, guardedness)}"
+                f"{user_id}：好感 {closeness}（{_level_name(likes_tier, closeness)}），"
+                f"防备 {guardedness}（{_level_name(guard_tier, guardedness)}）"
             )
             last = detail.get("last")
             if isinstance(last, dict):
-                axis = "亲近" if last.get("axis") == "closeness" else "防备"
+                axis = "好感" if last.get("axis") == "closeness" else "防备"
                 lines.append(
                     f"  最近一次：{axis} {last.get('before_value')}→{last.get('after_value')}"
                     f"（{last.get('source')}）{last.get('reason') or ''}"
@@ -3739,8 +3747,8 @@ class DialogueEngine:
         try:
             detail = store.relationship_detail(user_id)
             lines.append(
-                f"亲近 {_level_name(CLOSENESS_LABELS, int(detail['closeness']))}，"
-                f"防备 {_level_name(GUARDEDNESS_LABELS, int(detail['guardedness']))}"
+                f"好感 {_level_name(likes_tier, int(detail['closeness']))}，"
+                f"防备 {_level_name(guard_tier, int(detail['guardedness']))}"
             )
         except Exception:  # noqa: BLE001
             pass
@@ -6720,9 +6728,11 @@ class DialogueEngine:
 
         ## 核不过怎么办
 
-        **不存**：`guard_quote` 清成空串（`apply_affinity` 拿到空证据就不写旁表），
-        只把 `quote_unverified` 计数 +1 并记一条日志（只记长度，不记内容）。
-        档位照升——**证据存不下来不该改变她的态度**，那是两件事。
+        **这次写入被拒**：`guard_quote` 清成空串，`_apply_guard_signal` 于是拿不到
+        原话，存储层返回 `affinity_rejected_no_evidence`，防备一点不动；只把
+        `quote_unverified` 计数 +1 并记一条日志（只记长度，不记内容）。
+        2026-10-20 用户口径："拿不到原话就拒绝这次写入"——旧行为是"证据存不下来、
+        档位照升"，那正是全库只有 1 条证据的原因。
 
         ## 非 UP 的抄回也丢掉
 

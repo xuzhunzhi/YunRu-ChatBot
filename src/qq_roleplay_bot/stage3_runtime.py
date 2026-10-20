@@ -16,6 +16,8 @@ from .extensions import PromptMaterial
 from .base_prompt import BASE_PROMPT
 from .memory_model import MemoryMaterial
 from .prompt_library import derive_must_reply
+from .relationship_tiers import (GUARD_DEFAULT, GUARD_MAX, GUARD_MIN, LIKES_DEFAULT,
+                                 LIKES_MAX, LIKES_MIN, guard_index, guard_tier, likes_tier)
 from .state_store import persisted_history_limit
 from .stay_in_character import STAY_IN_CHARACTER_RULE
 from . import data_boundary
@@ -1455,64 +1457,82 @@ KNOWLEDGE_TIME_NOTE = (
 )
 
 
-# --- 关系现状（好感度）-----------------------------------------------------
-# 两个轴各四档。**数值不给模型看**：它读不出"2 比 1 热多少"，只会被数字带偏；
-# 给的是档位名 + 一句行为说明，模型才知道该怎么落地。
-CLOSENESS_LABELS = (
-    "生疏——没说过几句话，你不主动搭话。",
-    "认得——搭过话，还算不上熟。",
-    "熟络——聊得起来，你愿意多说两句。",
-    "信赖——你愿意讲自己的事，也会主动问一句。",
-)
-GUARDEDNESS_LABELS = (
-    "如常——不特别防着，也不主动多说。",
-    "收着——有些事你不想展开，点到为止。",
-    "留意——你会避开某些话题，留意他在问什么。",
-    "戒备——你明显收着，回避打探，不接某些话头。",
-)
-# 防备到这两档时，回复前先搁一下再发（秒，上限）。见 `stance_reply_delay`。
-STANCE_DELAY_SECONDS = (0.0, 2.0, 6.0, 12.0)
+# --- 关系现状（好感 / 防备）-------------------------------------------------
+# 档位文字的唯一来源是 `relationship_tiers.py`（22 + 7 档，逐字照用户看过的
+# `data/relationship-tiers.md`）。这里只决定**给她看哪一面**：
+#   * 回复侧：只有档名 + 那句话，**一个数字都没有**（用户 2026-10-20：
+#     *"回复 agent 只有档位文字，看不到数字"*）。数字会让她去算"差几分"，
+#     她读不出分寸，只会被带偏；文字才是能直接落地的东西。
+#   * 判定侧：数值 + 该档文字。它要判断"这个人跟她是什么关系"，数值是事实，
+#     但**不给任何接话阈值**——接不接由判定自己看这一轮的话。
+# 两处拼出来的字符串形状见 `Stance.as_data` / `Stance.as_judge_hint`。
+# 防备越高越要搁一下再发。**下标跟 `GUARD_TIERS` 同序**（0 = 绷得最紧）：
+# 30 → 12 秒、20–29 → 6 秒、10–19 → 2 秒、0 及以下 → 不拖。
+STANCE_DELAY_SECONDS = (12.0, 6.0, 2.0, 0.0, 0.0, 0.0, 0.0)
 
 
 @dataclass(frozen=True, slots=True)
 class Stance:
-    """她跟当前这个人的关系现状。0..3 两轴，越界值一律夹回范围内。"""
+    """她跟当前这个人的关系现状：好感 `-100..100`、防备 `-30..30`。
 
-    closeness: int = 0
-    guardedness: int = 0
+    越界值一律夹回范围内——读库拿到脏值时也要能说话，不能因为一行坏数据
+    让整轮回复没有分寸。
+    """
+
+    closeness: int = LIKES_DEFAULT
+    guardedness: int = GUARD_DEFAULT
 
     def _clamped(self) -> tuple[int, int]:
         return (
-            max(0, min(3, int(self.closeness))),
-            max(0, min(3, int(self.guardedness))),
+            max(LIKES_MIN, min(LIKES_MAX, int(self.closeness))),
+            max(GUARD_MIN, min(GUARD_MAX, int(self.guardedness))),
         )
 
     def as_data(self) -> str:
-        """回复 agent 看的那一段。用交谈视角写，**不许出现机制性词汇**。"""
+        """回复 agent 看的那一段：**只有档位文字，没有数字**。用交谈视角写。
+
+        2026-10-20 用户口径：回复侧看不到数值。这里的文本会被
+        `tests/test_relationship_tiers.py` 逐档扫一遍，确保不含任何数字
+        （包括区间边界值）——否则"看不到数字"就只是嘴上说说。
+        """
 
         closeness, guardedness = self._clamped()
+        likes = likes_tier(closeness)
+        guard = guard_tier(guardedness)
         return (
             "--- 你与这个人 ---\n"
-            f"亲近：{CLOSENESS_LABELS[closeness]}\n"
-            f"防备：{GUARDEDNESS_LABELS[guardedness]}\n"
-            "（这是你现在对他的分寸：亲近决定你愿意说多少，防备决定你收着多少。）\n"
+            f"好感：{likes.name}——{likes.text}\n"
+            f"防备：{guard.name}——{guard.text}\n"
+            "（这是你现在对他的分寸：好感决定你愿意说多少，防备决定你收着多少。）\n"
             "--- 你与这个人 ---\n"
         )
 
     def as_judge_hint(self) -> str:
-        """判定 agent 看的一句话。它只用来决定"没被叫到时要不要插话"。"""
+        """判定 agent 看的一段：**数值 + 该档文字**，不带任何接话阈值。
+
+        它只回答"这个人跟云茹是什么关系"；要不要接这句话由判定看这一轮的内容
+        自己判（用户 2026-10-20：*"不给任何接话阈值"*）。防备在这里只是语气
+        参考——这句口径写进了 `dialogue_judge.JUDGE_SYSTEM_PROMPT`，不是靠这里
+        暗示。
+        """
 
         closeness, guardedness = self._clamped()
+        likes = likes_tier(closeness)
+        guard = guard_tier(guardedness)
         return (
-            f"这个人跟云茹的相处分寸：亲近={CLOSENESS_LABELS[closeness].split('——')[0]}，"
-            f"防备={GUARDEDNESS_LABELS[guardedness].split('——')[0]}\n"
+            f"这个人和云茹是什么关系：好感 {closeness}（{likes.name}——{likes.text}），"
+            f"防备 {guardedness}（{guard.name}——{guard.text}）\n"
         )
 
     def reply_delay(self) -> float:
-        """低防备档要先搁一下再发。这是"不情愿"的信号，不是网络延迟。"""
+        """防备越高，回复前先搁一下（秒）。这是"不情愿"的信号，不是网络延迟。
+
+        按新刻度的 7 档取：0–9 正常分寸不拖；10–19 有点端着 2 秒；20–29
+        很克制 6 秒；30 绷得最紧 12 秒。负防备（松下来了）一律不拖。
+        """
 
         _, guardedness = self._clamped()
-        return STANCE_DELAY_SECONDS[guardedness]
+        return STANCE_DELAY_SECONDS[guard_index(guardedness)]
 
 
 def render_roster(lines: list[str]) -> str:

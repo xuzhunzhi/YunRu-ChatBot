@@ -26,8 +26,13 @@ OPS = {"ADD", "UPDATE", "MERGE", "DELETE", "IGNORE", "AFFINITY"}
 # 每批最多几条好感度 op。它不占 MAX_OPERATIONS 的名额，但也不能让一批里
 # 十几个人都改一遍——那样"变化要慢"这条就形同虚设。
 MAX_AFFINITY_OPERATIONS = 2
-# 好感度每轴的允许增量：只有 -1 / 0 / +1。数值本身是 0..3 的内部档位。
-AFFINITY_DELTAS = {"-1": -1, "0": 0, "+1": 1}
+# 好感度每轴的允许**写法**：带符号的整数串（"+8" / "-12" / "0"）。
+# 2026-10-20 起不再只有 {-1, 0, +1}：新刻度下模型要自己判"明确越界"下多重
+# （4–16），所以它必须能报一个数。这里只拦"写成一句人话 / 0.5 / 离谱的大数"，
+# 真正的幅度夹在 `memory_store._single_step`（普通下调 ≤4、越界 4–16、提升 ≤8）。
+AFFINITY_DELTA_PATTERN = re.compile(r"^[+-]?\d{1,3}$")
+# 写法上允许到刻度本身的最大绝对值；更大的数按脏输出整批拒掉。
+AFFINITY_DELTA_LIMIT = 100
 MAX_OPERATIONS = 5
 MAX_CONTENT = 300
 # 一条记忆最多关联几个人（含归属人）。多人条目只该用在"这事确实涉及几个人"上，
@@ -125,6 +130,9 @@ class MemoryOperation:
     subjects: tuple[str, ...] = ()
     # 维护 agent 认为这条值得**长期**留（用户选定的强化规则之一）。
     durable: bool = False
+    # AFFINITY 专用：模型判定"这一次是明确越界"（2026-10-20）。
+    # 只有它为真时才允许 4–16 的下调；否则一并压回 ≤4。
+    severe: bool = False
 
 
 def parse_operations(raw: str, batch: MemoryBatch) -> tuple[MemoryOperation, ...]:
@@ -172,7 +180,13 @@ def parse_operations(raw: str, batch: MemoryBatch) -> tuple[MemoryOperation, ...
             affinity_count += 1
             if affinity_count > MAX_AFFINITY_OPERATIONS:
                 fail()
-            if set(item) != {"op", "user_id", "closeness", "guardedness", "evidence_event_ids", "reason"}:
+            # `severe` 可选（2026-10-20）：旧输出不带它，按"普通下调"处理。
+            base_fields = {"op", "user_id", "closeness", "guardedness",
+                           "evidence_event_ids", "reason"}
+            if set(item) not in (base_fields, base_fields | {"severe"}):
+                fail()
+            severe = item.get("severe", False)
+            if not isinstance(severe, bool):
                 fail()
             target_user = item["user_id"]
             if not isinstance(target_user, str) or not re.fullmatch(r"\d{5,12}", target_user):
@@ -183,9 +197,12 @@ def parse_operations(raw: str, batch: MemoryBatch) -> tuple[MemoryOperation, ...
             deltas = []
             for axis_name in ("closeness", "guardedness"):
                 value = item[axis_name]
-                if not isinstance(value, str) or value not in AFFINITY_DELTAS:
+                if not isinstance(value, str) or not AFFINITY_DELTA_PATTERN.fullmatch(value.strip()):
                     fail()
-                deltas.append(AFFINITY_DELTAS[value])
+                number = int(value)
+                if abs(number) > AFFINITY_DELTA_LIMIT:
+                    fail()
+                deltas.append(number)
             evidence = item["evidence_event_ids"]
             if not isinstance(evidence, list) or not evidence or len(evidence) > 40:
                 fail()
@@ -203,6 +220,7 @@ def parse_operations(raw: str, batch: MemoryBatch) -> tuple[MemoryOperation, ...
                 evidence_event_ids=tuple(evidence),
                 affinity_user_id=target_user,
                 closeness_delta=deltas[0], guardedness_delta=deltas[1],
+                severe=severe,
             ))
             continue
         content_count += 1

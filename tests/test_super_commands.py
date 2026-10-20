@@ -249,7 +249,7 @@ def test_super_profile_shows_the_full_impression() -> None:
             text = result.text
             assert "【人物画像】" in text and NOISE in text
             assert PROFILE_TEXT in text, text
-            assert "亲近" in text and "防备" in text
+            assert "好感" in text and "防备" in text
             # 是发到群里的（目标群就是这条命令的群）
             assert result.target.group_id == GROUP
         finally:

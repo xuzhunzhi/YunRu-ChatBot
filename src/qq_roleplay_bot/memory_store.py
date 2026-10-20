@@ -15,6 +15,8 @@ from .memory_filters import scrub_evidence_quote, system_self_rule
 from . import dev_config
 from .memory_model import (MAX_SUBJECTS, InboxEvent, MemoryBatch, MemoryRecord,
                            MemoryValidationError, parse_operations)
+from .relationship_tiers import (GUARD_DEFAULT, GUARD_MAX, GUARD_MIN, LIKES_DEFAULT,
+                                 LIKES_MAX, LIKES_MIN)
 from .security import sanitize_chat_text
 
 # 词元切分与虚词表**只有一份**（在 `memory_grounding`）：检索按词命中、写入闸门按词
@@ -171,6 +173,12 @@ CREATE TABLE IF NOT EXISTS person_aliases (
     alias_user_id TEXT PRIMARY KEY, canonical_user_id TEXT NOT NULL,
     note TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL,
     CHECK (alias_user_id <> canonical_user_id));
+-- 键值元数据（2026-10-20 加）：目前只放"关系刻度迁移到第几版 + 迁移那一刻"。
+-- 为什么不复用 `PRAGMA user_version`：表结构版本与**数据**版本不是一回事——
+-- 刻度迁移是可重跑的数据换算，跑不跑由主会话决定；把它塞进表结构版本会逼着
+-- 每次打开旧库都自动改写关系数据（用户要求"这次不要动生产库"）。
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY, value TEXT NOT NULL);
 -- 兼容视图：v5 把 records 拆成两张表，但**所有既有工具脚本**（watch_memory.py、
 -- full_audit.py、data/ 下的各种体检脚本）都在查 records。视图让它们一行不用改。
 -- 只读：应用代码一律走 MemoryStore，不写这个视图。
@@ -324,23 +332,62 @@ WEAK_TERMS = frozenset({
     "容易", "倾向", "主动", "接受", "追问", "什么样", "为什么", "怎么样",
 })
 
-# --- 好感度（关系）---------------------------------------------------------
-# 两个轴各 4 档，内部存 0..3，**数字不给模型看**（模型对数字的分寸感差，
-# 同样的分值每次表现会飘，也没法写测试）。档位文案在 `stage3_runtime.py`。
-AFFINITY_MIN, AFFINITY_MAX = 0, 3
-# 默认：不认识的人 —— 生疏(0) + 如常(0)。查不到、读库失败、记忆关掉，一律回落到这里。
-DEFAULT_CLOSENESS = 0
-# 防备四档：0=如常 1=收着 2=留意 3=戒备。**如常是最低档**，不是"零防备"——
-# 陌生人本来就不该被交底，往下没有更松的档位可言。
-DEFAULT_GUARDEDNESS = 0
-# 滚动 24 小时每个轴的**净**变化上限。
-AFFINITY_DAILY_CAP = 2
-# 防备向下：7 天最多 1 档，而且只有维护 agent（复盘）能降。判定 agent 只升不降。
-GUARD_RELAX_PER_WEEK = 1
-# 多久没说话就衰减。衰减是机械的，不问模型。
+# --- 好感度（关系）：新刻度（2026-10-20）------------------------------------
+# 用户 2026-10-20 拍板、并逐行看过 `data/relationship-tiers.md`：
+#   好感（感性程度）`-100 … 100`，**初始 10**；防备（理性程度）`-30 … 30`，**初始 0**。
+# 旧的 0..3 四档刻度作废——14 行存量数据由 `relationship_migration` 换算。
+#
+# 为什么数字仍然**不直接给回复那一侧**：模型对数字的分寸感差，同样的分值每次表现
+# 会飘，也没法写测试。判定那边给数值（它要判断"这个人跟她是什么关系"），回复那边
+# 只给文字（`stage3_runtime.Stance.as_data`）。这是用户 2026-10-20 定的三条消费口径。
+#
+# 刻度本身的唯一来源在 `relationship_tiers.py`（22 + 7 档逐字照表）；这里只放
+# **写入规则**，不要再复制一份档位文字。
+AFFINITY_MIN, AFFINITY_MAX = LIKES_MIN, LIKES_MAX
+GUARDEDNESS_MIN, GUARDEDNESS_MAX = GUARD_MIN, GUARD_MAX
+# 默认：按那份表，初始值就落在「陌生人」（10–19）与「正常分寸」（0–9）。
+# 查不到、读库失败、记忆关掉，一律回落到这里。
+DEFAULT_CLOSENESS = LIKES_DEFAULT
+DEFAULT_GUARDEDNESS = GUARD_DEFAULT
+# 单次写入的幅度（用户 2026-10-20 定的硬规则）：
+#   * 提升 ≤ 8；
+#   * 普通下调 ≤ 4；
+#   * **明确越界**（`severe=True`，由模型自己判定"这一次越界了"）时下调 4–16。
+# 为什么把"越界"做成显式参数，而不是"看数值大小自己猜"：`-5` 到底是模型判了越界，
+# 还是它把"一点点不高兴"写大了，存储层分不出来。前者是用户批准的那条路，后者必须
+# 压回 -4——两种语义要能分开，否则"普通下调 ≤ 4"这条就形同虚设。
+AFFINITY_RAISE_MAX = 8
+AFFINITY_LOWER_MAX = 4
+AFFINITY_SEVERE_LOWER_MAX = 16
+# 滚动 24 小时每轴的**净**变化上限，按新刻度重算（用户 2026-10-20 要求"按新刻度
+# 重算、给出值与理由"，这两个数是本次选的）：
+#   * 好感 20：跨度 200 的 10%。必须容得下"一次明确越界的最大下调 16 + 一次小幅
+#     修正 4"，否则用户批准的那条 4–16 会在同一天里被每日上限自己顶回去；
+#     又不能大到让 8+8+8 一天连升 24（那等于旧刻度里一天连升 1.2 档）。
+#   * 防备 8：跨度 60 的 13%，正好是一次最大提升。防备比好感窄得多，按同一比例
+#     （7）会让"两句冒犯就顶满"；8 保留"每天最多一档、还要隔天再见"的节奏。
+AFFINITY_DAILY_CAP = 20
+GUARD_DAILY_CAP = 8
+# 防备向下：7 天最多松一档。新刻度一档 = 10（防备的档宽就是 10），所以从旧的
+# "7 天 1 档"直接换算成 **10 点**：一次普通下调 4 分，两次（8）还在限内，第三次
+# （12）就要等窗口滑过去。判定 agent 只升不降，降只有维护 agent 那条路。
+GUARD_RELAX_PER_WEEK = 10
+# 好感 ≥ 95（喜欢 / 爱慕）之后**不再往下**（用户 2026-10-20："限制继续降低"）。
+# 例外只有超管手动那条路：`manual=True`（面板）与 `reset_relationship`（重置）。
+AFFINITY_HIGH_HOLD = 95
+# 多久没说话就衰减。衰减是机械的，不问模型。数值按新刻度重算：
+# 旧规则是"每 30 天空闲降 1 档、停在 1 档（认得）"。新刻度一档 = 10，
+# 旧 1 档映射后是 35，所以步长取 10、地板取 35，节奏与旧口径一致。
 AFFINITY_DECAY_SECONDS = 30 * DAY
-# 衰减时亲近最低停在这一档（认得）：不熟可以，但"聊过的人"不该退回全然的陌生人。
-CLOSENESS_DECAY_FLOOR = 1
+AFFINITY_DECAY_STEP = 10
+# 衰减时好感最低停在这里（35 = 旧「认得」档换算值）：不熟可以，但"聊过的人"
+# 不该退回全然的陌生人。
+CLOSENESS_DECAY_FLOOR = 35
+# 刻度迁移的版本号（`meta` 表里的键）。迁移函数与写入路径共用这一个口径：
+# 迁移那一刻之前的流水按旧刻度记的，不能拿来算新的 24 小时/7 天窗口。
+RELATIONSHIP_SCALE_VERSION = 2
+SCALE_VERSION_KEY = "relationship_scale_version"
+SCALE_EPOCH_KEY = "relationship_scale_at"
 
 # 单字与高频虚词命中没有区分度，只会把不相关记录抬上来。
 # （表本身在 `memory_grounding`：写入闸门与检索共用同一份，见那里的说明。）
@@ -952,10 +999,25 @@ class MemoryStore:
                 elif op.op == "AFFINITY":
                     # 走**同一个**写入路径：上限与流水都在 `_apply_affinity` 里，
                     # 判定 agent 那条通道也调它。这里是维护 agent 一侧，可以降防备。
+                    #
+                    # 证据句（2026-10-20）：用户要求"每一次关系变动都必须存原话，
+                    # 拿不到原话就拒绝这次写入"。维护 agent 手上本来就有
+                    # `evidence_event_ids`（结构校验已保证至少一条是**他本人**说的），
+                    # 这里把那条原文递下去；批量事后还能对上是哪句话让他变熟的。
+                    trigger = next(
+                        (e for e in batch.events
+                         if e.id in op.evidence_event_ids
+                         and e.speaker == "user"
+                         and e.user_id == op.affinity_user_id),
+                        None,
+                    )
                     rejection = self._apply_affinity(
                         db, op.affinity_user_id,
                         closeness=op.closeness_delta, guardedness=op.guardedness_delta,
                         reason=op.content, source="maintenance", now=now, may_lower_guard=True,
+                        severe=op.severe,
+                        evidence=({"quote": trigger.text, "who_alias": "", "seq": 0}
+                                  if trigger is not None else None),
                     )
                     if rejection:
                         db.execute("INSERT INTO audit VALUES (?,?,?,?,?)",
@@ -1088,6 +1150,8 @@ class MemoryStore:
         source: str = "unknown",
         may_lower_guard: bool = False,
         evidence: dict | None = None,
+        severe: bool = False,
+        manual: bool = False,
     ) -> str:
         """**唯一的写入路径**：判定 agent 与维护 agent 都调这里。
 
@@ -1095,24 +1159,34 @@ class MemoryStore:
         不做"部分生效"）。上限、流水、防备不对称全在这一处。
 
         `evidence` 是"触发这次变动的**那一句原话**"（2026-10-16）：形如
-        `{"quote": str, "who_alias": str, "seq": int}`，**只有判定那条路会传**，
-        而且传之前已经由核心核过"它真的在这一轮的输入里"（`stage3_main._judge` 的
-        `quote in rendered_input`）；这里不再二次核对，只负责脱敏、截断、落旁表
-        （见 `_evidence_row`）。不传就是老行为，一个字都不多写。
+        `{"quote": str, "who_alias": str, "seq": int}`。**2026-10-20 起它是硬要求**：
+        判定与维护两条路都传；拿不到原话就返回 `affinity_rejected_no_evidence`，
+        **一次都不写**。为什么从"可选"改成"必须"：全库只有 1 条证据——升级时
+        没人强制存原话，事后就回答不了"她为什么突然变了"。宁可这次不改，
+        也不要记一条查不了的理由。
+
+        `severe=True` = 模型自己判定"这一次是明确越界"。只有它会放宽下调幅度到
+        4–16；普通下调一律压回 ≤4。**别从数值大小去猜**：-5 可能只是一点不高兴。
+
+        `manual=True` 只给超管人工那条路（`memory_ops.MemoryOps.affinity`）：
+        人点按钮时手上没有"哪句话"，这条本来就是用户 2026-10-20 留的例外
+        （"除超管手动设定的路径"）。模型那两条路永远不许传它。
         """
 
         with self.connection() as db:
             return self._apply_affinity(
                 db, self.canonical_user(user_id, db=db), closeness=closeness,
                 guardedness=guardedness, reason=reason, source=source, now=self.clock(),
-                may_lower_guard=may_lower_guard, evidence=evidence,
+                may_lower_guard=may_lower_guard, evidence=evidence, severe=severe,
+                manual=manual,
             )
 
     def reset_relationship(self, user_id: str, *, reason: str = "超管重置") -> bool:
-        """回落默认档（生疏 + 如常），并留一条流水。
+        """回落默认值（陌生人 + 正常分寸），并留一条流水。
 
         **不删行**：留痕才能解释"她为什么突然变了"。超管重置是人工纠正，
-        不走上限——它本来就是用来盖掉模型误判的。
+        不走上限（也不受"好感 ≥95 不再往下"那条约束——用户 2026-10-20 写明
+        例外是"除超管手动设定的路径"）。它本来就是用来盖掉模型误判的。
         """
 
         now = self.clock()
@@ -1143,7 +1217,14 @@ class MemoryStore:
         return True
 
     def decay_relationships(self, *, idle_seconds: float = AFFINITY_DECAY_SECONDS) -> int:
-        """很久没说话：亲近 −1（最低停在"认得"），防备回"如常"。机械的，不问模型。
+        """很久没说话：好感 −10（最低停在 35 = 旧「认得」），防备回「正常分寸」。
+
+        衰减是机械的，不问模型。数值按新刻度（2026-10-20）：步长 10 = 一档，
+        地板 35 = 旧 1 档映射后的值，节奏与旧的"每 30 天降一档"一致。
+
+        **好感 ≥ 95 的那几行不动**：用户 2026-10-20 说"≥95 之后限制继续降低"，
+        衰减也是一条降低的路；喜欢/爱慕不该因为久不说话就自己凉掉。
+        防备照旧回 0（那是"不在他面前端着"，不是关系降级）。
 
         衰减后把 `last_seen_at` 推到当前时间，否则每一轮都会接着降。
         """
@@ -1158,14 +1239,20 @@ class MemoryStore:
             ).fetchall()
             for row in rows:
                 user_id = row["user_id"]
-                new_closeness = max(CLOSENESS_DECAY_FLOOR, int(row["closeness"]) - 1)
+                current_closeness = int(row["closeness"])
+                new_closeness = current_closeness
+                # **只降不升**：地板 35 比初始值 10 高，若直接 `max(35, value-10)`，
+                # 一个 26 分的人会被"衰减"抬到 35——那就不是衰减了。
+                if CLOSENESS_DECAY_FLOOR < current_closeness < AFFINITY_HIGH_HOLD:
+                    new_closeness = max(CLOSENESS_DECAY_FLOOR,
+                                        current_closeness - AFFINITY_DECAY_STEP)
                 db.execute(
                     "UPDATE relationships SET closeness=?,guardedness=?,updated_at=?,last_seen_at=? "
                     "WHERE user_id=?",
                     (new_closeness, DEFAULT_GUARDEDNESS, now, now, user_id),
                 )
                 for axis, before, after in (
-                    ("closeness", int(row["closeness"]), new_closeness),
+                    ("closeness", current_closeness, new_closeness),
                     ("guardedness", int(row["guardedness"]), DEFAULT_GUARDEDNESS),
                 ):
                     if before != after:
@@ -1178,10 +1265,48 @@ class MemoryStore:
             logger.info("relationship_decay count=%s", changed)
         return changed
 
+    def _scale_epoch(self, db) -> float:
+        """刻度迁移那一刻（秒）。迁移**之前**的流水按旧刻度记，不能算进新窗口。
+
+        由来（2026-10-20）：24 小时净变化与 7 天放松上限都是"读流水求和"。旧刻度
+        里一次 0→1 的换算在新刻度里是 10→35（+25），迁移完当天就会被自己的每日
+        上限顶死。迁移本身不是一次真实的关系变化，所以把它的时间点记进 `meta`，
+        那之前的流水一律不计。拿不到 `meta`（老库还没迁）就是 0.0——全部算，
+        与迁移前行为一致。
+        """
+
+        try:
+            row = db.execute("SELECT value FROM meta WHERE key=?",
+                             (SCALE_EPOCH_KEY,)).fetchone()
+        except sqlite3.OperationalError:
+            return 0.0
+        try:
+            return float(row[0]) if row else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _single_step(delta: int, *, severe: bool) -> int:
+        """把模型报的增量压进单次允许的幅度（用户 2026-10-20 的硬规则）。
+
+        提升 ≤ 8；普通下调 ≤ 4；`severe=True`（明确越界）时下调 4–16。
+        **不做"平均拆成几次"**：一次调用就是一次，拒绝/压缩都在这里看得见。
+        """
+
+        delta = int(delta)
+        if delta > 0:
+            return min(AFFINITY_RAISE_MAX, delta)
+        if delta == 0:
+            return 0
+        if severe:
+            # "4–16"是幅度：模型说 -2 也至少走 4，说 -30 也只到 16。
+            return -min(AFFINITY_SEVERE_LOWER_MAX, max(AFFINITY_LOWER_MAX, -delta))
+        return -min(AFFINITY_LOWER_MAX, -delta)
+
     def _apply_affinity(
         self, db, user_id: str, *, closeness: int, guardedness: int, reason: str,
         source: str, now: float, may_lower_guard: bool,
-        evidence: dict | None = None,
+        evidence: dict | None = None, severe: bool = False, manual: bool = False,
     ) -> str:
         """干活的那个。返回拒绝码或空串。所有上限都在这里，谁调都一样。"""
 
@@ -1193,11 +1318,17 @@ class MemoryStore:
         if rule:
             logger.warning("relationship_reason_redacted rule=%s source=%s", rule, source)
             reason = AFFINITY_REASON_REDACTED % rule
-        # 单次每轴最多 1 档：模型说什么都越不过这条。
-        closeness = max(-1, min(1, int(closeness)))
-        guardedness = max(-1, min(1, int(guardedness)))
+        # 单次幅度（新刻度）：模型说什么都越不过这几条。
+        closeness = self._single_step(closeness, severe=severe)
+        guardedness = self._single_step(guardedness, severe=severe)
         if closeness == 0 and guardedness == 0:
             return ""
+        # **证据链**（2026-10-20 收紧）：模型那两条路必须带原话，拿不到就整次拒绝。
+        # 为什么不在 `_evidence_row` 里"记一条空的"了事：那正是旧行为——全库 1 条证据，
+        # 事后只能看到一句概括，回答不了"到底哪句话让她变冷的"。
+        quote = str((evidence or {}).get("quote") or "").strip()
+        if not manual and not quote:
+            return "affinity_rejected_no_evidence"
         if guardedness < 0 and not may_lower_guard:
             # 判定 agent 只升不降：防备受惊之后立刻回暖不合理，也给了刷好感一条新路。
             return "affinity_rejected_judge_downgrade"
@@ -1206,27 +1337,35 @@ class MemoryStore:
         ).fetchone()
         current_closeness = int(row["closeness"]) if row else DEFAULT_CLOSENESS
         current_guardedness = int(row["guardedness"]) if row else DEFAULT_GUARDEDNESS
+        # 好感 ≥ 95 之后不再往下（用户 2026-10-20）。这条挡在每日上限**之前**：
+        # 否则同一天里两次小幅下调会绕开它（第一次没到限、第二次才到限）。
+        # 例外是超管手动那条路（`manual=True`）——用户原话里写明了"除超管手动设定的路径"。
+        if closeness < 0 and current_closeness >= AFFINITY_HIGH_HOLD and not manual:
+            return "affinity_rejected_high_affinity_hold"
+        epoch = self._scale_epoch(db)
         if guardedness < 0:
             relaxed = db.execute(
                 "SELECT COALESCE(SUM(before_value-after_value),0) FROM relationship_log "
                 "WHERE user_id=? AND axis='guardedness' AND before_value>after_value AND occurred_at>?",
-                (user_id, now - 7 * DAY),
+                (user_id, max(now - 7 * DAY, epoch)),
             ).fetchone()[0]
             if int(relaxed or 0) >= GUARD_RELAX_PER_WEEK:
                 return "affinity_rejected_relax_too_soon"
-        # 滚动 24 小时的**净**变化上限，每轴分开算。
-        for axis, delta in (("closeness", closeness), ("guardedness", guardedness)):
+        # 滚动 24 小时的**净**变化上限，每轴分开算（两个数按各自跨度定，见常量说明）。
+        for axis, delta, cap in (("closeness", closeness, AFFINITY_DAILY_CAP),
+                                 ("guardedness", guardedness, GUARD_DAILY_CAP)):
             if delta == 0:
                 continue
             net = db.execute(
                 "SELECT COALESCE(SUM(after_value-before_value),0) FROM relationship_log "
                 "WHERE user_id=? AND axis=? AND occurred_at>?",
-                (user_id, axis, now - DAY),
+                (user_id, axis, max(now - DAY, epoch)),
             ).fetchone()[0]
-            if abs(int(net or 0) + delta) > AFFINITY_DAILY_CAP:
+            if abs(int(net or 0) + delta) > cap:
                 return "affinity_rejected_daily_cap"
         new_closeness = max(AFFINITY_MIN, min(AFFINITY_MAX, current_closeness + closeness))
-        new_guardedness = max(AFFINITY_MIN, min(AFFINITY_MAX, current_guardedness + guardedness))
+        new_guardedness = max(GUARDEDNESS_MIN,
+                              min(GUARDEDNESS_MAX, current_guardedness + guardedness))
         if (new_closeness, new_guardedness) == (current_closeness, current_guardedness):
             # 已经在顶/底了。这不是错误，但也不该记成一次"生效的变动"。
             return "affinity_rejected_at_boundary"
@@ -1246,11 +1385,10 @@ class MemoryStore:
                     "INSERT INTO relationship_log VALUES (?,?,?,?,?,?,?)",
                     (user_id, axis, before, after, reason[:200], source, now),
                 )
-                if evidence:
+                if quote and not manual:
                     # 证据挂在**这一行流水**上（`log_rowid` = 它的 rowid）。
                     # 一次调用若两个轴都变了，两行流水各挂一条同样的证据——这是
-                    # 如实的：每一次变动都由那一句引起。今天只有判定那条会传它，
-                    # 而那条只动 guardedness 一轴，所以实际是一对一。
+                    # 如实的：每一次变动都由那一句引起。
                     self._evidence_row(
                         db, log_rowid=int(cursor.lastrowid or 0), user_id=user_id,
                         axis=axis, occurred_at=now, evidence=evidence,
@@ -1267,10 +1405,15 @@ class MemoryStore:
 
         ## 存什么
 
-        * `quote`：**核过在输入里出现过**的那一句（校验在 `stage3_main._judge`：
-          `quote in rendered_input`，纯字符串包含）。这里只做脱敏与截断。
+        * `quote`：**核过在输入里出现过**的那一句（判定那条路在 `stage3_main._judge`
+          里核：`quote in rendered_input`，纯字符串包含；维护那条路核的是
+          `evidence_event_ids` 里**他本人**说过的那条事件正文）。这里只做脱敏与截断。
         * `quote_chars`：**原始长度**（脱敏前、截断前），"这句话有多长"本身是信息。
         * `quote_truncated` / `verify` / `rule`：下面三段说明。
+
+        注意（2026-10-20）：调用方**必须**先给出非空的 `quote`，否则
+        `_apply_affinity` 会直接拒绝这次写入——这个函数自己不再承担"没原话也记一行"
+        的兜底。走到这里时 `raw` 一定是非空的。
 
         ## 脱敏**分两级**（照搬 reason 那套会把证据抹光，实测反例见 `memory_filters`）
 

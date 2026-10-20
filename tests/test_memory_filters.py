@@ -212,8 +212,9 @@ def test_affinity_reason_is_redacted_not_dropped() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = MemoryStore(Path(tmp) / "memory.sqlite3")
         assert store.apply_affinity(
-            ME, closeness=1, guardedness=0, source="maintenance",
+            ME, closeness=8, guardedness=0, source="maintenance",
             reason="他确认自己就是做云茹的那个人，聊的是图片解析的琐事，关系维持原样。",
+            evidence={"quote": "他确认自己就是做云茹的那个人", "who_alias": "2", "seq": 3},
         ) == ""
         with store.connection() as db:
             reasons = [row["reason"] for row in db.execute(
@@ -224,7 +225,8 @@ def test_affinity_reason_is_redacted_not_dropped() -> None:
 
         # 正常依据原样保留
         assert store.apply_affinity(
-            "1002", closeness=1, reason="他聊自己的通勤，也肯接话，聊得下去。",
+            "1002", closeness=8, reason="他聊自己的通勤，也肯接话，聊得下去。",
+            evidence={"quote": "他聊自己的通勤", "who_alias": "1", "seq": 4},
         ) == ""
         with store.connection() as db:
             kept = db.execute("SELECT reason FROM relationship_log WHERE user_id='1002'").fetchone()[0]
