@@ -124,6 +124,12 @@ class EngineSnapshot:
     reply_past_claim_hits: int = 0
     reply_past_claim_rewrites: int = 0
     reply_past_claim_unfixed: int = 0
+    # 「预设型编造」（2026-10-20 加；同一个 `ask_when_unsure` 开关下，关掉它恒为 0）：
+    # 她把一件有"经历门槛"的事（六级 / 高考 / 宿舍 / 面试……）当成**已经发生过**
+    # 摆了出来，而这一轮材料里那个词出现 **0 次** → 打回重写一次的次数。
+    # 它与 `reply_past_claim_rewrites` **共用每轮一次**的重写额度，所以两者不会同时加。
+    # 只有计数，**不记正文、也不记是哪个词**。
+    reply_presupposition_rewrites: int = 0
     # 不可信数据的短码（`data_boundary`，2026-10-08）：`data_marker_retries` 是
     # "回复里抄了当轮短码、被打回重写一次"的次数；`data_marker_drops` 是"重写又抄、
     # 于是这一条没发出去"的次数（fail-closed）。只有计数，**不含短码、不含正文**。

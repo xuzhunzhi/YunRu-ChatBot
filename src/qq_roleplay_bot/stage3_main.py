@@ -41,6 +41,7 @@ from .ask_when_unsure import (
     check_past_claim,
     context_is_explicit,
     decide_grounding,
+    has_experiential_presupposition,
     has_specific_claim,
     material_haystack,
 )
@@ -1492,6 +1493,11 @@ class DialogueEngine:
             # 照发**（这一关绝不丢回复）的次数。三者都只有计数，**不记正文**。
             "reply_past_claim_hits", "reply_past_claim_rewrites",
             "reply_past_claim_unfixed",
+            # 「预设型编造」（2026-10-20 加）：她把一件有"经历门槛"的事（六级/高考/宿舍）
+            # 当成前提讲出来，而这一轮材料里那个词 **0 次**，于是打回重写一次。
+            # 与上面「过往断言」共用同一份额度（同一轮只重写一次）。只有计数，
+            # **不记正文、也不记是哪个词**（日志只写条数与 session）。
+            "reply_presupposition_rewrites",
             # 不可信数据的短码（`data_boundary`，2026-10-08）：`data_marker_retries` 是
             # "回复里抄了当轮短码、被打回重写一次"的次数；`data_marker_drops` 是
             # "重写又抄、于是这一条没发出去"的次数（fail-closed）。
@@ -6081,6 +6087,47 @@ class DialogueEngine:
                         "Stage 3 past claim: 重写之后那一句还是找不到，照发（不丢回复） "
                         "session=%s trigger=%s chars=%s",
                         message.session_id, trigger_kind, len(decision.text))
+            # 「预设型编造」那一关（2026-10-20 用户报告后加）。
+            #
+            # 要堵的形状是**第三种**：她没说"我做过"，但把一件有"经历门槛"的事当成
+            # 已经发生过的东西摆出来。真实一例（`run/data/logs/reply.jsonl`
+            # 2026-10-20 17:37:33 / seq=184）：「六级这事，我妈当年也问。后来不问了，
+            # 是我先不跟她提。」——那一轮材料的 `input` 里「六级」出现 **0 次**。
+            #
+            # 为什么上面那一关（`check_past_claim`）抓不到：它只认「我/俺 + ……过」与
+            # 「我/俺 + 当年」这类**第一人称句式**；这一句是「**我妈**当年」，也没有
+            # "我考过/我做过"。而且就算命中，「六级这事」才 4 个字，低于
+            # `PAST_CLAIM_MIN_CHUNK = 6` 的核对门槛，照样放行。
+            #
+            # 为什么判据**只看词、不看句式**（`has_experiential_presupposition`）：
+            # 句式换个人称就绕开了（"我妈当年"），而"六级/高考/宿舍"这类词本身
+            # 就是经历门槛——没经历过的人不会把它当成自己的事讲。纯字符串、零模型调用。
+            #
+            # 位置：紧跟在「过往断言」之后、与它**共用同一次**重写额度
+            # （`grounding_used`）。两关同时命中时只重写一次（用户交底要求）：
+            # 前面已经重写过 → 这里只跳过，不再第二次。
+            #
+            # 边界与上一关相同：**任何分支都不许把 `decision.text` 置空**。重写空手 →
+            # 照发第一版；重写后仍不合格 → 照发重写那一版（`replies` 照样 +1）。
+            # 日志只记**条数与 session**，不记正文、也不记是哪个词。
+            if (not grounding_used
+                    and has_experiential_presupposition(decision.text, past_haystack)):
+                self._stats["reply_presupposition_rewrites"] += 1
+                grounding_used = True
+                logger.warning(
+                    "Stage 3 presupposition: 一件有经历门槛的事在材料里没有，打回重写 "
+                    "session=%s trigger=%s",
+                    message.session_id, trigger_kind)
+                rewritten = await self._rewrite_after_review(
+                    request, decision.text, reason="",
+                    session_id=message.session_id, trigger=trigger, trigger_kind=trigger_kind,
+                    context=self._review_context(message, state),
+                    known_message_ids=frozenset(message_ids),
+                    must_reply=self._judge_on(message.session_id),
+                    note=PAST_CLAIM_NOTE,
+                )
+                if rewritten is not None:
+                    decision = replace(decision, text=rewritten)
         # 「没把握就别断言」的**兜底那一关**（2026-10-05 晚加，治"不懂装懂"）。
         #
         # 条件全部确定性：**被叫到**（`grounding.rewrite` 只在被叫到时为 True）

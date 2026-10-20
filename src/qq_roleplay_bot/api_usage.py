@@ -49,6 +49,10 @@ COUNTER_NAMES = (
     # 材料里对不上于是打回重写一次的次数、以及重写之后仍对不上**照发**的次数。
     # 三者都只记数，**不记正文**；与 `data_marker_drops` 不同，这一关从不丢回复。
     "reply_past_claim_hits", "reply_past_claim_rewrites", "reply_past_claim_unfixed",
+    # 「预设型编造」（2026-10-20）：她把一件有"经历门槛"的事（六级 / 高考 / 宿舍）
+    # 当成已经发生过的东西讲出来，而这一轮材料里那个词 0 次 → 打回重写一次。
+    # 与上面「过往断言」共用每轮一次的重写额度。只记数，**不记正文、不记是哪个词**。
+    "reply_presupposition_rewrites",
     # 「有人拿工具式的称呼在叫她」（2026-10-20）：这一轮往易变段递了那一句的条数。
     # 只有计数，**不记正文、也不记那个称呼**。
     "reply_tool_vocative_hints",
