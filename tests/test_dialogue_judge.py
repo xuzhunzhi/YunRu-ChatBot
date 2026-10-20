@@ -16,6 +16,7 @@ from qq_roleplay_bot.dialogue_judge import (
     JUDGE_SYSTEM_PROMPT,
     OFFENSE_CODES,
     build_judge_messages,
+    compose_judge_system_prompt,
     parse_judge_output,
 )
 from qq_roleplay_bot.base_prompt import BASE_PROMPT
@@ -167,6 +168,62 @@ def test_guard_draws_the_line_at_her_this_time_not_her_whole_self() -> None:
         "sarcasm": "他阴阳怪气地挤兑",
         "belittle": "他看不起她、嘲她没本事",
     }
+
+
+#: 判定 system 的总长度上限（字符）。2026-10-20 实测：内置 prompt 2735 + 分节规矩 207
+#: = 2942。这个数**只能靠精简别处抵消新增判据**，不许调大（`tests/test_judge_boundary.py`
+#: 里那条 `< len(SYSTEM_PROMPT) * 0.4` 是总的量级约束，这里钉的是当天那个具体水位）。
+JUDGE_PROMPT_MAX_CHARS = 2942.8
+
+
+def test_guard_asks_who_the_sentence_is_about_and_what_it_targets() -> None:
+    """判据要分开两维：**这句在说谁**、**说的是她这一句还是她这个人**（2026-10-20）。
+
+    审计依据：19 条"防备被抬高"的流水里能还原上下文的 6 条有 3 条是误判——
+    朱蝶那条是群里吵架、脏话在骂第三个人（延恒）；浪迹星海两条是纠正她的说法、
+    技术争执（"无营养废话/啰嗦""张嘴就瞎编"）。根因不是"聊技术当打探"，
+    而是判据缺了这两维：说别人的话被记成冲她这个人，说她这句话也被记成贬低她。
+
+    所以两份 prompt 都要有"在说别人（群友互喷、骂第三个人）→ HOLD"，
+    主判定那版还要有"纠正说法/技术争执 → HOLD"。
+    """
+
+    for prompt in (JUDGE_SYSTEM_PROMPT, JUDGE_ROUTING_PROMPT):
+        assert "这句在说谁" in prompt
+        assert "在说别人（群友互喷、骂第三个人）一律" in prompt
+        assert "带脏字" in prompt
+        assert "HOLD" in prompt
+    assert "只有**明确冲她本人**" in JUDGE_SYSTEM_PROMPT
+    assert "纠正她的说法/做法、技术争执" in JUDGE_SYSTEM_PROMPT
+    assert "在说别人就别当成冲她" in JUDGE_SYSTEM_PROMPT
+
+
+def test_the_judge_prompt_does_not_grow_past_its_cap() -> None:
+    """加判据不许靠加长 prompt：超了就得先精简别处（2026-10-20）。"""
+
+    assembled = compose_judge_system_prompt(JUDGE_SYSTEM_PROMPT)
+    assert len(assembled) <= JUDGE_PROMPT_MAX_CHARS, len(assembled)
+
+
+def test_offense_codes_and_up_parsing_are_unchanged() -> None:
+    """判据措辞改了，输出协议与解析行为一个字都不许动（不新增字段）。"""
+
+    assert OFFENSE_CODES == {
+        "insult": "他当面贬损羞辱",
+        "sarcasm": "他阴阳怪气地挤兑",
+        "belittle": "他看不起她、嘲她没本事",
+    }
+    verdict = parse_judge_output(
+        "<route>REPLY</route><topic>技术争执</topic>"
+        "<guard>UP</guard><guard_reason>belittle</guard_reason>"
+        "<guard_quote>换个人早做完了</guard_quote>"
+    )
+    assert verdict.should_reply is True
+    assert verdict.guard_up is True and verdict.guard_probe is False
+    assert verdict.guard_reason == "belittle"
+    assert verdict.guard_quote == "换个人早做完了"
+    # 只改判据措辞，不新增输出字段（避免动 parser 与回放脚本）。
+    assert not hasattr(verdict, "who") and not hasattr(verdict, "target")
 
 
 def test_guard_quote_is_asked_for_and_kept_verbatim() -> None:
