@@ -146,6 +146,12 @@ class EngineSnapshot:
     # 与 `empty_forced_reply` 是同一件事的两头：兜底生效时那个数就不涨了。
     # **长期非零不是好消息**——模型还在漏信封，只是这次没把话丢掉。只有计数，没有正文。
     reply_recovered_from_bare_text: int = 0
+    # 超短期层（inbox）的维护计数（2026-10-20），只记数、不含正文：
+    # `memory_inbox_extended` = 到期时"从没被维护碰过"、于是被续了 TTL 的条数；
+    # `memory_inbox_expired_deleted` = 真正过期删掉的条数。前者非零说明维护漏过拍，
+    # 后者才是正常的遗忘；两个数一起看才知道"1–3 小时的 TTL 有没有在丢数据"。
+    memory_inbox_extended: int = 0
+    memory_inbox_expired_deleted: int = 0
     # 当前当值状态：热群、当值多久、排队深度。只有数字与群号，没有正文。
     focus: dict[str, object] | None = None
     # 判定采样（2026-10-10）的观测面：各会话当前档位 / 攒批条数 / 攒了几条 /

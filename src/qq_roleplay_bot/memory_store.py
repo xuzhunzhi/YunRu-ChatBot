@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import sqlite3
 import threading
 import time
@@ -91,12 +92,18 @@ CREATE VIEW IF NOT EXISTS records AS
 COMMIT;
 """
 
-_FRESH_SCHEMA = f"""BEGIN IMMEDIATE;
+_INBOX_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS inbox (
     id TEXT PRIMARY KEY, group_id TEXT NOT NULL, user_id TEXT NOT NULL,
     speaker TEXT NOT NULL, text TEXT NOT NULL, occurred_at REAL NOT NULL,
-    expires_at REAL NOT NULL, lease_id TEXT);
+    expires_at REAL NOT NULL, lease_id TEXT,
+    -- 0 = 还没享受过"到期续一次"的保险；1 = 已经续过一次，再到期就删（见 `_cleanup`）。
+    extended_once INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS inbox_scope ON inbox(group_id, user_id, occurred_at);
+"""
+
+_FRESH_SCHEMA = f"""BEGIN IMMEDIATE;
+{_INBOX_SCHEMA_SQL}
 CREATE TABLE IF NOT EXISTS receipts (id TEXT PRIMARY KEY, expires_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS replays (
     id TEXT PRIMARY KEY, attempts INTEGER NOT NULL, expires_at REAL NOT NULL);
@@ -237,6 +244,13 @@ COMMIT;
 """
 MAX_INBOX_EVENTS = 10000
 MAX_INBOX_EVENTS_PER_GROUP = 2000
+# 超短期层（inbox）的寿命（2026-10-20 用户定）：**每条独立随机 1–3 小时**。
+# 为什么不再用 `retention_seconds`（7 天）：那一层是"还在内存里、马上要被维护读走"的
+# 材料，不是长期记录；留 7 天等于把别人的原话存成一份没人看的转写稿。
+# `retention_seconds` **不删**：它还给"已删除记忆行的保留期"（`_cleanup` 里那两张表）
+# 与回执/重放用，语义没有变，只是不再管 inbox 的寿命。
+INBOX_TTL_MIN_SECONDS = 3600.0
+INBOX_TTL_MAX_SECONDS = 10800.0
 MAX_REPLAY_ATTEMPTS = 2
 # 被删除的记忆在归档里保留多久。比 inbox 保留期长得多，因为归档是"后悔药"，
 # 是用来救误删的——真正需要回滚时往往已经过了好几天。
@@ -409,10 +423,15 @@ SCALE_EPOCH_KEY = "relationship_scale_at"
 class MemoryStore:
     def __init__(self, path: Path | str, *, retention_seconds: float = 7 * DAY, clock=time.time,
                  protect=False, daily_add_limit: int = DEFAULT_DAILY_ADD_LIMIT,
-                 near_duplicate_ratio: float = NEAR_DUPLICATE_RATIO):
+                 near_duplicate_ratio: float = NEAR_DUPLICATE_RATIO,
+                 inbox_ttl_random: random.Random | None = None):
         self.path = Path(path)
         self.retention_seconds = retention_seconds
         self.clock = clock
+        # inbox 每条行的 TTL 独立随机（见 INBOX_TTL_*）。RNG 做成构造参数而不是模块级
+        # 全局 `random`：测试传 `random.Random(seed)` 就能把整个 TTL 序列钉死复现，
+        # 也不改全局随机状态（同进程里别的取样不会把"这次为什么是这个值"搅乱）。
+        self.inbox_ttl_random = inbox_ttl_random if inbox_ttl_random is not None else random.Random()
         self._init_lock = threading.Lock()
         self._ready = False
         self._protect = protect
@@ -422,6 +441,10 @@ class MemoryStore:
         # 关系流水与墓碑这两张"只增"的表按保留期清旧行，清掉的条数要看得见。
         self.pruned: dict[str, int] = {
             "relationship_log": 0, "tombstones": 0, "relationship_evidence": 0}
+        # inbox 维护的计数（2026-10-20）：`extended` = 到期时被续了 TTL 的条数，
+        # `expired_deleted` = 真正过期删掉的条数。只记数，不含正文。
+        # 引擎的 `_stats` 在快照/结账时从这里取（清理发生在维护线程，引擎不参与）。
+        self.inbox_counts: dict[str, int] = {"extended": 0, "expired_deleted": 0}
         # 被**依据闸门**拒掉的写入（按拒绝码计数，本次进程累计；只记数，不含内容）。
         # 见 `memory_grounding`：归属不是他本人说的、没有依据就改正文、正文超出原话、
         # 空正文，都在这条路径上被逐条拒掉，拒了必须看得见（`/super status`）。
@@ -543,6 +566,10 @@ class MemoryStore:
                             # 已经在 v5 的库也可能缺那张兼容视图（比如它是在视图加进来之前
                             # 就迁过来的）。每次启动补一次，幂等。
                             db.executescript(_COMPAT_VIEW_SQL)
+                    # 列级补丁**不升 `user_version`**：老库（v7）没有 `inbox.extended_once`，
+                    # 每次打开按 PRAGMA 看一遍、缺了才 ADD COLUMN，幂等。与上面兼容视图
+                    # 同一先例：结构版本号留给"会改写数据的大迁移"，只加一列不惊动它。
+                    self._ensure_inbox_schema(db)
                     self._ready = True
         db = sqlite3.connect(self.path, timeout=0.1)
         db.row_factory = sqlite3.Row
@@ -556,6 +583,26 @@ class MemoryStore:
             raise
         finally:
             db.close()
+
+    @staticmethod
+    def _ensure_inbox_schema(db) -> None:
+        """给老库补 `inbox.extended_once`（幂等；缺了才加）。
+
+        为什么用 `PRAGMA table_info` 而不是 `ALTER TABLE ... IF NOT EXISTS`：
+        SQLite 没有后一种写法，直接 ADD 会在"已经是新形状"的库上撞 duplicate column。
+        为什么放在每次打开都跑：迁移只跑一次，而这个补丁要能兜住"版本号是 7、列却不在"
+        的老库与中断过的迁移（先加列、还没来得及记版本号也不影响）。
+        """
+
+        columns = {row[1] for row in db.execute("PRAGMA table_info(inbox)")}
+        if not columns:
+            # 极旧的测试夹具/残缺库可能根本没有 inbox 表：补一张全的（真实 v1+ 都有）。
+            db.executescript(_INBOX_SCHEMA_SQL)
+            return
+        if "extended_once" in columns:
+            return
+        db.execute("ALTER TABLE inbox ADD COLUMN extended_once INTEGER NOT NULL DEFAULT 0")
+        db.commit()
 
     @staticmethod
     def _record(row, tier: str = "short") -> MemoryRecord:
@@ -679,9 +726,11 @@ class MemoryStore:
             if db.execute("SELECT COUNT(*) FROM inbox").fetchone()[0] >= MAX_INBOX_EVENTS:
                 return False
             inserted = db.execute(
-                "INSERT OR IGNORE INTO inbox VALUES (?,?,?,?,?,?,?,NULL)",
+                "INSERT OR IGNORE INTO inbox "
+                "(id,group_id,user_id,speaker,text,occurred_at,expires_at,lease_id,extended_once) "
+                "VALUES (?,?,?,?,?,?,?,NULL,0)",
                 (event.id, event.group_id, event.user_id, event.speaker, event.text,
-                 event.occurred_at, event.occurred_at + self.retention_seconds),
+                 event.occurred_at, event.occurred_at + self._inbox_ttl_seconds()),
             ).rowcount
             # 保留较新的活动时间；OR IGNORE 不会刷新已存在行，否则周期复查会
             # 反复回到同一批长期只产生 IGNORE 的会话。
@@ -692,8 +741,46 @@ class MemoryStore:
             )
             return bool(inserted)
 
+    def _inbox_ttl_seconds(self) -> float:
+        """这条 inbox 行的寿命：1–3 小时，**每条独立随机**（见 INBOX_TTL_*）。"""
+
+        return self.inbox_ttl_random.uniform(INBOX_TTL_MIN_SECONDS, INBOX_TTL_MAX_SECONDS)
+
+    def _extend_unclaimed_inbox(self, db, now: float) -> int:
+        """过期了但**从没被任何一次维护碰过**的行，先续一次 TTL，而不是直接删。
+
+        判据：`lease_id IS NULL`（此刻没有进行中的认领）且 `replays` 里没有它
+        （没有"看过但没采信、还给一次重放"的记录）。`release()` 会把 lease_id 清回
+        NULL——那种行正是"维护没跑成"，按这条判据会被续期，方向是对的。
+        续过一次的行 `extended_once=1`，再到期就按正常过期删（不再无限续）。
+        """
+
+        rows = db.execute(
+            "SELECT i.id FROM inbox i LEFT JOIN replays r ON r.id=i.id "
+            "WHERE i.expires_at<=? AND i.extended_once=0 AND i.lease_id IS NULL "
+            "AND r.id IS NULL", (now,)).fetchall()
+        if not rows:
+            return 0
+        db.executemany(
+            "UPDATE inbox SET expires_at=?, extended_once=1 WHERE id=?",
+            ((now + self._inbox_ttl_seconds(), row[0]) for row in rows))
+        self.inbox_counts["extended"] += len(rows)
+        logger.info("memory inbox extended: rows=%s", len(rows))
+        return len(rows)
+
+    def inbox_maintenance_counts(self) -> dict[str, int]:
+        """本次进程里 inbox 的续期 / 过期删除条数（只记数，不含正文）。"""
+
+        return dict(self.inbox_counts)
+
     def _cleanup(self, db, now):
-        db.execute("DELETE FROM inbox WHERE expires_at<=?", (now,))
+        # 删除之前先续一次保险（2026-10-20）：TTL 压到 1–3 小时后，维护只要漏跑一两拍
+        # （模型超时、进程重启、群被临时关掉），一条没人看过的消息就会被清掉——那是
+        # **丢数据**，不是遗忘。所以"从没被碰过"的行到期先续一次；续过一次的才删。
+        self._extend_unclaimed_inbox(db, now)
+        expired_deleted = db.execute("DELETE FROM inbox WHERE expires_at<=?", (now,)).rowcount
+        if expired_deleted:
+            self.inbox_counts["expired_deleted"] += int(expired_deleted)
         db.execute("DELETE FROM receipts WHERE expires_at<=?", (now,))
         db.execute("DELETE FROM replays WHERE expires_at<=?", (now,))
         db.execute("UPDATE inbox SET lease_id=NULL WHERE lease_id IN (SELECT id FROM leases WHERE until_at<=?)", (now,))

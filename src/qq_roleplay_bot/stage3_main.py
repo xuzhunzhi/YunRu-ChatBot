@@ -1524,6 +1524,12 @@ class DialogueEngine:
             # （连 ping / 管理命令 / 私聊都进不来）。超时 = 这一条没有回复，
             # **历史照留**（她该知道群里发生过那句话）。
             "turn_timeouts",
+            # 超短期层（inbox）的维护计数（2026-10-20）：`memory_inbox_extended` 是
+            # 到期时"从没被维护碰过"、于是被续了 TTL 的条数；`memory_inbox_expired_deleted`
+            # 是真正过期删掉的条数。两者都只记数，**不记正文**。
+            # 记录点不在引擎里（清理跑在维护线程的 `MemoryStore._cleanup`），快照/结账时
+            # 从 store 的进程内累计取一次，见 `_refresh_memory_inbox_counts`。
+            "memory_inbox_extended", "memory_inbox_expired_deleted",
         )}
         # 连续失败次数（成功一次就归零）：单次失败可能只是网络抖一下，连续几次才是
         # "她又突然不说话了"。只用来决定 `/super status` 那一行要不要升级成"异常"。
@@ -2735,9 +2741,28 @@ class DialogueEngine:
         self._stats["turn_timeouts"] += 1
         return self._stats["turn_timeouts"]
 
+    def _refresh_memory_inbox_counts(self) -> None:
+        """把记忆库里 inbox 的进程内计数搬进 `_stats`（只记数，不含正文）。
+
+        为什么在这里取而不是"清理时 +1"：清理发生在维护线程的
+        `MemoryStore._cleanup` 里，引擎不参与，也没有回调。store 自己累计一份，
+        引擎在快照/结账这两处对齐即可（赋值而不是累加：两边都是本次进程的总量）。
+        """
+
+        store = getattr(self.memory_service, "store", None)
+        if store is None:
+            return
+        try:
+            counts = store.inbox_maintenance_counts()
+        except Exception:  # noqa: BLE001 - 读计数失败不该让快照/结账挂掉
+            return
+        self._stats["memory_inbox_extended"] = int(counts.get("extended", 0))
+        self._stats["memory_inbox_expired_deleted"] = int(counts.get("expired_deleted", 0))
+
     def snapshot(self) -> EngineSnapshot:
         """只读运行快照。内存数字每次读取时现取（取不到就是 0）。"""
 
+        self._refresh_memory_inbox_counts()
         memory_now, memory_peak = process_memory_bytes()
         # 审核的计数在**它自己**身上（判不过/认不出都发生在它内部，引擎看不到中间那一步），
         # 所以快照现取一份，让 `/super status` 与面板能看到拦截率（2026-10-05 追加）。
@@ -4732,6 +4757,9 @@ class DialogueEngine:
         store = getattr(self, "usage_store", None)
         if store is None:
             return
+        # inbox 的两个计数由记忆库维护，结账前先对齐（见 `_refresh_memory_inbox_counts`），
+        # 否则账本里只会记下 0。
+        self._refresh_memory_inbox_counts()
         try:
             store.commit_counters(store.all_time(self._stats))
         except Exception:  # noqa: BLE001 - 记账失败绝不影响对话

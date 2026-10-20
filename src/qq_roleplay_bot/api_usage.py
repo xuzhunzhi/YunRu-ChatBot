@@ -67,6 +67,10 @@ COUNTER_NAMES = (
     # 被当正文发了出去（`stage3_runtime.parse_dialogue_output`）。它顶着的是
     # "判定说要回但回复空手 → 沉默"那条路。只有计数，没有正文。
     "reply_recovered_from_bare_text",
+    # 超短期层（inbox）的维护计数（2026-10-20）：到期续期一次（保险）的条数、
+    # 真正过期删掉的条数。TTL 压到 1–3 小时后，前者非零说明维护漏过拍；
+    # 两者都只记数，**不记正文**。
+    "memory_inbox_extended", "memory_inbox_expired_deleted",
 )
 
 
