@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>云茹控制面板 · v2</title>
+    <script>
+      // Cross-check anchor for the load-time measurement (same clock Kotlin writes to
+      // window.__dshFirstText / __dshFontReady: performance.now() from navigation start).
+      window.__dshNavStart = performance.now();
+
+      // Start the CJK font download *now*, in parallel with composeApp.js + the two .wasm files
+      // (~700 ms on this machine). The Kotlin loader awaits this promise instead of issuing its own
+      // request, so the 2.1 MB fetch overlaps the wasm download instead of being added after it.
+      // Measured (9 ON / 8 OFF runs, see NOTES.md §字体预载): the gate costs ~50 ms at the median
+      // with this prefetch — without it the same gate measured +343 ms.
+      window.__dshFontB64 = fetch('fonts/NotoSansSC-Regular-subset.ttf')
+        .then(function (r) {
+          if (!r.ok) { throw new Error('HTTP ' + r.status); }
+          return r.arrayBuffer();
+        })
+        .then(function (buf) {
+          var bytes = new Uint8Array(buf);
+          var chunks = [];
+          var step = 0x8000;
+          for (var i = 0; i < bytes.length; i += step) {
+            chunks.push(String.fromCharCode.apply(null, bytes.subarray(i, i + step)));
+          }
+          return btoa(chunks.join(''));
+        });
+      // A rejected promise nobody handles would surface as an unhandled rejection in the console;
+      // the Kotlin side treats a failed preload as "fall back to the direct fetch".
+      window.__dshFontB64.catch(function () {});
+    </script>
+    <style>
+      html, body { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; }
+      #composeApp { width: 100%; height: 100%; }
+      /* Paint the same neutral the app uses while the wasm module is still downloading, so the
+         first presented frame is never a white flash. The app itself paints over this. */
+      body { background: #f7f7f7; }
+      @media (prefers-color-scheme: dark) { body { background: #101010; } }
+    </style>
+  </head>
+  <body>
+    <div id="composeApp"></div>
+    <script src="composeApp.js" type="application/javascript"></script>
+  </body>
+</html>

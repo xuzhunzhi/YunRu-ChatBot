@@ -1,0 +1,17 @@
+.gradle/
+# wasm distribution output (`build/dist/wasmJs/productionExecutable`) — never commit it;
+# it is copied into the panel package by `build-and-copy.ps1` (the tracked copy lives in
+# `../webui/v2/`, this directory is only the generator source).
+build/
+.kotlin/
+# Kotlin/JS + yarn workspace metadata written by the Kotlin Gradle plugin on every build.
+kotlin-js-store/
+local.properties
+node_modules/
+*.iml
+.idea/
+# Build logs / timings are per-machine artifacts, not source.
+gradle-build*.log
+build-verify.log
+build-timing.txt
+*.wasm
