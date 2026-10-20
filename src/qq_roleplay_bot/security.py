@@ -177,6 +177,14 @@ def is_sensitive_local_request(text: str) -> bool:
 
 
 def check_message_security(message: IncomingMessage, admin_user_ids: frozenset[str]) -> SecurityDecision:
+    if getattr(message, "channel", ""):
+        # 2026-10-20 用户："外人的邮件也能进啊，为什么要被拦，mail 又碰不到核心"。
+        # 这道闸防的是"在 QQ 里诱导她说出本机信息"；插件渠道（目前只有 mail）进来的
+        # 只是一段文字——她没有工具、也执行不了命令，而特权命令的形状在
+        # `runtime.deliver` 那一步已经被拒。实测后果很具体：两封正常来信都被判成
+        # 敏感请求拦掉，她**连正文都没看到**（`sensitive_local_request_admin_not_implemented`）。
+        # 所以本机信息这一关只对 QQ 那条路生效。
+        return SecurityDecision(False)
     if not is_sensitive_local_request(message.text):
         return SecurityDecision(False)
     is_admin = message.user_id in admin_user_ids and message.sender_role in {"admin", "owner"}

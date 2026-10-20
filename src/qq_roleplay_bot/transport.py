@@ -61,6 +61,15 @@ class IncomingMessage:
     # **表情包也是 image 段**（NapCat 实测，见 `media_segments`），所以识图要知道
     # 该按贴图还是按照片去描述，不能都当照片。
     media_kinds: tuple[str, ...] = ()
+    #: 这条消息**从哪个渠道进来**。空串 = QQ 传输层（`onebot_ws` 那条路）；
+    #: 非空 = 插件经 `runtime.deliver` 投进来的（目前只有 `"mail"`）。
+    #:
+    #: 2026-10-20 加。起因：邮件里正常的一句话被 `check_message_security` 判成
+    #: "要求访问本机/系统"、直接拦掉（实测两封信都被拦，她根本没看到正文）。
+    #: 用户当天定：**「mail 又碰不到核心」** —— 插件渠道进来的只是一段文字，她既没有
+    #: 工具、也执行不了命令；特权命令的形状在 `deliver` 那一步就已经被拒了。所以那道
+    #: 本机信息闸只该对 QQ 生效。判据用这个字段，**不要在别处嗅 `session_id` 前缀**。
+    channel: str = ""
 
 
 def display_name_from_sender(sender: object, *, fallback: str = "") -> str:

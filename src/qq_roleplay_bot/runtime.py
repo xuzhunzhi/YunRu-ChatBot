@@ -1814,6 +1814,9 @@ class _SeamBinder:
             target=MessageTarget(user_id=sender),
             sender_role="owner" if is_owner else "mailer",
             sender_name=_exact_text(parcel.sender_name) or (sender or "主人" if is_owner else sender),
+            # 记下"这条是从插件渠道来的"：`check_message_security` 用它决定那道
+            # 本机信息闸要不要生效（2026-10-20：只对 QQ 生效，见 `transport.IncomingMessage.channel`）。
+            channel=channel,
         )
         return await engine.handle(message)
 
