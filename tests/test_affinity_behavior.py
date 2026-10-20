@@ -22,6 +22,7 @@ from qq_roleplay_bot.memory_store import (
     DEFAULT_CLOSENESS,
     DEFAULT_GUARDEDNESS,
     GUARD_DAILY_CAP,
+    GUARD_RAISE_MAX,
     MemoryStore,
 )
 from qq_roleplay_bot.relationship_tiers import guard_tier, likes_tier
@@ -165,8 +166,9 @@ def _judge_quote(request) -> str:
 def test_guard_up_lands_before_the_reply_prompt_is_built() -> None:
     """判定的 UP 必须在**拼这一轮回复之前**生效，否则就不是"立刻"变冷。
 
-    2026-10-20：防备单次最多 +8、一档宽 10，所以这里先把防备垫到 4（跨一天写入），
-    一次 UP 之后到 12——跨进「有点端着」，回复 prompt 里就该是它。
+    2026-10-20：防备单次最多 +10（`GUARD_RAISE_MAX`）、一档宽 10，所以这里先把防备
+    垫到 4（跨一天写入），一次 UP 之后到 14（4 + `GUARD_RAISE_MAX`）——跨进
+    「有点端着」，回复 prompt 里就该是它。
     2026-10-20 起证据是硬要求：判定抄回来的原话核不过就整次拒绝。
     """
 
@@ -194,13 +196,14 @@ def test_guard_up_lands_before_the_reply_prompt_is_built() -> None:
         result = asyncio.run(engine.handle(msg(2, "@YunRu 你就是个废物", mentioned=True)))
 
         assert result is not None, "被冒犯也照样要回"
-        assert store.relationship(USER)[1] == 12, "4 + 8：防备应当已经抬到 12"
+        assert store.relationship(USER)[1] == 4 + GUARD_RAISE_MAX, (
+            "4 + GUARD_RAISE_MAX：防备应当已经抬到 14")
         assert store.relationship_detail(USER)["last"]["reason"] == "他当面贬损羞辱"
-        assert guard_tier(12).name == "有点端着"
+        assert guard_tier(4 + GUARD_RAISE_MAX).name == "有点端着"
         # 回复 prompt 里读到的已经是新档位（第一次 HOLD 那一轮也拼过一份，取最后一份）。
         assert reply.requests
         prompt = reply.requests[-1][2]["content"]
-        assert guard_tier(12).name in prompt
+        assert guard_tier(4 + GUARD_RAISE_MAX).name in prompt
         assert engine.snapshot().guard_raised == 1
 
 
@@ -296,8 +299,8 @@ def test_judge_hint_reads_the_value_from_before_the_write() -> None:
         # 所以要看"下一句"——第三轮。
         asyncio.run(engine.handle(msg(3, "@YunRu 你就是个废物", mentioned=True)))
         third = judge.requests[2][1]["content"]
-        assert "防备 8（" in third, "下一句判定看到的是写进去之后的数值"
-        assert guard_tier(8).name in third
+        assert f"防备 {GUARD_RAISE_MAX}（" in third, "下一句判定看到的是写进去之后的数值"
+        assert guard_tier(GUARD_RAISE_MAX).name in third
 
 
 def test_judge_cannot_lower_guardedness() -> None:
@@ -317,7 +320,12 @@ def test_judge_cannot_lower_guardedness() -> None:
 
 
 def test_guard_up_is_capped_per_turn_and_per_day() -> None:
-    """一次越界最多 +8，同一天再来也只写一次（24 小时净变化上限 8）。"""
+    """一次越界最多 +10（正好一档），同一天再来也只写一次（24 小时净变化上限 10）。
+
+    2026-10-20：原口径是单次 +8、日净 8。但防备一档宽 10，+8 之后仍停在
+    「正常分寸」——"被冒犯立刻变冷"根本没发生，且日净 8 会把单次 10 直接拒掉。
+    现在单次 = 日净 = 10：**一次冒犯正好跨一档，一天最多一档**。
+    """
 
     clock = [1_000_000.0]
     with tempfile.TemporaryDirectory() as tmp:
@@ -468,7 +476,7 @@ def test_engine_writes_invalidate_the_cache_immediately() -> None:
         )
         asyncio.run(engine.handle(msg(2, "@YunRu 你就是个废物", mentioned=True)))
         # 时间一点没走，也必须已经读到新值。
-        assert engine._stance_for(msg(3)).guardedness == 8
+        assert engine._stance_for(msg(3)).guardedness == GUARD_RAISE_MAX
 
 
 # --- 安全边界不受影响 -------------------------------------------------------

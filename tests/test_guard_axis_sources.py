@@ -60,6 +60,7 @@ from qq_roleplay_bot.memory_model import InboxEvent
 from qq_roleplay_bot.memory_store import (
     DEFAULT_CLOSENESS,
     DEFAULT_GUARDEDNESS,
+    GUARD_RAISE_MAX,
     MemoryStore,
 )
 from qq_roleplay_bot.stage3_main import (
@@ -181,7 +182,7 @@ def push_affinity(store: MemoryStore, *, guardedness: str, evidence: str, now: f
 def _engine(tmp: str, *, judge_output: str, guardedness: int = 0):
     """建一个最小的引擎 + 临时库；反例可以先把防备**顶到指定值**再跑。
 
-    2026-10-20 新刻度：单次最多 +8、一档宽 10，所以"顶到某一档"要跨天。
+    2026-10-20 新刻度：单次最多 +10（`GUARD_RAISE_MAX`）、一档宽 10。
     `guardedness` 现在给的是**要垫到的数值**（不是旧的四档序号）。
     """
 
@@ -190,7 +191,7 @@ def _engine(tmp: str, *, judge_output: str, guardedness: int = 0):
     while store.relationship(USER)[1] < guardedness:
         clock[0] += 86400 + 60
         assert store.apply_affinity(
-            USER, guardedness=min(8, guardedness - store.relationship(USER)[1]),
+            USER, guardedness=min(GUARD_RAISE_MAX, guardedness - store.relationship(USER)[1]),
             reason="测试起点", source="test", may_lower_guard=True,
             evidence={"quote": "测试起点", "who_alias": "1", "seq": 1},
         ) == ""
@@ -216,9 +217,9 @@ def test_negative_friendly_banter_does_not_raise_guardedness() -> None:
         ("哈哈哈哈哈你可真行", "joke"),
     )):
         with tempfile.TemporaryDirectory() as tmp:
-            store, engine, _ = _engine(tmp, judge_output=judge_up(offense), guardedness=8)
+            store, engine, _ = _engine(tmp, judge_output=judge_up(offense), guardedness=GUARD_RAISE_MAX)
             asyncio.run(engine.handle(msg(index, f"@YunRu {bench}", mentioned=True)))
-            assert store.relationship(USER)[1] == 8, bench
+            assert store.relationship(USER)[1] == GUARD_RAISE_MAX, bench
             assert engine.snapshot().guard_raised == 0, bench
             assert engine.snapshot().guard_rejected >= 1, bench
 
@@ -235,9 +236,9 @@ def test_negative_unrelated_topics_do_not_raise_guardedness() -> None:
         "手机电池不行了，打算去换一块",
     )):
         with tempfile.TemporaryDirectory() as tmp:
-            store, engine, _ = _engine(tmp, judge_output=judge_up("irrelevant"), guardedness=8)
+            store, engine, _ = _engine(tmp, judge_output=judge_up("irrelevant"), guardedness=GUARD_RAISE_MAX)
             asyncio.run(engine.handle(msg(index, bench, mentioned=True)))
-            assert store.relationship(USER)[1] == 8, bench
+            assert store.relationship(USER)[1] == GUARD_RAISE_MAX, bench
             assert engine.snapshot().guard_raised == 0, bench
 
 
@@ -253,9 +254,9 @@ def test_negative_plain_followups_do_not_raise_guardedness() -> None:
         "你这答案从哪来的",
     )):
         with tempfile.TemporaryDirectory() as tmp:
-            store, engine, _ = _engine(tmp, judge_output=judge_up("NONE"), guardedness=8)
+            store, engine, _ = _engine(tmp, judge_output=judge_up("NONE"), guardedness=GUARD_RAISE_MAX)
             asyncio.run(engine.handle(msg(index, f"@YunRu {bench}", mentioned=True)))
-            assert store.relationship(USER)[1] == 8, bench
+            assert store.relationship(USER)[1] == GUARD_RAISE_MAX, bench
             assert engine.snapshot().guard_raised == 0, bench
 
 
@@ -334,7 +335,7 @@ def test_positive_offenses_toward_her_raise_guardedness() -> None:
             result = asyncio.run(engine.handle(msg(index, bench, mentioned=True)))
 
             assert result is not None, f"{bench}：被冒犯也照样得回，只是回得冷"
-            assert store.relationship(USER)[1] == 8, bench
+            assert store.relationship(USER)[1] == GUARD_RAISE_MAX, bench
             assert engine.snapshot().guard_raised == 1, bench
             assert engine.snapshot().guard_probe_held == 0, bench
             # 落库的依据是表里那句固定说法，不是模型写的自由文本。

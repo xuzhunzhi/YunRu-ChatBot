@@ -26,7 +26,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from qq_roleplay_bot import memory_readonly
-from qq_roleplay_bot.memory_store import DAY, SCHEMA_VERSION, MemoryStore
+from qq_roleplay_bot.memory_store import (
+    DAY, GUARD_RAISE_MAX, SCHEMA_VERSION, MemoryStore)
+from qq_roleplay_bot.relationship_tiers import guard_tier
 from qq_roleplay_bot.stage3_main import DialogueEngine
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 
@@ -466,11 +468,14 @@ def test_evidence_never_reaches_her_reply_prompt() -> None:
     """她只该知道"现在该收着"，不该看到"哪句话让我记下了"。
 
     判据用**差分**：同一段对话跑两遍，一遍让判定抄回**真的**那句（于是证据落库、
-    防备 +8），一遍抄一句输入里没有的（于是这次写入被拒、防备不动）。她看到的那份
-    材料必须**逐字相同**——差一个字就说明证据那边（或数值那边）漏进了她的 prompt。
+    防备 +GUARD_RAISE_MAX），一遍抄一句输入里没有的（于是这次写入被拒、防备不动）。
 
-    防备 0 与 8 同属「正常分寸」档，所以档位文字本来就一样；这条同时钉住
-    "回复侧看不到数值"（否则两边的数字会不同）。
+    2026-10-20 起 0 与 GUARD_RAISE_MAX **不再同档**（「正常分寸」vs「有点端着」），
+    两份回复材料的档位文字本来就不同。所以先把那一行按**实际档位文字**
+    （`guard_tier(0).text` / `guard_tier(GUARD_RAISE_MAX).text`）抹平，其余部分
+    必须**逐字相同**；两边除了用户这条消息本身，也都不该出现证据原话——落库的
+    证词若被拼进材料，那里就会多出一份。这条同时钉住"回复侧看不到数值"
+    （否则两边的数字会不同）。
     """
 
     text = "@YunRu 你就是个没用的废话"
@@ -486,12 +491,26 @@ def test_evidence_never_reaches_her_reply_prompt() -> None:
         stored = _store(stored_tmp)
         with_text = _reply_prompt_blob(stored, guard_up(quote), text)
         assert len(_evidence(stored)) == 1, "这一步得真的存下了证据"
-        assert stored.relationship(USER)[1] == 8
+        assert stored.relationship(USER)[1] == GUARD_RAISE_MAX
 
         plain = _store(plain_tmp)
         without = _reply_prompt_blob(plain, guard_up("这句根本不在输入里"), text)
         assert _evidence(plain) == (), "这一轮不该有证据"
         assert plain.relationship(USER)[1] == 0, "没有原话，这次写入被拒"
 
-        assert with_text == without, "证据句（或它的数值）漏进了她的 prompt"
+        with_tier = guard_tier(GUARD_RAISE_MAX)
+        plain_tier = guard_tier(0)
+        assert with_tier.text != plain_tier.text, "0 与 GUARD_RAISE_MAX 本该不同档"
+        assert f"防备：{with_tier.name}——{with_tier.text}" in with_text
+        assert f"防备：{plain_tier.name}——{plain_tier.text}" in without
+
+        # 原话只来自用户这条消息；把它从材料里剔掉之后，哪儿都不该再有它。
+        assert quote not in with_text.replace(text, "")
+        assert quote not in without.replace(text, "")
+
+        def _blank_guard(blob: str, tier) -> str:
+            return blob.replace(f"防备：{tier.name}——{tier.text}", "防备：<档位>")
+
+        assert _blank_guard(with_text, with_tier) == _blank_guard(without, plain_tier), (
+            "证据句（或它的数值）漏进了她的 prompt")
 
