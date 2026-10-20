@@ -136,6 +136,21 @@ class MemoryOperation:
     severe: bool = False
 
 
+# 键的形状：普通条目是 [a-z][a-z0-9_]{0,63}；画像碎片多一段可选的
+# /方面（如 profile/work）——**2026-10-21** 画像碎片化之后，一个方面一个键。
+# 只对 profile 放开这一档，别的 kind 仍然只认扁平键（别顺手放宽整张表）。
+_KEY_FLAT = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_KEY_PROFILE = re.compile(r"profile(?:/[a-z][a-z0-9_]{0,31})?") 
+
+
+def _key_ok(key: str, kind: str) -> bool:
+    """这个键对这类条目合不合法。"""
+
+    if kind == "profile":
+        return bool(_KEY_PROFILE.fullmatch(key))
+    return bool(_KEY_FLAT.fullmatch(key))
+
+
 def parse_operations(raw: str, batch: MemoryBatch) -> tuple[MemoryOperation, ...]:
     """Reject the entire batch on malformed output or unauthorized targets."""
     def fail() -> None:
@@ -279,7 +294,7 @@ def parse_operations(raw: str, batch: MemoryBatch) -> tuple[MemoryOperation, ...
             fail()
         if not safe_memory_text(content) or sanitize_chat_text(content) != content:
             fail()
-        if not isinstance(key, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", key):
+        if not isinstance(key, str) or not _key_ok(key, kind):
             fail()
         if not isinstance(kind, str) or kind not in KINDS:
             fail()
@@ -306,9 +321,12 @@ def parse_operations(raw: str, batch: MemoryBatch) -> tuple[MemoryOperation, ...
         if kind == "status" and scope == "group":
             fail()  # 状态是某个人的处境，不是群的公共事实
         if kind == "profile":
-            # 画像一个人一条、跨群同一条：键固定、必须挂在本人身上、不许关联别人。
-            # 挂在 user_group 会让"同一个人在两个群里有两份画像"，渲染时还得二选一。
-            if scope != "user_global" or key != "profile":
+            # 画像：**碎片化**（2026-10-21 用户："画像不是完整的一大段啊，可以是一点一点
+            # 拼凑起来的"）。一个人可以有多条：总览用键 `profile`，某个方面用
+            # `profile/<方面>`（例如 `profile/工作`、`profile/脾气`）。
+            # 仍然**必须挂在本人身上**（`user_global`）——挂在 user_group 会让同一个人
+            # 在两个群里有两份画像，渲染时还得二选一。
+            if scope != "user_global" or not (key == "profile" or key.startswith("profile/")):
                 fail()
             if subjects:
                 fail()
