@@ -350,13 +350,18 @@ GUARDEDNESS_MIN, GUARDEDNESS_MAX = GUARD_MIN, GUARD_MAX
 DEFAULT_CLOSENESS = LIKES_DEFAULT
 DEFAULT_GUARDEDNESS = GUARD_DEFAULT
 # 单次写入的幅度（用户 2026-10-20 定的硬规则）：
-#   * 提升 ≤ 8；
+#   * 好感提升 ≤ 8；防备提升 ≤ 10（一档宽 10，见下面的 `GUARD_RAISE_MAX`）；
 #   * 普通下调 ≤ 4；
 #   * **明确越界**（`severe=True`，由模型自己判定"这一次越界了"）时下调 4–16。
 # 为什么把"越界"做成显式参数，而不是"看数值大小自己猜"：`-5` 到底是模型判了越界，
 # 还是它把"一点点不高兴"写大了，存储层分不出来。前者是用户批准的那条路，后者必须
 # 压回 -4——两种语义要能分开，否则"普通下调 ≤ 4"这条就形同虚设。
 AFFINITY_RAISE_MAX = 8
+# 防备单独取 10（正好一档）。共用 8 时 `0 → 8` 仍停在「正常分寸」，要连续被冒犯
+# 两次（0→8→16）才跨到「有点端着」；用户要的是"被冒犯立刻变冷"（2026-10-20 修正）。
+# 这不是每日净变化上限——`GUARD_DAILY_CAP` 仍是用户批准的 8，两层各管各的：
+# 这里管"一次调用最多抬高多少"，那里管"24 小时净变化多少"。
+GUARD_RAISE_MAX = 10
 AFFINITY_LOWER_MAX = 4
 AFFINITY_SEVERE_LOWER_MAX = 16
 # 滚动 24 小时每轴的**净**变化上限，按新刻度重算（用户 2026-10-20 要求"按新刻度
@@ -377,12 +382,15 @@ GUARD_RELAX_PER_WEEK = 10
 AFFINITY_HIGH_HOLD = 95
 # 多久没说话就衰减。衰减是机械的，不问模型。数值按新刻度重算：
 # 旧规则是"每 30 天空闲降 1 档、停在 1 档（认得）"。新刻度一档 = 10，
-# 旧 1 档映射后是 35，所以步长取 10、地板取 35，节奏与旧口径一致。
+# 所以步长取 10；地板按用户 2026-10-20 的修正回到初始值 10（原来取旧 1 档的
+# 映射值 35，会把 10 分的人永久冻住）。
 AFFINITY_DECAY_SECONDS = 30 * DAY
 AFFINITY_DECAY_STEP = 10
-# 衰减时好感最低停在这里（35 = 旧「认得」档换算值）：不熟可以，但"聊过的人"
-# 不该退回全然的陌生人。
-CLOSENESS_DECAY_FLOOR = 35
+# 衰减时好感最低停在这里（= **初始值 10**）。原来取 35（旧「认得」档换算值），
+# 结果低于 35 的人永远不衰减：2026-10-20 复核时库里有 8 个人停在 10 分，会被永久冻结。
+# 回到初始值之后，只有"已经比陌生人更近"的人会因久不联系往下掉；10 分及以下不动，
+# 而且这条始终只降不升（见 `decay_relationships` 里的边界判断）。
+CLOSENESS_DECAY_FLOOR = LIKES_DEFAULT
 # 刻度迁移的版本号（`meta` 表里的键）。迁移函数与写入路径共用这一个口径：
 # 迁移那一刻之前的流水按旧刻度记的，不能拿来算新的 24 小时/7 天窗口。
 RELATIONSHIP_SCALE_VERSION = 2
@@ -1217,10 +1225,13 @@ class MemoryStore:
         return True
 
     def decay_relationships(self, *, idle_seconds: float = AFFINITY_DECAY_SECONDS) -> int:
-        """很久没说话：好感 −10（最低停在 35 = 旧「认得」），防备回「正常分寸」。
+        """很久没说话：好感 −10（最低停在**初始值 10**），防备回「正常分寸」。
 
-        衰减是机械的，不问模型。数值按新刻度（2026-10-20）：步长 10 = 一档，
-        地板 35 = 旧 1 档映射后的值，节奏与旧的"每 30 天降一档"一致。
+        衰减是机械的，不问模型。数值按新刻度（2026-10-20）：步长 10 = 一档。
+        地板从 35 改回 `LIKES_DEFAULT`（10）：原来低于 35 的人永远不进衰减查询，
+        现在库里有 8 个人停在 10 分，等于被永久冻结；回到初始值后他们也不再往下掉，
+        但 15、20 这些"比陌生人更近"的人会继续按老节奏降。仍然**只降不升**，
+        否则 `max(地板, value-10)` 会把 8 分的人"衰减"到 10。
 
         **好感 ≥ 95 的那几行不动**：用户 2026-10-20 说"≥95 之后限制继续降低"，
         衰减也是一条降低的路；喜欢/爱慕不该因为久不说话就自己凉掉。
@@ -1241,8 +1252,8 @@ class MemoryStore:
                 user_id = row["user_id"]
                 current_closeness = int(row["closeness"])
                 new_closeness = current_closeness
-                # **只降不升**：地板 35 比初始值 10 高，若直接 `max(35, value-10)`，
-                # 一个 26 分的人会被"衰减"抬到 35——那就不是衰减了。
+                # **只降不升**：地板是初始值 10，比它低的（脏数据/手工改过）不进
+                # `max` 的上升支。直接 `max(10, value-10)` 会把 8 分的人抬到 10。
                 if CLOSENESS_DECAY_FLOOR < current_closeness < AFFINITY_HIGH_HOLD:
                     new_closeness = max(CLOSENESS_DECAY_FLOOR,
                                         current_closeness - AFFINITY_DECAY_STEP)
@@ -1286,16 +1297,18 @@ class MemoryStore:
             return 0.0
 
     @staticmethod
-    def _single_step(delta: int, *, severe: bool) -> int:
+    def _single_step(delta: int, *, severe: bool, axis: str) -> int:
         """把模型报的增量压进单次允许的幅度（用户 2026-10-20 的硬规则）。
 
-        提升 ≤ 8；普通下调 ≤ 4；`severe=True`（明确越界）时下调 4–16。
+        好感提升 ≤ 8；防备提升 ≤ 10（一档宽 10）；普通下调 ≤ 4；
+        `severe=True`（明确越界）时下调 4–16。
         **不做"平均拆成几次"**：一次调用就是一次，拒绝/压缩都在这里看得见。
         """
 
         delta = int(delta)
         if delta > 0:
-            return min(AFFINITY_RAISE_MAX, delta)
+            raise_max = GUARD_RAISE_MAX if axis == "guardedness" else AFFINITY_RAISE_MAX
+            return min(raise_max, delta)
         if delta == 0:
             return 0
         if severe:
@@ -1318,9 +1331,10 @@ class MemoryStore:
         if rule:
             logger.warning("relationship_reason_redacted rule=%s source=%s", rule, source)
             reason = AFFINITY_REASON_REDACTED % rule
-        # 单次幅度（新刻度）：模型说什么都越不过这几条。
-        closeness = self._single_step(closeness, severe=severe)
-        guardedness = self._single_step(guardedness, severe=severe)
+        # 单次幅度（新刻度）：模型说什么都越不过这几条。两个轴的上限不同，
+        # 防备按"一档宽 10"单独放宽到 10（好感仍是用户给的 8）。
+        closeness = self._single_step(closeness, severe=severe, axis="closeness")
+        guardedness = self._single_step(guardedness, severe=severe, axis="guardedness")
         if closeness == 0 and guardedness == 0:
             return ""
         # **证据链**（2026-10-20 收紧）：模型那两条路必须带原话，拿不到就整次拒绝。

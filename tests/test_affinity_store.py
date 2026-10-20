@@ -5,8 +5,8 @@
 哪一条通道"记得"守规矩。
 
 2026-10-20 用户拍板换刻度（好感 `-100..100` 初始 10、防备 `-30..30` 初始 0），
-并把规则写成：提升 ≤8、普通下调 ≤4、**明确越界**下调 4–16、好感 ≥95 不再往下。
-这一份把每一条都钉在存储层，包括"证据句拿不到就拒绝写入"。
+并把规则写成：好感提升 ≤8、防备提升 ≤10、普通下调 ≤4、**明确越界**下调 4–16、
+好感 ≥95 不再往下。这一份把每一条都钉在存储层，包括"证据句拿不到就拒绝写入"。
 
 不用 pytest fixture：临时目录在测试内部自己建。
 """
@@ -19,13 +19,16 @@ from qq_roleplay_bot.memory_model import InboxEvent, MemoryValidationError
 from qq_roleplay_bot.memory_store import (
     AFFINITY_DAILY_CAP,
     AFFINITY_HIGH_HOLD,
+    AFFINITY_RAISE_MAX,
     CLOSENESS_DECAY_FLOOR,
     DEFAULT_CLOSENESS,
     DEFAULT_GUARDEDNESS,
     GUARD_DAILY_CAP,
+    GUARD_RAISE_MAX,
     GUARD_RELAX_PER_WEEK,
     MemoryStore,
 )
+from qq_roleplay_bot.relationship_tiers import guard_tier
 
 GROUP = "717151356"
 USER = "900000001"
@@ -126,6 +129,32 @@ def test_a_single_rise_is_capped_at_eight() -> None:
         assert store.relationship(USER) == (18, 0)
         assert write(store, closeness=3) == ""
         assert store.relationship(USER) == (21, 0), "普通提升按原值走"
+
+
+def test_guard_can_rise_one_whole_tier_while_affinity_stays_at_eight() -> None:
+    """防备一档宽 10：`+10` 就该从「正常分寸」跨到「有点端着」。
+
+    用户 2026-10-20 补的这一条：共用 8 时 `0→8` 还在原档，要两次冒犯才变冷。
+    好感的 8 是用户单独给的，不许跟着放宽。
+    """
+
+    assert (AFFINITY_RAISE_MAX, GUARD_RAISE_MAX) == (8, 10)
+    assert MemoryStore._single_step(10, severe=False, axis="closeness") == 8
+    assert MemoryStore._single_step(10, severe=False, axis="guardedness") == 10
+
+    clock = [1_000_000.0]
+    with tempfile.TemporaryDirectory() as tmp:
+        store = make_store(tmp, clock=lambda: clock[0])
+        # `0→10` 本身会撞 24 小时净变化上限 8（那个数用户批准过，不能动）。
+        # 造一个"窗口内刚从 10 松到 0"的合法状态：净 -10，再 +10 后净 0。
+        with store.connection() as db:
+            db.execute("INSERT INTO relationships VALUES (?,?,?,?,?)",
+                       (USER, 0, 0, clock[0] - DAY, clock[0] - DAY))
+            db.execute("INSERT INTO relationship_log VALUES (?,?,?,?,?,?,?)",
+                       (USER, "guardedness", 10, 0, "刚松下来", "maintenance", clock[0] - 60))
+        assert write(store, guardedness=10) == ""
+        assert store.relationship(USER)[1] == 10
+        assert guard_tier(10).name == "有点端着"
 
 
 def test_a_normal_drop_is_capped_at_four() -> None:
@@ -369,17 +398,28 @@ def test_decay_after_thirty_days_of_silence() -> None:
         assert store.decay_relationships() == 0
 
 
-def test_decay_floor_keeps_acquaintances_from_becoming_strangers() -> None:
-    """衰减会降，但停在 35（旧「认得」档）：聊过的人不该退回全然的陌生人。"""
+def test_decay_floor_is_the_initial_value_not_a_freeze_at_thirty_five() -> None:
+    """地板 = 初始值 10：15 分会降，10 分及以下不动，而且永远不会被"降"上去。
+
+    原来地板 35 会把已经在 10 分的人永久冻住（2026-10-20 库里有 8 个）。
+    """
 
     clock = [1000.0]
     with tempfile.TemporaryDirectory() as tmp:
         store = make_store(tmp, clock=lambda: clock[0])
-        pump(store, clock, times=7)  # 66
-        for _ in range(5):
-            clock[0] += 31 * DAY
-            store.decay_relationships()
-        assert store.relationship(USER)[0] == CLOSENESS_DECAY_FLOOR == 35
+        stale = clock[0] - 40 * DAY
+        with store.connection() as db:
+            for user_id, closeness in ((USER, 15), (OTHER, 10), ("900000009", 8)):
+                db.execute("INSERT INTO relationships VALUES (?,?,?,?,?)",
+                           (user_id, closeness, 0, stale, stale))
+        clock[0] += DAY
+        assert store.decay_relationships() == 1, "只有 15 分那行进查询"
+        assert store.relationship(USER) == (10, 0), "15 - 10"
+        assert store.relationship(OTHER) == (10, 0), "10 分不动，也不被抬升"
+        assert store.relationship("900000009") == (8, 0), "低于初始值的不被抬到 10"
+        clock[0] += 31 * DAY
+        assert store.decay_relationships() == 0, "到了地板就不再变化"
+        assert store.relationship(USER)[0] == CLOSENESS_DECAY_FLOOR == DEFAULT_CLOSENESS
 
 
 def test_decay_never_touches_a_high_affinity_bond() -> None:
