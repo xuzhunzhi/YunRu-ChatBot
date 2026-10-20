@@ -53,8 +53,14 @@ class _Mail:
         self.sent = []
         self.read = []
 
-    async def list_messages(self, *, limit=10, folder="inbox", unread_only=False):
-        return {"data": list(self._messages)}
+    async def list_messages(self, *, limit=10, folder="inbox", unread_only=False,
+                            after=None, cursor=""):
+        # `after` / `cursor` 是 2026-10-20 加的（水位窗口 + 翻页）。替身按"一次给完"回：
+        # 记下参数供断言，pagination 永远 has_more=False。
+        self.lists = getattr(self, "lists", [])
+        self.lists.append({"after": after, "cursor": cursor, "unread_only": unread_only})
+        return {"data": list(self._messages),
+                "pagination": {"has_more": False, "next_cursor": ""}}
 
     async def read_message(self, message_id):
         self.read.append(message_id)
@@ -93,6 +99,20 @@ class _State:
 
     def mail_link(self, address):
         return self.links.get(str(address or "").casefold(), "")
+
+    # --- 2026-10-20 新增：收信水位 + 正文缓存（真实 store 上有，替身也要有）---
+    def poll_watermark(self):
+        return getattr(self, "watermark", 0.0)
+
+    def advance_watermark(self, stamp):
+        self.watermark = float(stamp)
+
+    def remember_body(self, message_id, body):
+        self.bodies = getattr(self, "bodies", {})
+        self.bodies[message_id] = body
+
+    def recall_body(self, message_id):
+        return getattr(self, "bodies", {}).get(message_id, "")
 
     def link_mail(self, address, user_id):
         self.links[str(address or "").casefold()] = str(user_id)

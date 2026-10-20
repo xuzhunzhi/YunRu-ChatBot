@@ -33,6 +33,9 @@ MAX_LETTER_CHARS = 4000
 PENDING_REPORT_MAX_AGE = 3 * 86400.0
 # 处理过的来信 id 留最近这些条（2026-09-30 读信回信用）：幂等靠它，重启也不会重复回。
 MAX_PROCESSED_MAIL = 100
+# 正文缓存（2026-10-20）：message +read 只在第一次返回正文，重试必须靠这份缓存。
+MAX_CACHED_BODIES = 12
+MAX_CACHED_BODY_CHARS = 4000
 
 
 def default_state_path() -> Path:
@@ -68,6 +71,10 @@ class MailState:
     # 学会的"邮箱地址 → QQ 号"（2026-09-30）：非 QQ 邮箱的发件人在回信里报了 QQ 号，
     # 核实过就记在这里，以后就按那个 QQ 号认人。**只存映射，不存正文**。
     links: dict[str, str] = field(default_factory=dict)
+    # 正文缓存：message_id -> 正文（见 `MailStateStore.remember_body`）。
+    bodies: dict[str, str] = field(default_factory=dict)
+    # 收信水位（秒）：最后一次「翻到底且无异常」的轮询时刻；0 = 还没有过。
+    poll_watermark: float = 0.0
 
     @property
     def last_send_at(self) -> float:
@@ -356,6 +363,47 @@ class MailStateStore:
             return
         state.processed_mail.append(target)
         state.processed_mail = state.processed_mail[-MAX_PROCESSED_MAIL:]
+        self.save(state)
+
+    def remember_body(self, message_id: str, body: str) -> None:
+        """把读到的正文存下来（2026-10-20）。
+
+        为什么必须存：`message +read` **只在第一次**返回正文，之后同一封返回空串
+        （实测：主人那两封信都是第一次读有正文、我再读就是 0 字符）。而"回复失败要
+        下一轮重试"恰恰会再读一次——不缓存就等于**重试永远拿到空正文**，那一步会
+        静默当成"她选择不回"。所以第一次读到就留下，重试用缓存。
+        只留最近 `MAX_CACHED_BODIES` 封；正文是私人内容，随状态文件留在 `data/` 下。
+        """
+
+        target = str(message_id or "").strip()
+        text = str(body or "")
+        if not target or not text:
+            return
+        state = self.load()
+        state.bodies[target] = text[:MAX_CACHED_BODY_CHARS]
+        if len(state.bodies) > MAX_CACHED_BODIES:
+            for stale in list(state.bodies)[: len(state.bodies) - MAX_CACHED_BODIES]:
+                state.bodies.pop(stale, None)
+        self.save(state)
+
+    def recall_body(self, message_id: str) -> str:
+        """取缓存正文；没有就空串（调用方据此决定要不要向 CLI 再要一次）。"""
+
+        target = str(message_id or "").strip()
+        if not target:
+            return ""
+        return str(self.load().bodies.get(target) or "")
+
+    def poll_watermark(self) -> float:
+        """收信水位：上一次"翻到底且没异常"的轮询时刻。0 = 还没有过。"""
+
+        return float(self.load().poll_watermark or 0.0)
+
+    def advance_watermark(self, stamp: float) -> None:
+        """只有**整轮成功**才推进（失败留在旧水位，下一轮重扫）。"""
+
+        state = self.load()
+        state.poll_watermark = float(stamp)
         self.save(state)
 
     def replies_today(self) -> int:

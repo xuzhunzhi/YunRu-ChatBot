@@ -34,6 +34,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -52,7 +53,7 @@ MAX_OUTPUT_CHARS = 8000
 MAX_ERROR_CHARS = 300
 
 # 只有这些子命令能被调用。**这是白名单，不是"拼接模板"**。
-_ALLOWED = ("+me", "message +send", "message +list", "message +read")
+_ALLOWED = ("+me", "message +send", "message +list", "message +read", "message +watch")
 
 _EMAIL = re.compile(r"^[A-Za-z0-9._+-]{1,64}@[A-Za-z0-9](?:[A-Za-z0-9.-]{0,253})\.[A-Za-z]{2,}$")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -306,12 +307,26 @@ class MailClient:
         return self._unwrap(payload)
 
     async def list_messages(self, *, limit: int = 10, folder: str = "inbox",
-                            unread_only: bool = False) -> dict:
-        """列邮件。首版只给"读"用，不做任何自动处理。"""
+                            unread_only: bool = False, after: float | None = None,
+                            cursor: str = "") -> dict:
+        """列邮件。首版只给"读"用，不做任何自动处理。
+
+        2026-10-20 起多两个参数：
+        * `after`（时间戳，秒）→ `--after <ISO8601>`：按**时间窗**列，替掉 `--is-unread`。
+          原因：服务端的"已读"不是我们的真相（别人的客户端一点、或我们自己 `+read`
+          过一遍，那封信就永远进不了未读列表；实测主人两封回信都被这么漏掉）。
+        * `cursor` → `--cursor`：翻页（`pagination.next_cursor`）。
+        """
 
         count = max(1, min(50, int(limit)))
         argv = ["message", "+list", "--limit", str(count), "--dir", folder]
+        if after is not None:
+            stamp = datetime.fromtimestamp(float(after), tz=timezone.utc)
+            argv += ["--after", stamp.strftime("%Y-%m-%dT%H:%M:%SZ")]
+        if cursor:
+            argv += ["--cursor", str(cursor)]
         if unread_only:
+            # 保留这个开关只为兼容旧调用/测试；**生产路径不再用它**（见上）。
             argv.append("--is-unread")
         return self._unwrap(await self._run(argv, action="message +list"))
 

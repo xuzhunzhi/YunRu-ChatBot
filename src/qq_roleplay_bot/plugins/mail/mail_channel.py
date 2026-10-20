@@ -16,8 +16,12 @@
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import re
+import subprocess
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -34,6 +38,14 @@ MAX_PER_POLL = 5
 # 太旧的来信不回：默认 48 小时。上限卡住的那几封会攒到第二天，
 # 隔好几天再回一封"你好吗"很奇怪。
 MAX_AGE_HOURS = 48.0
+# 收信窗口比水位往前多扫多久（秒）。重叠这一段是为了"边界那封"不漏：
+# 水位是"上一轮结束的时刻"，而邮件的 created_at 与我们本地时钟可能差几秒。
+POLL_OVERLAP_SECONDS = 3600.0
+# 一轮最多翻几页（每页 MAX_PER_POLL 封）。防"积压几千封时一轮扫到天亮"；
+# 到上限按"没翻完"处理 —— **不推进水位**，下一轮接着扫，靠 message_id 去重。
+MAX_PAGES_PER_POLL = 6
+# 来信唤起的最小间隔（秒）：`+watch` 对一封新信可能吐多行，2 秒内只踢一次。
+KICK_MIN_INTERVAL_SECONDS = 2.0
 
 
 def _normalize(address: object) -> str:
@@ -190,7 +202,9 @@ class MailChannel:
                       "skipped_stale": 0, "skipped_auto": 0, "replied": 0, "silent": 0,
                       "failed": 0, "capped": 0, "sender_capped": 0, "strangers": 0,
                       "asked_qq": 0, "linked": 0, "link_refused": 0,
-                      "link_unavailable": 0}
+                      "link_unavailable": 0,
+                      # 2026-10-20：翻页没走完的轮次（那一轮不推进水位）。
+                      "polls_incomplete": 0}
         # 注：这里原来还有 `command_refused`。**拒投已经归核心**（接缝里
         # `privileged_command_level` 那道判定），插件这边看不到"被拒了"与
         # "判定说不回"的区别（两者都是 `run()` 回 None），所以那个计数器永远停在 0——
@@ -200,6 +214,108 @@ class MailChannel:
         # 被规则挡下的信按 message_id 去重后再计数：同一封会在每轮里被重新看到，
         # 不记 id 的话计数会随着轮询次数一直涨（日志里看着像"一直在收"）。
         self._ignored_seen: set[str] = set()
+        # 来信唤起（2026-10-20 用户："不妨做个来信提醒直接唤起agent"）：
+        # 一个守护线程跑 `message +watch`，每吐一行就是"有新信"，立刻踢一轮收信，
+        # 不用等 300 秒节拍。节拍照旧保留——watch 挂了它还是兜底。
+        self._watch_thread: threading.Thread | None = None
+        self._watch_stop = threading.Event()
+        self._kick_loop: asyncio.AbstractEventLoop | None = None
+        self._kick_pending = False
+        self._kick_last_at = 0.0
+
+    # --- 来信唤起 -------------------------------------------------------------
+
+    def start_event_watch(self) -> bool:
+        """起 watch 线程（只起一次）。**没有 CLI / 起不来都只是退化**，不影响轮询。
+
+        为什么用线程 + 同步 `Popen` 而不是 `asyncio.create_subprocess_exec`：
+        Windows 上 npm 装出来的 `agently-cli` 是 `.cmd` 壳，异步子进程直接起不来；
+        而 `mail_client` 现有的同步起进程路径（`_resolve_executable`）已经验过能起。
+        """
+
+        if self._watch_thread is not None and self._watch_thread.is_alive():
+            return False
+        try:
+            self._kick_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        self._watch_stop.clear()
+        thread = threading.Thread(target=self._watch_worker, name="mail-watch", daemon=True)
+        self._watch_thread = thread
+        thread.start()
+        logger.info("mail_watch_started（来信会立刻触发一轮收信）")
+        return True
+
+    def stop_event_watch(self) -> None:
+        self._watch_stop.set()
+
+    def _watch_worker(self) -> None:
+        """线程体：跑 `+watch` 读行；断开/失败按 5→60 秒退避重来。"""
+
+        delay = 5.0
+        while not self._watch_stop.is_set():
+            proc = None
+            try:
+                executable = self.mail._resolve_executable()
+                self.mail.workdir.mkdir(parents=True, exist_ok=True)
+                proc = subprocess.Popen(
+                    [executable, "message", "+watch", "--msg-format", "event"],
+                    cwd=str(self.mail.workdir), stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
+                    errors="replace", shell=False,
+                )
+                delay = 5.0
+                for line in proc.stdout:
+                    if self._watch_stop.is_set():
+                        break
+                    text = str(line or "").strip()
+                    if not text:
+                        continue
+                    try:
+                        json.loads(text)
+                    except Exception:  # noqa: BLE001 - 不是 JSON 的行就当没看见
+                        continue
+                    self._request_poll()
+            except Exception as exc:  # noqa: BLE001 - watch 炸了只是退化到节拍
+                self._fail("watch", exc)
+                if self._watch_stop.wait(delay):
+                    break
+                delay = min(delay * 2, 60.0)
+                continue
+            finally:
+                if proc is not None:
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+            if self._watch_stop.wait(delay):
+                break
+
+    def _request_poll(self) -> None:
+        """线程里收到事件 → 投回主循环踢一轮收信。2 秒内只踢一次（一封信可能吐多行）。"""
+
+        loop = self._kick_loop
+        if loop is None or loop.is_closed():
+            return
+        now = time.monotonic()
+        if self._kick_pending or now - self._kick_last_at < KICK_MIN_INTERVAL_SECONDS:
+            return
+        self._kick_pending = True
+        self._kick_last_at = now
+        loop.call_soon_threadsafe(self._kick_from_watch)
+
+    def _kick_from_watch(self) -> None:
+        """主循环里这一步：起一个收信任务（不阻塞 watch 线程）。"""
+
+        self._kick_pending = False
+
+        async def run() -> None:
+            try:
+                await self.poll_once()
+            except Exception:  # noqa: BLE001 - 这一轮失败下一轮/下一封信再来
+                logger.warning("mail_watch_poll_failed", exc_info=False)
+
+        asyncio.get_running_loop().create_task(run())
 
     # --- 一轮 ---------------------------------------------------------------
 
@@ -294,22 +410,27 @@ class MailChannel:
         logger.info("mail_sender_allowed user_id=%s", user_id)
 
     async def poll_once(self) -> int:
-        """读一轮未读信并回信；返回**真正回了**的封数。"""
+        """读一轮来信并回信；返回**真正回了**的封数。
+
+        2026-10-20 三条口径改动（都在实测事故之后定的）：
+        1. **不再用 `--is-unread`**：服务端的已读不是我们的真相——主人两封回信都被
+           标成 read=True 之后永远列不出来，她一次都没看到。改用**水位**：
+           `--after (上次成功轮询 − 1 小时)`，重叠一小时防边界漏，翻页翻到底。
+        2. **水位只在整轮成功时推进**：失败就停在旧水位，下一轮重扫；去重靠 message_id。
+        3. **只有正常处理完才标记"已处理"**：原来 `finally` 里无条件标记，于是一旦回信
+           失败这封信既读不到（已读）也不会重试（已标记），**永久丢失**。
+        """
 
         if not self.enabled:
             return 0
         self.stats["polls"] += 1
-        try:
-            payload = await self.mail.list_messages(limit=MAX_PER_POLL, folder="inbox", unread_only=True)
-        except Exception as exc:  # noqa: BLE001 - 邮箱读不到只是这一轮没有信
-            self._fail("list", exc)
-            return 0
-        messages = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(messages, list):
-            return 0
-
+        since = max(0.0, self.state_store.poll_watermark() - POLL_OVERLAP_SECONDS)
+        items, complete = await self._list_window(since)
+        if not complete:
+            # 翻页没走完（网络/上限）：这一轮只处理已经拿到的，**不推进水位**。
+            self.stats["polls_incomplete"] += 1
         replied = 0
-        for item in messages:
+        for item in items:
             if not isinstance(item, dict):
                 continue
             self.stats["seen"] += 1
@@ -353,15 +474,44 @@ class MailChannel:
                 logger.warning("mail_reply_capped today=%s", self._replies_today())
                 continue
             try:
-                if await self._handle_one(item, message_id, sender=sender, subject=subject):
-                    replied += 1
+                handled = await self._handle_one(item, message_id, sender=sender, subject=subject)
             except Exception as exc:  # noqa: BLE001 - 一封处理失败不该停掉整轮
+                # **不标记已处理**：下一轮还会再看到它，正文从缓存里取（见 `_read_body`）。
                 self._fail("handle", exc)
-            finally:
-                # 无论回没回都记成"处理过"：否则下一轮会把同一封再送一遍，
-                # 而"她选择不回"是**她的决定**，不该被反复问。
-                self.state_store.mark_mail_processed(message_id)
+                continue
+            if handled:
+                replied += 1
+            self.state_store.mark_mail_processed(message_id)
+        if complete:
+            self.state_store.advance_watermark(self.clock())
         return replied
+
+    async def _list_window(self, since: float) -> tuple[list[dict], bool]:
+        """按水位翻页取一段来信。返回 `(items, complete)`。
+
+        翻页上限 `MAX_PAGES_PER_POLL` 是防"积压几千封时一轮扫到天亮"；到上限就
+        按"没翻完"处理（**不推进水位**，下一轮接着扫，靠 message_id 去重）。
+        """
+
+        collected: list[dict] = []
+        cursor = ""
+        for _ in range(MAX_PAGES_PER_POLL):
+            try:
+                payload = await self.mail.list_messages(
+                    limit=MAX_PER_POLL, folder="inbox", after=since or None, cursor=cursor,
+                )
+            except Exception as exc:  # noqa: BLE001 - 邮箱读不到只是这一轮没有信
+                self._fail("list", exc)
+                return collected, False
+            page = payload.get("data") if isinstance(payload, dict) else None
+            if not isinstance(page, list):
+                return collected, False
+            collected.extend(item for item in page if isinstance(item, dict))
+            pagination = payload.get("pagination") if isinstance(payload, dict) else None
+            cursor = str((pagination or {}).get("next_cursor") or "").strip()
+            if not isinstance(pagination, dict) or not pagination.get("has_more") or not cursor:
+                return collected, True
+        return collected, False
 
     async def _handle_one(self, item: dict, message_id: str, *, sender: str, subject: str) -> bool:
         body = await self._read_body(item, message_id)
@@ -423,25 +573,45 @@ class MailChannel:
         return True
 
     async def _read_body(self, item: dict, message_id: str) -> str:
-        """取正文：列表接口只给摘要，正文要 `message +read`。"""
+        """取正文：列表接口只给摘要，正文要 `message +read`。
+
+        **先看缓存**（2026-10-20）：`message +read` 只在第一次返回正文，之后再读同一封
+        就是空串（实测）。而失败重试恰恰会再读一次——不查缓存的话，重试永远拿到空正文，
+        然后被当成"她不想回"。所以：有缓存先用缓存；读到了就存起来。
+        """
 
         snippet = str(item.get("snippet") or "").strip()
+        cached = self.state_store.recall_body(message_id)
+        if cached:
+            return cached[:MAX_INBOUND_CHARS]
         try:
             payload = await self.mail.read_message(message_id)
         except Exception as exc:  # noqa: BLE001 - 读不到正文就退回摘要（仍可能是完整信）
             self._fail("read", exc)
             return snippet[:MAX_INBOUND_CHARS]
+        body = self._body_from_payload(payload)
+        if body:
+            self.state_store.remember_body(message_id, body)
+            return body[:MAX_INBOUND_CHARS]
+        return snippet[:MAX_INBOUND_CHARS]
+
+    @staticmethod
+    def _body_from_payload(payload: object) -> str:
+        """从 `+read` 的两种形状里取正文（外层 `data` 已由 `_unwrap` 拆掉，两种都认）。"""
+
+        if not isinstance(payload, dict):
+            return ""
         for key in ("body", "text", "content", "body_text", "plain"):
-            value = payload.get(key) if isinstance(payload, dict) else None
+            value = payload.get(key)
             if isinstance(value, str) and value.strip():
-                return value.strip()[:MAX_INBOUND_CHARS]
-        inner = payload.get("data") if isinstance(payload, dict) else None
+                return value.strip()
+        inner = payload.get("data")
         if isinstance(inner, dict):
             for key in ("body", "text", "content"):
                 value = inner.get(key)
                 if isinstance(value, str) and value.strip():
-                    return value.strip()[:MAX_INBOUND_CHARS]
-        return snippet[:MAX_INBOUND_CHARS]
+                    return value.strip()
+        return ""
 
     @staticmethod
     def _reply_subject(subject: str) -> str:

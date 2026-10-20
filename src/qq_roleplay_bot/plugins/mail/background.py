@@ -24,6 +24,12 @@ class MailChannelPlugin:
         self.enabled = channel is not None
 
     async def poll_once(self) -> object:
+        # 第一次 tick 时把"来信唤起"那条 watch 线程点起来（2026-10-20）。
+        # 放在这里而不是 `register()`：`register` 那一刻未必有运行中的事件循环，
+        # 而 tick 一定在循环里跑。起不来只是退化（照旧每 interval 秒轮询）。
+        starter = getattr(self.channel, "start_event_watch", None)
+        if callable(starter):
+            starter()
         return await self.channel.poll_once()
 
 
