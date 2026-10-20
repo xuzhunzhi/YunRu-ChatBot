@@ -377,6 +377,16 @@ Get-Content data\logs\verify_runs.log | Select-Object -Last 3
    `dev` 指 `dev\` 这个文件夹（那里面都算 dev）。插件那棵树（`yunru-stage4\`）是
    **另一份**，单独验（见 7.2 的门槛清单）。顺序：**在 dev 改 → 验证通过 → 才允许
    同步/部署到 `run`（线上）**。
+
+   ⚠️ **插件源码不在 `main` 分支里**（2026-10-20 实测，我在这上面判断错过一次）：
+   `dev\src\qq_roleplay_bot\plugins\` 里**只有一个 `__init__.py`**；九个插件
+   （`group_admin` / `join_approval` / `mail` / `outage_notice` / `remind` /
+   `roles` / `rss` / `timeout_alert` / `webui`）的源码**只存在于 `plugins` 分支**
+   （工作树 `yunru-stage4\`）。`run\src\qq_roleplay_bot\plugins\` 是部署时从那边
+   **手抄过去**的副本（`deploy_to_run.py` 只搬 `src/` 的核心部分，插件另走手工流程）。
+   所以：① 要读/改插件，去 `yunru-stage4`，别在 dev 里找；② `git grep` 在 dev 里
+   搜不到插件代码**不是仓库坏了**；③ 判断"某个插件功能有没有做"必须在
+   `yunru-stage4` 上核，只在 dev 看会得出反的结论。
 2. **代码派给 subagent / 专家写。**
    优先**复用已有的** subagent（`send_message` 续用同一个 agent id），不够用才新开；
    派活时可以**对它们做上下文压缩**（只给压缩过的交底，回来只收结论 + diff + 数字）。
