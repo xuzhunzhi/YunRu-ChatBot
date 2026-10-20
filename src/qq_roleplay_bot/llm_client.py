@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
 import re
 import socket
@@ -38,7 +39,20 @@ MAX_BACKOFF_SECONDS = 8.0
 # 回复不发、审核按通过）。**首字来了之后不再按总时长砍**：说到一半的长生成照旧读完，
 # 只有"连着 `self.timeout` 秒一个字节都不吐"才当连接死了（`stream_stalled`）——
 # 那是停顿网，不是总上限。
+#
+# **这是配置项，不是行为变更**（2026-10-20）：默认值仍是 3.0 秒，一个字节都不变。
+# 反过来，有些家（实测 mimo）首字 1.2–5.3s，10/20 被这道闸放掉；但它其实是
+# **流式先吐思考**、正文晚一点。所以允许**按用途**放宽，后台任务（memory / review /
+# relevance）可以配大，回复与判定默认不动。两个变量（都在 `stream_stall_seconds` 里读）：
+#
+#     QQBOT_STREAM_STALL_SECONDS=3.0            全局
+#     QQBOT_<TASK>_STREAM_STALL_SECONDS=15      按用途（**优先于全局**）
+#
+# 范围 1..60；坏值（不是数 / 越界）**回落默认 3.0**，不夹、不报错。调用时现读，
+# 改配置不必重启。什么时候改回去：用户重新定首字口径时。
 STREAM_STALL_SECONDS = 3.0
+STREAM_STALL_MIN_SECONDS = 1.0
+STREAM_STALL_MAX_SECONDS = 60.0
 
 # 需要保留的 usage 字段。`prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`
 # 是 DeepSeek 特有的缓存计量（见 https://api-docs.deepseek.com/guides/kv_cache），
@@ -72,6 +86,70 @@ def _task_of_role(usage_role: str) -> str:
     """
 
     return _SAMPLING_ROLE_TO_TASK.get(str(usage_role or ""), str(usage_role or ""))
+
+
+def _env_stall_seconds(name: str) -> float | None:
+    """读一个首字闸配置；没配、不是数、或不在 1..60 内都返回 None（等于没配）。
+
+    **越界不夹**，直接回落默认：`0` / `999` 更可能是写错了，夹成 1 / 60 会让人
+    以为自己配的值生效了（与 `api_timeout` 的夹取不同，那里 1..120 是硬边界）。
+    """
+
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    if not STREAM_STALL_MIN_SECONDS <= value <= STREAM_STALL_MAX_SECONDS:
+        return None
+    return value
+
+
+def stream_stall_seconds(usage_role: str = "") -> float:
+    """这一路的首字闸（秒）：**用途覆盖 > 全局覆盖 > 默认 3.0**。
+
+    `usage_role` 用账本的历史名（`dialogue` / `memory` / …），先经 `_task_of_role`
+    换成配置用途名（`reply` / `memory` / …），所以回复那一路读的是
+    `QQBOT_REPLY_STREAM_STALL_SECONDS`。没配任何环境变量时逐字等于
+    `STREAM_STALL_SECONDS`（3.0）——**默认行为一个字节都不变**。
+    """
+
+    task = _task_of_role(usage_role)
+    if task:
+        override = _env_stall_seconds(f"QQBOT_{task.upper()}_STREAM_STALL_SECONDS")
+        if override is not None:
+            return override
+    global_override = _env_stall_seconds("QQBOT_STREAM_STALL_SECONDS")
+    if global_override is not None:
+        return global_override
+    return STREAM_STALL_SECONDS
+
+
+#: **已知不认** `reasoning_effort` 的家。默认是**空集 = 全都发**。
+#: 2026-10-20 由"白名单（只有 ""/"deepseek" 发）"改成这份黑名单：mimo 实测收下
+#: 这个字段不会 400，而换 key 源之后如果还按 provider 静默丢弃，配好的 effort 就
+#: 悄悄失效了。真不支持的家应当**由它自己报错**，不要我们替它吞掉。
+#: 要拉黑某一家就直接加名字（`provider` 已 casefold）；想只对某一路关掉，
+#: 用下面的 `QQBOT_<TASK>_SEND_REASONING_EFFORT=0`，别往这里塞用途名。
+REASONING_EFFORT_INCOMPATIBLE_PROVIDERS: frozenset[str] = frozenset()
+
+
+def _send_reasoning_effort(task: str, provider: str) -> bool:
+    """这一路要不要发 `reasoning_effort`：强制开关 > 黑名单（默认全发）。
+
+    `QQBOT_<TASK>_SEND_REASONING_EFFORT=0/1` 是**按用途**的强制开关（task 用配置
+    用途名，`reply` 那一路同样经 `_task_of_role` 映射）。只有 `0` / `1` 算数，
+    别的值当没配；没配时看 provider 在不在黑名单里。默认（不设变量 + 黑名单为空）
+    对**所有家**都发——deepseek 与今天完全一致，mimo 从此也发（本次目的）。
+    """
+
+    if task:
+        raw = os.environ.get(f"QQBOT_{task.upper()}_SEND_REASONING_EFFORT", "").strip()
+        if raw in ("0", "1"):
+            return raw == "1"
+    return provider not in REASONING_EFFORT_INCOMPATIBLE_PROVIDERS
 
 
 def _sampling_params_for(usage_role: str) -> dict[str, float]:
@@ -411,11 +489,12 @@ class OpenAICompatibleClient:
         }
         if self.max_tokens is not None:
             body["max_tokens"] = self.max_tokens
-        # `user_id` 与 `reasoning_effort` 是**DeepSeek 专有**的调优字段：前者给同一
-        # 账号下的每个 agent 隔离 KVCache 与调度，后者控制 v4 系列的思考深度。
-        # 别的家未必认这两个字段（实测 2026-10-12：mimo 收下它们**不会** 400，但会
-        # 带 `reasoning_content` 静默思考——兜底时那是白花的钱），所以按 `provider`
-        # 门控：`""`（还不知道是哪一家）或 `"deepseek"` → 照旧发；其它家 → 一个都不发。
+        # `user_id` 是**DeepSeek 专有**的调优字段：给同一账号下的每个 agent 隔离
+        # KVCache 与调度。别的家未必认它，所以仍按 `provider` 门控：
+        # `""`（还不知道是哪一家）或 `"deepseek"` → 照旧发；其它家 → 不发。
+        # `reasoning_effort` **不再跟着这个门控走**（2026-10-20）：它改成"黑名单
+        # 默认全发"，见 `_send_reasoning_effort`——mimo 以前被这里静默丢弃，
+        # 换 key 源之后 effort 就失效了；真不支持应当由服务端报错。
         deepseek_fields = provider in ("", "deepseek")
         if self.user_id and deepseek_fields:
             # 同一账号下按 agent 隔离 KVCache 与调度；不带则所有请求共享隔离空间。
@@ -425,14 +504,15 @@ class OpenAICompatibleClient:
         # 这两个是两家都认的通用字段，不分家。
         for key, value in _sampling_params_for(self.usage_role).items():
             body[key] = value
-        if deepseek_fields:
+        task = _task_of_role(self.usage_role)
+        if _send_reasoning_effort(task, provider):
             # reasoning_effort：控制 DeepSeek v4 系列的思考深度（默认 high → 改 low ✓ 快很多）。
             # 2026-10-10 用户拍板。API 文档：none=关闭思考 / low / high / max。
             # 按**用途名**读（`_task_of_role`）：回复那一路的账本名是 `dialogue`，
             # 而它的配置名是 `QQBOT_REPLY_*`——不映射就永远读不到（契约 D4）。
             # 文件里写了 `agents.<用途>.reasoning_effort` 时由 `dev_config` 优先取文件那份。
             from .dev_config import reasoning_effort
-            body["reasoning_effort"] = reasoning_effort(_task_of_role(self.usage_role))
+            body["reasoning_effort"] = reasoning_effort(task)
         payload = json.dumps(body).encode("utf-8")
         request = urllib.request.Request(
             f"{base_url}/chat/completions",
@@ -446,9 +526,11 @@ class OpenAICompatibleClient:
             method="POST",
         )
         # 每一次读的等待上限：min(首字闸, 停顿网)。**这一条就是"3 秒无响应砍掉本轮"的
-        # 落点**——服务端连着 3 秒没吐任何字节，`response.readline()` 就抛 `socket.timeout`。
+        # 落点**——服务端连着这么久没吐任何字节，`response.readline()` 就抛 `socket.timeout`。
         # 首字来了之后，这个短超时只是"再等一轮"的心跳，真正放手看的是停顿网。
-        read_timeout = max(0.1, min(STREAM_STALL_SECONDS, float(timeout)))
+        # 首字闸按**用途**取（`stream_stall_seconds`）：默认仍是 3.0，可经
+        # `QQBOT_STREAM_STALL_SECONDS` / `QQBOT_<TASK>_STREAM_STALL_SECONDS` 放宽。
+        read_timeout = max(0.1, min(stream_stall_seconds(self.usage_role), float(timeout)))
         last_byte_at = time.monotonic()
         got_bytes = False
         said_something = False

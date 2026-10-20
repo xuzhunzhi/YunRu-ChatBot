@@ -5,11 +5,20 @@
 云茹"你是被规则驱动的""有人测试过你的防御"——把 prompt 里已经清掉的机制意识
 又补了回来。所以从写入侧堵住。
 """
+from __future__ import annotations
+
+import json
+
 from qq_roleplay_bot.memory_maintenance_agent import (
     MEMORY_SYSTEM_PROMPT,
     build_maintenance_messages,
 )
-from qq_roleplay_bot.memory_model import InboxEvent, MemoryBatch
+from qq_roleplay_bot.memory_model import (
+    InboxEvent,
+    MemoryBatch,
+    MemoryValidationError,
+    parse_operations,
+)
 
 GROUP = "717151356"
 USER = "900000001"
@@ -157,3 +166,71 @@ def test_constraints_reach_the_actual_request() -> None:
     # 数据仍然是 user 段的不可信 JSON，没有被混进 system。
     assert "我今天有点累" not in system
     assert "我今天有点累" in messages[1]["content"]
+
+
+# --- 输出形状（2026-10-20）：顶层只有 operations，AFFINITY 也必须放进去 --------
+
+
+def _add_item(batch: MemoryBatch) -> dict:
+    """一份**当前 parser 认可**的合法 ADD 项（不加任何顶层键）。"""
+
+    return {
+        "op": "ADD",
+        "scope_type": "user_global",
+        "kind": "name",
+        "normalized_key": "preferred_name",
+        "content": "用户希望被称作小明",
+        "confidence": 0.9,
+        "ttl_days": None,
+        "evidence_event_ids": [batch.events[0].id],
+        "targets": [],
+        "subjects": [],
+        "durable": False,
+    }
+
+
+def test_prompt_pins_the_top_level_shape_and_the_six_ops() -> None:
+    """mimo 实测会把关系项放到顶层 `affinity`、把 IGNORE 写成整个对象。
+
+    这些形状会让整批 `invalid_operation` 作废，所以 prompt 必须把形状说死；
+    parser 一个字都不放宽（它是判定与维护两条路共用的）。
+    """
+
+    prompt = MEMORY_SYSTEM_PROMPT
+    assert "顶层只允许 operations" in prompt
+    assert "不许顶层 affinity" in prompt
+    # op 的取值必须逐个列全（与 `memory_model.OPS` 完全一致），不许发明别名。
+    assert "ADD、UPDATE、MERGE、DELETE、IGNORE、AFFINITY" in prompt
+    assert "不是把整个输出变成 IGNORE" in prompt
+    # 关系变化也要写进 operations，而不是单独一个顶层键。
+    assert "关系变化同样写成 operations 里的一项" in prompt
+
+
+def test_existing_legal_output_still_parses() -> None:
+    """prompt 改动不许影响 parser：现有合法输出（含 IGNORE 项）照旧通过。"""
+
+    batch = _batch()
+    raw = json.dumps({"operations": [_add_item(batch), {"op": "IGNORE"}]},
+                     ensure_ascii=False)
+    ops = parse_operations(raw, batch)
+    assert [op.op for op in ops] == ["ADD", "IGNORE"]
+
+
+def test_top_level_affinity_and_whole_object_ignore_are_still_rejected() -> None:
+    """放宽 parser 会连判定那条一起松掉，所以这里钉住"照旧拒绝"。"""
+
+    batch = _batch()
+    item = _add_item(batch)
+    rejected = (
+        json.dumps({"operations": [item], "affinity": []}),
+        json.dumps({"affinity": []}),
+        json.dumps({"op": "IGNORE"}),
+        json.dumps({"operations": [{"op": "SET"}]}),
+        json.dumps({"operations": [{"op": "IGNORE", "reason": "没东西"}]}),
+    )
+    for raw in rejected:
+        try:
+            parse_operations(raw, batch)
+        except MemoryValidationError:
+            continue
+        raise AssertionError(f"这种形状必须被拒绝：{raw}")

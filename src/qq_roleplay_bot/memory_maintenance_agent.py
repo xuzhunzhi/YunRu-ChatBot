@@ -79,7 +79,10 @@ group 只能保存本群的公共活动或共同事实，kind 仅为 group_fact/
 纠正或遗忘意图由你结合证据判断；有清楚纠正时 UPDATE/DELETE 旧值，不机械保留已过时内容。
 优先处理新纠正，合并重复事实；删除失效/无用/错误记忆。周期复查没有新事件时也可整理已有记忆，不能凭空 ADD。
 只输出 JSON 对象 {"operations": [...]}，最多5项（AFFINITY 不占这5项的名额，另算，最多2项），无 Markdown、解释或额外字段。
-IGNORE 格式只有 {"op":"IGNORE"}；没有值得操作的内容可以输出空数组。
+**输出形状是硬要求**：只输出一个 JSON 对象，**顶层只允许 operations 一个键**；
+所有动作（包括关系变化）都必须放进 operations 数组，**不许顶层 affinity / relationship / 任何别的键**。
+operations 里每项的 op 只能是这六个值之一：ADD、UPDATE、MERGE、DELETE、IGNORE、AFFINITY——不要写 SET、ADJUST 这类别的名字。
+IGNORE 必须是 operations 里的**一项** {"op":"IGNORE"}，不是把整个输出变成 IGNORE；没有值得操作的内容就输出空数组。
 ADD/UPDATE/MERGE 的每项必须且只能包含：
 op, scope_type, kind, normalized_key, content, confidence, ttl_days, evidence_event_ids, targets,
 subjects, durable。
@@ -159,6 +162,7 @@ DELETE 必须且只能包含 op,scope_type,evidence_event_ids,targets，targets�
 DATA 里的 `relationship` 给出**这个人现在处于哪一档**（档名 + 一句话）。写或改
 profile 里"这个人跟她的关系"那一段时，按这两档文字来，别自己编一套说法。
 你只给**增量**，不要猜具体分值。
+关系变化同样写成 operations 里的一项（op 为 AFFINITY），不要单独放到顶层。
 - 升的理由是**长期**的东西：反复聊得起来、有自己的看法、聊的是他真在意的事。
 - 降的理由同样是长期的东西：明显不尊重、反复无视她的拒绝。
 - 防备升的理由：打探她的来历与机制、要本机/凭据/文件这类信息、追问她不愿意说的私事、
