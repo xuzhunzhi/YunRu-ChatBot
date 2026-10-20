@@ -135,6 +135,9 @@ from .extensions import (
 from .admin_control import AdminCommand, AdminCommandKind, parse_admin_command
 from .memory_model import MemoryMaterial
 from .memory_service import MemoryService
+# 防备单次的升幅（= 一档宽 10，2026-10-20）。从存储层引进来，不在调用点写死数字：
+# 写死 8 的时候 `0 → 8` 跨不了档，"被冒犯立刻变冷"是假的。
+from .memory_store import GUARD_RAISE_MAX
 from . import data_boundary
 from . import face_names
 from . import notice_text
@@ -2375,7 +2378,12 @@ class DialogueEngine:
             rejection = store.apply_affinity(
                 # 依据写**固定的那句中文**（表在 `dialogue_judge.OFFENSE_CODES`），
                 # 不把判定可能写歪的自由文本原样落库。
-                user_id, guardedness=8, reason=OFFENSE_CODES.get(offense, offense),
+                # 2026-10-20：这里原来是写死的 `8`。防备一档宽 10，写 8 意味着
+                # `0 → 8` 仍停在「正常分寸」——"被冒犯立刻变冷"根本没发生，
+                # 要连着被冒犯两次才跨档。改成引用存储层的那个常量（= 一档），
+                # 单次升幅从此只有一个来源。
+                user_id, guardedness=GUARD_RAISE_MAX,
+                reason=OFFENSE_CODES.get(offense, offense),
                 source="judge",
                 # "到底是哪句话"（2026-10-16）：原话已在 `_judge` 核过，这里只递过去。
                 # 空串 = 判定没抄/核不过 → 存储层拒绝这次写入（2026-10-20 收紧）。

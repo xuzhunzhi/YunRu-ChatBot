@@ -217,10 +217,16 @@ def test_rolling_daily_cap_for_closeness() -> None:
         assert write(store, closeness=1) == "affinity_rejected_daily_cap"
 
 
-def test_rolling_daily_cap_for_guard_is_eight() -> None:
+def test_rolling_daily_cap_for_guard_is_one_tier() -> None:
+    """防备的 24 小时净上限 = 一档（10）——**必须 ≥ 单次升幅**，否则提升跨不了档。
+
+    2026-10-20 改：原来是 8（比单次上限 10 小），于是"被冒犯一次 0→10"会被
+    日净上限直接拒掉，"立刻变冷"变成空话。现在单次 10、日净也 10：一天最多一档。
+    """
+
     with tempfile.TemporaryDirectory() as tmp:
         store = make_store(tmp)
-        assert write(store, guardedness=8) == ""
+        assert write(store, guardedness=GUARD_RAISE_MAX) == ""
         assert write(store, guardedness=1) == "affinity_rejected_daily_cap"
         assert store.relationship(USER)[1] == GUARD_DAILY_CAP
 
