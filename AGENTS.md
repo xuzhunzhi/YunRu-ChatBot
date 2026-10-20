@@ -387,6 +387,16 @@ Get-Content data\logs\verify_runs.log | Select-Object -Last 3
    所以：① 要读/改插件，去 `yunru-stage4`，别在 dev 里找；② `git grep` 在 dev 里
    搜不到插件代码**不是仓库坏了**；③ 判断"某个插件功能有没有做"必须在
    `yunru-stage4` 上核，只在 dev 看会得出反的结论。
+
+   ⚠️ **改核心的公开名字之前，先 grep 一遍插件树**（2026-10-20 的事故）：
+   当天重构关系刻度时，把 `stage3_runtime.CLOSENESS_LABELS` / `GUARDEDNESS_LABELS`
+   换成了 `relationship_tiers`，**没核插件是否还引用它们** —— 而
+   `plugins/mail/daily_report.py` 正是 `from ...stage3_runtime import CLOSENESS_LABELS`。
+   部署后日报从 23:00 起**每 60 秒 ImportError**，那封信整晚没发出去（用户第二天才看到）。
+   规矩：**删/改任何一个"插件可能 import 的核心名字"之前**，先
+   `git -C yunru-stage4 grep -n "<名字>" -- src/qq_roleplay_bot/plugins`，
+   有引用就**先让插件改用新名字（或给核心留兼容导出）再删**。
+   这条同样适用于改函数签名、改常量形状（tuple → 函数这种）。
 2. **代码派给 subagent / 专家写。**
    优先**复用已有的** subagent（`send_message` 续用同一个 agent id），不够用才新开；
    派活时可以**对它们做上下文压缩**（只给压缩过的交底，回来只收结论 + diff + 数字）。
