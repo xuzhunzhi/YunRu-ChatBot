@@ -206,6 +206,23 @@ def test_prompt_pins_the_top_level_shape_and_the_six_ops() -> None:
     assert "关系变化同样写成 operations 里的一项" in prompt
 
 
+def test_a_harmless_extra_identity_field_is_ignored_not_a_whole_batch_failure() -> None:
+    """模型多写 `scope_key` 这类**不承载身份**的键 → 忽略，不许整批作废（2026-10-21）。
+
+    实测事故：维护 agent 在 op 里带了 `"scope_key": "2639157559"`，而解析器当时要求
+    `set(item) == fields` 严格相等，于是**整批** `invalid_operation`；而维护 agent 是
+    "整轮失败、租约到期重试同一批"，结果从 01:10 起**每一轮都失败**，记忆一条都没再写进去
+    （用户报的"人物画像好久没有新的"就是这个）。身份由服务端按批绑定，模型给的不算数，
+    所以忽略比作废安全；**真正不认识的键仍然拒绝**（见下一条用例）。
+    """
+
+    batch = _batch()
+    item = _add_item(batch)
+    item["scope_key"] = "2639157559"
+    ops = parse_operations(json.dumps({"operations": [item]}, ensure_ascii=False), batch)
+    assert [op.op for op in ops] == ["ADD"]
+
+
 def test_existing_legal_output_still_parses() -> None:
     """prompt 改动不许影响 parser：现有合法输出（含 IGNORE 项）照旧通过。"""
 

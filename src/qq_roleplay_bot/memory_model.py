@@ -242,6 +242,15 @@ def parse_operations(raw: str, batch: MemoryBatch) -> tuple[MemoryOperation, ...
         content_count += 1
         if content_count > MAX_OPERATIONS:
             fail()
+        # 2026-10-21：模型会多写 `scope_key`（它以为要填）。从前这里是
+        # `set(item) != fields` **严格相等**，多一个键就整批 `invalid_operation`，
+        # 而维护 agent 是"整轮失败、租约到期重试同一批"——从 01:10 起每一轮都在失败，
+        # 记忆一条都没再写进去（用户报的"画像好久没有新的"就是它）。
+        # **只放过 `scope_key`**：它不改变任何东西——scope/scope_key 由服务端按批绑定
+        # （`batch.scope_key(scope)`），模型给的这个键一律忽略，记录仍然落在本批那个人身上。
+        # `subject_user_id` / `user_id` **照旧拒绝**：那两个是在指定"这条记忆算谁的"，
+        # 属于伪造身份的形状（`test_reject_foreign_scope_and_forged_model_identity` 钉着）。
+        item.pop("scope_key", None)
         fields = {"op", "scope_type", "evidence_event_ids", "targets"}
         if op != "DELETE":
             fields |= {"kind", "normalized_key", "content", "confidence", "ttl_days"}

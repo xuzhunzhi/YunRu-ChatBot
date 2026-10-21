@@ -112,6 +112,9 @@ scope_type 只能 user_global/user_group/group；kind 只能 name/preference/bou
   （服务端固定 7 天、最多 14 天，永远不会进长期）。一批里至多写一条，没有就 IGNORE。
   那条事后来由他说起已经办了、或者你明显已经不打算再提 → 找到那条 intention，用 DELETE 划掉。
 - group_fact：这个群真实发生过的公共事实（例如群里某种互动可用了）。
+每个 operation 的字段**只能是**：op / scope_type / kind / normalized_key / content / confidence / ttl_days / evidence_event_ids / targets / subjects / durable。
+**不要写 scope_key、user_id、subject_user_id**（身份由服务端按批绑定，你写了也会被忽略；
+多写别的键会让整批作废——2026-10-21 就因为多一个 scope_key，记忆维护失败了十个小时）。
 - profile：**人物画像**——你对**这一个人**整体的印象。**可以一点一点拼**（2026-10-21
   用户："画像不是完整的一大段啊，可以是一点一点拼凑起来的"）：
   - 一个人可以有**多条**：总览那条键写 `profile`；某个方面用 `profile/<方面>`，例如
