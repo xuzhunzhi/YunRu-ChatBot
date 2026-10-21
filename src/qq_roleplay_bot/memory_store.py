@@ -974,6 +974,34 @@ class MemoryStore:
                                        "WHERE scope_type=? AND scope_key=? AND normalized_key=?",
                                        (now, op.scope_type, key, row["normalized_key"]))
                 elif op.op in {"ADD", "UPDATE", "MERGE"}:
+                    # 2026-10-21：**总览那条 `profile` 如果是谁手写的，模型不许覆盖它**
+                    # （用户当天："给我写入的还有之前积攒的顶掉了"）。判据是数据本身：
+                    # 那一行的 `origin` 是 `operator_seed`（面板/脚本写进来的），
+                    # 模型就只能往 `profile/<方面>` 里长——"手写的总览"和"攒起来的方面"
+                    # 各在各的行，互不顶掉。为什么不在模型那一侧靠 prompt 忍：
+                    # ADD 到同键是**就地覆盖**（见下面"同键就地更新"），一句模型改写
+                    # 就能把人工设定顶掉，那不是提示词能保证的事。
+                    if (op.kind == PROFILE_KIND and op.normalized_key == PROFILE_KIND
+                            and op.op != "DELETE"):
+                        existing = None
+                        for tier in TIERS:
+                            found = db.execute(
+                                f"SELECT origin FROM {TABLES[tier]} WHERE scope_type=? AND scope_key=?"
+                                " AND normalized_key=? AND status='active' LIMIT 1",
+                                (op.scope_type, key, op.normalized_key),
+                            ).fetchone()
+                            if found is not None:
+                                existing = found
+                                break
+                        if existing is not None and str(existing["origin"]) == "operator_seed":
+                            db.execute("INSERT INTO audit VALUES (?,?,?,?,?)",
+                                       (batch.id, index, "profile_overview_readonly",
+                                        op.scope_type, now))
+                            logger.warning(
+                                "memory_write_rejected reason=profile_overview_readonly"
+                                " scope=%s group=%s", op.scope_type, batch.group_id,
+                            )
+                            continue
                     if op.op == "ADD":
                         rejection = self._add_rejection(db, batch, key, op, now)
                         if rejection:

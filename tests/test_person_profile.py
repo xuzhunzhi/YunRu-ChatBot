@@ -140,6 +140,31 @@ class PersonProfileTests(unittest.TestCase):
         assert "他叫老明" in text, text
         assert text.index("他叫老明") < text.index("他喜欢拆旧手机"), "总览那条要排在前面"
 
+    def test_a_hand_written_profile_overview_is_not_overwritten_by_the_agent(self) -> None:
+        """人手写的总览（键 `profile`）不许被模型覆盖（2026-10-21 用户："给我写入的…被顶掉了"）。
+
+        机制：ADD 到同键是**就地覆盖**，所以模型随手写一段总览就能把人工设定顶掉。
+        现在数据层直接拒：那一行的 `origin` 是 `operator_seed` 时，模型只能往
+        `profile/<方面>` 里长。**这条不是靠 prompt 忍出来的**——prompt 也会改口，
+        但保证在这里。
+        """
+
+        batch = self.batch()
+        self.store.commit(batch, output(operation(batch, key="profile", content="人手写的总览。")))
+        # 模拟"由面板/脚本写入"：真实库里那一条的 origin 就是 operator_seed。
+        with self.store.connection() as db:
+            for table in ("memory_short", "memory_long"):
+                db.execute(f"UPDATE {table} SET origin='operator_seed'"
+                           " WHERE scope_key='100' AND normalized_key='profile'")
+
+        self.now += 200          # 换一批，避免同一批的租约影响
+        batch = self.batch()
+        ops = self.store.commit(
+            batch, output(operation(batch, key="profile", content="模型改写的总览。"))
+        )
+        assert all(op.op != "ADD" for op in ops), [op.op for op in ops]
+        assert self.store.profile("100") == "人手写的总览。", self.store.profile("100")
+
     def test_a_profile_can_be_assembled_from_several_pieces(self) -> None:
         """画像**碎片化**（2026-10-21 用户："画像不是完整的一大段啊，可以一点一点拼凑起来的"）。
 
