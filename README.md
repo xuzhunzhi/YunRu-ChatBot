@@ -273,7 +273,7 @@ ran=1933 failed=0 errors=0 skipped=0 result=PASS
 - **没有 Docker / 一键部署。** 按上面的 venv 手动跑；进程守护、开机自启用系统自带的任务计划
   或 systemd 自己配。
 - **插件发布方式未定。** 表里九个插件是 `plugins` 分支上的实现，预装还是另装还没有拍板。
-- **当前版本 `0.3.0`，阶段 Stage 3。** Stage 3 管对话、记忆、防护；Stage 4 的功能扩展
+- **当前版本 `0.4.0b1`（beta）。** 阶段 Stage 3：Stage 3 管对话、记忆、防护；Stage 4 的功能扩展
   （群管理、邮件、识图、面板等）以插件形式实现。版本号见 `pyproject.toml`。
 
 ## 文档索引
