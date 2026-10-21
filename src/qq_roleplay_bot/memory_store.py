@@ -47,8 +47,13 @@ TABLES = {"short": "memory_short", "long": "memory_long"}
 PROMOTE_KINDS = frozenset({"name", "boundary", "profile"})
 # 画像不进普通记忆检索：它由"当前说话的人"每次单独取，混进列表只会重复占位。
 PROFILE_KIND = "profile"
-# 画像碎片拼起来的总长度上限（2026-10-21 碎片化之后）。超了从最旧的开始截。
-PROFILE_JOIN_MAX = 600
+# 画像碎片拼起来的总长度上限（2026-10-21 碎片化之后）。
+# **不按年龄裁剪**（用户当天纠正："不要从最旧截啊"）：画像是方面不是时间线。
+# 长度靠写入侧控制：每条 ≤120 字、最多 PROFILE_MAX_PIECES 条，满了由维护 agent 合并。
+# 这个常量只是兜底（真超了在句末截断加…，不整条丢）。
+PROFILE_JOIN_MAX = 1200
+# 一个人的画像最多几片（写入侧口径，维护 agent 负责合并；这里只做渲染上限提示）。
+PROFILE_MAX_PIECES = 12
 # 状态类事实（正在发烧/明天有考试）只活在**中短期**，永远不会被强化进长期。
 STATUS_KIND = "status"
 STATUS_TTL_DAYS = 7
@@ -2200,37 +2205,53 @@ class MemoryStore:
 
         2026-10-21 改（用户："画像不是完整的一大段啊，可以是一点一点拼凑起来的"）：
         画像**不再是一个人一条长文**，而是多条碎片（`profile` 总览 + `profile/<方面>`）
-        拼起来——维护 agent 每次只需补一条或改一条，不必整段重写。这里按更新时间从旧到新
-        拼成一段，超过 `PROFILE_JOIN_MAX` 就从**最旧的**那条开始截（新印象优先保留）。
+        拼起来——维护 agent 每次只需补一条或改一条，不必整段重写。
+
+        **拼的顺序不按年龄**（用户当天纠正："不要从最旧截啊"）：画像是"方面"，不是时间线，
+        "半年前知道的脾气"并不比"昨天知道的爱好"更该丢。所以：
+        * **总览那条先**，其它方面按键名排序（稳定顺序，同一份画像每次渲染都一样）；
+        * 不做按龄裁剪；长度靠**写入侧**控制（每条 ≤120 字、最多 `PROFILE_MAX_PIECES` 条，
+          满了由维护 agent 合并，而不是这里静默丢）；
+        * `PROFILE_JOIN_MAX` 只是兜底：真超了就在句末截断并加 `…`，不整条丢弃。
+
         它不进普通检索——每次都由"当前说话的人"触发渲染，画像跟着人走，不跟话题走。
         """
 
         if not user_id:
             return ""
         now = self.clock()
-        rows: list[tuple[float, str]] = []
+        pieces: list[tuple[str, str]] = []
         with self.connection() as db:
             person = self.canonical_user(user_id, db=db)
             for tier in ("long", "short"):
                 for row in db.execute(
-                    f"SELECT content, updated_at FROM {TABLES[tier]} WHERE scope_type='user_global'"
-                    " AND scope_key=? AND kind=? AND status='active' AND visibility='group_safe'"
-                    " AND (expires_at IS NULL OR expires_at>?) ORDER BY updated_at ASC",
+                    f"SELECT kind, normalized_key AS k, content FROM {TABLES[tier]}"
+                    " WHERE scope_type='user_global' AND scope_key=? AND kind=?"
+                    " AND status='active' AND visibility='group_safe'"
+                    " AND (expires_at IS NULL OR expires_at>?)",
                     (person, PROFILE_KIND, now),
                 ):
                     text = str(row["content"] or "").strip()
+                    key = str(row["k"] or "")
                     if text:
-                        rows.append((float(row["updated_at"]), text))
-        if not rows:
+                        pieces.append((key, text))
+        if not pieces:
             return ""
-        rows.sort()
-        kept: list[str] = []
-        for _, text in reversed(rows):          # 新的优先，凑到预算为止
-            candidate = "；".join([text] + kept)
-            if len(candidate) > PROFILE_JOIN_MAX and kept:
-                break
-            kept.insert(0, text)
-        return "；".join(kept)[:PROFILE_JOIN_MAX]
+        # 以键去重（同一份碎片的短/长两表可能都有），总览 `profile` 排最前，其余按字母序。
+        unique: dict[str, str] = {}
+        for key, text in pieces:
+            unique.setdefault(key, text)
+        ordered = sorted(unique.items(), key=lambda item: (item[0] != PROFILE_KIND, item[0]))
+        joined = "；".join(text for _, text in ordered)
+        if len(joined) <= PROFILE_JOIN_MAX:
+            return joined
+        # 兜底：按句读断在一个整句上，加省略号——**不整条丢弃任何一片画像**。
+        head = joined[:PROFILE_JOIN_MAX]
+        for stop in ("。", "；", "，", " "):
+            cut = head.rfind(stop)
+            if cut > PROFILE_JOIN_MAX // 2:
+                return head[: cut + 1] + "…"
+        return head + "…"
 
     def person_names(self, group_id: str, user_ids) -> dict[str, str]:
         """QQ 号 → 本群显示名。渲染记忆归属用；查不到就由调用方退回号码。"""

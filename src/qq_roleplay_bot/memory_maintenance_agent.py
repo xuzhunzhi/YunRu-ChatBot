@@ -118,6 +118,8 @@ scope_type 只能 user_global/user_group/group；kind 只能 name/preference/bou
     `profile/work`、`profile/temper`、`profile/speech`（**方面名用英文小写**，键只认
     小写字母、数字、下划线）。**同一个方面要改就 UPDATE 那一条，不要再开新键**
     （一个方面只有一条）。
+  - **最多 12 条**（一个人）：满了就**合并**到已有的方面里（UPDATE），不要无限开新方面；
+    画像越攒越厚、每条都留着，别丢旧的（旧的一条不会因为旧就失效）。
   - **每条 1~3 句、不超过 120 字**：写清"他在这方面是什么样的人"就够了，不必凑成一大段。
     材料只够一句话时，就 ADD 一条新方面、或 UPDATE 对应的那条。
   - 必须是 `user_global`、`durable=true`、`ttl_days=null`、`subjects=[]`。

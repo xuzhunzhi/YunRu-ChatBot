@@ -119,6 +119,27 @@ class PersonProfileTests(unittest.TestCase):
         self.store.commit(batch, output(operation(batch)))
         self.assertEqual(self.store.profile("200"), "")
 
+    def test_an_old_piece_is_never_dropped_by_age(self) -> None:
+        """**不按年龄裁剪**（2026-10-21 用户："不要从最旧截啊"）。
+
+        画像是"方面"不是时间线：半年前知道的脾气，不会因为昨天知道了一个新爱好就失效。
+        所以拼的顺序是"总览在前、其余按键名"，与 updated_at 无关；旧的碎片照旧渲染。
+        """
+
+        batch = self.batch()
+        self.store.commit(batch, output(
+            operation(batch, key="profile/hobby", content="他喜欢拆旧手机。"),
+            operation(batch, key="profile", content="他叫老明，做后端的。"),
+        ))
+        old = self.now - 200 * 86400        # 把"爱好"那片拨旧 200 天：它仍然必须在渲染里
+        with self.store.connection() as db:
+            for table in ("memory_short", "memory_long"):
+                db.execute(f"UPDATE {table} SET updated_at=? WHERE normalized_key='profile/hobby'", (old,))
+        text = self.store.profile("100")
+        assert "他喜欢拆旧手机" in text, text
+        assert "他叫老明" in text, text
+        assert text.index("他叫老明") < text.index("他喜欢拆旧手机"), "总览那条要排在前面"
+
     def test_a_profile_can_be_assembled_from_several_pieces(self) -> None:
         """画像**碎片化**（2026-10-21 用户："画像不是完整的一大段啊，可以一点一点拼凑起来的"）。
 
