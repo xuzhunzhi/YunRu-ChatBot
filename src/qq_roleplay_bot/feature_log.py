@@ -23,10 +23,14 @@
 1. **正文只落盘，不进内存。** 1000 条 × 4 个功能 × 每条几十 KB，全放内存就是
    上百 MB——运行状态里还要报内存占用，不能自己先把内存吃满。内存里只留计数与
    最后几条预览（给 `/super status` 看）。
-2. **文件最多留 2×容量行，超过就重写成最近 1000 条。** 每写一条都重写 1000 行
+2. **活文件最多留 2×容量行，超过就重写成最近 1000 条。** 每写一条都重写 1000 行
    太贵；留一倍余量之后，摊到每条记录的成本可以忽略。**这段轮转逻辑现在只有一份**
    （`RollingJsonlFile`）：对话日志（`chat_log.py`）要的是同一个做法，两边共用，
    不会出现"模型日志的轮转修了、对话日志还是老样子"。
+   **被裁掉的旧行不再丢弃**：追加到同目录的 `archive/<label>-YYYYMM.jsonl`，
+   于是活文件仍然只有 capacity..capacity*2 行，但半个月以上的历史还能在归档里查到
+   （2026-10-21 用户要求"所有落盘日志都能查到半个月以上"）。归档保留天数由
+   `QQBOT_LOG_ARCHIVE_DAYS` 控制（默认 30，0 = 不归档、完全回到旧行为）。
 3. **内容含完整 system prompt 与聊天正文**，所以目录在 `data/`（已被 .gitignore
    忽略），并且可以用 `QQBOT_FEATURE_LOG=0` 整体关掉。
 4. 单字段上限 20000 字符：一条请求撑不到这个数，但真撑到了也不该让日志无限长。
@@ -52,6 +56,10 @@ PREVIEW_ENTRIES = 20
 PREVIEW_CHARS = 400
 # 文件行数超过 capacity × 这个倍数才重写。
 TRIM_SLACK = 2
+# 归档保留多少天。默认 30：用户 2026-10-21 要求"所有落盘日志都能查到半个月以上"。
+# 0 = 不归档（回退用，行为与改动前完全一致），坏值回落默认值。
+DEFAULT_ARCHIVE_DAYS = 30
+MAX_ARCHIVE_DAYS = 3650
 
 
 def logs_enabled() -> bool:
@@ -84,6 +92,21 @@ def log_capacity() -> int:
     return max(10, min(100000, value))
 
 
+def log_archive_days() -> int:
+    """归档保留天数。**0 = 不归档**（回退到"裁掉就丢"的旧行为）；坏值回落默认值。
+
+    每次都读环境变量（不在 `RollingJsonlFile.__init__` 里缓存）：这样运维改配置
+    不用重启进程就能生效，测试也能在构造之后再切换。范围夹在 0..3650。
+    """
+
+    raw = os.environ.get("QQBOT_LOG_ARCHIVE_DAYS", "").strip()
+    try:
+        value = int(raw) if raw else DEFAULT_ARCHIVE_DAYS
+    except ValueError:
+        value = DEFAULT_ARCHIVE_DAYS
+    return max(0, min(MAX_ARCHIVE_DAYS, value))
+
+
 def truncate_field(text: object) -> str:
     """单字段上限：**模型日志与对话日志共用这一份口径**（见 `MAX_FIELD_CHARS`）。"""
 
@@ -104,9 +127,11 @@ class RollingJsonlFile:
 
     共用纪律：
 
-    - **绝不让日志打断调用方**：写盘/轮转失败只累加 `write_failures` 并告警，不抛；
+    - **绝不让日志打断调用方**：写盘/轮转/归档失败只累加 `write_failures` 并告警，不抛；
     - 内存里**不留正文**：这里只数行数与字节数（正文在文件里），
-      所以文件再大也不吃内存。
+      所以文件再大也不吃内存；
+    - 被裁掉的旧行落进同目录 `archive/<label>-YYYYMM.jsonl`（`QQBOT_LOG_ARCHIVE_DAYS`
+      默认 30 天，0 = 不归档），活文件的容量口径不变。
 
     `capacity` 下限只有 1（`FeatureLog` 自己在传进来之前已经按 10 兜住了）；
     滚动判据是"行数 > capacity × slack"，所以文件里通常有 capacity..capacity×slack 条。
@@ -159,11 +184,58 @@ class RollingJsonlFile:
             self.trim()
 
     def trim(self) -> None:
-        """把文件重写成最近 capacity 条。顺序读一遍，内存里只留尾部若干行。"""
+        """把文件重写成最近 capacity 条；被裁掉的旧行先追加到归档。
+
+        **顺序必须是先写归档、再替换活文件。** 如果反过来（先 `os.replace` 再归档），
+        进程在两步之间崩掉时，那批已经从活文件里消失、又还没进归档的行就**永久没了**；
+        按现在这个顺序崩，最坏是归档里多出下一轮会再写一遍的重复行——重复可以接受，
+        丢数据不行。这也是"宁可少归档，不许日志弄炸主流程"的落点：归档写不进去时只
+        计数告警，活文件照样裁到 capacity。
+
+        内存仍然只留尾部 capacity 行：顺序读一遍，deque 满了就说明最左那行马上要被
+        挤掉，当场写进归档。**不把整个文件读进内存。**
+        """
+
+        days = log_archive_days()
+        archive_path = self._archive_path() if days > 0 else None
+        archive = None
+        archive_broken = False
+
+        def archive_line(line: str) -> None:
+            nonlocal archive, archive_broken
+            if archive_path is None or archive_broken:
+                return
+            if archive is None:
+                try:
+                    archive_path.parent.mkdir(parents=True, exist_ok=True)
+                    archive = archive_path.open("a", encoding="utf-8")
+                except OSError as exc:
+                    # 一次失败就不再重试：archive 可能是同名普通文件，每行都试一遍
+                    # 只会把同一条告警刷满、把 write_failures 刷爆。
+                    archive_broken = True
+                    self._note_failure("rolling_log_archive_failed", exc)
+                    return
+            try:
+                archive.write(line)
+            except OSError as exc:
+                archive_broken = True
+                self._note_failure("rolling_log_archive_failed", exc)
+                self._close(archive)
+                archive = None
 
         try:
             with self.path.open("r", encoding="utf-8", errors="replace") as handle:
-                tail = deque(handle, maxlen=self.capacity)
+                tail = deque(maxlen=self.capacity)
+                for line in handle:
+                    if len(tail) == self.capacity:
+                        archive_line(tail[0])
+                    tail.append(line)
+            # 归档先落盘并关闭，之后才动活文件（见上面的顺序说明）。
+            # close 的 flush 失败同样是归档写失败，要计数，不能悄悄吞掉。
+            self._close(archive, count=True)
+            archive = None
+            if archive_path is not None:
+                self._prune_archive(archive_path, days)
             temp = self.path.with_suffix(".jsonl.trim")
             with temp.open("w", encoding="utf-8") as handle:
                 handle.writelines(tail)
@@ -172,9 +244,56 @@ class RollingJsonlFile:
             self.bytes = self.path.stat().st_size
             logger.info("rolling_log_trimmed label=%s kept=%s", self.label, len(tail))
         except OSError as exc:
-            self.write_failures += 1
-            logger.warning("rolling_log_trim_failed label=%s category=%s",
-                           self.label, type(exc).__name__)
+            self._note_failure("rolling_log_trim_failed", exc)
+        finally:
+            if archive is not None:
+                self._close(archive)
+
+    def _archive_path(self) -> Path:
+        """当月归档文件：`archive/<label>-YYYYMM.jsonl`（YYYYMM 取归档那一刻的本地年月）。"""
+
+        stamp = time.strftime("%Y%m", time.localtime())
+        return self.path.parent / "archive" / f"{self.label}-{stamp}.jsonl"
+
+    def _prune_archive(self, keep: Path, days: int) -> None:
+        """删归档目录里 mtime 超过 days 天的 `*.jsonl`；**刚写的那个不删**。
+
+        只 glob 这个目录自己的 `*.jsonl`（不递归、不碰活日志）。清理失败同样不打断
+        调用方——它是顺手做的事，不是 trim 成功的前提。
+        """
+
+        directory = keep.parent
+        cutoff = time.time() - days * 86400
+        try:
+            candidates = list(directory.glob("*.jsonl"))
+        except OSError as exc:
+            # `archive` 被同名普通文件占住时这里会失败；不能因此让 trim 失败。
+            self._note_failure("rolling_log_archive_prune_failed", exc)
+            return
+        keep_key = os.path.normcase(os.path.abspath(str(keep)))
+        for candidate in candidates:
+            if os.path.normcase(os.path.abspath(str(candidate))) == keep_key:
+                continue
+            try:
+                if candidate.stat().st_mtime < cutoff:
+                    candidate.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                self._note_failure("rolling_log_archive_prune_failed", exc)
+
+    def _note_failure(self, event: str, exc: OSError) -> None:
+        self.write_failures += 1
+        logger.warning("%s label=%s category=%s", event, self.label, type(exc).__name__)
+
+    def _close(self, handle, *, count: bool = False) -> None:
+        if handle is None:
+            return
+        try:
+            handle.close()
+        except OSError as exc:
+            if count:
+                self._note_failure("rolling_log_archive_failed", exc)
 
     def clear(self) -> None:
         """清空文件与计数（不删文件本身）。"""

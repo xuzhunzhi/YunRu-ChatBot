@@ -32,7 +32,9 @@
    绝不让"日志写不进去"变成"消息收不到 / 发不出"。
 
 轮转**复用 `feature_log.RollingJsonlFile`**（不另写第二套）：按条滚动、留一倍余量、
-超过 `capacity × 2` 就重写成最近 `capacity` 条。容量见 `dev_config.RAW_EVENTS_MAX`
+超过 `capacity × 2` 就重写成最近 `capacity` 条；被裁掉的旧行追加到
+`data/logs/archive/raw_events-YYYYMM.jsonl`，保留 `QQBOT_LOG_ARCHIVE_DAYS` 天
+（默认 30，0 = 不归档、回到旧行为）。容量见 `dev_config.RAW_EVENTS_MAX`
 （默认 5000），开关 `QQBOT_RAW_EVENTS=0`（**默认开启**，一键关掉）。
 
 **心跳不算**：`meta_event/heartbeat` 每几十秒一条、纯噪音，排除（`is_heartbeat`）；
