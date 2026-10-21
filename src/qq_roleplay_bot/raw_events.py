@@ -33,8 +33,9 @@
 
 轮转**复用 `feature_log.RollingJsonlFile`**（不另写第二套）：按条滚动、留一倍余量、
 超过 `capacity × 2` 就重写成最近 `capacity` 条；被裁掉的旧行追加到
-`data/logs/archive/raw_events-YYYYMM.jsonl`，保留 `QQBOT_LOG_ARCHIVE_DAYS` 天
-（默认 30，0 = 不归档、回到旧行为）。容量见 `dev_config.RAW_EVENTS_MAX`
+`data/logs/archive/raw_events-YYYYMMDD.jsonl`（按归档那一刻的本地日期分文件），保留
+`QQBOT_LOG_ARCHIVE_DAYS` 天（默认 30，0 = 不归档、回到旧行为；按文件名日期严格保留
+最近 N 个自然日，不看 mtime）。容量见 `dev_config.RAW_EVENTS_MAX`
 （默认 5000），开关 `QQBOT_RAW_EVENTS=0`（**默认开启**，一键关掉）。
 
 **心跳不算**：`meta_event/heartbeat` 每几十秒一条、纯噪音，排除（`is_heartbeat`）；

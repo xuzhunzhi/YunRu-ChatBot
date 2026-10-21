@@ -28,8 +28,9 @@
 
 保留期：活文件最多留 `capacity × 2` 条，超过就重写成最近 `capacity` 条（默认 20000 条，
 理由见 `dev_config.CHAT_LOG_MAX` 那一行）；被裁掉的旧行不再丢弃，而是追加到
-`data/logs/archive/chat-YYYYMM.jsonl`，保留 `QQBOT_LOG_ARCHIVE_DAYS` 天（默认 30，
-0 = 不归档、回到旧行为）。轮转用的是 `feature_log.RollingJsonlFile`
+`data/logs/archive/chat-YYYYMMDD.jsonl`（按归档那一刻的本地日期分文件），保留
+`QQBOT_LOG_ARCHIVE_DAYS` 天（默认 30，0 = 不归档、回到旧行为；按文件名日期严格保留
+最近 N 个自然日，不看 mtime）。轮转用的是 `feature_log.RollingJsonlFile`
 ——**与模型日志共用同一份实现**，不另写一套（"共用模块的改动必须同时服务两边"）。
 """
 from __future__ import annotations

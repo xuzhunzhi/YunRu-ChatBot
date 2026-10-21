@@ -7,6 +7,7 @@
 离线测试入口不用 pytest fixture，临时目录在测试内部自己建。
 """
 import asyncio
+import datetime
 import json
 import os
 import tempfile
@@ -182,28 +183,65 @@ def test_zero_archive_days_keeps_the_old_discard_behaviour() -> None:
         assert not (Path(tmp) / "archive").exists()
 
 
-def test_archive_prunes_files_older_than_the_retention_window() -> None:
-    """归档目录里 40 天前的 *.jsonl 会被清掉；刚写的那个不动。"""
+def archive_name(label: str, days_ago: int) -> str:
+    """按"今天减 N 天"造归档文件名；不硬编码年份（跨年也能跑）。"""
+
+    day = datetime.date.today() - datetime.timedelta(days=days_ago)
+    return f"{label}-{day.strftime('%Y%m%d')}.jsonl"
+
+
+def test_archive_prunes_by_filename_date_not_mtime() -> None:
+    """按文件名日期清理：40 天前的文件即使 mtime 是现在也删；10 天前的即使 mtime 很旧也留。
+
+    mtime 会被复制/解压/追加改掉，按它清理等于"看文件最近被谁碰过"，不能保证严格 30 天。
+    """
 
     with tempfile.TemporaryDirectory() as tmp, archive_days_env("30"):
         archive = Path(tmp) / "archive"
         archive.mkdir()
-        old = archive / "judge-202001.jsonl"
-        old.write_text('{"seq": -1}\n', encoding="utf-8")
-        recent = archive / "judge-202002.jsonl"
+        expired = archive / archive_name("judge", 40)
+        expired.write_text('{"seq": -1}\n', encoding="utf-8")
+        fresh_mtime = time.time()
+        os.utime(expired, (fresh_mtime, fresh_mtime))
+
+        recent = archive / archive_name("judge", 10)
         recent.write_text('{"seq": -2}\n', encoding="utf-8")
-        forty_days_ago = time.time() - 40 * 86400
-        os.utime(old, (forty_days_ago, forty_days_ago))
+        old_mtime = time.time() - 40 * 86400
+        os.utime(recent, (old_mtime, old_mtime))
+
+        today = archive / archive_name("judge", 0)
+        today.write_text('{"seq": -3}\n', encoding="utf-8")
 
         log = FeatureLog("judge", tmp, capacity=10, enabled=True)
         for index in range(21):
             log.record(input=f"in-{index}")
 
-        assert not old.exists()
+        assert not expired.exists()
         assert recent.exists()
-        current = archive / f"judge-{time.strftime('%Y%m', time.localtime())}.jsonl"
-        assert current.exists()
+        assert today.exists()
         assert [int(entry["seq"]) for entry in read_archive_entries(Path(tmp), "judge")] != []
+
+
+def test_unparseable_archive_names_are_never_deleted() -> None:
+    """名字里解析不出日期的文件（备份、别的工具、别的扩展名）一律不动——误删比留垃圾贵。"""
+
+    with tempfile.TemporaryDirectory() as tmp, archive_days_env("30"):
+        archive = Path(tmp) / "archive"
+        archive.mkdir()
+        backup = archive / "judge-backup.jsonl"
+        backup.write_text('{"seq": -1}\n', encoding="utf-8")
+        notes = archive / "notes.txt"
+        notes.write_text("别删我\n", encoding="utf-8")
+        old_mtime = time.time() - 400 * 86400
+        os.utime(backup, (old_mtime, old_mtime))
+        os.utime(notes, (old_mtime, old_mtime))
+
+        log = FeatureLog("judge", tmp, capacity=10, enabled=True)
+        for index in range(21):
+            log.record(input=f"in-{index}")
+
+        assert backup.exists()
+        assert notes.exists()
 
 
 def test_archive_failure_still_trims_and_counts_a_failure() -> None:

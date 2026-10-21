@@ -27,10 +27,11 @@
    太贵；留一倍余量之后，摊到每条记录的成本可以忽略。**这段轮转逻辑现在只有一份**
    （`RollingJsonlFile`）：对话日志（`chat_log.py`）要的是同一个做法，两边共用，
    不会出现"模型日志的轮转修了、对话日志还是老样子"。
-   **被裁掉的旧行不再丢弃**：追加到同目录的 `archive/<label>-YYYYMM.jsonl`，
-   于是活文件仍然只有 capacity..capacity*2 行，但半个月以上的历史还能在归档里查到
-   （2026-10-21 用户要求"所有落盘日志都能查到半个月以上"）。归档保留天数由
-   `QQBOT_LOG_ARCHIVE_DAYS` 控制（默认 30，0 = 不归档、完全回到旧行为）。
+   **被裁掉的旧行不再丢弃**：追加到同目录的 `archive/<label>-YYYYMMDD.jsonl`
+   （按归档那一刻的本地日期分文件），于是活文件仍然只有 capacity..capacity*2 行，
+   但半个月以上的历史还能在归档里查到（2026-10-21 用户要求"所有落盘日志都能查到
+   半个月以上"）。归档保留天数由 `QQBOT_LOG_ARCHIVE_DAYS` 控制（默认 30，0 = 不归档、
+   完全回到旧行为）；清理**按文件名里的日期严格保留最近 days 个自然日，不看 mtime**。
 3. **内容含完整 system prompt 与聊天正文**，所以目录在 `data/`（已被 .gitignore
    忽略），并且可以用 `QQBOT_FEATURE_LOG=0` 整体关掉。
 4. 单字段上限 20000 字符：一条请求撑不到这个数，但真撑到了也不该让日志无限长。
@@ -42,6 +43,7 @@ import logging
 import os
 import time
 from collections import deque
+from datetime import date, timedelta
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -97,6 +99,10 @@ def log_archive_days() -> int:
 
     每次都读环境变量（不在 `RollingJsonlFile.__init__` 里缓存）：这样运维改配置
     不用重启进程就能生效，测试也能在构造之后再切换。范围夹在 0..3650。
+
+    口径是**按归档文件名里的日期**保留最近 `days` 个自然日（含今天），不是按 mtime
+    ——mtime 会被复制/解压/追加改掉，按它清理等于"看文件最近被谁碰过"，不是按日志
+    写下的那一天算。文件名解析不出日期的文件一律不删（见 `_prune_archive`）。
     """
 
     raw = os.environ.get("QQBOT_LOG_ARCHIVE_DAYS", "").strip()
@@ -130,8 +136,9 @@ class RollingJsonlFile:
     - **绝不让日志打断调用方**：写盘/轮转/归档失败只累加 `write_failures` 并告警，不抛；
     - 内存里**不留正文**：这里只数行数与字节数（正文在文件里），
       所以文件再大也不吃内存；
-    - 被裁掉的旧行落进同目录 `archive/<label>-YYYYMM.jsonl`（`QQBOT_LOG_ARCHIVE_DAYS`
-      默认 30 天，0 = 不归档），活文件的容量口径不变。
+    - 被裁掉的旧行落进同目录 `archive/<label>-YYYYMMDD.jsonl`（`QQBOT_LOG_ARCHIVE_DAYS`
+      默认 30 天，0 = 不归档），活文件的容量口径不变。归档按**文件名里的日期**严格
+      保留最近 `days` 个自然日，不看 mtime。
 
     `capacity` 下限只有 1（`FeatureLog` 自己在传进来之前已经按 10 兜住了）；
     滚动判据是"行数 > capacity × slack"，所以文件里通常有 capacity..capacity×slack 条。
@@ -250,20 +257,46 @@ class RollingJsonlFile:
                 self._close(archive)
 
     def _archive_path(self) -> Path:
-        """当月归档文件：`archive/<label>-YYYYMM.jsonl`（YYYYMM 取归档那一刻的本地年月）。"""
+        """当天归档文件：`archive/<label>-YYYYMMDD.jsonl`（按归档那一刻的本地日期）。"""
 
-        stamp = time.strftime("%Y%m", time.localtime())
+        stamp = time.strftime("%Y%m%d", time.localtime())
         return self.path.parent / "archive" / f"{self.label}-{stamp}.jsonl"
 
-    def _prune_archive(self, keep: Path, days: int) -> None:
-        """删归档目录里 mtime 超过 days 天的 `*.jsonl`；**刚写的那个不删**。
+    def _archive_date(self, name: str) -> date | None:
+        """从 `<label>-YYYYMMDD.jsonl` 里取出日期；名字不是这个形状就返回 None。
 
+        **只认自己这套命名**（以 `self.label` 开头、8 位数字、`.jsonl` 结尾）。
+        别的工具放的、备份改名过的、别的扩展名的文件解析不出来——调用方一律不删。
+        """
+
+        prefix = f"{self.label}-"
+        suffix = ".jsonl"
+        if not name.startswith(prefix) or not name.endswith(suffix):
+            return None
+        stamp = name[len(prefix):len(name) - len(suffix)]
+        if len(stamp) != 8 or not stamp.isdigit():
+            return None
+        try:
+            return date(int(stamp[:4]), int(stamp[4:6]), int(stamp[6:]))
+        except ValueError:
+            return None
+
+    def _prune_archive(self, keep: Path, days: int) -> None:
+        """删归档目录里**文件名日期**早于保留窗口的 `*.jsonl`；**刚写的那个不删**。
+
+        **为什么按文件名日期而不是 mtime**：mtime 会被复制、解压、追加改写——拷过来
+        的一份旧归档在 mtime 上可能"全新"，于是清理就成了看心情；文件名里的日期是
+        写入那一刻的事实，复制/解压都改不掉它。保留窗口是**最近 days 个自然日（含
+        今天）**，即删 `date < today-(days-1)` 的文件。
+
+        **为什么解析不出日期的文件不删**：误删比留垃圾贵。别的工具放的、备份、别的
+        扩展名（这里只 glob `*.jsonl`）都可能落在同一目录，宁可留着让人自己处理。
         只 glob 这个目录自己的 `*.jsonl`（不递归、不碰活日志）。清理失败同样不打断
         调用方——它是顺手做的事，不是 trim 成功的前提。
         """
 
         directory = keep.parent
-        cutoff = time.time() - days * 86400
+        cutoff = date.today() - timedelta(days=max(0, days - 1))
         try:
             candidates = list(directory.glob("*.jsonl"))
         except OSError as exc:
@@ -274,8 +307,11 @@ class RollingJsonlFile:
         for candidate in candidates:
             if os.path.normcase(os.path.abspath(str(candidate))) == keep_key:
                 continue
+            archived_on = self._archive_date(candidate.name)
+            if archived_on is None:
+                continue
             try:
-                if candidate.stat().st_mtime < cutoff:
+                if archived_on < cutoff:
                     candidate.unlink()
             except FileNotFoundError:
                 continue
