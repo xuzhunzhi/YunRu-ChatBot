@@ -54,18 +54,27 @@ python -m venv .venv
 Copy-Item .env.example .env
 ```
 
+模板里已经有的这些行不用改结构，把值填上就行：
+
 ```dotenv
 QQBOT_API_BASE_URL=https://api.deepseek.com
 QQBOT_API_MODEL=deepseek-flash
 QQBOT_API_KEY=replace-me
-
-# 超管。不写会落到代码里的占位号 900000001，等于你没有权限。
-QQBOT_SUPER_ADMIN_USER_IDS=你的QQ号
-
 ONEBOT_WS_HOST=127.0.0.1
 ONEBOT_WS_PORT=8080
-QQBOT_SNOWLUMA_HTTP_BASE_URL=http://127.0.0.1:3000
 ```
+
+下面两行**模板里没有，要自己加**：
+
+```dotenv
+# 超管，必填。不写会落到代码里的占位号 900000001，等于你没有权限。
+QQBOT_SUPER_ADMIN_USER_IDS=你的QQ号
+# 普通管理员，可选。
+QQBOT_ADMIN_USER_IDS=你的QQ号
+```
+
+`QQBOT_SNOWLUMA_HTTP_BASE_URL` 也不在模板里，但**不写就行**：默认就是
+`http://127.0.0.1:3000`，只有 NapCat 的 HTTP 端口换了才需要加这一行。
 
 Linux / macOS：把 `.\.venv\Scripts\python.exe` 换成 `.venv/bin/python`，`Copy-Item` 换成 `cp`。
 
@@ -123,11 +132,14 @@ OneBot 已连接
 
 ### 记忆
 
-- **按人跨群。** 人物画像是“她对这个人的整体印象”，每轮带上，不按词检索；
-  知识库才是按词命中。画像与关系档位都是同一个人在所有群共用一份。
+- **三层记忆。** 每一条进来的消息（包括她没接话的那些）先落到**超短期**队列：TTL 在 1–3 小时
+  之间随机，到期还没被维护认领会再续一次；维护 agent 每批从这里取料，值得留的才升到中短期
+  （默认 14 天，群事实与话题摘要 30 天），被后续证据再次确认的才升长期。
+  `name` / `boundary`（称呼与红线）直接进长期。私聊与邮件目前不进这套队列。
+- **跨群的是人物记忆，不是对话原文。** 画像、称呼、边界与关系（好感 / 防备）按 `user_id`
+  在所有群共用一份；对话原文、活窗口与会话状态按群隔离，A 群说的话不会进 B 群的 prompt。
+  能不能跨群由写入时的 scope 决定：`user_global` 跨群，`user_group` 锁在单个群。
 - **一人多号要手工登记。** 系统不判断两个号是不是同一个人；登记之后两个号读写同一份记忆。
-- **两层记忆库。** 新事实先进中短期，被后来的证据再次确认才升到长期；
-  `name` / `boundary`（称呼与红线）直接进长期。每类事实有各自的保留上限。
 - **只删不改。** 面板与 `/super memory` 能删有问题的记忆，不能手写一条；写入只走记忆维护 agent。
   删除先把整条记录快照进 `archive`（保留 30 天），墓碑保留 365 天，防止旧证据把它写回来。
 - **金句与黑话都从群里被动学。** 金句的素材只认“别人给她的话贴了表情”；注入时最多挑 5 条
