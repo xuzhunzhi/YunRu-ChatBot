@@ -256,20 +256,28 @@
 | 2 | 会话明细（`group`/`private`） | `/api/session/messages` 389-394 | `/api/session/clear` 501 → `_clear_session()` 704-713 | 读 = **面板直接读 `runtime_state.json`**（`webui_data.py:167-215`）；写 = `session_clear`（`runtime.py:1227`） | **有**（`session_id` 形如 `group:<号>`） |
 | 3 | 用量（`account`） | `/api/usage` 387-388 | — | **面板直接读 `data/api_usage.json`**（`webui_data.py:216-262`） | 无（按 agent 汇总） |
 | 4 | 记忆（`memory`/`memory_profile`） | `/api/memory/overview` 395-396、`/api/memory/problem` 397-403、`/api/memory/<表>` 404-428 | `/api/memory/purge` 505 → `_memory_purge()` 715-732、`/api/memory/affinity` 507 → `_memory_affinity()` 734-751 | 读 = **面板自己开只读 sqlite**（`webui_data.py:263-274`、`_LIST_SQL` 359-382、`read_memory_table()` 383-477）；写 = `memory_ops`（`memory_ops.py:40-107`） | **部分**（见 §5.3） |
-| 5 | 知识库（`knowledge`） | `/api/knowledge/overview` 442-443、`/chunks` 444-445、`/operator` 446-447 | `/api/knowledge/operator` 513 → `_knowledge_write()` 790-823、`/rebuild` 519 → `_knowledge_rebuild()` 825-839 | `knowledge`（`wire.py:158-160`；核心给的是 `_knowledge_for(engine)`，`runtime.py:1294`，定义在 `runtime.py:1680`） | **无**（全局） |
+| 5 | 知识库（`knowledge`） | `/api/knowledge/overview` 442-443、`/chunks` 444-445、`/operator` 446-447 | `/api/knowledge/operator` 513 → `_knowledge_write()` 790-823 | `knowledge`（`wire.py:158-160`；核心给的是 `_knowledge_for(engine)`，`runtime.py:1294`，定义在 `runtime.py:1680`） | **无**（全局） |
 | 6 | 金句 / 黑话（`knowledge_quotes`/`knowledge_slang`） | `/api/knowledge/quotes` 451-453、`/slang` 462-464 | `/quotes` 515 → `_quotes_write()` 1168-1219、`/slang` 517 → `_slang_write()` 1221-1271 | `learned`（`wire.py:169-171`；契约是 `LearnedSeams`，`plugins/__init__.py:465-539`） | **部分**（见 §5.3） |
 | 7 | 插件（`plugins` + 动态 tab） | `/api/plugins` 370-379、**`/api/plugin/<名字>`**（`webui_panel.py:380-386` → `_plugin_panel()` 596） | — | `plugins`（只读清单，`wire.py:98`）+ **`panel_spec` / `panel_names`**（`wire.py:235-236` 递的两个绑定方法；插件自己在 `register()` 里用 `registry.provide_panel(name, spec)` 报它那一页） | 无（每页归那个插件自己） |
 | 8 | 日志（`logs`） | `/api/logs` 429-435 | — | **面板直接读 `data/logs/*`**（`webui_data.py:557-573`） | 无（按 feature，不是按群） |
 | 9 | 调参（`settings`） | `/api/settings` 436-437 → `_settings_view()` 847-895 | `/api/settings` 509 → `_settings()` 753-762 | `apply_overrides`（`runtime.py:225-307`；白名单 `operator_config.SETTINGS` `operator_config.py:40-97`） | **无**（全局配置） |
 | 10 | 六套 prompt（`settings` 内） | `/api/prompts` 438-439 → `_prompts_view()` 897-914、`/versions` 440-441 → `_prompt_versions()` 916-927 | `/api/prompts` 511 → `_prompt_write()` 764-788 | `prompt_library`（六套：`PROMPTS = ("persona","reply","judge","memory","review","vision")` `prompt_library.py:63`） | **无** |
-| 11 | 动作 / 群管理（`actions`） | **—**（动作清单不再是面板的读接口：它由 `plugins/group_admin/plugin.py` 的 `PANEL_ACTIONS` 自报，面板只按封闭 kind 词表画出来） | `/api/action` 495 → `_action()` 536-568 | `execute_action`（`wire.py:120` → `runtime.py:1221` → `stage3_main.py:2754+`）；菜单 `PANEL_ACTIONS`（`plugins/group_admin/plugin.py:35-56`） | **有**（显式 `group_id`） |
+| 11 | 动作 / 群管理（`actions`） | **—**（动作清单不再是面板的读接口：它由 `plugins/group_admin/plugin.py` 的 `PANEL_ACTIONS` 自报，面板只按封闭 kind 词表画出来） | `/api/action`（`webui_panel.py:684` → `_action()` 737） | `execute_action`（`wire.py:165` → `runtime.py:1989` → `stage3_main.py:3107`）；菜单 `PANEL_ACTIONS`（`plugins/group_admin/plugin.py:35-56`） | **有**（显式 `group_id`） |
 | 12 | 入群审批（插件 tab） | `/api/plugin/join_approval`（`webui_panel.py:380-386` → 596；取数闭包是 `plugins/join_approval/plugin.py:108-142` 的 `_pending_reader`） | `/api/approval` 497 → `_approval()` 570-594 | `call_action`（`get_group_system_msg` / `set_group_add_request`） | **有**（`group_id`） |
 | 13 | 操作记录（`history`） | `/api/history` 465-468 | — | `control_audit.tail()`（`control_audit.py:118-135`） | 无 |
 | 14 | 群开关（`group` 内） | — | `/api/groups` 499 → `_groups()` 636-648 | `group_switch`（`wire.py:145` → `runtime.py:1230`） | **有** |
-| 15 | 重启（`settings` 内） | — | `/api/control/restart` 493 → `_restart()` 525-534 | `restart`（`wire.py:143` → `runtime.py:1224`）+ 冷却闸（`wire.py:21-33`） | 无 |
+| 15 | 重启（`settings` 内） | — | `/api/control/restart`（`webui_panel.py:682` → `_restart()` 726） | `restart`（`wire.py:188` → `runtime.py:2023`）+ 冷却闸（`wire.py:21-33`） | 无 |
 
 （另有两条不对应任何 tab、但存在：`/api/login` 479-485、`/api/logout` 486-488；
 以及 `/health` 320（`_health()`）、469-470 与静态外壳——`PUBLIC_PATHS` `webui_panel.py:242`。）
+
+> **2026-10-22 删掉了一条死路由**：`POST /api/knowledge/rebuild`（本表第 5 行原来列着它）。
+> 依据是读代码，不是猜：运行时**不建索引**（`runtime.py:131` 写着索引由离线
+> `data/knowledge_tool.py build` 建，运行时不读语料、不建索引）；`UiSeams` 里从来没有
+> `knowledge_rebuild` 这一项，所以那条路由**永远 501**；而前端（`webui/app.js` 与
+> `/v2` 产物）**从来没请求过**它。补一条接缝等于给核心新开"运行时重建向量索引"这个重活
+> （读语料、可能重算向量），不属于这次 beta 打磨——所以删路由，不留死按钮。
+> 要恢复就先把核心那一侧的离线/在线边界定下来（同一条依据写在 `webui_panel._write` 那处注释里）。
 
 **插件自报界面（2026-10-11 的那处接缝）**：每个插件可以在 `register()` 里用
 `registry.provide_panel(name, spec)` 报**它自己那一页**，面板用一条通用读路由
@@ -310,13 +318,13 @@ panel.audit.read         panel.groups.switch     panel.restart
 | --- | --- | --- |
 | **删记忆** | `/api/memory/purge`（`webui_panel.py:505` → `_memory_purge()` 715-732）→ `memory_ops.purge()`（`memory_ops.py:51-68`） | 动了她的记忆。**内容不销毁**（先归档，`AGENTS.md:51-53`；面板回复里也写着"原文已归档，保留 30 天" `webui_panel.py:731`），但"删了什么"只有审计能还原 |
 | **调 / 重置好感** | `/api/memory/affinity`（`webui_panel.py:507` → `_memory_affinity()` 734-751）→ `memory_ops.affinity()/reset_affinity()`（`memory_ops.py:70-107`） | 直接改关系档；而且**这张表没有群维度**（§5.3） |
-| **踢人 / 禁言 / 撤回 / 全员禁言** | `/api/action`（`webui_panel.py:495` → `_action()` 536-568）+ `PANEL_ACTIONS` 里 `group_admin` 那 6 行（`plugins/group_admin/plugin.py:36-43`）；允许集合 `capabilities.GROUP_MANAGE_ACTIONS`（`capabilities.py:100-102`） | 动的是群里的人；**踢人不可逆**（`set_group_kick` 在名单里，但要求明确指定：`stage3_main.py:2766-2767`） |
+| **踢人 / 禁言 / 撤回 / 全员禁言** | `/api/action`（`webui_panel.py:684` → `_action()` 737）+ `PANEL_ACTIONS` 里 `group_admin` 那 6 行（`plugins/group_admin/plugin.py:36-43`）；允许集合 `capabilities.GROUP_MANAGE_ACTIONS`（`capabilities.py:100-102`） | 动的是群里的人；**踢人不可逆**（`set_group_kick` 在名单里，但要求明确指定：`stage3_main.py:2766-2767`） |
 | **设 / 撤 QQ 群管理员、改群名片 / 群名 / 头衔 / 公告** | `/api/action` + 同一份目录里 `group_owner` 那 6 行（`plugins/group_admin/plugin.py:44-55`）；`capabilities.GROUP_OWNER_ACTIONS`（`capabilities.py:116-122`） | 等于发权限 / 改群；`capabilities.py:97-99` 明写这几个是"要么不可逆、要么等于发权限" |
 | **入群审批通过与拒绝** | `/api/approval`（`webui_panel.py:497` → `_approval()` 570-594）；`JOIN_APPROVAL_ACTIONS`（`capabilities.py:126`） | 让陌生人进群 |
-| **重启** | `/api/control/restart`（`webui_panel.py:493` → `_restart()` 525-534） | 会中断线上（`AGENTS.md:322`：动运行中的进程要先问） |
+| **重启** | `/api/control/restart`（`webui_panel.py:682` → `_restart()` 726） | 会中断线上（`AGENTS.md:322`：动运行中的进程要先问） |
 | **改配置（含凭据）** | `/api/settings`（`webui_panel.py:509` → `_settings()` 753-762）→ `apply_overrides`（`runtime.py:216-295`）；`secret` 类见 `operator_config.py:83-89` | 凭据类只回显掩码（`webui_data.mask_settings()` `webui_data.py:71-88`），但**写**是真的改运行配置 |
 | **改六套 prompt** | `/api/prompts`（`webui_panel.py:511` → `_prompt_write()` 764-788）→ `PromptLibrary.save/reset/read_version`（`prompt_library.py:378/428/544`） | 直接改她的人格与判定材料（`AGENTS.md` §2.2） |
-| **改 / 删知识库、重建索引** | `/api/knowledge/operator`（`webui_panel.py:513` → `_knowledge_write()` 790-823）、`/rebuild`（`webui_panel.py:519` → `_knowledge_rebuild()` 825-839） | Stage 3 的数据（`AGENTS.md:96`） |
+| **改 / 删知识库** | `/api/knowledge/operator`（`webui_panel.py:1116` → `_knowledge_write()`） | Stage 3 的数据（`AGENTS.md:96`）。`/api/knowledge/rebuild` 已于 2026-10-22 删除（理由见 §4.1 那条注记：运行时本来就不建索引） |
 | **群开关 / 清会话** | `/api/groups`（`webui_panel.py:499` → `_groups()` 636-648）、`/api/session/clear`（`webui_panel.py:501` → `_clear_session()` 704-713） | 这两个是**管理员本职**，但**必须过作用域**（§5.3）；清会话**不可逆**（`leave_session` `stage3_main.py:4082-4089`） |
 
 - **【待定】T6**：管理员要不要能用**踢人 / 禁言 / 撤回**？他本来就是 QQ 群管理员，
@@ -330,7 +338,7 @@ panel.audit.read         panel.groups.switch     panel.restart
 ### 5.1 现状：接缝是**全权、无身份**的（【实测】）
 
 - `UiSeams` 的每个字段都没有调用者参数（`src/qq_roleplay_bot/plugins/__init__.py:417-464`）；
-- `_SeamBinder.ui_seams()` 把引擎方法直接绑上（`runtime.py:1279-1303`）；
+- `_SeamBinder.ui_seams()` 把引擎方法直接绑上（`runtime.py:2090-2127`）；
 - `wire._panel_seams()` 把闭包原样交给 `Panel`（`wire.py:84-178`）；
 - `Panel.handle()/authorize()` 只判"进不进得来"（`webui_panel.py:244-291`）；
 - `AccessDecision` 里 `source` 是 IP（`webui_access.py:151-167, 199-207`）。
@@ -376,19 +384,27 @@ panel.audit.read         panel.groups.switch     panel.restart
 | `memory_ops`（`wire.py:130-131`，`_Lazy` 延后取；核心侧 `runtime.py:1259-1261`） | `MemoryOps` 实例（`memory_ops.py:40-107`：`available` / `purge` / `affinity` / `reset_affinity`） | `purge(record_ids)`：**先按 id 反查这些记录的群归属再筛**——`records` 用 `scope_type`/`scope_key`（`webui_data.py:359-360`），而 `scope_key` 对 `user_group` 就是 `群号:人`（`memory_store.py:498-510` 的 `_namespaces`），`record_subjects` 也有 `group_id`（`memory_store.py:127-129`）。**越界一律剔除、不做部分成功**；一个都没剩下就拒。`affinity` / `reset_affinity`：**待定（T8）**——`relationships` 表**只有 `user_id`，没有群维度**（`memory_store.py:117-120`），所以它天然跨群。三个选项：(a) 只给超管（v1 建议）；(b) 按"这个人在我管的群里说过话"做门（弱，不构成隔离）；(c) 给关系表加群维度（改数据模型，代价大，且会动 Stage 3 的记忆语义） |
 | `knowledge`（`wire.py:158-160`） | `OperatorKnowledge` 那一块（`runtime.py:1680` 给的是 `prompt_sources.knowledge_base`） | **无群维度**（知识库是全局的）→ **只给超管**；管理员面板里这一块**不显示**（不是"显示了再禁用"——"面板只显示与提交"意味着不给的就不显示） |
 | `learned`（`wire.py:169-171`；契约 `LearnedSeams` `plugins/__init__.py:465-539`） | 七个函数：`quote_view` / `quote_correct` / `quote_note_enabled` / `slang_list` / `slang_update` / `slang_delete` / `slang_mark_wrong` | **按群收窄（部分可行）**：`quote_view(group_id)`、`quote_correct(group_id, emoji_id, …)`（`runtime.py:1348-1524`）、`slang_list(group_id=None)`（`runtime.py:1535-1542`——**必须由核心把 `None` 换成"调用者的 scopes"**，透传 `None` 等于"所有群"）、`slang_update` / `slang_delete` / `slang_mark_wrong`（`runtime.py:1543-1574`）都带 `group_id`，逐个校验。<br>**两个例外【实测】**：(1) `quote_note_enabled(note_id, enabled)` **没有群参数**（`runtime.py:1525-1534`）——它操作的是 `QuoteStore.disabled_notes`，而 `notes` / `disabled_notes` 在存储里是**全局的**（`quote_learning.py:494-499, 501-511`；`note_id` 是**内容指纹**，`quote_learning.py:387-401`），只有 `meanings` / `overrides`（表情含义表与人工覆盖）按群（`quote_learning.py:480-493, 614-632`）→ 这条**只给超管**；(2) 同一条理由，`_quotes_view` 里与笔记有关的那半（`webui_panel.py:1057-1096`）也不能按群收窄 |
-| `execute_action`（`wire.py:120` → `runtime.py:1221` → `stage3_main.py:2754+`） | 面板必须显式给 `group_id`（`webui_panel.py:564`）、actor 固定是云茹（`webui_panel.py:538-545`） | 核心在执行前加一道"**调用者能不能管这个群**"，语义对齐 `_admin_may_manage_group()`（`stage3_main.py:2506-2516`）与 `_out_of_scope_reply()` 的固定说法（`stage3_main.py:3562-3585`）。**注意**：这里判的是**面板身份**，不是 QQ 消息里的身份，所以不能直接复用 `_control_scope_ok(message)`——要一个新入口（例如 `execute_action(..., panel_identity=…)`），否则就是把消息路径与面板路径混在一处 |
+| `execute_action`（`wire.py:165` → `runtime.py:1989` → `stage3_main.py:3107`） | 面板必须显式给 `group_id`（`webui_panel.py:762`）、actor 固定是云茹（`webui_panel.py:742-746`） | 核心在执行前加一道"**调用者能不能管这个群**"，语义对齐 `_admin_may_manage_group()`（`stage3_main.py:2506-2516`）与 `_out_of_scope_reply()` 的固定说法（`stage3_main.py:3562-3585`）。**注意**：这里判的是**面板身份**，不是 QQ 消息里的身份，所以不能直接复用 `_control_scope_ok(message)`——要一个新入口（例如 `execute_action(..., panel_identity=…)`），否则就是把消息路径与面板路径混在一处 |
 | `apply_overrides`（`wire.py:122-123` → `runtime.py:1274-1278` → `runtime.py:225-307`） | 改**全局**运行配置（白名单 `operator_config.SETTINGS` `operator_config.py:40-97`） | **无群维度** → **只给超管**（凭据类尤其）。管理员调用直接拒，不进 `apply_overrides` |
 | `prompt_library`（`wire.py:95`） | 六套 prompt 的读写（`prompt_library.py:63, 378, 428, 544`） | **只给超管** |
-| `control_audit`（`wire.py:105`） | **写**：`record(action, detail, result, source, token)`（`control_audit.py:80-105`）；**读**：`tail(count)`（118-135）→ `/api/history`（`webui_panel.py:465-468`） | 写：每条要能带**操作者 QQ**（§6）。<br>读：管理员只看**自己**的条目——现在这条做不到，因为记录里没有"谁"（§6）。<br>附带一处【实测】的缺口：面板 `_audit()` 读 `self._seam("token")`（`webui_panel.py:1273-1282`，另见 760），但 `wire._panel_seams()` 造的 seams **没有 `"token"` 这一项**（`wire.py:93-178`）→ `str(None or "")` → 审计里 `token` 字段**恒为空串**，也就是现在**分不出是哪把 token 干的** |
+| `control_audit`（`wire.py:105`） | **写**：`record(action, detail, result, source, token)`（`control_audit.py:80-105`）；**读**：`tail(count)`（118-135）→ `/api/history`（`webui_panel.py:465-468`） | 写：每条要能带**操作者 QQ**（§6）。<br>读：管理员只看**自己**的条目——现在这条做不到，因为记录里没有"谁"（§6）。<br>**"哪把 token"这一半 2026-10-22 补上了**：`build_web_panel()` 注入 `token` 接缝（`wire.py:84-118` 的 `_token_seam`，装配点 `wire.py:279`），返回值是本机 token 的**短指纹** `sha256(token)[:8]`（明文一个字节都不出这一层），没凭据/远程模式给空串。面板 `_audit()`（`webui_panel.py:1585`）把它交给 `ControlAudit.record(token=…)`，后者按既有纪律再记一次 `token_fingerprint`——落盘仍是 8 位十六进制、仍不可逆、不同 token 一定不同。它**仍不是"人"**：本机只有一把 token，远程模式这个字段是空串，所以"哪个管理员按的"还得等 §6.2 的身份层（T1）。 |
 | `state_reader`（`wire.py:140` → `runtime.py:1262-1265`） | `{"snapshot": engine.snapshot(), "usage_store": …}`——**整份快照**（含 `enabled_group_ids`、`sessions`） | 收窄成"只含调用者范围内的群与会话"：`enabled_group_ids ∩ scopes`、`sessions` 按 `session_id` 前缀筛。<br>**【待定】T9**：如果 `snapshot` 的结构不适合在核心侧就地过滤，就给它加一个参数化的读取口（`state_reader(scope)`），但**不要再让面板自己去读 `runtime_state.json`**（现在它在 `webui_data.py:167-187` 这么干） |
 | `group_switch`（`wire.py:145` → `runtime.py:1230-1234`） | `(group_id, enabled) -> 是否真的变了` | 入参就是 `group_id` → 校验在 scopes 内；`ALL` 不限。**这是管理员 v1 的正当能力之一** |
 | `session_clear`（`wire.py:147` → `runtime.py:1227-1229`） | `(session_id) -> bool` | 先解析出群号（`group:<号>`；`leave_session()` `stage3_main.py:4082-4089`）再校验。**【待定】T10**：非 `group:` 前缀的会话（例如 `mail:*`）管理员能不能清？本设计建议**不能**（"所在群聊"不含它） |
 | `self_id`（`wire.py:149-156`） | 云茹自己的 QQ 号 | 不是数据，是"她是谁" → **不需要收窄** |
 | `plugins`（`wire.py:98`；`runtime.py:1304`） | **只读**插件清单 | 无敏感内容 → 可保持不变（`plugins/__init__.py:450-451` 那段说明它为什么是只读） |
 | `flags`（`wire.py:135`） | `RuntimeFlags.snapshot`（`runtime_flags.py:26-60, 90-92`） | **读**（展示开关状态）可以给；**写**走的是 `apply_overrides`（`operator_config.py:42-51` 那些 `applies="live"` 的键）→ **只给超管** |
-| `restart`（`wire.py:143`） | 请求重启 | 全局且危险 → **只给超管**（冷却闸 `wire.py:21-33` 保留） |
+| `restart`（`wire.py:188` → `runtime.py:2023`） | 请求重启（面板把来源一起交过去：`webui:<来源>`） | 全局且危险 → **只给超管**（冷却闸 `wire.py:21-33` 保留） |
 | `data_root`（`wire.py:177`） | 数据根目录字符串 | **它就是"绕过接缝直接开库"的入口**。收窄的实质是**取消它**（§5.1 那四处读改走接缝）——前提是 T7 的核查结果确认它没有别的用途 |
 
+- **2026-10-22 已修的两处签名（实测坏点，别再退回去）**：`UiSeams.execute_action` 的转发口
+  `runtime.ui_execute_action` 现在收 `request` + 四个 keyword（`group_id` / `actor_id` 必填、
+  `message_id` / `mentioned` 照核心给默认），与 `stage3_main.execute_action`（`:3107`）
+  **逐个参数同名同种同默认值**；`ui_restart` 收 `source`（默认空串，转发给
+  `request_restart`）。修之前面板传 4 个关键字、闭包只收 1 个 → 每个动作按钮 500，
+  重启按钮同理（`run/data/bot.err.log` 约 105736 行，10-22 01:02:42 的 `TypeError`）。
+  形状由 `tests/test_ui_action_seam.py`（本体树）与 `tests/test_webui_panel.py`
+  的 `RealBinderActionTests`（插件树，真 `_SeamBinder` + 假引擎）逐个钉住。
 - **【待核】T7**：`data_root` 还有没有"非数据读取"的用途（例如静态资源、列表页）？
   我读了 `webui_panel.py` 里 `self.root` 的全部调用点与 `webui_data.py` 的相关函数，
   **没找到**别的东西；但我**没有逐行读完** `webui_data.py` 全 727 行与前端 `app.js`，
@@ -412,17 +428,20 @@ panel.audit.read         panel.groups.switch     panel.restart
 | 落点与形状 | `data/control_audit.jsonl`，一行一条 JSON：`seq/at/action/result/source/token/detail`（`control_audit.py:80-105`；模块头 1-12 说明为什么单独一份） |
 | 凭据保护 | `SECRET_KEY_HINTS = ("key","token","password","secret","passwd")`，命中这些**名字**的键，值换成 `"[已改]"`（`control_audit.py:31-32, 54-68`）；`token` 字段只存 sha256 前 8 位（41-46） |
 | 不会无限长 | 超 4MB 裁到最近 2000 行（27-29, 106-116） |
-| 面板每条写动作都记账 | `_audit()` `webui_panel.py:1273-1282`；调用点：restart 533、action 567、approval 590/593、group_switch 647、session_clear 712、memory_purge 728、affinity 743/750、prompt 783/785、knowledge 810/814/819/821、quote/slang 1191/1216/1240/1250/1266、settings 由核心 `apply_overrides` 记（`runtime.py:301-302`） |
+| 面板每条写动作都记账 | `_audit()` `webui_panel.py:1585-1594`；调用点：restart 734、action 773、approval 796/799、group_switch 853、session_clear 1038、memory_purge 1054、affinity 1069/1076、prompt 1109/1111、knowledge 1136/1140/1145/1147、quote/slang 1503/1528/1552/1562/1578、settings 由核心 `apply_overrides` 记（`runtime.py:556-558`） |
 | 读 | `tail(count)`（118-135）→ `/api/history`（`webui_panel.py:465-468`） |
 
-**缺的是什么【实测】：没有"谁"。**
+**缺的是什么【实测】：没有"人"。**
 - `source` 是 **IP**（`webui_access.py:199-207` 的 `source_of`）；
-- `token` 字段**恒为空串**（原因见 §5.3 那条：seams 里没有 `"token"`）；
-- 唯一像"人"的 `actor_id` 记的是**云茹自己的 QQ 号**（`webui_panel.py:538-545` 把 `self_id`
+- `token` 字段**从 2026-10-22 起有短指纹了**（`sha256(token)[:8]` 再经
+  `token_fingerprint` 落盘；见 §5.3 那条）：它解决的是"是不是同一把本机 token"，
+  **不解决"是谁"**——本机只有一把 token，远程模式没有本机 token（字段为空串），
+  而且本机模式本来就只有 `127.0.0.1` 一个来源；
+- 唯一像"人"的 `actor_id` 记的是**云茹自己的 QQ 号**（`webui_panel.py:742-746` 把 `self_id`
   当 actor 传进 `_audit(actor=…)`）——不是操作者。
 
-所以现在这份流水能回答"什么时候、改了什么"，**答不了"是谁干的"**。多管理员一上来，
-这一点必须先补。
+所以现在这份流水能回答"什么时候、改了什么、是不是本机那把 token 按的"，
+**仍然答不了"是哪个管理员干的"**。多管理员一上来，这一点必须先补。
 
 ### 6.2 要做成什么样
 
@@ -618,8 +637,8 @@ panel.audit.read         panel.groups.switch     panel.restart
 | 面板路由（读/写） | `webui_panel.py:346-471, 476-520` |
 | 面板自己开库/开文件读数据（绕过接缝） | `webui_data.py:167-187, 216-262, 263-274, 333-477, 557-573` |
 | 审计流水形状与凭据保护 | `control_audit.py:31-32, 41-46, 54-68, 80-117` |
-| 审计里缺"谁"（token 字段恒空） | `webui_panel.py:1273-1282`（读 `seam("token")`）对 `wire.py:93-178`（没有这一项） |
-| 接缝清单（面板侧） | `wire.py:93-178`；核心侧 `runtime.py:1221-1303` |
+| 审计里的 token 短指纹（2026-10-22 起） | `wire.py:84-118`（`_token_seam`）；装配点 `wire.py:279`；面板取用 `webui_panel.py:1585`（`_audit()`） |
+| 接缝清单（面板侧） | `wire.py:121-224`；核心侧 `runtime.py:1989-2127` |
 | 接缝契约（核心侧） | `plugins/__init__.py:417-464`（`UiSeams`）、`465-539`（`LearnedSeams`） |
 | 动作闸门与档位 | `capabilities.py:27-47, 100-102, 116-122, 126, 210-246` |
 | 运行期开关 | `runtime_flags.py:26-60, 63-140` |
