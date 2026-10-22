@@ -827,10 +827,11 @@ def mail_report_self_check_lines() -> list[str]:
 # 以前写信借用的是**回复 agent** 的 client（同一把 key、同一个 user_id），
 # 于是"信"与"群聊"共用一份缓存隔离空间；信的 prompt 前缀又大又恒定，
 # 分开之后它才能自己吃满缓存，而且成本/排障也能分开看。
-# 不配 `QQBOT_LETTER_API_KEY` 时：
-#   `model_config` 里 letter 那条 key 的回落项是 **reply 那把 mimo key**（同家，
-#   所以回落也不会造成"A 家 key 打 B 家地址"）；下面这个常量是**更老的**名字
-#   `QQBOT_MAIL_API_KEY` 的兼容读数——历史部署可能只填了它。
+# 不配 `QQBOT_LETTER_API_KEY` 时（2026-10-22 实测的回落链）：
+#   ① `model_config` 的 letter 用**自己那条** key（`KEYS["letter"]`，mimo 家），
+#      模型是 `mimo-v2.6-pro`；那条 key 没配就借 reply 那把（xkiro）——**跨家**，
+#      模型名却仍是 mimo，属于已知风险；再没有才落主 key（`QQBOT_API_KEY`）。
+#   下面这个常量是**更老的**名字 `QQBOT_MAIL_API_KEY` 的兼容读数——历史部署可能只填了它。
 LETTER_API_KEY = _compat("QQBOT_LETTER_API_KEY",
                          _compat("QQBOT_MAIL_API_KEY", ""))
 #: 老名字，历史部署 / 测试可能在读。语义就是"写信那一路的 key"。

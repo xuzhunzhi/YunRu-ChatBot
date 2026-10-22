@@ -2992,10 +2992,11 @@ def _build_letter_client() -> OpenAICompatibleClient:
     为什么单独一份：信的 prompt 前缀又大又恒定（人设 + 信件规矩 + 已确定事实），
     跟群聊共用一份缓存隔离空间只会互相挤；分开之后它的命中率与成本都能单独看。
 
-    凭据走 `model_config` 的 **letter** 那个用途。2026-10-12 起那一行借的是
-    `judge` 那条（deepseek / `deepseek-v4-pro`）——与 reply 同一个形状：模型的哪家
-    就借哪家的 key。它自己那把 `QQBOT_LETTER_API_KEY`（mimo）留着不动，主家余额
-    耗尽切兜底时由 `FALLBACK_TASKS` + `FALLBACK_KEY` 借走（见 `model_config`）。
+    凭据走 `model_config` 的 **letter** 那个用途，模型是 `mimo-v2.6-pro`
+    （用户 2026-10-22 明确："写邮件模型是用 mimo v2.6-pro"）。它优先用自己那把
+    `QQBOT_LETTER_API_KEY`（mimo）；那把没配才按 `KEYS["letter"].fallback` 借 reply
+    的 key（xkiro）——**跨家**，模型名仍是 mimo，这是已知风险（`model_config` 的
+    `KEYS` 注释里记着）。再没有才落主 key。
 
     留在核心（而不是跟着装配搬去 `background_plugins.py`）：它要往**核心的用量账本**
     （`_USAGE_STORE`）里记一笔，那是核心状态。
