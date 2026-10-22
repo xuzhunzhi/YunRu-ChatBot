@@ -503,11 +503,12 @@ def test_report_prompt_asks_for_her_own_thoughts():
     """提示词：要她自己的想法（机制词一个都不许有），不要工作量。"""
 
     assert scan_persona_text(dr.REPORT_PROMPT) == [], "prompt_guard 机制词表过一遍"
-    assert "你脑子里在转的那些东西" in dr.REPORT_PROMPT, "主题得是她的想法，不是她干了什么"
+    assert "今晚想写什么随你" in dr.REPORT_PROMPT, "主题得是她的，不是我们给她派的"
     # 2026-10-22：原来那句"别照着它念"是给"素材里那一小段"的规矩；材料不再预塞之后
     # 它换了说法（"不写你没看过、没发生过的事"），要防的病没变：别把材料/旧事写成流水账。
-    for words in ("别报数目", "不写你没看过、没发生过的事", "不要把他人的原话抄给他看",
-                  "不是……而是……", "落款就写你自己的名字"):
+    for words in ("不能报数目", "不能写你没看过、没发生过的事",
+                  "不能把他人的原话抄给他看", "不是……而是……",
+                  "落款就写你自己的名字"):
         assert words in dr.REPORT_PROMPT, f"{words} 这条规矩被删了"
 
 
@@ -523,17 +524,16 @@ def test_report_prompt_asks_for_a_letter_not_a_diary():
 
     assert scan_persona_text(dr.REPORT_PROMPT) == [], "加了形状要求也不许混进机制词"
     # 仍然是信、不是日记（这一条 2026-10-13 定的病，2026-10-22 没有撤）
-    assert "不是你自己记的一页日记" in dr.REPORT_PROMPT, "信/日记这一条被删了"
-    assert "他读完要知道这是你在跟他说话" in dr.REPORT_PROMPT
+    assert "不能只写成给自己看的一页日记" in dr.REPORT_PROMPT, "信/日记这一条被删了"
+    assert "他读的时候要知道这是你在跟他说话" in dr.REPORT_PROMPT
     # 但**不许**再钉死那三段式（用户 2026-10-22："不强制"）
     for words in ("开头要有一句是**对他说的**", "中间挑**一件事**说给他听",
                   "信里得有他", "结尾收在对他说话上"):
         assert words not in dr.REPORT_PROMPT, f"固定形状又回来了：{words}"
     assert "别从你那边起头" not in dr.REPORT_PROMPT, "现在允许从夜里/手上正在做的事起头"
-    assert "可以从夜里起头" in dr.REPORT_PROMPT
-    assert "不许把那里面的旧事写成" in dr.REPORT_PROMPT, "旧事冒充今天的新事，是那封信的老毛病"
-    assert "发生的新鲜事" in dr.REPORT_PROMPT
-    assert "这像不像一封写给他的信" in dr.REPORT_PROMPT, "自检那一问也得问信的形状"
+    assert "可以一个词当标题" in dr.REPORT_PROMPT
+    assert "已确定的事" not in dr.REPORT_PROMPT, "材料段落不再进 prompt（她自己查）"
+    assert "不能写你没看过、没发生过的事" in dr.REPORT_PROMPT, "旧事冒充今天的老毛病仍被这条拦住"
 
 
 def test_report_prompt_leaves_his_words_optional():
@@ -551,13 +551,13 @@ def test_report_prompt_leaves_his_words_optional():
         "材料不再进 prompt——他的句子由 `<his>` 现查，规矩里不再指点一段材料"
     )
     assert "那是义务" not in dr.REPORT_PROMPT
-    assert "不要把他人的原话抄给他看" in dr.REPORT_PROMPT, (
+    assert "不能把他人的原话抄给他看" in dr.REPORT_PROMPT, (
         "别人的原话仍然不许抄（这一条与'提不提他'是两件事）"
     )
-    assert "别把他的话" in dr.REPORT_PROMPT and "抄一遍" in dr.REPORT_PROMPT, (
+    assert "他本人说的话可以提一句" in dr.REPORT_PROMPT, (
         "别把他的话抄一遍：这是他本人那句，仍在 prompt 里（2026-10-16 起的老规矩）"
     )
-    assert "他本人说的话，你要是记得，可以提一句" in dr.REPORT_PROMPT
+    assert "但别复述" in dr.REPORT_PROMPT
 
 
 def test_super_mail_send_now_hands_the_seams_not_the_engine():

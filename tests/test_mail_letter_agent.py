@@ -491,24 +491,24 @@ def test_the_prompt_is_no_longer_a_work_report():
 
     assert "至少接上一句" not in text, "「必须接一句他说的话」已删（用户 2026-10-22）"
     assert "没有新事就说没有新事" not in text, "汇报口吻的引导已删"
-    assert "今晚想写什么就写什么" in text
-    assert "不写这段时间的事也可以" in text
+    assert "今晚想写什么随你" in text
+    assert "写不写、写多少，都是你的事" in text
     # 固定形状那三条都不许回来（用户同一天："不强制开头对他说话 + 一件事 + 结尾"）
     assert "结尾收在对他说话上" not in text
     assert "中间挑**一件事**" not in text
     assert "信里得有他" not in text
     # 允许很短 / 标题一个词
     assert "几句也是信" in text
-    assert "一个词就够" in text
+    assert "一个词当标题" in text
     # 三条签名只当语感参照，且明确不许照抄
     assert "有棱有角，不卑不亢" in text
     assert "可落尘埃若犬，亦能凌顶似神" in text
     assert "黎明" in text
     assert "只当参照，不要照抄" in text
     # 标题规则（用户要的"真正的信名"）
-    assert "主题那一行是这封信的名字" in text
+    assert "标题不能照抄正文里的半句" in text
     assert "不超过 14 个字" in text
-    assert "不要把正文里的半句照抄过来" in text
+    assert "不能以\"你今晚\"\"你晚上\"\"我今天\"\"我这边\"开头" in text
     assert "我看见了" in text and "你说" in text
 
     from qq_roleplay_bot.prompt_guard import scan_persona_text

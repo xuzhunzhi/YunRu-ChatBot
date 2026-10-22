@@ -264,7 +264,7 @@ def test_a_very_long_subject_is_still_left_to_clean_subject() -> None:
 
 
 def test_the_draft_rules_tell_her_not_to_use_quotes_in_the_subject() -> None:
-    assert "主题那一行别用引号" in dr.REPORT_PROMPT
+    assert "不能用引号" in dr.REPORT_PROMPT
     assert "落款就写你自己的名字。" in dr.REPORT_PROMPT, "原来那条别被挤掉"
 
 
