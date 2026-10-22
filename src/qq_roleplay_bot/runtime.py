@@ -1986,11 +1986,54 @@ class _SeamBinder:
 
     # --- UiSeams ---------------------------------------------------------
 
-    def ui_execute_action(self, request):
-        return self._require().execute_action(request)
+    def ui_execute_action(self, request, *, group_id: str | None, actor_id: str,
+                          message_id: str = "", mentioned: bool = False):
+        """面板执行动作：**按核心的真实签名逐个转发**。
 
-    def ui_restart(self):
-        return self._require().request_restart()
+        ## 为什么长这样（2026-10-22 实测的坏点）
+
+        这一口原来只收 `request`，而面板按核心签名传了四个关键字
+        （`webui_panel._action`）→ 面板每个动作按钮都是 `TypeError` → 500
+        （线上 `run/data/bot.err.log` 约 105736 行，2026-10-22 01:02:42）。
+        **就算只传 request 也照样炸**：`stage3_main.execute_action` 的 `group_id` /
+        `actor_id` 是必填 keyword-only（`stage3_main.py:3107`），这里一个都没给。
+
+        ## 为什么参数与核心一字不差（含"两个必填、两个有默认"）
+
+        面板是"某个人在某个群按了一下"的另一个入口，权限判定、护栏、审计**全在核心**
+        （`AGENTS.md` §2.3）。接缝只负责把值送到，所以形状照抄核心：
+
+        * `group_id` / `actor_id` **不给默认值**。在这里补一个空串默认，等于替核心回答
+          "这动作作用在哪个群、以谁的名义"——而 `group_owner` 那几个动作正是靠这两个值
+          判"她当前到底是不是那个群的群主"。缺了就当场 `TypeError`（调用方的 bug），
+          比静默按空串执行安全。
+        * `message_id` / `mentioned` 跟核心一样留默认：群命令那条路（`_plugin_action_reply`）
+          老调用方不传这两个。
+
+        ## 什么时候能改回去
+
+        不用改回去。这是面板与核心之间的契约：核心签名一变，`dev/tests/test_ui_action_seam.py`
+        的签名对照用例会当场红（而不是等线上按钮 500）。
+        """
+
+        return self._require().execute_action(
+            request, group_id=group_id, actor_id=actor_id,
+            message_id=message_id, mentioned=mentioned)
+
+    def ui_restart(self, source: str = ""):
+        """面板「重启」：把**来源**一起交给核心（`request_restart(source)`）。
+
+        由来（2026-10-22 实测的坏点）：面板传 `f"webui:{source}"`（`webui_panel.py:733`），
+        而这一口原先不收参数 → `TypeError` → 500。
+
+        `source` 只进核心那行 WARNING 日志（`stage3_main.request_restart` 的
+        `Stage 3 restart requested by=…`），**不参与任何权限判定**，也不落审计正文里的
+        凭据——所以照核心的默认值（空串）给，命令那条路（`/super restart`）本来就不传来源。
+
+        什么时候能改回去：不用改；同 `ui_execute_action`，形状由签名对照用例钉住。
+        """
+
+        return self._require().request_restart(source)
 
     def ui_session_clear(self, session_id: str):
         return self._require().leave_session(session_id)
