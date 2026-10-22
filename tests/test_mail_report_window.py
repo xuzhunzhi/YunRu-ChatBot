@@ -245,7 +245,7 @@ FACTS_TEXT = "（测试用的事实表：她读过仪表盘）"
 
 
 def _seams(client, *, letters=None, facts=None, persona=PERSONA_TEXT, reader=None,
-           his=None) -> ReportSeams:
+           his=None, lore=None) -> ReportSeams:
     """生产接缝的那一份（外加只读记忆口）。
 
     2026-10-12 起两处变了：`memory_service`（可写的工程件）换成只读的 `memory_read`；
@@ -266,6 +266,7 @@ def _seams(client, *, letters=None, facts=None, persona=PERSONA_TEXT, reader=Non
         letter_context=his,
         letter_persona=(lambda: persona),
         letter_facts=lambda: FACTS_TEXT,
+        letter_lore=lore,
     )
 
 
@@ -386,18 +387,24 @@ def test_the_blocked_line_carries_no_count():
 
 
 class _Writer:
-    """假的写信口（两阶段那条路）：把收到的素材留下来给测试看。"""
+    """假的写信口（两阶段那条路）：把收到的**那包东西的材料**留下来给测试看。
+
+    2026-10-22 起第一个参数是 `letter_tools.LetterToolbox`（她自己能翻的那些东西），
+    材料在它的 `.materials` 上——下面那些断言核的还是同一份材料，只是多剥了一层。
+    """
 
     enabled = True
 
     def __init__(self) -> None:
         self.materials: list = []
+        self.toolbox: list = []
         self.seen: dict = {}
         self.last_skip = ""
 
-    async def write(self, materials, *, persona="", facts="", closeness_names=(),
+    async def write(self, source, *, persona="", facts="", closeness_names=(),
                     guardedness_names=(), lookup=None, now=None):
-        self.materials.append(materials)
+        self.toolbox.append(source)
+        self.materials.append(getattr(source, "materials", source))
         self.seen = {"persona": persona, "facts": facts, "lookup": lookup}
         return "今天", "群里今天挺热闹，我跟几个人说了话。"
 
@@ -497,47 +504,60 @@ def test_report_prompt_asks_for_her_own_thoughts():
 
     assert scan_persona_text(dr.REPORT_PROMPT) == [], "prompt_guard 机制词表过一遍"
     assert "你脑子里在转的那些东西" in dr.REPORT_PROMPT, "主题得是她的想法，不是她干了什么"
-    for words in ("别报数目", "别照着它念", "不要把他人的原话抄给他看",
+    # 2026-10-22：原来那句"别照着它念"是给"素材里那一小段"的规矩；材料不再预塞之后
+    # 它换了说法（"不写你没看过、没发生过的事"），要防的病没变：别把材料/旧事写成流水账。
+    for words in ("别报数目", "不写你没看过、没发生过的事", "不要把他人的原话抄给他看",
                   "不是……而是……", "落款就写你自己的名字"):
         assert words in dr.REPORT_PROMPT, f"{words} 这条规矩被删了"
 
 
 def test_report_prompt_asks_for_a_letter_not_a_diary():
-    """提示词：得写"一封信长什么样"，不只是"别像机器写的"。
+    """提示词：得写"一封信长什么样"，但不是一套固定形状（2026-10-22 用户改的口径）。
 
-    2026-10-13 用户读到一封这样的信（"这写的啥啊。。根本不像是人写的信"）：
-    四段互不相干、每段结尾一句把话咽回去、拿事实表里的旧事当今天发生的事。
-    上一版规矩只禁了机器腔（对仗/首先其次/比方/语气标签），一条也没说信的形状。
-    这四条是那次投诉的修法——删掉任意一条，那封信的形状就会回来。
+    由来：2026-10-13 用户读到一封"四段互不相干、拿旧事当今天"的信，当时的修法是钉死
+    "开头对他说话 + 一件事 + 结尾收在他身上"。2026-10-22 用户又改了口径——
+    *"日报不是真的写汇报，云茹想说什么都可以"*，而且要点名不再强制那个三段式
+    （"不强制'开头对他说话 + 一件事 + 结尾收在对他说话'"）。所以这一条现在钉的是
+    **新的形状**：它仍然是一封给他的信（不是日记），但写什么、怎么起头、多短都随她。
     """
 
     assert scan_persona_text(dr.REPORT_PROMPT) == [], "加了形状要求也不许混进机制词"
-    assert "这是一封写给他的信，不是写给自己看的" in dr.REPORT_PROMPT, "信/日记这一条被删了"
+    # 仍然是信、不是日记（这一条 2026-10-13 定的病，2026-10-22 没有撤）
+    assert "不是你自己记的一页日记" in dr.REPORT_PROMPT, "信/日记这一条被删了"
+    assert "他读完要知道这是你在跟他说话" in dr.REPORT_PROMPT
+    # 但**不许**再钉死那三段式（用户 2026-10-22："不强制"）
     for words in ("开头要有一句是**对他说的**", "中间挑**一件事**说给他听",
                   "信里得有他", "结尾收在对他说话上"):
-        assert words in dr.REPORT_PROMPT, f"{words} 这条形状要求被删了"
-    assert "别从你那边起头" in dr.REPORT_PROMPT, "日记式开场（夜深了/我坐在工作台前面）得点名禁掉"
+        assert words not in dr.REPORT_PROMPT, f"固定形状又回来了：{words}"
+    assert "别从你那边起头" not in dr.REPORT_PROMPT, "现在允许从夜里/手上正在做的事起头"
+    assert "可以从夜里起头" in dr.REPORT_PROMPT
     assert "不许把那里面的旧事写成" in dr.REPORT_PROMPT, "旧事冒充今天的新事，是那封信的老毛病"
     assert "发生的新鲜事" in dr.REPORT_PROMPT
     assert "这像不像一封写给他的信" in dr.REPORT_PROMPT, "自检那一问也得问信的形状"
 
 
 def test_report_prompt_leaves_his_words_optional():
-    """他说过的话进了素材，但**不是义务**——2026-10-22 用户改了那条口径。
+    """他说过的话只是她能看的一样，**不是义务**——2026-10-22 用户改了那条口径。
 
     用户原话：*"日报不是真的写汇报，云茹想说什么都可以"*。2026-10-13 那版要求
     "信里至少接上一句他说的话"，实测把它写成了逐条汇报（10-19/10-20/10-21 三封都从
-    "你今晚说……"起头）。这一轮删掉硬要求；他的话仍可用作由头，只是不接也行。
+    "你今晚说……"起头）。2026-10-22 再进一步：他的句子不再预塞，她想看才点 `<his>`。
+    所以这一段钉的是：**prompt 里根本没有"必须提他"这一条**，也没了"素材里那一段"。
     """
 
     assert scan_persona_text(dr.REPORT_PROMPT) == []
-    assert "他这段时间说过的话" in dr.REPORT_PROMPT, "素材里那一段得在规矩里点名"
     assert "至少接上一句" not in dr.REPORT_PROMPT, "硬要求已删（用户 2026-10-22）"
-    assert "那不是义务" in dr.REPORT_PROMPT
-    assert "别把他的话抄一遍" in dr.REPORT_PROMPT
-    assert "不要把他人的原话抄给他看**（说的是**别人**" in dr.REPORT_PROMPT, (
-        "两句的关系要写清楚，不然她会分不清该不该提他说过的话"
+    assert "他这段时间说过的话" not in dr.REPORT_PROMPT, (
+        "材料不再进 prompt——他的句子由 `<his>` 现查，规矩里不再指点一段材料"
     )
+    assert "那是义务" not in dr.REPORT_PROMPT
+    assert "不要把他人的原话抄给他看" in dr.REPORT_PROMPT, (
+        "别人的原话仍然不许抄（这一条与'提不提他'是两件事）"
+    )
+    assert "别把他的话" in dr.REPORT_PROMPT and "抄一遍" in dr.REPORT_PROMPT, (
+        "别把他的话抄一遍：这是他本人那句，仍在 prompt 里（2026-10-16 起的老规矩）"
+    )
+    assert "他本人说的话，你要是记得，可以提一句" in dr.REPORT_PROMPT
 
 
 def test_super_mail_send_now_hands_the_seams_not_the_engine():
@@ -761,6 +781,36 @@ def test_a_broken_reader_does_not_stop_the_letter():
     data = writer.materials[0].as_data((), ())
     assert "跟你说过话的人" not in data
     assert "改变了态度" not in data
+
+
+def test_the_reporter_hands_over_a_toolbox_not_a_materials_pack():
+    """2026-10-22：递给写信口的是**她能自己翻的那一包**，材料只是它的数据源。
+
+    这条钉住三处接线（缺一处 `<his>` / `<letters>` / `<lore>` 就会静默变成"没翻着"）：
+    ① `materials` 挂在 toolbox 上，但**不再整段进请求**；
+    ② 她上几封信来自 `MailState.letters`；
+    ③ `<lore>` 走 `ReportSeams.letter_lore`（核心那条只读知识口）。
+    """
+
+    from qq_roleplay_bot.plugins.mail import letter_tools as lt
+
+    seen_lore: list[str] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        store = MailStateStore(Path(tmp) / "mail_state.json")
+        store.record_letter(subject="黎明", body="今天没有雨。", to="owner@example.com", now=NOW - 86400)
+        writer = _Writer()
+        reporter = _reporter(store, _Mail())
+        reporter.writer = writer
+        seams = _seams(_Client(), reader=_Reader(),
+                       lore=lambda query: seen_lore.append(query) or "〔核心设定〕她在希望角。")
+        asyncio.run(reporter.run_once(seams))
+
+    toolbox = writer.toolbox[0]
+    assert isinstance(toolbox, lt.LetterToolbox), toolbox
+    assert toolbox.materials is writer.materials[0], "材料只是数据源"
+    assert "黎明" in toolbox.run("letters").text, "上几封信要从 state.letters 来"
+    assert "希望角" in toolbox.run("lore", "焚风基地").text, "<lore> 要走核心那条只读口"
+    assert seen_lore == ["焚风基地"], "查询原样交给核心"
 
 
 def test_materials_survive_a_snapshot_that_is_not_there():

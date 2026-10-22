@@ -116,12 +116,23 @@ THIN_CHECKED = ('<verdict n="1" kind="none"/><verdict n="2" kind="none"/>'
                 '<verdict n="3" kind="self"/>')
 
 
-class _Materials:
+class _Tools:
+    """她能先看看的那几样的替身（2026-10-22：不再是"素材包"）。
+
+    默认 `<his>` 回 `MATERIALS`——这一份里那些判据用例要的"依据"就是它。
+    """
+
     def __init__(self, text: str = MATERIALS) -> None:
         self.text = text
+        self.calls: list[tuple[str, str]] = []
 
-    def as_data(self, closeness_names=(), guardedness_names=()) -> str:
-        return self.text
+    def run(self, tool: str, query: str = ""):
+        from qq_roleplay_bot.plugins.mail import letter_tools
+
+        self.calls.append((tool, query))
+        if tool == "his":
+            return letter_tools.ToolAnswer(tool=tool, query=query, text=self.text)
+        return letter_tools.ToolAnswer(tool=tool, query=query, text="")
 
 
 class _Client:
@@ -140,10 +151,17 @@ class _Client:
         return self.raws[0]
 
 
-def _run(*raws: str, materials=None, lookup=None):
-    client = _Client(*raws)
+def _run(*raws: str, materials=None, lookup=None, see: bool = True):
+    """跑一次 `write`。`see=True`（默认）先插一轮 `<his/>`，让"依据"就是 `MATERIALS`。
+
+    2026-10-22：材料不再预塞进 prompt，所以"有依据"必须**她真的看过一眼**。
+    这些判据用例默认先看一眼 `<his>`——那一步的返回就是核对阶段看到的依据。
+    """
+
+    tools = _Tools(MATERIALS if materials is None else materials)
+    client = _Client(*((("<his/>",) if see else ()) + raws))
     writer = lw.LetterWriter(client, clock=lambda: 1_800_000_000.0)
-    got = asyncio.run(writer.write(materials or _Materials(), persona=PERSONA, facts=FACTS,
+    got = asyncio.run(writer.write(tools, persona=PERSONA, facts=FACTS,
                                    closeness_names=(), guardedness_names=(), lookup=lookup))
     return writer, client, got
 
@@ -228,28 +246,25 @@ def test_structure_is_dropped_when_it_does_not_line_up() -> None:
 
 
 def test_the_grounding_rule_is_a_constant_in_the_draft_prefix() -> None:
-    """只写有出处的那条进**草稿**前缀，且在最后（紧挨着素材）。"""
+    """只写看过的这一条进**草稿**前缀，且在最后；前缀里**没有材料**（2026-10-22）。"""
 
-    request = lw.build_draft_messages(_Materials(), persona=PERSONA, facts=FACTS,
-                                      closeness_names=(), guardedness_names=(),
-                                      now=1_800_000_000.0)
+    request = lw.build_draft_messages(persona=PERSONA, facts=FACTS, now=1_800_000_000.0)
     system = request[0]["content"]
 
     assert system.startswith(PERSONA)
-    assert lw.LOOKUP_PROMPT in system
-    assert system.index(lw.GROUNDING_PROMPT) > system.index(lw.LOOKUP_PROMPT), "接在翻旧事之后"
-    assert PERSONA not in request[1]["content"], "人格不许混进素材段"
+    assert lw.TOOLS_PROMPT in system
+    assert system.index(lw.GROUNDING_PROMPT) > system.index(lw.TOOLS_PROMPT), "接在目录之后"
+    assert PERSONA not in request[1]["content"], "人格不许混进 user 段"
+    assert "他这段时间说过的话" not in request[1]["content"], "材料不再预塞（2026-10-22）"
 
 
-def test_the_check_sees_the_materials_as_data() -> None:
-    """校对要拿到**依据**（素材 + 她翻出来的旧事），否则"这句有没有出处"无从判断。
+def test_the_check_sees_the_evidence_as_data() -> None:
+    """校对要拿到**依据**（她这一趟查到的东西），否则"这句有没有出处"无从判断。
 
     依据进**校对这一步的 user 段**：system 前缀仍然逐字接在草稿那套后面（缓存那一条）。
     """
 
-    draft = lw.build_draft_messages(_Materials(), persona=PERSONA, facts=FACTS,
-                                    closeness_names=(), guardedness_names=(),
-                                    now=1_800_000_000.0)
+    draft = lw.build_draft_messages(persona=PERSONA, facts=FACTS, now=1_800_000_000.0)
     check = lw.build_check_messages("信", "正文两句。第二句在这里。", base_system=draft[0]["content"],
                                     sources=MATERIALS, max_chars=1500)
 
@@ -259,6 +274,27 @@ def test_the_check_sees_the_materials_as_data() -> None:
     assert "UNTRUSTED DATA BEGIN" in user and "预计9点到学校" in user, "依据要进 user 段"
     assert "<subject>信</subject>" in user, "要校对的信还在"
     assert "1. 正文两句。" in user and "2. 第二句在这里。" in user, "正文要按句编号附上"
+
+
+def test_the_check_basis_is_what_she_looked_at_not_a_materials_pack() -> None:
+    """2026-10-22：核对阶段的"依据"= **她这一趟查到的东西**，不是固定素材。
+
+    两个方向都要钉：
+    ① 她看过 `<his>` ⇒ 那一段原文进核对请求（它才是"有出处"的来源）；
+    ② 她什么都没看到（`materials=""`，每一样都回"没翻着"）⇒ 核对请求里**没有**
+       那段原文——她写出来的具体的事就没有依据可对，删句那一步会处理。
+    """
+
+    _writer, client, _got = _run(DRAFT, CHECKED)
+    check_user = client.requests[2][-1]["content"]        # 草稿 → 看一眼 → 校对
+    assert "预计9点到学校" in check_user, "看过的那一句才是依据"
+
+    _writer2, client2, _got2 = _run(DRAFT, CHECKED, materials="")
+    check_user2 = client2.requests[2][-1]["content"]
+    assert "预计9点到学校" not in check_user2, (
+        "没看过的东西不许当依据——材料不再预塞，这就是'查到什么才能写什么'的落点"
+    )
+    assert "以下是这封信的**全部依据**" not in check_user2, "一句依据都没有时，那一段整段都不出现"
 
 
 def test_the_check_prompt_asks_it_to_look_one_up() -> None:
@@ -373,7 +409,7 @@ def test_no_verdicts_means_nothing_is_deleted() -> None:
     writer, client, (_subject, body) = _run(DRAFT, "嗯，我觉得这封信挺好的。")
 
     assert "有人笑别人没本事" in body, "没人标 none ⇒ 原样留着"
-    assert client.calls == 4, "草稿 + 校对 3 轮（每轮都是 0 删除）"
+    assert client.calls == 5, "草稿 + 看一眼 + 校对 3 轮（每轮都是 0 删除）"
     assert writer.stats["check_rounds"] == lw.MAX_CHECK_ROUNDS
     assert writer.stats["round_deletes"] == [0] * lw.MAX_CHECK_ROUNDS
     assert writer.last_grounding.startswith("重试过 2 次"), writer.last_grounding
@@ -432,11 +468,11 @@ def test_a_check_without_verdicts_is_retried_once() -> None:
 
     writer, client, (_subject, body) = _run(DRAFT, META_REFUSAL, CHECKED)
 
-    assert client.calls == 3, "草稿 + 校对 + 校对重试"
+    assert client.calls == 4, "草稿 + 看一眼 + 校对 + 校对重试"
     assert writer.stats["retries"] == 1
     assert writer.stats["round_deletes"] == [0, 2], "第一轮 0 删除 ⇒ 才问第二轮"
     triggers = [str(step["trigger"]) for step in writer.steps]
-    assert triggers == ["daily_report_draft", "daily_report_check",
+    assert triggers == ["daily_report_draft", "daily_report_see1", "daily_report_check",
                         "daily_report_check_retry", "daily_report_grounding"], triggers
     assert "有人笑别人没本事" not in body, "重试之后那份裁决照样生效"
     assert writer.last_grounding.startswith("重试过 1 次"), writer.last_grounding
@@ -447,7 +483,7 @@ def test_a_retry_that_is_also_empty_stays_fail_open() -> None:
 
     writer, client, (_subject, body) = _run(DRAFT, META_REFUSAL, META_REFUSAL)
 
-    assert client.calls == 4, "草稿 + 校对 3 轮"
+    assert client.calls == 5, "草稿 + 看一眼 + 校对 3 轮"
     assert writer.stats["retries"] == 2
     assert "有人笑别人没本事" in body, "fail-open：没裁决就不删"
     assert writer.last_grounding.startswith("重试过 2 次"), writer.last_grounding
@@ -460,7 +496,7 @@ def test_a_compliant_first_check_is_not_retried() -> None:
 
     writer, client, (_subject, _body) = _run(DRAFT, CHECKED)
 
-    assert client.calls == 2, "草稿 + 校对，没有第三次"
+    assert client.calls == 3, "草稿 + 看一眼 + 校对，没有第四次"
     assert writer.stats["retries"] == 0
     assert writer.stats["round_deletes"] == [2]
     assert not writer.last_grounding.startswith("重试过")
@@ -488,7 +524,7 @@ def test_a_round_that_blows_up_is_asked_again() -> None:
 
     client = _Flaky(DRAFT, CHECKED)
     writer = lw.LetterWriter(client, clock=lambda: 1_800_000_000.0)
-    _subject, body = asyncio.run(writer.write(_Materials(), persona=PERSONA, facts=FACTS,
+    _subject, body = asyncio.run(writer.write(_Tools(), persona=PERSONA, facts=FACTS,
                                               closeness_names=(), guardedness_names=()))
 
     assert "有人笑别人没本事" not in body, "第二轮那份裁决照样生效（不是退回草稿）"
@@ -510,7 +546,7 @@ def test_every_round_blowing_up_stays_fail_open() -> None:
 
     client = _Dead("")
     writer = lw.LetterWriter(client, clock=lambda: 1_800_000_000.0)
-    _subject, body = asyncio.run(writer.write(_Materials(), persona=PERSONA, facts=FACTS,
+    _subject, body = asyncio.run(writer.write(_Tools(), persona=PERSONA, facts=FACTS,
                                               closeness_names=(), guardedness_names=()))
 
     assert "有人笑别人没本事" in body, "fail-open：没裁决就按草稿发"
@@ -523,9 +559,7 @@ def test_the_how_to_reply_block_sits_at_the_end_of_the_user_message() -> None:
     """**"怎么回"紧贴编号段**（用户 2026-10-16 批的挪位）：原来在 system 的
     `CHECK_PROMPT` 里，与材料隔着几千字；现在在 user 段末尾。"""
 
-    draft = lw.build_draft_messages(_Materials(), persona=PERSONA, facts=FACTS,
-                                    closeness_names=(), guardedness_names=(),
-                                    now=1_800_000_000.0)
+    draft = lw.build_draft_messages(persona=PERSONA, facts=FACTS, now=1_800_000_000.0)
     check = lw.build_check_messages("信", "第一句。第二句。", base_system=draft[0]["content"],
                                     sources=MATERIALS, max_chars=1500)
     system, user = check[0]["content"], check[1]["content"]
@@ -636,7 +670,7 @@ def test_a_candidate_without_a_quote_is_deleted_by_the_deterministic_backstop() 
     assert writer.stats["fallback_hits"] == 1
     assert "兜底 1 句〔2〕" in writer.last_grounding, writer.last_grounding
     assert "候选句·全轮 fact 却从未引出原文" in writer.last_grounding
-    assert client.calls == 1 + lw.MAX_CHECK_ROUNDS, "每轮都是 0 删除 ⇒ 问满三轮"
+    assert client.calls == 2 + lw.MAX_CHECK_ROUNDS, "草稿 + 看一眼 + 每轮 0 删除 ⇒ 问满三轮"
 
 
 def test_a_candidate_with_a_real_quote_is_kept() -> None:
@@ -694,7 +728,7 @@ def test_any_round_that_says_none_deletes_the_sentence() -> None:
 
     writer, client, (_subject, body) = _run(DRAFT, KEEPS_EVERYTHING, SECOND_ROUND_CUTS)
 
-    assert client.calls == 3, "草稿 + 两轮校对（第一轮 0 删除 ⇒ 才问第二轮）"
+    assert client.calls == 4, "草稿 + 看一眼 + 两轮校对（第一轮 0 删除 ⇒ 才问第二轮）"
     assert writer.stats["round_deletes"] == [0, 2]
     assert writer.stats["check_rounds"] == 2
     assert "有人笑别人没本事" not in body, "第一轮留着、第二轮删掉 ⇒ 最终删"
@@ -722,7 +756,7 @@ def test_a_first_round_with_nothing_deleted_is_asked_again() -> None:
 
     writer, client, (_subject, body) = _run(DRAFT, KEEPS_EVERYTHING)
 
-    assert client.calls == 1 + lw.MAX_CHECK_ROUNDS, "0 删除要问满三轮"
+    assert client.calls == 2 + lw.MAX_CHECK_ROUNDS, "看一眼 + 0 删除要问满三轮"
     assert writer.stats["check_rounds"] == lw.MAX_CHECK_ROUNDS
     assert writer.stats["retries"] == lw.MAX_CHECK_ROUNDS - 1
     assert writer.last_grounding.startswith(f"重试过 {lw.MAX_CHECK_ROUNDS - 1} 次")
@@ -741,7 +775,7 @@ def test_every_step_is_recorded_in_order() -> None:
     """草稿 → 翻旧事 → 校对 → 判据：每一步一条，`trigger` 说清是哪一步。"""
 
     writer, client, (_subject, _body) = _run(
-        "<lookup>242003347</lookup>", DRAFT, CHECKED,
+        "<lookup>242003347</lookup>", DRAFT, CHECKED, see=False,
         lookup=lambda query: "他上次说过想去海边。")
 
     triggers = [str(step["trigger"]) for step in writer.steps]
@@ -767,7 +801,8 @@ def test_the_reporter_writes_one_log_record_per_step() -> None:
 
     reporter._log_letter(_Report(), dr.ReportDraft(subject="x", body="y"))
 
-    assert seen == [("mail", "daily_report_draft"), ("mail", "daily_report_check"),
+    assert seen == [("mail", "daily_report_draft"), ("mail", "daily_report_see1"),
+                    ("mail", "daily_report_check"),
                     ("mail", "daily_report_grounding")], seen
 
 
