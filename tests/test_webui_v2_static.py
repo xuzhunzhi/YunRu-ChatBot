@@ -50,8 +50,11 @@ LEGACY_BASELINE: dict[str, tuple[str, int, str]] = {
                     "aee195ad3ea7a3eca34d78d9565ceaa1ea5610659f379c7b0a462356f76b946b"),
     "/app.css": ("text/css; charset=utf-8", 143041,
                  "b3450ecb639c3e6dab948b32f9b58a5e63fdff890b55823bbe2bdff23f62823b"),
-    "/app.js": ("application/javascript; charset=utf-8", 271723,
-                "12e77bc912a27412dd8d1c7d318872c85efc425ce2b7ecc3a4f5c53bb7af13aa"),
+    # 2026-10-22：用户批准"人物画像要显示全部碎片（总览优先，// app.js 里的人物画像渲染段）"，
+    # 老外壳因此有一次**有意**变动，基线随同一改动重新抓（size/正文 sha 都换）。
+    # 测试的作用不变：它仍然锁住"之后任何无意的外壳改动"。
+    "/app.js": ("application/javascript; charset=utf-8", 272676,
+                "5cd1f0dd53b70cd2fe3455a031256c4f1ab364bbada628549f6287edaabc652d"),
 }
 
 

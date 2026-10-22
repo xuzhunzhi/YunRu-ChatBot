@@ -3379,8 +3379,9 @@ function noteTip(text) {
 }
 
 //: 人物画像那一页的说明（**只在 `?` 里出现**，不许再铺在页面上）。
-const PROFILE_NOTES = `画像就是记忆里的一类（<code>kind=profile</code>）：<b>一个人一张</b>、
-  跟着人走、不按词检索。它由记忆维护 agent 写——真的看出"这个人的整体样子"时才写一条，
+const PROFILE_NOTES = `画像就是记忆里的一类（<code>kind=profile</code>）：<b>一个人一组</b>
+  （<code>profile</code> 总览 + 若干 <code>profile/&lt;方面&gt;</code>）、
+  跟着人走、不按词检索。它由记忆维护 agent 写——总览与方面都是一片一片补的，
   不是每人一条。面板对记忆<b>只读</b>：写入只走记忆维护 agent，删除入口在「记忆」页。
   每类最多看 ${PROFILE_LIMIT} 条，超出的没列出来（不是没有）。
   这里**只看生效的**；已删 / 被顶替的旧版在「记忆」页切"全部状态"才看得到。`;
@@ -3420,10 +3421,14 @@ function personBlock(key, data) {
       : ""}
   </div>`;
 
-  // 整体印象：有就写出来（带版本），没有就一句短的——**不拿旧事冒充印象**。
+  // 整体印象：**这一组碎片全写出来**（2026-10-22）。画像现在是一个人一组
+  // （`profile` 总览 + `profile/<方面>`），只画 `rows[0]` 会漏掉后补的方面；
+  // `viewPersonProfiles()` 已经把总览排在最前，这里按那个顺序用「；」拼起来，
+  // 与 `/super profile`、与 `memory_store.profile()` 看到的是同一份内容。
   const impression = main
-    ? `<div class="impression">${esc(main.content || "（空）")}</div>${
-        main.revision ? `<p class="hint">第 ${num(main.revision)} 版</p>` : ""}`
+    ? `<div class="impression">${rows.map((row) => esc(row.content || "（空）")).join("；")}</div>${
+        main.revision ? `<p class="hint">总览第 ${num(main.revision)} 版${
+          rows.length > 1 ? `（共 ${num(rows.length)} 片）` : ""}</p>` : ""}`
     : `<p class="hint">还没成形像——她在真的看出"这个人的整体样子"时才会写，不是每人一条。</p>`;
 
   // ⑤ **类别筛选**：这一节里出现过的类别各一枚（带条数），"全部"一枚；
@@ -3532,9 +3537,16 @@ async function viewPersonProfiles() {
     if (!mentions.has(key)) mentions.set(key, []);
     mentions.get(key).push(row);
   });
-  // 生效的那条：同一人有多条时取版本最高的（正常情况下按人只有一条 active）。
+  // 生效的那几条：同一人有多条时**总览排最前**（2026-10-22）。
+  // 画像已经碎片化（`profile` 总览 + `profile/<方面>`，见 `memory_store.py` 的
+  // `profile()`）：原来只按 revision 排，最新补的那个"方面"会被当成「整体印象」，
+  // 总览反而看不到。这里让 `normalized_key === "profile"` 先出，其余碎片按
+  // revision 从新到旧跟在后面；后端 `/api/memory/records` 本来就带 `normalized_key`，
+  // 不用另加接口。
   impression.forEach((rows, key) => {
-    rows.sort((a, b) => Number(b.revision || 0) - Number(a.revision || 0));
+    rows.sort((a, b) => (Number(b.normalized_key === "profile")
+      - Number(a.normalized_key === "profile"))
+      || Number(b.revision || 0) - Number(a.revision || 0));
     impression.set(key, rows);
   });
   //: 这个人名下最近一条记录的时间（切换条里"没画像的人"按这个排）。
