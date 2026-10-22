@@ -419,3 +419,45 @@ outage_notice **取用**它；mail 那一侧不认识任何使用者的名字。
 - **webui 必修清单**（`data/plans/06-webui必修清单.md`）：`/api/action` 全挂、重启按钮、
   模型页空白等**未动**——用户已明确"webui 没做好，插件先不上传"。
 - **预装归零的代码改动**：本次 release 直接只发 main（天然不含插件），没改 `discover()`。
+
+---
+
+## 十、2026-10-22 下午：M1 上线 + 写信改造（都已部署并重启，15:46）
+
+### 10.1 邮件 M1（发信进核心）
+
+- 核心新增 `qq_roleplay_bot/mail/`（`client.py` 发信最小实现 + `provide_senders()`），
+  `runtime.build_engine()` 在 `provide_roles()` 之后、`attach_plugins()` **之前** provide
+  （`runtime.py:996`）。
+- `REQUIRES = ("mail",)` **声明没改，判定改了**：`discover()._load` 先问
+  `has_capability("mail")`；为真跳过装前置插件（删掉 `plugins/mail/` 也放行），
+  为假才退回老路，装不上跳过自己（fail-closed）。
+- 启动日志实测：`模型配置 letter: provider=mimo model=mimo-v2.6-pro key=QQBOT_LETTER_API_KEY 有值`、
+  `发信能力已经有人提供过，本次不覆盖`、`寄给某个地址的能力已经有人提供过，本次不覆盖`、
+  9 个插件全部装配、OneBot 已连接。
+- 门槛：dev `ran=1954` PASS；插件树 `ran=2510` PASS（skipped=1 为缺 `data/relationship-tiers.md`）；
+  两树 pyflakes 静默；解耦七项全过；插件范围门槛 exit 0。
+- **门槛增了一档要知道**：`check_plugin_branch_scope.py` 新增 `MIRRORED_CORE_FILES`
+  （4 个精确路径：`mail/__init__.py`、`mail/client.py`、`runtime.py`、`model_config.py`），
+  因为插件树测试要 import 核心 mail；注释写明"逐字复制自 dev、M4 后删除、不许扩成通配"。
+
+### 10.2 写信（质量 + 模型）
+
+- **模型**：`model_config` 的 letter 行改为 `{"key": "letter", "model": "mimo-v2.6-pro"}`
+  （用户 2026-10-22：「写邮件模型我说过是用 mimo v2.6pro 吧」；代码里原有一行是 2026-10-12
+  记的"借 judge / deepseek-v4-pro"，与本轮口径不符，已改并同步两处过时注释）。
+- **不再写成汇报**：`daily_report.py` 的写作 prompt 删掉「必须写这段时间的事」「至少接上
+  一句他说的话」「没有新事就说没有新事」，改成「今晚想写什么就写什么，不写这段时间的事也可以」。
+- **标题**：新增纯函数 `letter_writer.subject_problem(subject, body)`（>20 字 / 禁开头 /
+  复述词 / 与正文第一句最长公共子串 ≥6 → 不合格），走校对阶段已有的 `<subject>改过的主题>`
+  通道重给一次，仍不合格保留原标题；**不加模型调用**。
+- 实测（真实调用、素材取自 10-19/10-20/10-21 三封信）：两轮 6 封，标题 6/6 不再像首句、
+  "我这边没什么新事"类模板 6/6 消失；**残余**：仍有 2/6 以"今晚在群里看到你…"起头，
+  下一步要再动"开头"那一条。
+
+### 10.3 待办（明确）
+
+- 插件分支**没有 push**（用户 10-22「所有插件先不上传」）；本地已合并 main 并全绿。
+- `0.4.0b1` release 之后又有了 M1 + 写信改造两个提交（`8fcd615`、`6d9b009`）——
+  **要不要补一个 `v0.4.0b2` release，等用户说**。
+- webui 必修清单仍未动（`data/plans/06-webui必修清单.md`）。
