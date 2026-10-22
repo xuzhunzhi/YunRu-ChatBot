@@ -7,7 +7,7 @@ import logging
 import time
 from dataclasses import asdict
 
-from .memory_model import MemoryBatch, MemoryMetrics
+from .memory_model import MemoryBatch, MemoryMetrics, is_private_memory_group
 from .memory_store import MemoryStore
 from .relationship_tiers import guard_text, likes_text
 
@@ -252,6 +252,15 @@ class MemoryMaintenanceAgent:
         self.feature_logs = feature_logs
         self._lock = asyncio.Lock()
 
+    def _batch_allowed(self, batch: MemoryBatch) -> bool:
+        """这一批还要不要处理：群聊现读记忆名单，私聊伪群不受群名单约束。
+
+        私聊没有群号，它的开关是记忆总开关（`MemorySettings.enabled`）；把 `dm:` 当成
+        "不在名单里"会让它永远提交不了——这正是用户 2026-10-22「记所有人」要修的东西。
+        """
+
+        return is_private_memory_group(batch.group_id) or batch.group_id in self.allowed_groups()
+
     def _log_io(self, request, output: str, *, batch, error: str = "", **meta) -> None:
         """把一次维护调用的完整输入输出写进 data/logs/memory.jsonl。"""
 
@@ -296,12 +305,21 @@ class MemoryMaintenanceAgent:
                     # 待处理行**静默删掉**（体检实测因此丢过 249 条普通聊天），再按同一个集合
                     # 认领。那个删除已经删掉——关掉一个群的记忆只表示"不再收新的"，
                     # 已有的行留在库里，重新打开就接着处理。
+                    # 私聊没有群号，不在 `allowed_groups()` 里。它的待处理材料以伪群
+                    # `dm:<uid>` 存在库里；这里把**待处理里出现过的伪群**并进认领集合，
+                    # 但仍走同一个批次节奏、同一条 `store.claim`（不新起循环、不另开
+                    # SQL）。`pending_private_group_ids` 只返回群号，不返回正文。
                     groups = set(self.allowed_groups())
+                    try:
+                        groups |= await asyncio.to_thread(
+                            self.store.pending_private_group_ids)
+                    except Exception:  # noqa: BLE001 - 列不出私聊待处理不该停掉群维护
+                        logger.warning("memory_private_pending_failed", exc_info=True)
                     batch = await asyncio.to_thread(self.store.claim, groups,
                                                     lease_seconds=self.timeout + 30)
                     if batch is None:
                         break
-                    if batch.group_id not in self.allowed_groups():
+                    if not self._batch_allowed(batch):
                         break
                     self.metrics.maintenance_calls += 1
                     roster = await asyncio.to_thread(self.store.people_roster, batch.group_id)
@@ -339,7 +357,7 @@ class MemoryMaintenanceAgent:
                     # 与从前的"群被关掉就撤销提交"同一形状、同一判据（只是那个集合现在
                     # 表示"哪些群开记忆"，不再表示"哪些群开对话"）。关掉不删行：
                     # 这条材料会带着租约到期回到待处理，重新打开就接着处理。
-                    if batch.group_id not in self.allowed_groups():
+                    if not self._batch_allowed(batch):
                         break
                     ops = await asyncio.to_thread(self.store.commit, batch, raw)
                     for op in ops:

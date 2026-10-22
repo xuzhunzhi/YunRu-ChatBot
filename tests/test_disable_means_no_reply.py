@@ -296,18 +296,25 @@ def test_a_failed_maintenance_round_keeps_the_row() -> None:
     run(scenario())
 
 
-def test_a_private_message_from_a_stranger_is_still_dropped_whole() -> None:
-    """边界没变：白名单外的**私聊**整条丢弃（那里不是"这个群没记"而是"这个人没被允许"）。"""
+def test_a_private_message_from_a_stranger_is_recorded_but_not_answered() -> None:
+    """2026-10-22 用户口径「记所有人」：白名单外的**私聊**照进记忆。
+
+    对话边界没变：**不回复、不进会话历史、不调模型**（fail-closed，见 AGENTS.md §2.1）。
+    变的是记忆：私聊在记忆侧换算成伪群 `dm:<uid>`，收件箱里该有一条。
+    这条原来断言的是"整条丢弃"——用户当天明确改成"任何人的私聊消息都进记忆"。
+    """
 
     async def scenario():
         with harness(memory=(GROUP,)) as case:
+            # 白名单故意留空，确保走的是"白名单外"那条闸，而不是本机 .env 的配置。
+            case.engine.private_debug_user_ids = frozenset()
             stranger = IncomingMessage(
                 message_id="p1", session_id="private:404", user_id="404",
                 text="在吗", target=MessageTarget(user_id="404"),
             )
             assert await case.deliver(stranger) is None
             assert case.history("private:404") == []
-            assert case.inbox_rows() == []
+            assert [(row[0], row[1]) for row in case.inbox_rows()] == [("dm:404", "在吗")]
 
     run(scenario())
 

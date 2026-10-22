@@ -14,7 +14,7 @@ from .security import sanitize_chat_text, sanitize_reply_text
 from .memory_filters import scrub_system_self
 from .extensions import PromptMaterial
 from .base_prompt import BASE_PROMPT
-from .memory_model import MemoryMaterial
+from .memory_model import MemoryMaterial, memory_group_for
 from .prompt_library import derive_must_reply
 from .relationship_tiers import (GUARD_DEFAULT, GUARD_MAX, GUARD_MIN, LIKES_DEFAULT,
                                  LIKES_MAX, LIKES_MIN, guard_index, guard_tier, likes_tier)
@@ -2315,7 +2315,12 @@ def build_dialogue_messages(
         "以下可能已经过时，眼前这句优先。\n"
         # 短码：长期记忆是模型写的、可能过时的资料——**正是 DATA 的典型**。
         + data_boundary.render(
-            f"{(memory_material or MemoryMaterial()).as_data(current.target.group_id, current.user_id)}\n",
+            # 私聊没有群号，但记忆渲染仍要按 `dm:<uid>` 取（与服务端检索同一口径，
+            # 见 `memory_model.memory_group_for`）；否则私聊里检索到了也渲染不出来。
+            f"{(memory_material or MemoryMaterial()).as_data(
+                memory_group_for(current.target.group_id, current.user_id,
+                                 channel=current.channel),
+                current.user_id)}\n",
             mark)
         + "--- 你记得的旧事 结束 ---\n"
         # 「**刚才**有人给她贴了什么」（2026-10-11，用户选的"甲"）：这是**逐轮**的材料

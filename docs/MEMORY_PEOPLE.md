@@ -74,9 +74,11 @@ CREATE TABLE people (                    -- 本群见过的人：QQ → 最近�
   迁移时无法还原"当时是在哪个群说的"，宁可少借；
 - 说话人自己的记录照旧（含跨群 `user_global`），因为那本来就是对他自己说话。
 
-顺带说清楚：**记忆只从群聊里来**。私聊消息根本进不了 inbox
-（`MemoryInbox.offer` 要求 `target.group_id` 在允许列表里），所以不存在"私聊说的事被
-借到群里"这条路。
+顺带说清楚：**记忆从群聊和私聊都会来**（2026-10-22 用户「记所有人」）。私聊在记忆里
+是伪群 `dm:<uid>`（`MemoryInbox.offer` 用 `memory_model.memory_group_for` 换算），
+它的 `user_group` / `group` 记录与任何群号都不相交，所以不会被"本群学到的事"借出去。
+`user_global` 是**故意共享**的：用户当天口径是「记忆进群，私聊内容泄漏风险自负」——
+不做新的 visibility 过滤。
 
 ## 五、检索与排序
 

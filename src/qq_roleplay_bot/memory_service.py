@@ -7,7 +7,8 @@ from dataclasses import asdict
 from .memory_config import MemorySettings
 from .memory_inbox import MemoryInbox
 from .memory_maintenance_agent import MemoryMaintenanceAgent
-from .memory_model import MemoryMaterial, MemoryMetrics
+from .memory_model import (MemoryMaterial, MemoryMetrics, is_private_memory_group,
+                           memory_group_for)
 from .memory_store import MemoryStore
 
 logger = logging.getLogger(__name__)
@@ -18,8 +19,11 @@ class MemoryService:
                  store: MemoryStore | None = None, feature_logs=None):
         self.settings = settings or MemorySettings()
         # `allowed_groups` 是**记忆开放的群**（`/super enable memory`，在那个群里说的
-        # 那一句；引擎那边是 `DialogueEngine.memory_group_ids`）。它同时管两件事：
+        # 那一句；引擎那边是 `DialogueEngine.memory_group_ids`）。它管的是**群聊**：
         # 这些群的群消息进收件箱、这些群的旧事在回复时被检索回来。
+        #
+        # **私聊不走这张名单**（2026-10-22 用户：「记所有人」）：私聊用伪群 `dm:<uid>`，
+        # 收不收只看记忆总开关。理由见 `memory_model.DM_GROUP_PREFIX`。
         #
         # 它**不是**"这个群开不开对话"——那是 `/admin enable|disable`（另一张名单）。
         # 两件事从 2026-10-08 起彻底分开（用户："我要的是**记忆**不是对话"，
@@ -33,6 +37,26 @@ class MemoryService:
                                              timeout=self.settings.model_timeout, max_batches=self.settings.max_batches,
                                              feature_logs=feature_logs)
         self._tasks: list[asyncio.Task] = []
+
+    def _group_for(self, message) -> str | None:
+        """这次读/写用哪个记忆空间：群聊是群号，QQ 私聊是 `dm:<uid>` 伪群。
+
+        私聊没有群号，而记忆的每条读路径都按群号取命名空间；在**记忆侧**换算出伪群，
+        不去改 `MessageTarget` 的构造（那里要求 `user_id` / `group_id` 恰有其一）。
+        """
+
+        return memory_group_for(message.target.group_id, message.user_id,
+                                channel=getattr(message, "channel", ""))
+
+    def _readable(self, group: str | None) -> bool:
+        """这个记忆空间现在让不让读。
+
+        群聊看 `/super enable memory` 那张名单（现读，命令一改就生效）；私聊伪群
+        **不看群名单**——它的开关是记忆总开关（用户 2026-10-22「记所有人」）。
+        """
+
+        return self.settings.enabled and (
+            is_private_memory_group(group) or group in self.allowed_groups())
 
     async def start(self):
         if not self.settings.enabled or self._tasks:
@@ -49,8 +73,8 @@ class MemoryService:
             self.inbox.offer(message, reply=text, session_key=getattr(message, "session_id", None))
 
     async def retrieve(self, message, topic="", mentioned=()) -> MemoryMaterial:
-        group = message.target.group_id
-        if not self.settings.enabled or group not in self.allowed_groups():
+        group = self._group_for(message)
+        if not self._readable(group):
             return MemoryMaterial()
         self.metrics.reads += 1
         # 先各自限长再拼接：否则超长消息会把 topic 整段挤出检索窗口。
@@ -60,7 +84,7 @@ class MemoryService:
         try:
             records = await asyncio.wait_for(asyncio.to_thread(
                 self.store.retrieve, group, message.user_id, query, people), timeout=0.3)
-            if group not in self.allowed_groups():
+            if not self._readable(group):
                 return MemoryMaterial()
             self.metrics.hits += len(records)
             return await self._decorate(group, records)
@@ -93,8 +117,8 @@ class MemoryService:
         就影响判定。
         """
 
-        group = message.target.group_id
-        if not self.settings.enabled or group not in self.allowed_groups():
+        group = self._group_for(message)
+        if not self._readable(group):
             return MemoryMaterial()
         try:
             records = await asyncio.wait_for(asyncio.to_thread(
@@ -112,8 +136,8 @@ class MemoryService:
         只要是他说话，她就该记得自己对他的印象。混进按词命中的检索反而会时有时无。
         """
 
-        group = message.target.group_id
-        if not self.settings.enabled or group not in self.allowed_groups():
+        group = self._group_for(message)
+        if not self._readable(group):
             return ""
         try:
             return await asyncio.wait_for(
@@ -136,8 +160,8 @@ class MemoryService:
         返回 `{"id","content","age_days"}`；提醒过就写 `reminded_at`，一条状态只提醒一次。
         """
 
-        group = message.target.group_id
-        if not self.settings.enabled or group not in self.allowed_groups():
+        group = self._group_for(message)
+        if not self._readable(group):
             return None
         try:
             note = await asyncio.to_thread(self.store.pending_status_note, group, message.user_id)
@@ -189,8 +213,8 @@ class MemoryService:
         没办完就还在"——所以按小时限流、可以提不止一次。拿不到就当没有：不该影响这一轮。
         """
 
-        group = message.target.group_id
-        if not self.settings.enabled or group not in self.allowed_groups():
+        group = self._group_for(message)
+        if not self._readable(group):
             return ()
         try:
             return await asyncio.to_thread(

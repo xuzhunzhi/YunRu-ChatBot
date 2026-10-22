@@ -6,7 +6,8 @@ import hashlib
 import logging
 import time
 
-from .memory_model import InboxEvent, MemoryMetrics, safe_memory_text
+from .memory_model import (InboxEvent, MemoryMetrics, is_private_memory_group,
+                           memory_group_for, safe_memory_text)
 from .memory_store import MemoryStore
 from .security import sanitize_chat_text
 from .transport import IncomingMessage
@@ -30,10 +31,21 @@ class MemoryInbox:
 
     def offer(self, message: IncomingMessage, *, reply: str | None = None,
               session_key: str | None = None) -> bool:
-        group = message.target.group_id
-        # 收不收只看**这个群开没开记忆**；回不回是群对话开关的事（另一张名单）。
-        # 私聊/邮件仍然不进来（它们没有群号，记忆至今只认群，见 `docs/PENDING.md` 第 8 条）。
-        if group is None or group not in self.allowed_groups() or message.is_bot_message:
+        # 私聊没有群号，但记忆的每一层（收件箱、维护批、检索）都以群号为轴，
+        # 所以在这里把它当成伪群 `dm:<uid>`（理由见 `memory_model.DM_GROUP_PREFIX`）。
+        group = memory_group_for(message.target.group_id, message.user_id,
+                                 channel=getattr(message, "channel", ""))
+        # 收不收：**群聊**看这个群开没开记忆（`/super enable memory`）；**私聊全收**
+        # （用户 2026-10-22「记所有人」，不再只收主人）。回不回是群对话开关的事，
+        # 与这张名单互不相干。
+        #
+        # 私聊内容**不做群侧隔离**，这是用户当天的口径：「记忆进群，私聊内容泄漏
+        # 风险自负」——她学到的东西照旧可以升成 `user_global`（群里也能用）。
+        # 群侧检索不会看到 `dm:` 的 `user_group` / `group` 记录，靠的是命名空间天然
+        # 不相交，**不是**新造一层 visibility 过滤。
+        if group is None or message.is_bot_message:
+            return False
+        if not is_private_memory_group(group) and group not in self.allowed_groups():
             return False
         raw = reply if reply is not None else message.text
         # Credentials/local diagnostics do not enter either temporary storage or the agent.
@@ -63,9 +75,13 @@ class MemoryInbox:
         while True:
             event, sender_name = await self.queue.get()
             try:
-                if event.group_id not in self.allowed_groups():
-                    # 排队之后这个群的记忆被关掉：不写库（关掉就是"不再收"）。
-                    # **已入库的行一条都不动**——重新打开后它们照旧被维护处理。
+                # 排队之后这个群的记忆被关掉：不写库（关掉就是"不再收"）。
+                # **已入库的行一条都不动**——重新打开后它们照旧被维护处理。
+                #
+                # 私聊伪群不受群名单约束（与 `offer` 同一判据）：它的开关是记忆总开关
+                # （`MemorySettings.enabled`，关掉时 `MemoryService.capture` 根本不会入队）。
+                if (not is_private_memory_group(event.group_id)
+                        and event.group_id not in self.allowed_groups()):
                     self.metrics.dropped += 1
                 else:
                     saved = False

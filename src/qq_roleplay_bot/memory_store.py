@@ -14,8 +14,8 @@ from pathlib import Path
 from . import memory_grounding
 from .memory_filters import scrub_evidence_quote, system_self_rule
 from . import dev_config
-from .memory_model import (MAX_SUBJECTS, InboxEvent, MemoryBatch, MemoryRecord,
-                           MemoryValidationError, parse_operations)
+from .memory_model import (DM_GROUP_PREFIX, MAX_SUBJECTS, InboxEvent, MemoryBatch,
+                           MemoryRecord, MemoryValidationError, parse_operations)
 from .relationship_tiers import (GUARD_DEFAULT, GUARD_MAX, GUARD_MIN, LIKES_DEFAULT,
                                  LIKES_MAX, LIKES_MIN)
 from .security import sanitize_chat_text
@@ -844,6 +844,23 @@ class MemoryStore:
     def cleanup(self):
         with self.connection() as db:
             self._cleanup(db, self.clock())
+
+    def pending_private_group_ids(self) -> set[str]:
+        """待处理材料里出现过的**私聊伪群**（`dm:<uid>`）。
+
+        维护 agent 认领的候选集合一直是"记忆开放的群"；私聊没有群号、也不该进那张
+        持久化名单（`DialogueEngine.memory_group_ids` 会当群展示），所以这里从库里
+        已有的待处理材料把伪群捞出来，与名单合并后再交给 `claim`。只返回群号，
+        不返回任何正文；老库里没有 `dm:` 行时就是空集合。
+        """
+
+        pattern = f"{DM_GROUP_PREFIX}%"
+        with self.connection() as db:
+            rows = db.execute(
+                "SELECT DISTINCT group_id FROM inbox WHERE group_id LIKE ? "
+                "UNION SELECT DISTINCT group_id FROM participants WHERE group_id LIKE ?",
+                (pattern, pattern)).fetchall()
+        return {str(row[0]) for row in rows}
 
     def claim(self, allowed_groups: set[str], *, lease_seconds=120.0, limit=40) -> MemoryBatch | None:
         """认领一批待处理材料。`allowed_groups` 是**记忆开放的群**（`/super enable memory`）。

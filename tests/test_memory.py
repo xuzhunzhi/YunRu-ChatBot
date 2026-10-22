@@ -15,7 +15,9 @@ from qq_roleplay_bot import runtime_flags
 from qq_roleplay_bot.llm_client import ModelRequestError
 from qq_roleplay_bot.memory_config import MemorySettings
 from qq_roleplay_bot.memory_maintenance_agent import MemoryMaintenanceAgent, build_maintenance_messages
-from qq_roleplay_bot.memory_model import InboxEvent, MemoryMaterial, MemoryMetrics, MemoryValidationError, parse_operations
+from qq_roleplay_bot.memory_model import (InboxEvent, MemoryMaterial, MemoryMetrics,
+                                          MemoryValidationError, memory_group_for,
+                                          parse_operations)
 from qq_roleplay_bot.memory_service import MemoryService
 from qq_roleplay_bot.memory_store import SCHEMA_VERSION, DAY, MemoryStore
 from qq_roleplay_bot.stage3_main import DialogueEngine
@@ -55,6 +57,13 @@ def _test_scratch() -> _Scratch:
 
 def message(mid="m1", text="我喜欢被叫作小明", group=GROUP, user="100", mentioned=True):
     return IncomingMessage(mid, f"group:{group}", user, text, MessageTarget(group_id=group), mentioned, sender_name="同名用户")
+
+
+def private_message(mid="p1", text="我最近在学吉他", user="100", channel=""):
+    """QQ 私聊消息：`target.group_id` 是 `None`（记忆侧要换算成 `dm:<uid>` 伪群）。"""
+
+    return IncomingMessage(mid, f"private:{user}", user, text, MessageTarget(user_id=user),
+                           sender_name="私聊用户", channel=channel)
 
 
 def operation(batch, *, op="ADD", scope="user_global", key="preferred_name", content="用户希望被称作小明", kind="name", targets=(), evidence=None, ttl_days=None):
@@ -758,6 +767,84 @@ class OwnWordsInboxTests(unittest.TestCase):
         self.assertEqual(self.service.metrics.dropped, 1)
 
 
+class PrivateMemoryInboxTests(unittest.TestCase):
+    """私聊进记忆收件箱（2026-10-22 用户口径「记所有人」）。
+
+    原状：`MemoryInbox.offer` 对 `group is None` 直接拒绝，私聊一条都进不来。
+    现在：私聊在**记忆侧**换算成伪群 `dm:<uid>`，准入**不看群白名单**（私聊全收），
+    但仍受记忆总开关与 `safe_memory_text` 限制。群聊那条路一个字没改。
+
+    用户当天另有两条口径，这里一并钉住：
+    * 「记忆进群，私聊内容泄漏风险自负」——群侧不做新的 visibility 过滤；
+      群检索看不到 `dm:` 记录靠的是命名空间不相交（见 `MemoryAsyncTests` 的用例）。
+    * 「邮件 0.5 才做」——非 QQ 渠道（`channel="mail"`）**不**套私聊伪群。
+    """
+
+    def setUp(self):
+        self.temp = _test_scratch()
+        self.addCleanup(self.temp.cleanup)
+        self.store = MemoryStore(Path(self.temp.name) / "memory.sqlite3", clock=lambda: 1_000_000.0)
+        self.groups = {GROUP}
+        self.service = MemoryService(object(), lambda: self.groups, store=self.store)
+
+    def queued(self) -> list:
+        out = []
+        while not self.service.inbox.queue.empty():
+            out.append(self.service.inbox.queue.get_nowait())
+        return out
+
+    def test_private_message_enters_inbox_under_a_pseudo_group(self):
+        self.service.capture(private_message())
+
+        (event, name), = self.queued()
+        self.assertEqual(event.group_id, "dm:100")
+        self.assertEqual(event.user_id, "100")
+        self.assertEqual(event.text, "我最近在学吉他")
+        self.assertEqual(name, "私聊用户")
+        self.assertEqual(self.service.metrics.enqueued, 1)
+
+    def test_every_private_message_is_admitted_without_a_group_allowlist(self):
+        """私聊全收：群名单是空的也照样进（「不只主人」）。"""
+
+        self.groups.clear()
+        self.service.capture(private_message(user="404"))
+
+        (event, _name), = self.queued()
+        self.assertEqual(event.group_id, "dm:404")
+
+    def test_a_disabled_memory_setting_never_captures_private_messages(self):
+        off = MemoryService(object(), lambda: self.groups,
+                            settings=MemorySettings(enabled=False), store=self.store)
+
+        self.assertFalse(off.capture(private_message()))
+        self.assertEqual(off.inbox.queue.qsize(), 0)
+
+    def test_private_credentials_are_still_dropped(self):
+        """安全闸一个字没放宽：凭据/本机信息照旧不进暂存。"""
+
+        self.assertFalse(self.service.capture(
+            private_message(text="回头把 api_key = sk-abcdefghijklmnopqrstuvwxyz012345 发给他")))
+        self.assertEqual(self.queued(), [])
+        self.assertEqual(self.service.metrics.dropped, 1)
+
+    def test_group_and_private_dedup_keys_do_not_collide(self):
+        """同一个 message_id 在群聊与私聊各一条：去重键带上了 `dm:` 与会话。"""
+
+        self.service.capture(message(mid="same"))
+        self.service.capture(private_message(mid="same"))
+
+        events = [event for event, _name in self.queued()]
+        self.assertEqual(len(events), 2)
+        self.assertEqual({event.group_id for event in events}, {GROUP, "dm:100"})
+        self.assertEqual(len({event.id for event in events}), 2)
+
+    def test_non_qq_channels_do_not_become_private_memory(self):
+        """邮件有自己的命名空间（0.5 才做），今天它仍是一个字都不进记忆。"""
+
+        self.assertFalse(self.service.capture(private_message(channel="mail")))
+        self.assertEqual(self.queued(), [])
+
+
 class MemoryAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = _test_scratch()
@@ -769,6 +856,17 @@ class MemoryAsyncTests(unittest.IsolatedAsyncioTestCase):
 
     def make_agent(self, client, **kwargs):
         return MemoryMaintenanceAgent(client, self.store, lambda: self.groups, self.metrics, max_batches=1, **kwargs)
+
+    def seed(self, group, text, *, scope, key, content, kind="preference"):
+        """直接落一条记忆（不经过模型），给读路径用例造数据。"""
+
+        self.sequence = getattr(self, "sequence", 0) + 1
+        self.now += 1
+        self.store.append(InboxEvent(f"seed{self.sequence}", group, "100", "user", text, self.now))
+        batch = self.store.claim({group})
+        self.assertIsNotNone(batch)
+        self.store.commit(batch, output(operation(
+            batch, scope=scope, key=key, content=content, kind=kind)))
 
     async def test_agent_autonomous_add_update_delete_ignore_and_cost(self):
         class FakeClient:
@@ -819,6 +917,102 @@ class MemoryAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls["n"], 1, "失败不再重试")
         self.assertEqual(self.metrics.failures, 1)
         self.assertIsNotNone(self.store.claim(self.groups), "批次应当放回去，下一轮还能认领")
+
+    async def test_maintenance_agent_claims_a_private_batch(self):
+        """维护 agent 认领 `dm:` 批次：不靠群名单，也不需要新起一套循环。
+
+        假模型只断言"这批的 group_id 是 dm:100"，然后照常写一条 `user_global`。
+        """
+
+        class FakeClient:
+            last_usage = {"prompt_tokens": 7, "completion_tokens": 3}
+
+            async def complete(inner, request):
+                data = json.loads(request[1]["content"].split("\n", 1)[1])
+                assert data["batch"]["group_id"] == "dm:100"
+                event = data["events"][0]
+                return output({
+                    "op": "ADD", "scope_type": "user_global", "kind": "preference",
+                    "normalized_key": "hobby", "content": "他最近在学吉他",
+                    "confidence": 0.9, "ttl_days": None,
+                    "evidence_event_ids": [event["id"]], "targets": [],
+                })
+
+        self.now += 1
+        self.store.append(InboxEvent("dm1", "dm:100", "100", "user", "他最近在学吉他", self.now))
+        agent = self.make_agent(FakeClient())
+
+        self.assertEqual(await agent.run_once(), 1)
+        self.assertEqual(self.metrics.maintenance_calls, 1)
+        self.assertEqual(self.metrics.maintenance_runs, 1)
+        self.assertIn("他最近在学吉他",
+                      [record.content for record in self.store.retrieve("dm:100", "100", "")])
+
+    async def test_private_retrieval_returns_own_dm_records_and_user_global(self):
+        self.seed("dm:100", "他最近在学吉他", scope="user_group", key="hobby",
+                  content="他最近在学吉他")
+        self.seed(GROUP, "他喜欢被叫作小明", scope="user_global", key="preferred_name",
+                  content="他喜欢被叫作小明")
+        # 群里的本群叫法不该串进私聊（与"群侧看不到 dm"对称的技术底线）。
+        self.seed(GROUP, "群里叫他老明", scope="user_group", key="group_nick",
+                  content="群里叫他老明")
+
+        service = MemoryService(object(), lambda: set(), store=self.store)
+        material = await service.retrieve(private_message(text=""))
+
+        contents = [record.content for record in material.records]
+        self.assertIn("他最近在学吉他", contents)
+        self.assertIn("他喜欢被叫作小明", contents)
+        self.assertNotIn("群里叫他老明", contents)
+        # 渲染也要按同一个伪群取，否则"检索到了但 prompt 里没有"。
+        self.assertIn("他最近在学吉他",
+                      material.as_data(memory_group_for(None, "100"), "100"))
+
+    async def test_private_identity_uses_the_dm_namespace(self):
+        self.seed("dm:100", "他喜欢被叫小明", scope="user_group", key="preferred_name",
+                  content="他喜欢被叫小明", kind="name")
+
+        service = MemoryService(object(), lambda: set(), store=self.store)
+        material = await service.identity_for(private_message())
+
+        note = material.as_judge_note(memory_group_for(None, "100"), "100")
+        self.assertIn("小明", note)
+
+    async def test_group_retrieval_never_returns_dm_records_but_keeps_user_global(self):
+        """串味的技术底线：群里查不到 `dm:` 的 user_group / group 记录。
+
+        `user_global` 是**故意共享**的（用户 2026-10-22：「记忆进群，私聊内容泄漏
+        风险自负」）。所以这里只钉命名空间，不钉内容隔离。
+        """
+
+        self.seed("dm:100", "私聊里说他养猫", scope="user_group", key="pet",
+                  content="私聊里说他养猫")
+        self.seed("dm:100", "私聊里他自嘲是猫奴", scope="group", key="self_joke",
+                  content="私聊里他自嘲是猫奴", kind="group_fact")
+        # 这条是**在私聊里学到的跨群事实**：群聊必须看得到（用户口径「记忆进群」）。
+        self.seed("dm:100", "他喜欢被叫作小明", scope="user_global", key="preferred_name",
+                  content="他喜欢被叫作小明")
+
+        service = MemoryService(object(), lambda: {GROUP}, store=self.store)
+        material = await service.retrieve(message(text=""))
+
+        contents = [record.content for record in material.records]
+        self.assertNotIn("私聊里说他养猫", contents)
+        self.assertNotIn("私聊里他自嘲是猫奴", contents)
+        self.assertIn("他喜欢被叫作小明", contents)
+        rendered = material.as_data(GROUP, "100")
+        self.assertNotIn("私聊里说他养猫", rendered)
+        self.assertIn("他喜欢被叫作小明", rendered)
+
+    async def test_disabled_memory_setting_retrieves_nothing_in_private(self):
+        self.seed("dm:100", "他最近在学吉他", scope="user_group", key="hobby",
+                  content="他最近在学吉他")
+        off = MemoryService(object(), lambda: set(),
+                            settings=MemorySettings(enabled=False), store=self.store)
+
+        self.assertEqual((await off.retrieve(private_message(text=""))).records, ())
+        self.assertEqual(await off.identity_for(private_message()), MemoryMaterial())
+        self.assertEqual(await off.own_notes(private_message()), ())
 
     async def test_no_overlap_and_disable_during_model(self):
         """模型还在跑时第二轮直接返回 0；跑到一半被禁用则不提交（也不算失败）。"""
@@ -874,12 +1068,14 @@ class MemoryAsyncTests(unittest.IsolatedAsyncioTestCase):
         await task
         self.assertEqual(engine.snapshot().model_calls, 1)
 
-    async def test_engine_capture_dedup_bot_sent_admin_and_private_boundaries(self):
+    async def test_engine_capture_dedup_bot_sent_admin_and_private_messages(self):
         class Client:
             async def complete(inner, request):
                 return "<decision>REPLY</decision><reply>我在</reply>"
         service = MemoryService(Client(), lambda: self.groups, store=self.store)
-        engine = DialogueEngine(Client(), memory_service=service)
+        # 私聊白名单**故意留空**：用来钉住"白名单外的人不回复、但记忆照收"。
+        engine = DialogueEngine(Client(), memory_service=service,
+                                private_debug_user_ids=frozenset())
         msg = message()
         result = await engine.handle(msg)
         self.assertEqual(service.inbox.queue.qsize(), 1)  # Only the user before send succeeds.
@@ -891,9 +1087,9 @@ class MemoryAsyncTests(unittest.IsolatedAsyncioTestCase):
         await engine.handle(message("admin", "/admin status", user="900000001"))
         engine.record_sent_reply(message("admin", user="900000001"), "状态")
         await engine.handle(replace(message("self"), is_bot_message=True))
-        private = replace(message("private"), target=MessageTarget(user_id="100"))
-        await engine.handle(private)
-        self.assertEqual(service.inbox.queue.qsize(), 2)
+        # 2026-10-22「记所有人」：私聊不再回、不再进会话历史，但**进记忆收件箱**。
+        await engine.handle(private_message())
+        self.assertEqual(service.inbox.queue.qsize(), 3)
         writer = asyncio.create_task(service.inbox.run())
         try:
             await service.inbox.flush()
@@ -902,6 +1098,9 @@ class MemoryAsyncTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(writer, return_exceptions=True)
         batch = self.store.claim(self.groups)
         self.assertEqual({e.speaker for e in batch.events}, {"user", "yunru"})
+        private_batch = self.store.claim({"dm:100"})
+        self.assertIsNotNone(private_batch)
+        self.assertEqual([e.text for e in private_batch.events], ["我最近在学吉他"])
 
     async def test_filtered_messages_never_reach_inbox(self):
         service = MemoryService(object(), lambda: self.groups, store=self.store)

@@ -59,6 +59,45 @@ def safe_memory_text(value: str) -> bool:
     return not SENSITIVE.search(value) and not is_sensitive_local_request(value)
 
 
+# 私聊在记忆里的**伪群**前缀（2026-10-22 用户：「记所有人」）。
+#
+# 为什么用伪群而不是给记忆加一个"渠道"维度：记忆的归属、检索、维护批、配额、
+# 关系证据全都以 `group_id` 为轴（`MemoryStore._namespaces` / `MemoryBatch.scope_key`
+# 都是 `gid:uid`）。私聊没有群号，造一个 `dm:<uid>` 就能让现有每条通路原样工作，
+# 不必升 schema、不必迁移老数据，也不会碰 `visibility` 那套（用户当天明确：
+# 「不要为此新造一批 visibility 过滤」）。
+#
+# 为什么不写进 `DialogueEngine.memory_group_ids`：那张集合会持久化，并在
+# `/super status` 里当"记忆开放的群"展示；把 `dm:<uid>` 写进去等于凭空多出一堆群。
+# 伪群只在记忆子系统内部存在（收件箱 / 认领 / 检索），外面看不见。
+DM_GROUP_PREFIX = "dm:"
+
+
+def private_memory_group_id(user_id: str) -> str:
+    """一个私聊者的记忆命名空间（`user_group` 的键会变成 `dm:<uid>:<uid>`）。"""
+
+    return f"{DM_GROUP_PREFIX}{user_id}"
+
+
+def is_private_memory_group(group_id: str | None) -> bool:
+    return bool(group_id) and str(group_id).startswith(DM_GROUP_PREFIX)
+
+
+def memory_group_for(group_id: str | None, user_id: str | None, *, channel: str = "") -> str | None:
+    """这次读/写该用哪个记忆空间：群聊用群号，QQ 私聊用 `dm:<uid>`。
+
+    `channel` 非空（邮件等其他渠道）时**不套私聊伪群**：邮件进记忆是 0.5 才做的事，
+    它会有自己的命名空间（`docs/MAIL_AS_CORE_CHANNEL.md` §二.8）。这条判据也
+    顺手保证今天的邮件正文仍然一个字都不进记忆，不被"私聊全收"顺带带进来。
+    """
+
+    if group_id:
+        return group_id
+    if channel or not user_id:
+        return None
+    return private_memory_group_id(str(user_id))
+
+
 @dataclass(frozen=True, slots=True)
 class InboxEvent:
     id: str

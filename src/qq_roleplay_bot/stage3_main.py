@@ -134,7 +134,7 @@ from .extensions import (
 # 这个模块就是它的解析器，自身零依赖（只有 `re` + enum + dataclass）。
 # 所以这是**合法的 stage3 依赖**，不是要拆掉的拴缚。
 from .admin_control import AdminCommand, AdminCommandKind, parse_admin_command
-from .memory_model import MemoryMaterial
+from .memory_model import MemoryMaterial, memory_group_for
 from .memory_service import MemoryService
 # 防备单次的升幅（= 一档宽 10，2026-10-20）。从存储层引进来，不在调用点写死数字：
 # 写死 8 的时候 `0 → 8` 跨不了档，"被冒犯立刻变冷"是假的。
@@ -5412,11 +5412,15 @@ class DialogueEngine:
             # 短期历史，也照进记忆收件箱（**只要那个群开了记忆**），只有"回不回"
             # 被关掉。用户原话："只是不回复，不要影响上下文和记忆入栈"。
             #
-            # 只对**群消息**这么做：私聊白名单外的人仍然整条丢弃（fail-closed，
-            # 见 AGENTS.md §2.1），那里不是"这个群没开"而是"这个人没被允许"。
-            # 记忆那张名单与这张互不相干（`DialogueEngine.memory_group_ids`）。
+            # 群消息走 `_absorb_without_reply`；私聊白名单外的人**仍然不回复、不进模型、
+            # 不进会话历史**（fail-closed，见 AGENTS.md §2.1），但**记忆照收**——
+            # 用户 2026-10-22「记所有人」：任何人的私聊消息都进记忆，不只主人。
+            # 所以这里对私聊只做一件事：投进记忆收件箱（收不收由 `MemoryInbox` 与记忆
+            # 总开关决定），`return None` 一个字没变。
             if message.target.group_id is not None:
                 await self._absorb_without_reply(message, resumed=resumed)
+            elif self.memory_service is not None:
+                self.memory_service.capture(message)
             return None
         if not resumed and not self.deduplicator.accept(message.message_id):
             self._stats["ignored_messages"] += 1
@@ -6717,7 +6721,11 @@ class DialogueEngine:
         own_notes: tuple[dict, ...] = ()
         if self.memory_service is not None:
             material = await self.memory_service.identity_for(message)
-            identity = material.as_judge_note(message.target.group_id, message.user_id)
+            # 与回复段同一口径：私聊的 `group_id` 是 None，按 `dm:<uid>` 伪群取。
+            identity = material.as_judge_note(
+                memory_group_for(message.target.group_id, message.user_id,
+                                 channel=message.channel),
+                message.user_id)
             # 「惦记事」：她自己记着的事，判定这边一样只看得到、只是 DATA（"判定这边我不是
             # 很确定，你看着办"——看着办的结果是**给它**：判定要判"还在不在同一条线上"，
             # 而"她答应过回头问一句"正是这条线上的一件事）。
