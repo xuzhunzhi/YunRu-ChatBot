@@ -3793,12 +3793,23 @@ class DialogueEngine:
             pass
         profile = ""
         updated = 0.0
+        # 正文走 `profile()`：它把这个人**全部生效的碎片**拼起来（`profile` 总览在前、
+        # `profile/<方面>` 按名跟在后面，见 `memory_store.py` 的 `profile()`）。
+        # 原来这里用 `profile_record()`，而它是 `ORDER BY updated_at DESC LIMIT 1`——
+        # 画像 2026-10-21 碎片化之后，拿到的是**最新补的那一片**，不是总览，
+        # 于是 `/super profile` 只剩一句"最近又知道了什么"，其余碎片都看不到。
+        try:
+            profile = str(store.profile(user_id) or "")
+        except Exception:  # noqa: BLE001 - 正文拿不到就按"还没有画像"走下面的兜底
+            profile = ""
+        # 时间戳仍取 `profile_record()`：`profile()` 只回正文、没有更新时间；
+        # 那一条（最新碎片）的 `updated_at` 就是全部碎片里的 max，正好是"画像更新于"。
+        # 两件事分开取，任一边失败只丢那一边，不把整块画像变成兜底文案。
         try:
             record = store.profile_record(user_id)
-            profile = str(getattr(record, "content", "") or "")
             updated = float(getattr(record, "updated_at", 0.0) or 0.0)
-        except Exception:  # noqa: BLE001
-            profile = ""
+        except Exception:  # noqa: BLE001 - 时间拿不到只是不显示"更新于"
+            updated = 0.0
         lines.append("—— 她对这个人的印象 ——")
         if profile:
             lines.append(profile)

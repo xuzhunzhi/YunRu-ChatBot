@@ -213,19 +213,29 @@ def test_super_help_via_private_chat() -> None:
 PROFILE_TEXT = "他叫老明，做后端的，喜欢把话说清楚，讨厌被追问家里的事。"
 
 
-def _seed_profile(store, *, user_id: str = NOISE, content: str = PROFILE_TEXT) -> None:
-    """往临时库里写一条画像（走真实校验路径，不直接插表）。"""
+def _seed_profile_piece(store, *, user_id: str, key: str, content: str) -> None:
+    """往临时库里写**一片**画像（总览 `profile` 或某个 `profile/<方面>`）。
 
-    store.append(InboxEvent("e-profile", GROUP, user_id, "user", "我叫老明", _now()))
+    走真实校验路径，不直接插表；事件 id 带上键名，同一批测试里写多片也不会撞。
+    """
+
+    event_id = f"e-profile-{key.replace('/', '-')}"
+    store.append(InboxEvent(event_id, GROUP, user_id, "user", "我叫老明", _now()))
     batch = store.claim({GROUP})
     assert batch is not None
     evidence = [event.id for event in batch.events if event.speaker == "user"]
     store.commit(batch, json.dumps({"operations": [{
         "op": "ADD", "scope_type": "user_global", "kind": "profile",
-        "normalized_key": "profile", "content": content, "confidence": 0.9,
+        "normalized_key": key, "content": content, "confidence": 0.9,
         "ttl_days": None, "evidence_event_ids": evidence, "targets": [],
         "subjects": [], "durable": True,
     }]}, ensure_ascii=False))
+
+
+def _seed_profile(store, *, user_id: str = NOISE, content: str = PROFILE_TEXT) -> None:
+    """往临时库里写一条画像总览（走真实校验路径，不直接插表）。"""
+
+    _seed_profile_piece(store, user_id=user_id, key="profile", content=content)
 
 
 def _mention(text: str, user_id: str, *, sender: str = ADMIN) -> IncomingMessage:
@@ -252,6 +262,48 @@ def test_super_profile_shows_the_full_impression() -> None:
             assert "好感" in text and "防备" in text
             # 是发到群里的（目标群就是这条命令的群）
             assert result.target.group_id == GROUP
+        finally:
+            cleanup()
+
+    asyncio.run(run())
+
+
+def test_super_profile_assembles_every_piece() -> None:
+    """`/super profile` 要把**全部碎片**都摊开（2026-10-22）。
+
+    由来（实测）：生产记忆库里主人有 3 条 active 画像——`profile` 总览 191 字、
+    `profile/arts` 63 字、`profile/tech` 66 字——而 `/super profile` 只显示一条。
+    原因就是这里原来用 `profile_record()`（`ORDER BY updated_at DESC LIMIT 1`），
+    碎片化之后拿到的是最新那一片。正文现在走 `profile()`（拼全部碎片）；
+    时间仍取最新一条的 `updated_at`，所以"更新于"必须还在。
+    """
+
+    async def run() -> None:
+        engine, store, cleanup = _engine_with_memory()
+        try:
+            _seed_profile_piece(store, user_id=NOISE, key="profile", content="总览：他叫老明。")
+            _seed_profile_piece(store, user_id=NOISE, key="profile/arts", content="他喜欢拆旧手机。")
+            _seed_profile_piece(store, user_id=NOISE, key="profile/tech", content="他做后端。")
+            text = engine._profile_block(store, NOISE, _mention("/super profile @某人", NOISE))
+            assert "总览：他叫老明。" in text, text
+            assert "他喜欢拆旧手机。" in text, text
+            assert "他做后端。" in text, text
+            assert "更新于" in text, text
+        finally:
+            cleanup()
+
+    asyncio.run(run())
+
+
+def test_super_profile_without_a_profile_keeps_the_fallback() -> None:
+    """一条画像都没有时，`_profile_block` 仍然给原来那句兜底文案、不说"更新于"。"""
+
+    async def run() -> None:
+        engine, store, cleanup = _engine_with_memory()
+        try:
+            text = engine._profile_block(store, NOISE, _mention("/super profile @某人", NOISE))
+            assert "还没有画像（记忆维护 agent 还没攒出来）。" in text, text
+            assert "更新于" not in text, text
         finally:
             cleanup()
 
