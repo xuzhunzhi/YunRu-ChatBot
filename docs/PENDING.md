@@ -387,3 +387,35 @@ outage_notice **取用**它；mail 那一侧不认识任何使用者的名字。
 - 用户原话「别他妈提公告听到就烦」：**这批计划不含任何群公告/对外发言步骤**，以后也不主动提。
 - 用户原话「该核实的先派 opencode 核实再说」：四条待核发现 + 评审 P1/P2 共 20 条，
   已派三个 opencode 核实（`dev/data/opencode/out/verify-*.md`），**核实结论没回来之前不当事实用**。
+
+---
+
+## 九、2026-10-22 白天：已上线 0.4.0b1 + 邮件三件拍板
+
+### 9.1 已做的（都已提交并部署到 `run`，bot 已于 14:12 重启）
+
+| 项 | 落点 | 说明 |
+| --- | --- | --- |
+| 画像读侧修复 | `stage3_main.py` `_profile_block` 改走 `store.profile()` | `/super profile` 与面板显示全部碎片（总览在前）；取证见 `data/opencode/out/profile-forensics.md`（库里一条没少） |
+| 人手写记忆不被覆盖 | `memory_store.py` 守卫扩到任意 kind | 判据从"看 kind/键"改成"看 origin=operator_seed"；audit 记 `operator_seed_readonly` |
+| 私聊进记忆（记所有人） | `memory_model.py` 伪群 `dm:<uid>` + inbox/service/maintenance | 不升 schema、不做群侧隔离（用户口径「记忆进群，私聊内容泄漏风险自负」）；白名单外私聊只入记忆、不回复 |
+| 日志归档 30 天 | `feature_log.py` | 本次随核心一起上线 |
+| 0.4.0b1 release | tag `v0.4.0b1` | **只含核心与 Stage 3**；插件（含 `webui/`）不随 release 上传 |
+
+### 9.2 邮件三件（用户 10-22 拍板）
+
+1. **第二个插件名**：`daily_report`（用户「第一个同意」）。
+2. **陌生人 vs 熟人**：用户要求「要想办法识别这个人到底是陌生人还是熟人，剩下的照你说的做」
+   ——陌生人只进中短期（7–14 天），长期只留"这人是谁/关系"；识别方式待设计
+   （用 `people` / `relationships` / 关系刻度的既有数据，不新造名单）。
+3. **信的 scope**：「共用，但是标注好是邮件的。而且进长期记忆，可以通过记忆调起收到的邮件」
+   ——`user_global` 共用 + 渠道标注 `mail` + 长期保留 + 召回时能带出邮件内容（0.5 的 M3）。
+
+### 9.3 没做的（明确记账）
+
+- **邮件 M1（发信核心化）没做**：要新建核心 `mail/`、`registry.mail` 由核心 provide、
+  `REQUIRES` 改能力判定，并跨 `dev` 与插件树改测试；当天选择先上线已完成四项，M1 顺延。
+- **邮件 M2/M3/M4**：按计划放 0.5。
+- **webui 必修清单**（`data/plans/06-webui必修清单.md`）：`/api/action` 全挂、重启按钮、
+  模型页空白等**未动**——用户已明确"webui 没做好，插件先不上传"。
+- **预装归零的代码改动**：本次 release 直接只发 main（天然不含插件），没改 `discover()`。
