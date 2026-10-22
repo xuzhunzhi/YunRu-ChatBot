@@ -2,7 +2,7 @@
 
 > 一个跑在 QQ 群里的角色扮演 Bot：先判断此刻该不该开口，再决定说什么。
 
-[![Tests](https://img.shields.io/badge/tests-1933%20passing-4CC38A)](#测试)
+[![Tests](https://img.shields.io/badge/tests-1962%20passing-4CC38A)](#测试)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](#快速开始)
 [![OneBot](https://img.shields.io/badge/OneBot-v11%20%2F%20NapCat-3482FF)](#状态与限制)
 [![Stage](https://img.shields.io/badge/stage-3-6E6E6E)](#状态与限制)
@@ -17,7 +17,8 @@
 1. **说不说，和说什么，是两次调用。** 判定 agent（`dialogue_judge.py`）只回答“接不接、在聊什么”，
    不带人设与知识库；它说 `NO_REPLY` 时，回复调用完全不发生。
    一次 48 小时统计里，判定给出 `NO_REPLY` 900 次、`REPLY` 135 次；
-   被 @ 到时回复率 83%，没被叫到时 11%（`ARCHITECTURE.md` 第 82 行）。
+   被 @ 到时回复率 83%，没被叫到时 11%（`ARCHITECTURE.md`「Stage 3 Prompt 分层」那节
+   "消极要治语气"那段）。
 2. **记忆按人存，不按群存。** `subject_user_id` 负责隔离，`record_subjects` 负责归属与召回；
    同一个人在 A 群和 B 群共用一份画像。一个人有多个 QQ 号时，只能由操作者手工登记，
    系统不猜——认错人比想不起来更伤。
@@ -135,13 +136,17 @@ OneBot 已连接
 - **三层记忆。** 每一条进来的消息（包括她没接话的那些）先落到**超短期**队列：TTL 在 1–3 小时
   之间随机，到期还没被维护认领会再续一次；维护 agent 每批从这里取料，值得留的才升到中短期
   （默认 14 天，群事实与话题摘要 30 天），被后续证据再次确认的才升长期。
-  `name` / `boundary`（称呼与红线）直接进长期。私聊与邮件目前不进这套队列。
+  `name` / `boundary`（称呼与红线）直接进长期。**私聊也进这套队列**（2026-10-22 起，伪群
+  `dm:<uid>`：不过群名单、不做群侧隔离，用户口径「记所有人」）；邮件仍不进（它有自己的
+  命名空间，0.5 才做）。
 - **跨群的是人物记忆，不是对话原文。** 画像、称呼、边界与关系（好感 / 防备）按 `user_id`
   在所有群共用一份；对话原文、活窗口与会话状态按群隔离，A 群说的话不会进 B 群的 prompt。
   能不能跨群由写入时的 scope 决定：`user_global` 跨群，`user_group` 锁在单个群。
 - **一人多号要手工登记。** 系统不判断两个号是不是同一个人；登记之后两个号读写同一份记忆。
-- **只删不改。** 面板与 `/super memory` 能删有问题的记忆，不能手写一条；写入只走记忆维护 agent。
-  删除先把整条记录快照进 `archive`（保留 30 天），墓碑保留 365 天，防止旧证据把它写回来。
+- **删除只走维护 agent，但允许人手写。** 面板与 `/super memory` 能删有问题的记忆；模型不能
+  手写一条——写入只走记忆维护 agent。**人手写的行（`origin=operator_seed`，任意 kind）模型
+  一律不许覆盖**（拒写理由 `operator_seed_readonly`，2026-10-22）。删除先把整条记录快照进
+  `archive`（保留 30 天），墓碑保留 365 天，防止旧证据把它写回来。
 - **金句与黑话都从群里被动学。** 金句的素材只认“别人给她的话贴了表情”；注入时最多挑 5 条
   与眼前这句相关的材料。黑话只在有人解释一个词时记一条，带原话证据。
   关系是亲近 / 防备两轴，变动流水保留 365 天。
@@ -179,7 +184,7 @@ OneBot 已连接
 | --- | --- |
 | `group_admin/` | 踢人、禁言、全员禁言、撤回、头衔、公告、改名片；群管理命令在 `/super` 下（档位 super），给自己设头衔的 `/title` 是公开命令 |
 | `join_approval/` | 入群申请按黑名单 / 白名单 / 正则 / 兜底四道判据处理；拿不到角色来源时 fail-closed |
-| `mail/` | 读信回信、每晚一封信；并把“给操作者发信”“寄给指定地址”两条窄口提供给别的插件 |
+| `mail/` | 读信回信、每晚一封信；"给操作者发信""寄给指定地址"两条窄口自 2026-10-22（M1）起**由核心先提供**，插件只是再登记一次（已有人提供就 no-op），所以删掉 `mail/` 告警仍能发信 |
 | `outage_notice/` | 在线 → 掉线算一段，断一次发一封邮件；依赖 `mail` |
 | `remind/` | 她说“8 点提醒我交作业”就收下，到点走核心的出站路径发出；群 @ / 私聊 / 邮箱三选一，`/提醒` 查看与删除 |
 | `rss/` | 轮询 RSS / Atom，投到群或操作者邮箱；订阅写在 `data/rss/feeds.json`，加源不用重启 |
@@ -188,13 +193,17 @@ OneBot 已连接
 | `webui/` | 跑在 bot 进程里的控制面板；本地 token 与远程口令两套接入；权限与超管一致，不能改代码 |
 
 哪些插件随代码发布、哪些需要另装，还没有定；这张表只说明有哪些插件。
+2026-10-22 仍是这个状态：`v0.4.0b1` 只发核心，插件源码只存在于 `plugins` 分支（预装还是另装没拍板）。
 
 > **0.4.0b1 的 release 只发布核心与 Stage 3 内容**（对话 / 记忆 / 防护 / 传输 / 装配）。
 > 插件源码（含面板 `webui/`）暂不随 release 上传，等面板打磨完再单独发。
 
 `roles` 不再是独立插件：群成员角色事实已经进核心 `group_roles.py`，插件侧的重复实现已删
-（`yunru-stage4` 提交 `e16874a`）。插件之间用 `REQUIRES` 表达前置依赖，
-比如 `outage_notice` / `timeout_alert` 依赖 `mail`；前置装不上就跳过自己，核心照跑。
+（`yunru-stage4` 提交 `e16874a`；`plugins/roles/` 只剩 `__pycache__`，没有 `plugin.py`）。
+插件之间用 `REQUIRES` 表达前置依赖，比如 `outage_notice` / `timeout_alert` 依赖 `mail`；
+**2026-10-22（M1）起这个依赖可以先问核心能力**：`REQUIRES = ("mail",)` 会先查
+`has_capability("mail")`，为真直接放行（删掉 `plugins/mail/` 也装得上），为假才装前置插件，
+还装不上就跳过自己，核心照跑。
 
 ## 架构
 
@@ -251,9 +260,13 @@ NapCat ──WS──▶ onebot_ws.py ──▶ runtime.serve ──┬─▶ �
 最近一次离线留痕（`data/logs/verify_runs.log`）：
 
 ```text
-2026-10-22T00:18:56+08:00 label=offline sha=223c5c9 branch=main dirty=no
-ran=1933 failed=0 errors=0 skipped=0 result=PASS
+2026-10-22T20:12:38+08:00 label=offline sha=30774d9 branch=main dirty=yes
+ran=1962 failed=0 errors=0 skipped=0 result=PASS
 ```
+
+> 这次 `dirty=yes`：跑的是提交 `30774d9` **加上未提交的文档改动**（2026-10-22 文档盘点）。
+> 想要"某个提交是绿的"那种凭证，得把工作区提交干净后重跑一次（本机的 `dirty=yes` 不进仓库，
+> 也别当某个提交的证据）。
 
 **报数请用 `ran=`，不要用 `grep -c "def test_"`**——`TestCase` 里的方法不叫 `def test_`，
 两个数天然对不上。
@@ -271,6 +284,9 @@ ran=1933 failed=0 errors=0 skipped=0 result=PASS
   `get_group_member_info` 的 `no_cache`，以及 NapCat 的 HTTP 接口形状。
   换 go-cqhttp、Lagrange、LLOneBot 之类的实现，大概率要按 `transport.py` 写适配层。
 - **模型接口按 OpenAI-compatible `/chat/completions` 写。** 换别的协议要改 `llm_client.py`。
+  **写信（插件 `mail/` 那一路）用 `mimo-v2.6-pro`**（2026-10-22 用户定），钥匙是它自己那条
+  `QQBOT_LETTER_API_KEY`；其余五路（reply / judge / memory / review / vision）是 `deepseek-flash`。
+  每个用途怎么换 key / 地址 / 模型，见 `docs/CONFIG_GUIDE.md` §2。
 - **语音没有实现。** 出站目前以文本与图片为主；语音、Ark 卡片、戳一戳、表情回应等出站动作
   没有接入。`capabilities.py` 里登记的动作目录远多于实际调用点。
 - **没有 Docker / 一键部署。** 按上面的 venv 手动跑；进程守护、开机自启用系统自带的任务计划
@@ -298,7 +314,9 @@ ran=1933 failed=0 errors=0 skipped=0 result=PASS
 | [`DEFECT_VERIFICATION.md`](DEFECT_VERIFICATION.md) | 一次系统性缺陷核实与修复的记录 |
 
 **数字口径**：测试数见 `data/logs/verify_runs.log` 的 `ran=`；判定比例见
-`ARCHITECTURE.md` 第 82 行，判定 prompt 的 2 条上限见第 92 行；窗口与压缩常量见 `src/qq_roleplay_bot/stage3_main.py`；
+`ARCHITECTURE.md`「Stage 3 Prompt 分层」里"消极要治语气"那段，判定 prompt 的 2 条上限见
+同节那张三份 prompt 的表（**别按行号找**——2026-10-22 的文档盘点是增删过正文的，行号会漂）；
+窗口与压缩常量见 `src/qq_roleplay_bot/stage3_main.py`；
 前缀复用率见 `DEFECT_VERIFICATION.md` 第 158 行；归档与关系流水保留期见
 `src/qq_roleplay_bot/dev_config.py` 与 `memory_store.py`。
 

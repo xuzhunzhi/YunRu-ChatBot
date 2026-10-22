@@ -147,10 +147,18 @@ git log --oneline plugins..main
 # 6ebed64 模型：reply/judge 从 xkiro 的 Gemini Flash 切回 deepseek
 ```
 
-也就是说插件树里的 `model_config.py` **还把 reply / judge 指向中继的 Gemini Flash**
-（`{"key": "reply", "model": "google/gemini-2.5-flash"}`）。整树拷过去会：
-**① 把模型路由退回切之前那一版；② 把写信素材那笔核心改动抹掉。**
+也就是说**插件树的核心仍然落后于 `main`**——2026-10-22 实测
+`git -C yunru-stage4 diff --stat main..HEAD -- src/qq_roleplay_bot`（排除 `plugins/`）是
+**8 个文件、+37/−165**：`dev_config.py` / `memory_inbox.py` / `memory_maintenance_agent.py` /
+`memory_model.py` / `memory_service.py` / `memory_store.py` / `stage3_main.py` /
+`stage3_runtime.py`（**私聊伪群 `dm:<uid>` 那套正在这些文件里**）。整树拷过去会：
+**① 把核心退回"私聊进记忆"之前那一版；② 把那些文件上的其它核心改动一起抹掉。**
 拷之前先看一眼：
+
+> 这条原来举的例子是"插件树的 `model_config.py` 还把 reply/judge 指向中继的 Gemini Flash"——
+> **2026-10-22（M1）起不成立了**：`model_config.py` 现在是 M1 镜像的 4 个核心文件之一
+> （`mail/__init__.py`、`mail/client.py`、`runtime.py`、`model_config.py`，逐字复制自 `dev`），
+> 两棵树同版。别拿那句当"整树拷会退模型"的依据。
 
 ```powershell
 cd dev
@@ -223,7 +231,7 @@ schtasks /Run /TN "YunRu-bot-launcher"
 | --- | --- |
 | `模型配置 reply: provider=deepseek model=deepseek-flash key=… 有值`（六个用途各一行） | 模型与凭据解析对了。写 `**缺**` 的那一路没有可用 key |
 | `运行状态已恢复：groups=… sessions=… admins=… enabled=…` | 状态文件读回来了 |
-| `后台插件已装配：group_admin、join_approval、mail、outage_notice、remind、timeout_alert、vision、webui` | **插件都装上了**——核实"插件拷对了没有"最直接的就是这一行 |
+| `后台插件已装配：group_admin、join_approval、mail、outage_notice、remind、rss、timeout_alert、vision、webui` | **插件都装上了**（2026-10-22 生产实测 9 个）——核实"插件拷对了没有"最直接的就是这一行 |
 | `server listening on 127.0.0.1:8080` + `OneBot 反向 WebSocket 监听于 ws://127.0.0.1:8080` | 端口起来了 |
 | **`OneBot 已连接`** | **NapCat 连上来了**。没有这一行 = 她收不到任何消息，一个字都不会回 |
 | `每日汇报已就绪：收件人=… 发送时间=23:00（窗口＝距上次汇报到现在）` | 邮件那一路接上了 |

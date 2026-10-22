@@ -4,6 +4,17 @@
 > 原始输出：`data\tmp_file_apis.txt`（1381 行，60 个文件）
 > 三列含义：**提供** = 公开的类/函数/常量；**被谁用** = 谁 import 它并取走了什么名字；
 > **用到** = 它从别人那里取走了什么名字。下划线开头的不算公开接口。
+>
+> ⚠️ **2026-10-22 文档盘点核过（下列每一条都是实测，不是推断）**：
+>
+> - **生成脚本与原始输出都不在仓库里，也不在本机 `dev\data\` 里**：`data\tmp_file_apis.py`
+>   与 `data\tmp_file_apis.txt` 都 `Test-Path` 为 `False`（`data/` 被 `.gitignore` 忽略，
+>   这两份是当年的临时产物）。所以这份表**没法在本机原样重新生成**——下面的行数与
+>   "60 个文件"都是 2026-10-05 那一刻的量，**别再当成现状**。
+> - 表里的**行数**是当时（2026-10-05）的数；2026-10-22 重数过三个主文件（见第三、四节各行的括注）。
+> - 表是在 2026-10-05 生成的，**早于**这两件事：① 2026-10-05 之后识图搬成插件（`vision` 已在
+>   `plugins/vision/`）；② 2026-10-22 邮件 M1（核心新增 `mail/`）、私聊记忆（`dm:<uid>` 伪群）、
+>   写信换模型（`mimo-v2.6-pro`）。第二节末补了 `mail/` 两行，其余按老表读，**别拿它当接口契约**。
 
 ---
 
@@ -90,6 +101,12 @@
 | `runtime_diagnostics` | `LocalRuntimeDiagnostics` `RuntimeDiagnostics` Protocol | `dev_config` |
 | `media_segments` | 消息段与图片处理 | `transport` `vision` |
 | `outbox` | `Outbox` 补发队列 | `transport` |
+| `mail/`（2026-10-22 M1 新增，**不在老表里**） | 核心发信能力：`client.py`（**457 行**）`MailClient` 最小实现 + `__init__.py`（**141 行**）`provide_senders(seams)` → `operator_sender` / `address_sender` 两条窄口 | `runtime.build_engine()` 在 `attach_plugins()` **之前**调 `provide_senders()`（`runtime.py:996`）；`plugins/__init__.py::has_capability("mail")` 读的就是它 |
+
+> 行数口径：`Get-Content <file> | Measure-Object -Line` 数的是**非空行**，与 `(Get-Content).Count`
+> 差得多（`stage3_main.py` 前者 6429、后者 7122）。上面写的是**总行数**，2026-10-22 实测。
+> `runtime.py` 是 **4069 行**（2026-10-22 提交 `30774d9` 之后，工作区与 HEAD 一致；
+> 当天早先那份 4026 是面板接缝改动提交前的数）。这些数会随着提交漂，别当稳定值。
 
 ---
 
@@ -98,8 +115,8 @@
 ### 引擎与人格
 | 文件 | 提供 | 用到 |
 | --- | --- | --- |
-| `stage3_main` (3869 行) | `DialogueEngine`（96 个方法：`handle()` `tick()` `snapshot()` `execute_action()` `enable_group()` `disable_group()` `leave_session()` `request_restart()` …）、`OutgoingMessage` 装配、`parse_super_command()` `parse_group_action()` `is_admin_help_command()` `PUBLIC_HELP` `ADMIN_HELP`、`SuperAction` 枚举、`RelayDelivery` / `PendingRelay` | 顶层：`_host` `admin_control` `attention` `builtin_commands` `dev_config` `dialogue_compaction` `dialogue_judge` `extensions` `feature_log` `focus` `llm_client` `memory_model` `memory_service` `memory_view` `metrics` `onebot_ws` `runtime_flags` `security` `snapshots` `stage3_runtime` `transport` `trigger`；函数内：`_host_adapters` `capabilities` `command_plugins` `runtime` |
-| `stage3_runtime` (1205 行) | 六套 prompt 的装配（`build_*_messages`）`TLABEL` | `prompt_library` `security` `transport` `base_prompt` |
+| `stage3_main` (**7122 行**，2026-10-22 重数；老表写 3869 行) | `DialogueEngine`（96 个方法：`handle()` `tick()` `snapshot()` `execute_action()` `enable_group()` `disable_group()` `leave_session()` `request_restart()` …）、`OutgoingMessage` 装配、`parse_super_command()` `parse_group_action()` `is_admin_help_command()` `PUBLIC_HELP` `ADMIN_HELP`、`SuperAction` 枚举、`RelayDelivery` / `PendingRelay` | 顶层：`_host` `admin_control` `attention` `builtin_commands` `dev_config` `dialogue_compaction` `dialogue_judge` `extensions` `feature_log` `focus` `llm_client` `memory_model` `memory_service` `memory_view` `metrics` `onebot_ws` `runtime_flags` `security` `snapshots` `stage3_runtime` `transport` `trigger`；函数内：`_host_adapters` `capabilities` `command_plugins` `runtime` |
+| `stage3_runtime` (**2410 行**，2026-10-22 重数；老表写 1205 行) | 六套 prompt 的装配（`build_*_messages`）`TLABEL` | `prompt_library` `security` `transport` `base_prompt` |
 | `base_prompt` | 人格正文（`_load_base_prompt()`） | `dev_config` |
 | `extensions` | `PromptSources` `PromptContext` `PromptMaterial` `KnowledgeItem` | `transport` |
 
@@ -116,7 +133,7 @@
 ### 记忆
 | 文件 | 提供 | 用到 |
 | --- | --- | --- |
-| `memory_store` (1867 行) | 两层库 + archive + tombstones 的读写 | `security` |
+| `memory_store` (**2671 行**，2026-10-22 重数；老表写 1867 行) | 两层库 + archive + tombstones 的读写 | `security` |
 | `memory_service` | `MemoryService` | `memory_config` `memory_inbox` `memory_maintenance_agent` `memory_model` `memory_store` |
 | `memory_maintenance_agent` | 维护 agent（批记忆、写画像） | `memory_store` + 函数内 `prompt_library` |
 | `memory_model` | `MemoryItem` `MemoryMaterial` 等数据模型 | `security` `dev_config`… |

@@ -1,5 +1,9 @@
 # Stage 3 重做方案（stage3-rebuild 分支）
 
+> ⚠️ **2026-10-22 文档盘点**：这份是 `stage3-rebuild` 那段工作的**历史记录**——那条分支
+> 早已合并、内容进了 `main`。按历史读，**别当现状**；现在的形状看 `ARCHITECTURE.md`
+> 与 `docs/STAGE_BOUNDARY.md`。
+
 起点：`main`（`09fc482`，771 用例）。
 
 ## 一、起点的实测状态

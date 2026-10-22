@@ -25,7 +25,7 @@ copy .env.example .env
 
 ```
 模型配置 reply: provider=deepseek model=deepseek-flash key=QQBOT_JUDGE_API_KEY 有值
-模型配置 letter: provider=deepseek model=deepseek-v4-pro key=QQBOT_JUDGE_API_KEY 有值
+模型配置 letter: provider=mimo model=mimo-v2.6-pro key=QQBOT_LETTER_API_KEY 有值
 …（六个用途各一行：reply / letter / judge / memory / review / vision）
 运行状态已恢复：groups=… sessions=… admins=… enabled=…
 server listening on 127.0.0.1:8080
@@ -73,17 +73,17 @@ OneBot 已连接
 | 键 | 说明 |
 | --- | --- |
 | `QQBOT_API_BASE_URL` | 兼容档地址，默认 `https://api.deepseek.com`（`model_config.PROVIDERS["deepseek"]`） |
-| `QQBOT_API_MODEL` | 兼容档模型名。**不配 = 用 `TASKS` 里那个真名**（现在 reply / judge / memory / review / vision 是 `deepseek-flash`，letter 是 `deepseek-v4-pro`）。⚠️ 这里原来写"默认 `deepseek-chat`"——那是会消失的别名，代码里已经不用了 |
+| `QQBOT_API_MODEL` | 兼容档模型名。**不配 = 用 `TASKS` 里那个真名**（现在 reply / judge / memory / review / vision 是 `deepseek-flash`，letter 是 `mimo-v2.6-pro`）。⚠️ 这里原来写"默认 `deepseek-chat`"——那是会消失的别名，代码里已经不用了 |
 | `QQBOT_API_KEY` | 兼容档那把主 key。某个用途自己那条 key 有值时就轮不到它，但"只配一把 key"的部署靠它 |
 | `QQBOT_API_PROVIDER` | 可选但建议写。说清"主 key 属于哪一家"（`deepseek` / `mimo` / `xkiro`）。不写也能跑，但自检那行会显示 `兼容档·未声明，按…算` |
 | `QQBOT_REPLY_API_BASE_URL` | 可选。**只给回复 agent** 的地址；不配回落那条 key 自己的地址 |
 | `QQBOT_REPLY_API_MODEL` | 可选。只给回复 agent 的模型名 |
 | `QQBOT_REPLY_API_KEY` | 可选。**只给回复 agent** 的 key。**2026-10-16 起回复那一路住在 deepseek**（借 `QQBOT_JUDGE_API_KEY` 那条，见下面"手动切档"），所以这一项**现在闲置**——2026-10-14～10-16 那段它承载的是中转 xkiro 那把 Gemini key；那把 key 与 `model_config.KEYS["reply"]`（provider = `xkiro`）都**保留**，将来切回 Gemini 要用 |
-| `QQBOT_JUDGE_API_KEY` | 判定用。**2026-10-16 起 reply / judge / letter 三路都借这一条**（前两路 `deepseek-flash`，写信 `deepseek-v4-pro`），所以它现在是"判定 + 回复 + 写信"三路共用的那把 |
+| `QQBOT_JUDGE_API_KEY` | 判定用。**2026-10-22 起 reply / judge 两路借这一条**（都是 `deepseek-flash`）；写信（`letter`）同日改用**自己那条** mimo key（`QQBOT_LETTER_API_KEY`），不再借它 |
 | `QQBOT_MEMORY_API_KEY` | 可选，记忆维护用。不配时的顺序：**主 key 没配** → 借同家的 `QQBOT_JUDGE_API_KEY`；**主 key 配了** → 直接用兼容档那一对（值 + 地址一起）。这是 `model_config._key_source` 里那道闸，不是"永远回落主 key" |
 | `QQBOT_REVIEW_API_KEY` | 可选，风格审核用；**配了它就自动开**（`QQBOT_STYLE_REVIEW` 可以强行开关）。回落顺序同记忆那行 |
 | `QQBOT_VISION_API_KEY` | 可选，识图用；回落顺序同记忆那行 |
-| `QQBOT_LETTER_API_KEY` | 可选，写信那一路**自己那条**（mimo）。现在**闲置**：`TASKS["letter"]` 借的是 judge 那条。**没废**——主家余额耗尽切到兜底那一家时，走的就是它 |
+| `QQBOT_LETTER_API_KEY` | 写信那一路**自己那条**（mimo）。**2026-10-22 起它就是写信在用的那把**（`TASKS["letter"] = {"key": "letter", "model": "mimo-v2.6-pro"}`），不再闲置。不配时按 `KEYS["letter"]["fallback"]` 借 reply 那条（跨家，风险写在 `model_config` 注释里） |
 | `QQBOT_FALLBACK_API_KEY` | 可选，兜底那一家专用 key；不配就沿回落链借同家那条（本机落到写信那把 mimo key） |
 
 **每个用途都能单独换地址与模型名**（键名就是用途名大写；两张表的形状不一样，别猜）：
@@ -114,7 +114,7 @@ key 条目**时才真的生效。2026-10-16（用户原话："切换回ds。gemi
 | --- | --- | --- | --- |
 | reply | `{"key": "judge", "model": "deepseek-flash"}` | `QQBOT_JUDGE_API_KEY` | `deepseek` / `deepseek-flash` |
 | judge | `{"key": "judge", "model": "deepseek-flash"}` | `QQBOT_JUDGE_API_KEY` | `deepseek` / `deepseek-flash` |
-| letter | `{"key": "judge", "model": "deepseek-v4-pro"}` | `QQBOT_JUDGE_API_KEY` | `deepseek` / `deepseek-v4-pro` |
+| letter | `{"key": "letter", "model": "mimo-v2.6-pro"}` | `QQBOT_LETTER_API_KEY`（mimo 那把；不配才按 `KEYS["letter"]["fallback"]` 借 reply 那条） | `mimo` / `mimo-v2.6-pro` |
 | memory | `{"key": "memory", "model": "deepseek-flash"}` | `QQBOT_MEMORY_API_KEY`（不配回落 `QQBOT_JUDGE_API_KEY`） | `deepseek` |
 | review | `{"key": "review", "model": "deepseek-flash"}` | `QQBOT_REVIEW_API_KEY`（同上回落） | `deepseek` |
 | vision | `{"key": "vision", "model": "deepseek-flash"}` | `QQBOT_VISION_API_KEY`（同上回落） | `deepseek` |
@@ -138,11 +138,12 @@ key **仍然是 judge 那把**（等于把 deepseek 的 key 递给新地址）�
 | `model_config.KEYS["reply"]["provider"]` | `xkiro` | 不动（**别**跟着改成 deepseek——`KEYS["letter"]["fallback"]` 还指它） |
 | `.env` 的 `QQBOT_REPLY_API_KEY` | xkiro 那把 | 留着不管（闲置） |
 
-切到中继时会**丢掉 `reasoning_effort`**：那一项只在 `provider ∈ {"", "deepseek"}`
-时才发（`llm_client._complete_sync` 里的 `deepseek_fields`），provider 是 `xkiro` 时
-发不出去 ⇒ 只能吃 DeepSeek 自己的默认档。这是 2026-10-16 回退的两条依据之一；
-另一条是中继的 Google 上游当时整段 503（`/v1/models` 通、`chat/completions` 全 503，
-25 分钟探针全挂）。
+切到中继时**当年**会丢掉 `reasoning_effort`（2026-10-16 那条依据：`deepseek_fields` 只在
+`provider ∈ {"", "deepseek"}` 时才发）。**这条依据 2026-10-20 起已经不成立了**：那道白名单
+换成了黑名单 `REASONING_EFFORT_INCOMPATIBLE_PROVIDERS`（默认空集 = 对所有家都发，mimo 实测
+收下不 400），另有按用途的强制开关 `QQBOT_<TASK>_SEND_REASONING_EFFORT=0/1`。所以 2026-10-16
+回退的两条依据里**只剩一条还成立**：当时中继的 Google 上游整段 503（`/v1/models` 通、
+`chat/completions` 全 503，25 分钟探针全挂）。
 
 ⚠️ **两个坑，都在 `reasoning_effort` 上**
 
@@ -170,12 +171,14 @@ key **仍然是 judge 那把**（等于把 deepseek 的 key 递给新地址）�
 那一族。两套名字不一致是历史遗留（回复的账本角色叫 dialogue、配置键叫 reply），
 不是笔误。**写错的那个键既不报错也不打日志，只是永远不生效**——动它之前先确认键名。
 
-**坑二：这一项只在 `provider ∈ {"", "deepseek"}` 时才发得出去。**
-`llm_client` 里那道闸叫 `deepseek_fields`：`self.provider` 是空串（还不知道是哪家）或
-`deepseek` 才带上 `reasoning_effort`（连带 `user_id` 也一样）。换成 mimo、xkiro 这类中继，
-**整项发不出去**，只能吃服务商自己的默认档——这条是 2026-10-16 从 Gemini 切回 deepseek
-的两条依据之一；另一条是当时中继的 Google 上游整段 503（`/v1/models` 通、
-`chat/completions` 全 503，25 分钟探针全挂）。
+**坑二：发不发由"黑名单 + 按用途开关"决定，不再看 provider 是不是 deepseek。**
+（2026-10-20 改的，原来这里写"只在 `provider ∈ {"", "deepseek"}` 时才发得出去"，**已作废**。）
+`llm_client._send_reasoning_effort(task, provider)` 的顺序是：先看
+`QQBOT_<TASK>_SEND_REASONING_EFFORT` 是不是 `0`/`1`（按用途强制），没配再看 provider 在不在
+`REASONING_EFFORT_INCOMPATIBLE_PROVIDERS`（**默认空集**）。所以 mimo 这类中继现在**也会**收到
+`reasoning_effort`；真要关某一家，把名字加进那个集合，别指望代码替你按家静默丢弃。
+当年 2026-10-16 从 Gemini 切回 deepseek 的另一条依据（中继的 Google 上游整段 503：
+`/v1/models` 通、`chat/completions` 全 503，25 分钟探针全挂）**仍然成立**。
 
 **实测口径（2026-10-16，`deepseek` / `deepseek-flash`，走本仓库自己的 client，流式）**：
 
@@ -313,7 +316,12 @@ netstat -ano | findstr :8080     # 看是谁占了
 **最后那一列"能删"只在"你知道自己在干什么"时成立**：`/data/` 整个目录在 `.gitignore` 里
 （锚定仓库根），删了没有任何 git 副本。`private_docs/` 与 `.env` 一样属于"删了就真没了"。
 
-### 邮件通道（插件 `plugins/mail/`，另带两个后置插件）
+### 邮件通道（插件 `plugins/mail/`，另带两个后置插件；发信能力自 2026-10-22 M1 起在核心）
+
+> M1 之后：核心 `qq_roleplay_bot/mail/` 在 `runtime.build_engine()` 里、`attach_plugins()` **之前**
+> 提供"给操作者发一封普通邮件"与"寄给指定地址"两条窄口（`mail.provide_senders()`），
+> 插件再提供时是 no-op。写信 / 日报 / 收信 / 邮箱状态仍在插件线 `plugins/mail/`。
+> 下面这些键**照旧全在插件或核心两侧读取**，一个都没改名。
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
@@ -335,7 +343,9 @@ netstat -ano | findstr :8080     # 看是谁占了
 | `QQBOT_MAIL_TIMEOUT_ALERT_WINDOW` / `_TIMES` / `_COOLDOWN` / `_POLL` | `300` / `5` / `1800` / `60` | 5 分钟够 5 次超时就写一封；写完 30 分钟内不再写；每 60 秒看一次 |
 
 > 后两个插件（`outage_notice` / `timeout_alert`）**只报事实**：不调模型、不往群里发消息，
-> 信里的话是手写定稿。它们依赖 `mail`（`REQUIRES = ("mail",)`），mail 装不上就不装它们。
+> 信里的话是手写定稿。它们的 `REQUIRES = ("mail",)` **声明没改、判定改了**（2026-10-22 M1）：
+> `discover()._load` 先问 `PluginRegistry.has_capability("mail")`，为真直接放行（**删掉
+> `plugins/mail/` 也装得上**），为假才退回"装同名前置插件"，装不上跳过自己（fail-closed）。
 
 **"发失败会存着、下一次先补发"到底怎么走**（读 `daily_report.py` 核过，2026-10-18）：
 

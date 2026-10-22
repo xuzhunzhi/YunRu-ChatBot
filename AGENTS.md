@@ -174,6 +174,16 @@
   不允许任何一侧复制主循环或装配逻辑。
 - **共用模块的改动必须同时服务两边。** 不能为某一侧开后门。
 
+- **Stage 5 = v2.0 的方向（工具化 + 一个大脑），当前只是实验，未落地（2026-10-22 记）。**
+  用户口径：「这就是 stage5 了，把接口封装成工具，找到一个大脑去调用这些工具」、
+  「现在 mail agent 还不是真正的大脑，后续要单独做一个真正的大脑」。
+  **这里只写方向与边界，不写实现**：工具只提供能力、不判权限、不做决定；权限判定、
+  护栏、审计、发送仍在核心；插件仍然不许碰对话 / 记忆 / 知识库。
+  **未实现**：`main` / `plugins` / 生产 `run\` 都没动，实验在 `stage5/letter-tools`（dev）与
+  `stage5/letter-tools-plugins`（插件树）两条分支；`mail` 只是"现在其中一个"候选能力。
+  详述见 `docs/STAGE_BOUNDARY.md` 末节与 `data/plans/08-stage5-brain.md`（后者在被忽略的
+  `data\` 下，不在仓库里）。**不许把这一条当"已经做了"来引用。**
+
 ---
 
 ## 三、验证要求（说了不算，跑过才算）
@@ -393,11 +403,13 @@ Get-Content data\logs\verify_runs.log | Select-Object -Last 3
    **另一份**，单独验（见 7.2 的门槛清单）。顺序：**在 dev 改 → 验证通过 → 才允许
    同步/部署到 `run`（线上）**。
 
-   ⚠️ **插件源码不在 `main` 分支里**（2026-10-20 实测，我在这上面判断错过一次）：
-   `dev\src\qq_roleplay_bot\plugins\` 里**只有一个 `__init__.py`**；九个插件
-   （`group_admin` / `join_approval` / `mail` / `outage_notice` / `remind` /
-   `roles` / `rss` / `timeout_alert` / `webui`）的源码**只存在于 `plugins` 分支**
-   （工作树 `yunru-stage4\`）。`run\src\qq_roleplay_bot\plugins\` 是部署时从那边
+   ⚠️ **插件源码不在 `main` 分支里**（2026-10-20 实测，我在这上面判断错过一次；
+   2026-10-22 文档盘点又核了一遍清单）：`dev\src\qq_roleplay_bot\plugins\` 里**只有一个
+   `__init__.py`**；九个插件（`group_admin` / `join_approval` / `mail` / `outage_notice` /
+   `remind` / `rss` / `timeout_alert` / `vision` / `webui`）的源码**只存在于 `plugins` 分支**
+   （工作树 `yunru-stage4\`）。`roles` **已不存在**（`plugins\roles\` 只剩 `__pycache__`，
+   没有 `plugin.py`；角色事实在核心 `group_roles.py`）——上面原来把 `roles` 算进九个、
+   漏了 `vision`，2026-10-22 改准。`run\src\qq_roleplay_bot\plugins\` 是部署时从那边
    **手抄过去**的副本（`deploy_to_run.py` 只搬 `src/` 的核心部分，插件另走手工流程）。
    所以：① 要读/改插件，去 `yunru-stage4`，别在 dev 里找；② `git grep` 在 dev 里
    搜不到插件代码**不是仓库坏了**；③ 判断"某个插件功能有没有做"必须在

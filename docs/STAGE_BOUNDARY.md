@@ -72,7 +72,7 @@ Stage 4 是**手脚**：它给大脑接上更多表达方式和动作能力。
 | `join_approval.py` | 入群审批策略 |
 | ~~`qq_roles.py`~~ → **`group_roles.py`（已进核心）** | 群成员角色事实（某人在某群 / 她自己）。2026-10-06 用户拍板"行，进核心"：身份判定属于权限判定那一类，按 `AGENTS.md` §2.3 留在核心；`plugins/roles/` 那份只答得出她自己的角色 |
 | `webui_panel.py` / `webui_access.py` / `webui_data.py` | **WebUI 面板**（2026-10-01 用户："面板属于 stage4 内容，本质插件"）：HTTP 与路由、本地/远程两套接入、只读数据层。它拿不到 `transport` 也拿不到引擎，只能调装配点注入的闭包 |
-| `mail_client.py` / `mail_state.py` / `mail_channel.py` / `daily_report.py` / `letter_writer.py` | 邮件通道：读信回信、每日汇报 |
+| `mail_client.py` / `mail_state.py` / `mail_channel.py` / `daily_report.py` / `letter_writer.py` | 邮件通道：读信回信、每日汇报。**2026-10-22（M1）起"发一封信"的能力已在核心**（`qq_roleplay_bot/mail/`，`runtime.build_engine()` 在 `attach_plugins()` 之前 provide）；这些文件仍是插件线上的实现体，**留在插件侧** |
 | `vision.py` | 识图（图片描述） |
 | `operator_config.py` / `prompt_library.py` / `prompt_guard.py` / `knowledge_operator.py` / `memory_ops.py` / `runtime_flags.py` / `control_audit.py` / `provider_registry.py` | 面板的**接入面**：配置覆盖层、六套 prompt 的可编辑层、机制词扫描共用一份、知识库面板块、记忆只删不加、运行期开关、审计、供应商表。权限判定与动作执行仍在核心。**这些留在 main 上**——它们是接缝，不是功能 |
 
@@ -172,3 +172,28 @@ Stage 3 阶段**不应引入任何"必须调用某个 SnowLuma action 才能完�
 如果出现这种需求，说明它其实是 Stage 4 的功能，只是被误判了。
 
 Stage 3 的目标是：**把对话、记忆和防护做到稳**。功能覆盖面不是它的指标。
+
+## Stage 5 = v2.0 的方向（**未实现**；只写边界，不写实现）
+
+> 用户口径（2026-10-22，原话）：「这就是 stage5 了，把接口封装成工具，找到一个大脑去调用
+> 这些工具。现在 mail 是其中一个，未来回复也会是，mail 会退化为一个工具」；
+> 「写信 agent 目前的设计是最接近大脑的，所以基于这个做实验」；
+> 「私聊不急，现在 mail agent 还不是真正的大脑，后续要单独做一个真正的大脑」。
+
+**方向只有一句**：把能力封装成**工具**，再找一个**大脑**去调用这些工具。
+"要不要做、做什么、调哪个工具、调几次"由大脑定；工具只提供能力，不做决定、不判权限。
+
+**边界（现在就定死）**：
+
+1. 工具不判权限、不做决定：能不能发、发给谁、能不能查某人，仍由核心判；工具只执行。
+2. 权限判定、护栏、审计、发送仍然在核心（一条都没松，`AGENTS.md` §2.3 全部继续有效）。
+3. 插件仍然不许碰对话 / 记忆 / 知识库；"大脑"是核心一侧的东西，插件只是工具提供方。
+
+**现在的状态（别读成已经做了）**：
+
+- **未实现、未落地**：`main` / `plugins` 两条正式分支与生产 `run\` 都没有动；实验只在
+  `stage5/letter-tools`（dev）与 `stage5/letter-tools-plugins`（插件树）两条分支上。
+- **mail 是这条路上第一个被拿来试的能力**（用户把它列为"现在其中一个工具"），但写信 agent
+  还不是"大脑"——它现在仍然是"到点写一封"的固定链路，不是"想说才说"。
+- 计划与实验记录：`data/plans/08-stage5-brain.md`（`data/` 被 `.gitignore` 忽略，**不在仓库里**）。
+- 这一节**不写实现**、也不承诺时间表。要不要开、怎么开，由用户决定。

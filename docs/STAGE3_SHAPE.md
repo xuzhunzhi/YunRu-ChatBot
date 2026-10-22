@@ -1,5 +1,9 @@
 # Stage 3 的模块形状（stage3-rebuild 分支）
 
+> ⚠️ **2026-10-22 文档盘点**：这是 `stage3-rebuild` 分支的**施工图**（历史）。文中
+> `stage3_main.py` 3827 行、模块清单等都是那一版的数；今天 `stage3_main.py` 是 **7122 行**
+> （2026-10-22 实测），模块也多了 `mail/` 等。按历史读，现状看 `ARCHITECTURE.md` 与 `docs/FILE_MAP.md`。
+
 这份是**施工图**：改完长什么样、每个文件管什么、命令怎么被认领。
 `docs/STAGE3_REBUILD.md` 讲为什么与分几步，这里讲最终形状。
 

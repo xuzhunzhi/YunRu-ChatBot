@@ -16,7 +16,7 @@ runtime.serve  ──> stage3_main.py 的 DialogueEngine
     ├─ dialogue_judge.py     判定 agent：先说"要不要接、在聊什么"
     ├─ dialogue_compaction.py 旧对话压成摘要，给回复段一个稳定前缀
     ▼
-llm_client.py  ──> OpenAI-compatible /chat/completions（非流式）
+llm_client.py  ──> OpenAI-compatible /chat/completions（流式；按首字等待设闸）
     │
     ▼
 DialogueDecision  ──> OneBot send_msg
@@ -43,16 +43,15 @@ DialogueDecision  ──> OneBot send_msg
 | `builtin_commands.py` | 内置命令插件：`ping`、`/help`，并在装配时注入 `help_provider` |
 | `builtin_balance_command.py` / `balance_client.py` | `/balance` 余额查询命令与其 HTTP 客户端，默认仅超管私聊可用（fail-closed） |
 | `base_prompt.py` | 固定人格策略，属于可信 system prompt |
-| `llm_client.py` | 标准库 HTTP 模型客户端，非流式 `/chat/completions`，带有限重试与 `user_id` 缓存隔离 |
+| `llm_client.py` | 标准库 HTTP 模型客户端，**流式** `/chat/completions`（`"stream": True`，2026-10-13 起；按"多久一个字节都没吐"设闸，默认 `STREAM_STALL_SECONDS = 3.0`），带可选重试（`DEFAULT_MAX_ATTEMPTS = 1`，默认不重试）与 `user_id` 缓存隔离 |
 | `security.py` | 敏感本机请求阻断、输入与出站正文清理 |
 | `extensions.py` | 插件 / 知识库 / 额外 prompt 三个受限端口 |
 | `capabilities.py` / `conversation_context.py` | 能力闸门与由 SnowLuma 提供背景时的受限读取 |
 | `typing_sim.py` | 出站拟人化节奏（分段与字符数停顿） |
 | `feature_log.py` | 按功能分开的输入输出日志（判定/回复/记忆/规则/汇报），各留最近 1000 次（**模型日志**） |
 | `chat_log.py` | **对话日志**（实际收发）：`data/logs/chat.jsonl`，由传输层在收发边界落盘，默认留最近 20000 条；**与模型日志分开**（2026-10-05 用户定的边界） |
-| `mail_client.py` ※ | Agent Mail CLI 的封装：固定子命令白名单、正文走文件、argv 防注入、失败分类（Stage 4） |
-| `mail_state.py` ※ | 邮箱侧状态：上次汇报时间、当天重试次数、送信流水（`data/mail_state.json`） |
-| `daily_report.py` ※ | 每日汇报：素材（只有计数与编号）、写信 prompt、解析、发送（Stage 4） |
+| `mail/`（**核心**，2026-10-22 M1） | 发信能力的最小实现（`client.py`：固定子命令白名单、正文走文件、argv 防注入、失败分类）＋ `provide_senders()`：`runtime.build_engine()` 在 `attach_plugins()` **之前**把 `registry.mail.operator_sender` / `address_sender` 两条窄口放好。**只搬了"发一封信"**，写信 / 日报 / 收信仍不在核心 |
+| `plugins/mail/` 里的 `mail_client.py` / `mail_state.py` / `daily_report.py` / `letter_writer.py` / `mail_channel.py` | 邮件通道的实现体（写信、每日汇报、读信回信、邮箱状态）：**在插件线**（`plugins` 分支 / 工作树 `yunru-stage4`），`main` 的核心目录里没有这些文件。M1 起"给操作者发一封普通邮件"与"寄给指定地址"由核心先 provide，插件再提供时 no-op |
 | `model_trace.py` | **旧**模型 I/O 追踪（单文件、30 条、默认关闭）；引擎已改用 `feature_log.py`，此模块待删 |
 | `control.py` | 脱敏运行快照与控制协议（不是认证层） |
 | `metrics.py` | 脱敏运行指标：固定类别计数与耗时滑窗 |
@@ -68,7 +67,7 @@ DialogueDecision  ──> OneBot send_msg
 
 `dev_config.load_env_file()` 在模块导入时用标准库解析 `.env`（支持 `KEY=VALUE`、`#` 注释、可选引号、`export` 前缀），并且**只注入 `os.environ` 中尚不存在的键**，因此真实环境变量永远优先。把 `.env` 中的键统一注入 `os.environ` 而不是只在 `dev_config` 内部兜底，是为了让只从 `os.environ` 读取的配置（如 `QQBOT_MEMORY_MODEL`）也能一致生效。
 
-`.env` 已在 `.gitignore` 中忽略；`.env.example` 只保留占位值。默认后端是 DeepSeek 官方接口（`https://api.deepseek.com` + `deepseek-chat`）。
+`.env` 已在 `.gitignore` 中忽略；`.env.example` 只保留占位值。默认后端是 DeepSeek 官方接口（`https://api.deepseek.com` + `deepseek-flash`；不配 `QQBOT_API_MODEL` 时模型名取 `TASKS["judge"]["model"]`，`dev_config.py:200`——**不是** `deepseek-chat`，那是会消失的别名，代码里不用它）。每个用途的 key/地址/模型各自可覆盖，见 `docs/CONFIG_GUIDE.md` §2；写信（`letter`）自 2026-10-22 起用自己那条 mimo key 与 `mimo-v2.6-pro`。
 
 ## Stage 3 Prompt 分层
 
@@ -201,7 +200,11 @@ confidence=0到1之间的小数
 
 ## 模型客户端重试
 
-`llm_client.py` 对**限流（429）、服务端错误（5xx）和传输层抖动**做有限重试（默认 3 次，指数退避加抖动，上限 8 秒）。重试在客户端内部完成，因此一条业务消息在客户端看来仍然是一次逻辑调用；双 agent 结构下一条消息最多两次逻辑调用（判定 + 回复），压缩是偶发的第三次。
+`llm_client.py` 对**限流（429）、服务端错误（5xx）和传输层抖动**做**可选**重试：机制还在
+（`RETRYABLE_HTTP_STATUS` / `RETRYABLE_KINDS` / 指数退避 + 抖动、上限 8 秒），但
+**`DEFAULT_MAX_ATTEMPTS = 1` ⇒ 默认不重试**（2026-10-13 用户口径：首字没吐出来就跳过那一轮）。
+显式传 `max_attempts > 1` 才会真的重试。重试在客户端内部完成，因此一条业务消息在客户端看来
+仍然是一次逻辑调用；双 agent 结构下一条消息最多两次逻辑调用（判定 + 回复），压缩是偶发的第三次。
 
 客户端支持 `user_id` 参数（`[a-zA-Z0-9\-_]+`，≤512 字符）：它把 KVCache 与调度按业务实体隔开，**在同一个账号内生效，与 API Key 无关**。对话、判定、记忆维护因此各用独立 `user_id`（`QQBOT_DIALOGUE_USER_ID` / `QQBOT_JUDGE_USER_ID` / `QQBOT_MEMORY_USER_ID`）。
 
@@ -275,6 +278,8 @@ confidence=0到1之间的小数
 
 三者均有数量/长度上限；`stage3_main.py` 对 `collect` 与 `notify` 各施加 2 秒整体超时，异常会降级为空扩展材料，不阻塞主循环。注意收集是串行的：单个插件卡住会连带跳过知识库与额外 prompt。
 
+**插件依赖与"核心能力"（2026-10-22 M1）**：插件的 `REQUIRES` 现在可以是**核心能力**而不只是前置插件。`outage_notice` / `timeout_alert` 的 `REQUIRES = ("mail",)` 声明没变，判定变了——`plugins/__init__.py::discover()._load` 先问 `PluginRegistry.has_capability("mail")`：为真直接放行（删掉 `plugins/mail/` 也装得上），为假才退回"装同名前置插件"，装不上跳过自己（fail-closed）。核心在 `runtime.build_engine()` 里、`attach_plugins()` **之前**用 `qq_roleplay_bot.mail.provide_senders()` 放好那两条窄口（`runtime.py:996`）。
+
 ## 长期记忆
 
 - `memory_inbox.py`：有界异步捕获队列（512），按 `sha256(group:session:user_id:message_id:speaker)` 幂等；敏感或超长内容直接丢弃。
@@ -286,6 +291,10 @@ confidence=0到1之间的小数
 - `memory_service.py`：Stage 3 读取（0.3 秒超时，失败降级为空记忆）、捕获、发送确认与生命周期。
 
 记忆作用域：`user_global` 按 QQ 号跨群共享，`user_group` 按 `group_id + user_id` 隔离，`group` 按 `group_id` 隔离。Agent 自主决定 ADD/UPDATE/MERGE/DELETE/IGNORE，但不能修改人格、知识库、安全规则或 system prompt。
+
+**私聊也进记忆（2026-10-22，伪群 `dm:<uid>`）**：私聊没有群号，而记忆的归属、检索、维护批、配额、关系证据全都以 `group_id` 为轴——所以给私聊造一个伪群号 `dm:<uid>`（`memory_model.py:73` `DM_GROUP_PREFIX` / `private_memory_group_id()`），让现有每条通路原样工作。**不升 schema、不迁移老数据**；**不做群侧隔离、不做渠道标**（用户当天口径：「记所有人」「记忆进群，私聊内容泄漏风险自负」）。群侧检索看不到 `dm:` 命名空间（两边天然不相交），`user_global` 照旧跨群共享。`channel` 非空（邮件等）时**不套伪群**，所以邮件正文仍然一个字都不进记忆。伪群只在记忆子系统内部存在，不写进 `DialogueEngine.memory_group_ids`（否则 `/super status` 会凭空多出一堆"群"）。
+
+**人手写的行模型不许覆盖（2026-10-22）**：判据不看 kind 而看 `origin`——只要命中的活跃行是 `origin='operator_seed'`，任何 kind / 任何键的 UPDATE / MERGE 一律拒写，audit 记 `operator_seed_readonly`（`profile` 总览沿用历史理由名 `profile_overview_readonly`）。由来：当天加了一条人手写的称呼（`kind=name`），只守 `profile` 的话模型换个键就能把它顶掉。模型自己攒的行（`origin=agent_inferred`）不受影响。
 
 **写入的机械兜底**（都不依赖模型自觉；前三条是 2026-09-27 体检后补的，后四条 2026-10-09 补的）：
 
@@ -606,11 +615,11 @@ DATA 区（`identity` 参数）。它不进 system 前缀——那是易变内�
 - **缓存隔离**：每个会话一个 `user_id`（`dev_config.session_user_id`），
   对话与判定各一套；记忆维护保持全局，跨群共享不受影响。
 
-## 未来 WebUI 控制端口
+## 控制端口与 WebUI
 
 `control.py` 定义了 `Stage3Control`、`EngineSnapshot` 和 `SessionSnapshot`。`DialogueEngine` 已实现读取不含 API Key 和完整聊天历史的脱敏运行快照、启停消息处理、清除指定短期会话，以及接收/忽略/阻断/延迟/模型调用/判定调用/压缩调用/回复统计。
 
-这只是业务控制端口，不是 Web 服务或认证层。未来 WebUI 仍必须自行实现认证、CSRF 防护、访问来源限制和敏感操作审计。
+这只是业务控制端口，不是 Web 服务或认证层。**面板本体是 Stage 4 插件**：实现在插件线（`plugins/webui/`，工作树 `yunru-stage4`），`main` 上只有这份控制端口与装配点注入的那几个闭包（`execute_action` / `apply_overrides` / `memory_ops` / `prompt_library` / `knowledge` / `control_audit` / `self_id`）；面板自己必须实现认证、CSRF 防护、访问来源限制和敏感操作审计，权限判定与动作执行仍在核心（`AGENTS.md` §2.3）。
 
 ## 观测：日志、对账、概览
 
@@ -631,7 +640,12 @@ DATA 区（`identity` 参数）。它不进 system 前缀——那是易变内�
 - **一场交谈结束（`<dialogue>EXIT</dialogue>`）时自动对一次账**并记日志：这既不像每轮那样吵，也不像定时那样可能永远等不到。
 - 内存数字用标准库取（Windows `GetProcessMemoryInfo`、Linux `/proc/self/status`）。**ctypes 必须声明 argtypes/restype**：不声明时 HANDLE 被当 32 位传，函数返回 FALSE，界面上永远显示 `—`。
 
-## Stage 4：每日汇报（唯一一条已实现的 Stage 4 路径）
+## Stage 4：每日汇报（插件 `mail/` 的一条路径，**不在核心**）
+
+> 2026-10-22（M1）之后：`DailyReporter` / `REPORT_PROMPT` / `mail_state` 全部在**插件线**
+> `plugins/mail/`（`daily_report.py`、`letter_writer.py`、`mail_state.py`、`mail_channel.py`）；
+> 核心只保留"把一封信发出去"的能力（`mail/`），由 `runtime.build_engine()` 在
+> `attach_plugins()` 之前 provide。下面的行为描述仍然是插件里那条路径的现存事实。
 
 - **触发者是时钟，不是她**：`runtime._report_loop` 每分钟看一眼 `DailyReporter.due()`，
   到点就写一封。它**不复制主循环**，和焦点时钟、维护时钟并列。
@@ -643,14 +657,21 @@ DATA 区（`identity` 参数）。它不进 system 前缀——那是易变内�
 - **素材只有客观事件**（计数、QQ 号、档位、判定给的人话依据）。**不喂聊天原文**：
   汇报是给主人看的，但群里的话是群友说的。
 - 人设仍来自 `base_prompt.py`（可信前缀），素材进 DATA；`REPORT_PROMPT` 过机制词扫描。
-- 发送走 `mail_client.py`：正文写文件（argv 里只有收件人与主题）、主题按最严规则
+- 发送走插件里的 `plugins/mail/mail_client.py`：正文写文件（argv 里只有收件人与主题）、主题按最严规则
   卡掉 cmd 元字符（Windows 上 `.cmd` 会再过一遍 cmd 解析）、失败分类而不是抛裸异常。
+- **写信模型（2026-10-22）**：`model_config.TASKS["letter"] = {"key": "letter", "model": "mimo-v2.6-pro"}`，
+  用写信自己那条 `QQBOT_LETTER_API_KEY`（mimo）；那把没配才按 `KEYS["letter"]["fallback"]` 借 reply 那条
+  （跨家，已知风险写在 `model_config` 注释里）。同日 prompt 也改了：删掉"必须写这段时间的事""至少接上
+  他说的一句话""没有新事就说没有新事"，改成"今晚想写什么就写什么，不写这段时间的事也可以，它不是汇报"
+  （提交 `6d9b009`）。标题有机械判据：`letter_writer.subject_problem(subject, body)`（>20 字 / 禁三种开头 /
+  复述 / 与正文第一句最长公共子串 ≥6 → 不合格），走校对阶段已有的改题通道重给一次，**不加模型调用**。
 - **没装 CLI / 没授权 → 整条路径静默关闭**，对话照常。这是"随时能迁移"的关键性质。
 
 ## 当前审计发现（未修复）
 
 - `onebot_ws.py` 的 `_messages` 是无界队列，且传输层无背压；极端情况下依赖上层 4096 条去重窗口。
-- `llm_client.py` 没有连接复用，每次调用都新建 TCP/TLS 连接；重试已实现。
+- `llm_client.py` 没有连接复用，每次调用都新建 TCP/TLS 连接；**重试机制保留但默认不重试**
+  （`DEFAULT_MAX_ATTEMPTS = 1`，显式传 >1 才生效——2026-10-13 用户口径"首字没吐出来就跳过那一轮"）。
 - 普通消息默认不传 `max_tokens`，输出长度依赖服务端默认值（记忆维护调用已显式限制为 4096）。
 - `admin_control.py` 的 `relay` 别名在命令正则中不可达，`/admin relay 123456789`（缺内容）会解析为普通聊天。
 - 放行窗口（`_denied_admin`）只存在**内存**里：重启即失效，也不会跨进程生效；被拒的命令只留 5 分钟，超管没在那之前引用就没了（得让对方重发）。命令原文（可能含转告正文）也在这 5 分钟里短暂留在内存，不写库、不写日志正文。
