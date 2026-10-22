@@ -522,16 +522,18 @@ def test_report_prompt_asks_for_a_letter_not_a_diary():
     assert "这像不像一封写给他的信" in dr.REPORT_PROMPT, "自检那一问也得问信的形状"
 
 
-def test_report_prompt_tells_her_to_pick_up_on_what_he_said():
-    """他说过的话进了素材，规矩里就得有对应的那一条（2026-10-13 用户："加"）。
+def test_report_prompt_leaves_his_words_optional():
+    """他说过的话进了素材，但**不是义务**——2026-10-22 用户改了那条口径。
 
-    这一条单列，是因为它和"不要把他人的原话抄给他看"**看着像冲突**：那句说的是
-    **别人**，他本人的话正好相反——要接上一句，只是不许照抄一遍。两句都得在。
+    用户原话：*"日报不是真的写汇报，云茹想说什么都可以"*。2026-10-13 那版要求
+    "信里至少接上一句他说的话"，实测把它写成了逐条汇报（10-19/10-20/10-21 三封都从
+    "你今晚说……"起头）。这一轮删掉硬要求；他的话仍可用作由头，只是不接也行。
     """
 
     assert scan_persona_text(dr.REPORT_PROMPT) == []
     assert "他这段时间说过的话" in dr.REPORT_PROMPT, "素材里那一段得在规矩里点名"
-    assert "至少接上一句" in dr.REPORT_PROMPT
+    assert "至少接上一句" not in dr.REPORT_PROMPT, "硬要求已删（用户 2026-10-22）"
+    assert "那不是义务" in dr.REPORT_PROMPT
     assert "别把他的话抄一遍" in dr.REPORT_PROMPT
     assert "不要把他人的原话抄给他看**（说的是**别人**" in dr.REPORT_PROMPT, (
         "两句的关系要写清楚，不然她会分不清该不该提他说过的话"

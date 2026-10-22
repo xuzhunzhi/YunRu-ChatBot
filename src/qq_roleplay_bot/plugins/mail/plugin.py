@@ -30,15 +30,22 @@ def register(registry) -> None:
     # 判定在核心（`runtime._SeamBinder`），见 `plugins.provide_owner_channel`。
     registry.provide_owner_channel("mail")
 
-    # **前置能力**：把"给操作者发一封普通邮件"开放给别的插件（`registry.mail`）。
-    # 放在最前面：后置插件（`outage_notice`）的 `register()` 会**用它**，
-    # 而 `discover()` 保证前置插件的 `register()` 先整个跑完（见 `REQUIRES`）。
-    # 方向不许反：**这一个提供，那一个使用**；mail 不认识任何使用者的名字。
+    # **M1（2026-10-22）：这两条现在通常是 no-op**——核心已经在 `build_engine()` 里、
+    # 插件 attach 之前把同两条窄口放到了 `registry.mail` 上。这里仍然调它们，是为了
+    # 保住"没有核心那份时的兼容路径"（老核心 + 新插件）与 M4 删目录之前的行为：
+    # builder 看到"已经有人提供过"就直接返回现有函数，**不重复提供、不报错**。
+    #
+    # 为什么不再由本插件当唯一提供者：判据是"删掉 `plugins/mail/` 之后
+    # `outage_notice` / `timeout_alert` 仍能装、仍能发信"。把能力留在插件里，
+    # 删目录就等于告警哑了；M1 之后依赖按能力判定（`REQUIRES = ("mail",)` →
+    # `PluginRegistry.has_capability`），不再要求这个目录存在。
+    #
+    # 方向仍然只有一个：**提供者放函数，使用者取函数**；mail 不复述使用者的名字。
     wire.build_operator_mail_sender(registry.mail)
 
-    # **第二条前置能力**：把"寄给指定的一个地址"也开放出去（2026-10-08）。
+    # **第二条窄口**：把"寄给指定的一个地址"也开放出去（2026-10-08）。
     # 到点提醒（`plugins/remind/`）的邮箱那一路要寄给**那个人**，而上面那一条的
-    # 收件人写死是操作者——两条能力各管各的，互不替换（旧的掉线通知一个字没动）。
+    # 收件人写死是操作者——两条能力各管各的、互不替换。M1 之后同样由核心先提供。
     wire.build_address_mail_sender(registry.mail)
 
     # 读信回信：只拿窄接缝 `chat`（四个函数），**不拿引擎**。

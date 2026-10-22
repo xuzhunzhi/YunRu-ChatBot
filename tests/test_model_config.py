@@ -37,6 +37,12 @@ key 去打 mimo，**全 401**。根因不是"谁配错了"，是**形状**——
 >   `(provider, base_url, model, key 变量名)`，以及"哪一路在用哪条 key 条目"。
 >   这些值**移了就要跟着改**；判定的家回到 deepseek 之后，"deepseek 那一路"的例子
 >   也回到 **`judge`**——2026-10-14～10-16 那段它住 xkiro 时才需要绕开。
+>
+> ⚠️ **2026-10-22 的口径（用户原话："写邮件的模型是 mimo-v2.6-pro"）**：
+> `TASKS["letter"]` 从 2026-10-12 的 `{"key": "judge", "model": "deepseek-v4-pro"}`
+> **改回** `{"key": "letter", "model": "mimo-v2.6-pro"}`（用写信自己那条 mimo key，
+> 地址跟着钥匙走）。本文件里 letter 那一行期望值、以及"只配 judge 时缺哪几路"那条
+> 断言因此跟着改——**这是用户改了那条口径**，不是为了让用例变绿。
 
 （测试里用的都是**假 key**：真实值由部署方写在 `run/.env` 里，不进任何仓库文件。）
 """
@@ -64,11 +70,12 @@ EXPECTED: tuple[tuple[str, str, str, str, str], ...] = (
     # `KEYS["reply"]` 那条 xkiro 条目**保留**（闲置，将来一键切回要用）。
     ("reply", "deepseek", "https://api.deepseek.com", "deepseek-flash",
      "QQBOT_JUDGE_API_KEY"),
-    # 2026-10-12 用户拍板"信用v4pro写"：letter 与 reply 同一个形状——要的模型挂在
-    # 哪一家就借哪家的 key，`QQBOT_LETTER_API_KEY`（mimo 那把）因此在正常路径上
-    # 闲置，只在"主家余额耗尽切兜底"那条链上被借走（见 `FALLBACK_TASKS`）。
-    ("letter", "deepseek", "https://api.deepseek.com", "deepseek-v4-pro",
-     "QQBOT_JUDGE_API_KEY"),
+    # 2026-10-22 用户明确："写邮件的模型是 mimo-v2.6-pro"——这一行从 2026-10-12 的
+    # "信用v4pro写"（借 judge 那条 deepseek key）**回退到写信自家的 mimo**：
+    # 模型挂在哪一家就用哪家的 key，于是 `QQBOT_LETTER_API_KEY` 不再是闲置项，
+    # 它现在就是写信这一路主家那把（兜底链照旧借它，见 `FALLBACK_TASKS`）。
+    ("letter", "mimo", "https://api.xiaomimimo.com/v1", "mimo-v2.6-pro",
+     "QQBOT_LETTER_API_KEY"),
     # 2026-10-16（同一条口径："切换回ds。gemini好蠢。"）：判定**也回到 deepseek**，
     # 用它自己那条 key（`QQBOT_JUDGE_API_KEY`）与 `deepseek-flash`——即 2026-10-14
     # 之前那一版。依据同 reply 那条（上游 503 + `reasoning_effort` 发不出去 ⇒
@@ -183,46 +190,57 @@ def test_the_three_layers_are_layered() -> None:
     for task, fields in model_config.TASKS.items():
         assert fields["key"] in model_config.KEYS, f"{task} 指向了不存在的 key 条目"
         assert fields["model"], f"{task} 没有模型名"
-        # 模型名要写**真名**：`deepseek-chat` 是随时会没的别名（实测现在只有
-        # `deepseek-flash` 与 `deepseek-v4-pro`）。
+        # 模型名要写**真名**：`deepseek-chat` 是随时会没的别名（现在在用的是
+        # `deepseek-flash` 与 `mimo-v2.6-pro`——写信那一路自 2026-10-22 起是后者）。
         assert fields["model"] != "deepseek-chat", f"{task} 还在用别名"
 
 
-def test_the_letter_purpose_uses_the_pro_model_through_the_judge_key() -> None:
-    """用户原话（2026-10-12）："信用v4pro写"——写信那一路要 pro 那档。
+def test_the_letter_purpose_uses_mimo_the_pro_model_with_its_own_key() -> None:
+    """**这一行是用户 2026-10-22 亲口定的，用例把它钉死**（防止被改回 deepseek）。
 
-    `deepseek-v4-pro` 只在 deepseek 那一家（与 `deepseek-flash` 不同档），所以这一路
-    跟 reply 一个形状：借 `judge` 那条 key。它自己那条（`QQBOT_LETTER_API_KEY`）是
-    mimo 的，闲置但**没废**——它是兜底链借走的那把（见 `FALLBACK_TASKS`）。
+    原话："**写邮件的模型是 mimo-v2.6-pro**"。于是 `TASKS["letter"]` 是
+    `{"key": "letter", "model": "mimo-v2.6-pro"}`——写信这一路用**自己那条**
+    key（`QQBOT_LETTER_API_KEY`，mimo 那把），地址跟着钥匙走（letter → mimo）。
+    2026-10-12 那版"信用v4pro写、借 judge 那条 deepseek key"从这一天起作废。
     """
 
-    assert model_config.TASKS["letter"]["model"] == "deepseek-v4-pro"
-    assert model_config.TASKS["letter"]["key"] == "judge", "模型在哪家就借哪家的 key"
+    assert model_config.TASKS["letter"] == {"key": "letter", "model": "mimo-v2.6-pro"}
     letter = model_config.KEYS["letter"]
     assert letter["provider"] == "mimo"
     assert letter["env"] == "QQBOT_LETTER_API_KEY"
     assert letter["fallback"] == "reply", \
-        "回落规则要写清：先自己那条（mimo），再沿 `reply` 那条借"
-    # ⚠️ 已知的**跨家**之处（2026-10-16 如实记下，没有顺手"修"）：`KEYS["reply"]`
-    # 自 2026-10-14 起 provider = xkiro，而这条回落说的是 letter（mimo）→ reply。
-    # 也就是说：letter 自己那条与主 key 都没配、而 `QQBOT_REPLY_API_KEY` 有值时，
-    # 信会拿 xkiro 的 key 去打 xkiro 的地址（模型名仍是 `deepseek-v4-pro`）——
-    # 这正是本模块要根治的"A 家 key 打 B 家模型"的形状。它今天走不到（生产 `.env`
-    # 里 `QQBOT_LETTER_API_KEY` 与主 key 都在）。这是"`TASKS` 回退、`KEYS["reply"]`
-    # 按用户口径留在 xkiro"两件事并存的代价，改回 Gemini 之前要先看它一眼。
+        "回落规则没改：先自己那条（mimo），再沿 `reply` 那条借"
+
+    with _env(env_file_key="", QQBOT_LETTER_API_KEY="sk-fake-letter"):
+        endpoint = model_config.resolve("letter")
+    assert endpoint.provider == "mimo"
+    assert endpoint.base_url == "https://api.xiaomimimo.com/v1"
+    assert endpoint.model == "mimo-v2.6-pro"
+    assert endpoint.key_env == "QQBOT_LETTER_API_KEY"
+    assert endpoint.own_key is True, "它现在用的是自己那条 key，不是借来的"
+    # ⚠️ 落到回落链第二层时仍有一个**已知的跨家**（2026-10-16 记下、这一轮没动）：
+    # `KEYS["reply"]` 自 2026-10-14 起 provider = xkiro，而 `KEYS["letter"]` 说的是
+    # letter（mimo）→ reply。也就是说：letter 自己那条与主 key 都没配、而
+    # `QQBOT_REPLY_API_KEY` 有值时，信会拿 xkiro 的 key 去打 xkiro 的地址
+    # （模型名仍是 `mimo-v2.6-pro`）——这正是本模块要根治的"A 家 key 打 B 家模型"
+    # 的形状。生产 `.env` 里 `QQBOT_LETTER_API_KEY` 与主 key 都在，走不到这一层；
+    # 改这一层要等用户点头（`KEYS` 的回落链不在"只改 letter 那一行"的范围里）。
 
 
 def test_the_letter_key_entry_still_serves_the_mimo_fallback() -> None:
-    """`QQBOT_LETTER_API_KEY` 那条条目**没废**：主家余额耗尽时信切回它。
+    """`QQBOT_LETTER_API_KEY` 那条条目**没废**：主家在用它，兜底链也借它。
 
-    2026-10-12 之前这条测的是"写信用途自己回落 reply 那把 mimo key"——那条规则连同
-    "信跑在 mimo 上"一起作废了（用途现在借 judge 那条）。它自己那条 mimo key 仍然
-    生效，只是生效的地方换到了**兜底链**上：兜底那条 key（mimo / `QQBOT_FALLBACK_API_KEY`）
-    自己没配，按回落链借到 letter 这把。
+    2026-10-12 之前这条测的是"写信用途自己回落 reply 那把 mimo key"；10-12～10-22
+    它借 judge 那条、这条 key 闲置；2026-10-22 用户把写信模型改回 mimo 之后，它同时是
+    **主家**（letter 自己那条）与**兜底链借走的那把**（`QQBOT_FALLBACK_API_KEY` 没配，
+    按回落链落到它）。两种身份都钉在下面。
     """
 
     with _env(QQBOT_JUDGE_API_KEY="sk-fake-judge",
               QQBOT_LETTER_API_KEY="sk-fake-letter"):
+        primary = model_config.resolve("letter")
+        assert primary.key_env == "QQBOT_LETTER_API_KEY"
+        assert primary.provider == "mimo" and primary.own_key is True
         fallback = model_config.resolve_fallback("letter")
         assert fallback is not None, "letter 从 2026-10-12 起在兜底表里"
         assert fallback.triple() == (
@@ -581,12 +599,13 @@ def test_the_self_check_marks_the_missing_purposes() -> None:
 
     with _env(env_file_key="", QQBOT_JUDGE_API_KEY="sk-fake-judge"):
         blob = "\n".join(model_config.self_check_lines())
-        # judge 有自己的 key；reply / letter 都借 judge 那条，memory / review / vision
-        # 回落到它（同家）——所以这一把 key 就够六个用途跑起来，一个 `**缺**` 都不该有。
+        # judge 有自己的 key；reply 借 judge 那条，memory / review / vision 回落到它
+        # （同家）——这五路都有值。**letter 自 2026-10-22 起用自己那条**（mimo 的
+        # `QQBOT_LETTER_API_KEY`），与这一把 deepseek key 无关 ⇒ 只有它报缺。
         assert "judge: provider=deepseek" in blob
-        assert "**缺**" not in blob, "reply 与 letter 借的都是 judge 那条，不该报缺"
-        assert "letter: " in blob
         assert "reply: provider=deepseek" in blob, "reply 回到借 judge 那条（deepseek）"
+        assert "letter: provider=mimo model=mimo-v2.6-pro key=QQBOT_LETTER_API_KEY" in blob
+        assert blob.count("**缺**") == 1, "只配 judge 时，缺的只剩 letter 那一路"
 
 
 def test_the_runtime_self_check_hook_returns_those_lines() -> None:

@@ -26,6 +26,13 @@
 > "以 **judge 住 xkiro** 为前提"的地方改准：判定那道闸的家改回 deepseek
 > （见 `test_the_judge_chain_is_back_on_deepseek`），`reapply` / `restore_primary`
 > 两条里 402 的来源从 xkiro 改回 deepseek。
+>
+> ⚠️ **2026-10-22（用户原话："写邮件的模型是 mimo-v2.6-pro"）**：`letter` 从
+> deepseek **搬回 mimo**，于是它不再能证明"主家是 deepseek"。本文件里那批
+> `letter` 驱动的用例（402 切换 / 不切 / 二次 402 / 没兜底 key / 兜底接不住）
+> **驱动换回 `judge`**——判定的家没动，只是回到"住在 deepseek 的那一路"这个最直接的
+> 证据上。不变式（只有主家 402 才切、兜底地址不来自任务级覆盖、没 key 就 fail-closed、
+> primary 与 `require` 逐字相同）一个字都没松。
 > 不变式（只有主家那一路的 402 才切、兜底地址不来自任务级覆盖、没 key 就
 > fail-closed、primary 与 `require` 逐字相同）一个字都没松。
 
@@ -63,12 +70,13 @@ ALL_VARS: tuple[str, ...] = (
     "QQBOT_FALLBACK_API_KEY",
 )
 
-#: 最常用的一份环境：reply / letter / memory / review / vision 在主家 **deepseek**
-#: （reply 与 letter 都借 `judge` 那条 key，其余三路回落到它），兜底那条 key **不配**
-#: ——于是它的同家回落链落到 letter 那把实测活着的 mimo key。
-#: 2026-10-16 用户「切换回ds」之后 reply 与 judge 都回到借 `judge` 那条 key，
-#: 所以这一把就够了（2026-10-14～10-16 那段 reply 走自己那条 key，这份环境里
-#: 才需要额外给它一个值）。
+#: 最常用的一份环境：reply / judge / memory / review / vision 的主家是 **deepseek**
+#: （reply 借 `judge` 那条 key，memory / review / vision 回落到它），兜底那条 key
+#: **不配**——于是它的同家回落链落到 letter 那把实测活着的 mimo key。
+#: `QQBOT_LETTER_API_KEY` 也放在这里：2026-10-22 用户"写邮件的模型是 mimo-v2.6-pro"
+#: 之后 letter 的主家在 **mimo**（它不再住 deepseek），所以"主家 deepseek 报 402"
+#: 那条不变式的驱动换成了 **`judge`**（自 2026-10-16 起它就在 deepseek 上）；
+#: letter 那把 mimo key 仍在这条回落链上被借走。
 MAIN_ENV: dict[str, str] = {
     "QQBOT_JUDGE_API_KEY": "sk-fake-judge",
     "QQBOT_LETTER_API_KEY": "sk-fake-letter",
@@ -152,16 +160,17 @@ def test_in_primary_mode_every_purpose_is_word_for_word_require() -> None:
 def test_a_402_from_the_main_provider_switches_the_whole_chain() -> None:
     """主家那一路报 402 → 整条切到兜底那一家。
 
-    驱动用的用途是 **`letter`**（住在 deepseek：借 `judge` 那条 key，见 `TASKS`）。
-    2026-10-14 那次口径移动把驱动从 `judge` 换成它，2026-10-16 用户「切换回ds」之后
-    **保持不动**——`letter` 一直是"deepseek 报 402 → 整条切走"这条不变式的活证据，
-    判定那道闸的家另有一条用例钉着（`test_the_judge_chain_is_back_on_deepseek`）。
+    驱动用的用途是 **`judge`**（住在 deepseek：用它自己那条 key，见 `TASKS`）。
+    2026-10-14～10-16 那段驱动曾是 `letter`（那时它借 judge 那条、也在 deepseek）；
+    **2026-10-22 用户"写邮件的模型是 mimo-v2.6-pro"把 letter 搬回 mimo**，于是它
+    不再能证明"deepseek 报 402"，驱动换回 `judge`——**口径真的移了**，不是为了让
+    用例变绿（`letter` 现在住 mimo 这件事由 `test_model_config` 钉着）。
     """
 
     with _isolated(**MAIN_ENV):
-        assert provider_failover.note_balance_exhausted("deepseek", task="letter") is True
+        assert provider_failover.note_balance_exhausted("deepseek", task="judge") is True
         assert provider_failover.in_fallback() is True
-        endpoint = provider_failover.endpoint_for("letter")
+        endpoint = provider_failover.endpoint_for("judge")
         assert endpoint.triple() == (
             "https://api.xiaomimimo.com/v1", "sk-fake-letter", "mimo-v2.6-pro")
         assert endpoint.provider == "mimo"
@@ -169,7 +178,7 @@ def test_a_402_from_the_main_provider_switches_the_whole_chain() -> None:
         assert endpoint.key_env == "QQBOT_LETTER_API_KEY"
         assert endpoint.own_key is False
         # 只切了这一次：状态里记的就是本次那个用途与那一家
-        assert "letter" in provider_failover.status_line()
+        assert "judge" in provider_failover.status_line()
         assert "deepseek" in provider_failover.status_line()
 
 
@@ -179,7 +188,7 @@ def test_the_judge_chain_is_back_on_deepseek() -> None:
 
     为什么单列一条、而不是把上一条里的字符串改掉就算：判定的家从 deepseek 换到
     xkiro（2026-10-14）又换回来（2026-10-16）是"语义锚点真的移了"，只改字符串的话，
-    "它现在住哪一家、那道闸认谁"就没有活的证据了（上一条的驱动是 `letter`）。
+    "它现在住哪一家、那道闸认谁"就没有活的证据了。
     """
 
     with _isolated(**MAIN_ENV):
@@ -200,13 +209,14 @@ def test_the_judge_chain_is_back_on_deepseek() -> None:
 
 
 def test_a_402_from_another_provider_does_not_switch() -> None:
-    """不在主家上的那家报 402 不改状态：letter 的主家现在是 deepseek（借 judge 那条，
-    2026-10-12 起），所以 mimo 报上来的"余额耗尽"对它不算数；
+    """不在主家上的那家报 402 不改状态：judge 的主家是 deepseek（用它自己那条 key），
+    所以 xkiro / mimo 报上来的"余额耗尽"对它不算数；
     没给用途时判不出"这一家是不是主家那一路" → 宁可不切。
     """
 
     with _isolated(**MAIN_ENV):
-        assert provider_failover.note_balance_exhausted("mimo", task="letter") is False
+        assert provider_failover.note_balance_exhausted("xkiro", task="judge") is False
+        assert provider_failover.note_balance_exhausted("mimo", task="judge") is False
         # 没给用途时判不出"这一家是不是主家那一路" → 宁可不切
         assert provider_failover.note_balance_exhausted("deepseek") is False
         assert provider_failover.in_fallback() is False
@@ -215,16 +225,16 @@ def test_a_402_from_another_provider_does_not_switch() -> None:
 def test_a_second_402_does_not_switch_twice() -> None:
     """已经在兜底时再报 402 不改状态（否则就是来回弹）。
 
-    驱动用的用途是 **`letter`**（2026-10-14 起；2026-10-16 用户「切换回ds」之后
-    **保持不动**——判定那道闸的家另有一条用例钉着，见
-    `test_the_judge_chain_is_back_on_deepseek`）。
+    驱动用的用途是 **`judge`**（住在 deepseek：用它自己那条 key）。2026-10-14～10-16
+    那段驱动是 `letter`；2026-10-22 用户把写信模型改回 mimo 之后它不住 deepseek 了，
+    驱动换回 judge。
     """
 
     with _isolated(**MAIN_ENV):
-        assert provider_failover.note_balance_exhausted("deepseek", task="letter") is True
+        assert provider_failover.note_balance_exhausted("deepseek", task="judge") is True
         # 已经在兜底：再报不许动（否则就是来回弹）
-        assert provider_failover.note_balance_exhausted("deepseek", task="letter") is False
-        assert provider_failover.note_balance_exhausted("mimo", task="letter") is False
+        assert provider_failover.note_balance_exhausted("deepseek", task="judge") is False
+        assert provider_failover.note_balance_exhausted("mimo", task="judge") is False
         assert provider_failover.in_fallback() is True
 
 
@@ -248,17 +258,17 @@ def test_the_fallback_address_never_comes_from_a_task_level_override() -> None:
 def test_without_any_fallback_key_it_fails_closed() -> None:
     """没配兜底 key（同家回落链上也没有任何一条有值）→ 老实返回 False，不硬凑端点。
 
-    驱动用的用途是 **`letter`**（2026-10-14 起的驱动，2026-10-16 用户「切换回ds」
-    之后保持不动）：`letter` 借 `judge` 那条 key，它有 key、而兜底那条（连它的
-    回落链）没有，正是这一条要的形状。
+    驱动用的用途是 **`judge`**（2026-10-14～10-16 那段是 `letter`；2026-10-22 写信
+    模型改回 mimo 之后它不住 deepseek 了，驱动换回 judge）：`judge` 有自己那条 key，
+    而兜底那条（连它的回落链）没有，正是这一条要的形状。
     """
 
     with _isolated(QQBOT_JUDGE_API_KEY="sk-fake-judge"):
-        assert model_config.resolve_fallback("letter") is None
-        assert provider_failover.note_balance_exhausted("deepseek", task="letter") is False
+        assert model_config.resolve_fallback("judge") is None
+        assert provider_failover.note_balance_exhausted("deepseek", task="judge") is False
         assert provider_failover.in_fallback() is False
         # 没切的时候照旧逐字段等于 require
-        assert provider_failover.endpoint_for("letter") == model_config.require("letter")
+        assert provider_failover.endpoint_for("judge") == model_config.require("judge")
 
 
 # --- 5. 兜底那一家接不住的用途：老实失败 -------------------------------------
@@ -267,15 +277,16 @@ def test_without_any_fallback_key_it_fails_closed() -> None:
 def test_a_purpose_the_fallback_cannot_serve_fails_honestly() -> None:
     """兜底那一家接不住的用途，切过去之后仍然老实回主家那一路（明确失败，不硬凑）。
 
-    驱动用的用途是 **`letter`**（2026-10-14 起，2026-10-16 用户「切换回ds」之后保持
-    不动）：它借 `judge` 那条 key，主家仍在 deepseek 上。
+    驱动用的用途是 **`judge`**（住在 deepseek：用它自己那条 key）。2026-10-14～10-16
+    那段驱动是 `letter`；2026-10-22 写信模型改回 mimo 之后它不住 deepseek 了。
     """
 
     with _isolated(**MAIN_ENV):
-        assert provider_failover.note_balance_exhausted("deepseek", task="letter") is True
+        assert provider_failover.note_balance_exhausted("deepseek", task="judge") is True
         assert provider_failover.in_fallback() is True
-        # letter 在 2026-10-12 进了兜底表（主家换成 deepseek 之后），
-        # 只剩 vision 不在表里——它要传图片，mimo 那一路没实测过收不收图
+        # 兜底表里只剩 vision 不在——它要传图片，mimo 那一路没实测过收不收图
+        # （letter 仍在表里：2026-10-12 进表、2026-10-22 之后主家与兜底同是 mimo，
+        #  这是已知且没在"只改 letter 那一行"范围内顺手改的事）。
         for task in ("vision",):
             assert model_config.resolve_fallback(task) is None, task
             assert (provider_failover.endpoint_for(task).triple()

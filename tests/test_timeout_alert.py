@@ -43,6 +43,7 @@ from unittest import mock
 
 from plugin_support import plugin_registry
 from qq_roleplay_bot import plugins as plugins_module
+from qq_roleplay_bot.mail import provide_senders as provide_core_mail
 from qq_roleplay_bot.metrics import RuntimeMetrics
 from qq_roleplay_bot.plugins import PluginRegistry, ReportSeams, discover
 from qq_roleplay_bot.plugins.outage_notice import outage_notice
@@ -115,6 +116,22 @@ def _fake_sender():
         return {"message_id": "fake"}
 
     return sender, sends
+
+
+class _CoreMailClient:
+    """核心 `MailClient` 的替身：只记下 `send(...)`，不起子进程。
+
+    M1 的用例要验"核心提供的能力真的能把信发出去"，所以这里按 `MailClient.send`
+    的关键字形状（`to` / `subject` / `body`）收，而不像 `_fake_sender()` 那样
+    停在 `MailSeams` 那一层。
+    """
+
+    def __init__(self) -> None:
+        self.sends: list[dict] = []
+
+    async def send(self, *, to: str, subject: str, body: str, **kwargs) -> dict:
+        self.sends.append({"to": to, "subject": subject, "body": body})
+        return {"message_id": "fake"}
 
 
 def _failing_sender(attempts: list[tuple[str, str]]):
@@ -556,7 +573,14 @@ def test_the_moment_formatting_is_not_borrowed_from_outage_notice() -> None:
 
 
 def test_the_requirement_points_at_mail_and_register_is_called_once() -> None:
-    """`REQUIRES` 里是 `mail`；真装配里 **mail 先装、本插件后装**，且只装一次。"""
+    """`REQUIRES` 里是 `mail`；空注册表里 **mail 插件先装、本插件后装**，且只装一次。
+
+    **M1（2026-10-22）之后这条只覆盖"没有核心能力"的回落路径**：声明照旧是
+    `("mail",)`，但这个 `PluginRegistry()` 没有核心提供的发信能力，所以仍走
+    "装同名前置插件"的老路。**有核心能力时不再装 mail 插件**的那一半由
+    `test_without_the_mail_plugin_the_core_capability_still_assembles_and_sends`
+    覆盖（那里断言 `"mail" not in loaded`），两条合起来才是"能力判定"的完整语义。
+    """
 
     assert tuple(timeout_plugin.REQUIRES) == ("mail",), timeout_plugin.REQUIRES
     assert timeout_plugin.TITLE == "超时通知", timeout_plugin.TITLE
@@ -579,7 +603,14 @@ def test_the_requirement_points_at_mail_and_register_is_called_once() -> None:
 
 
 def test_without_the_mail_plugin_nothing_is_registered_and_core_runs() -> None:
-    """藏掉 `mail` 的插件模块 → 本插件不装、不留后台节拍、不抛异常，核心照跑。"""
+    """藏掉 `mail` 的插件模块 → 本插件不装、不留后台节拍、不抛异常，核心照跑。
+
+    **M1（2026-10-22）之后这条守的是"两边都没有"的 fail-closed**：这个注册表既
+    没有核心提供的能力、`mail` 插件又被藏了，所以仍然必须跳过自己。核心先提供
+    能力的另一半由
+    `test_without_the_mail_plugin_the_core_capability_still_assembles_and_sends`
+    覆盖。
+    """
 
     registry = plugin_registry()
     real_import = importlib.import_module
@@ -690,6 +721,54 @@ def test_the_real_assembly_hands_over_the_mails_own_sender() -> None:
     assert plugin.enabled is True
     assert plugin.sender is registry.mail.operator_sender, "接的必须是 mail 放上来的那一个"
     assert plugin.snap == registry.report.snap, "快照口也必须是核心给的那一个"
+
+
+def test_without_the_mail_plugin_the_core_capability_still_assembles_and_sends() -> None:
+    """**M1 判据**（用户 2026-10-22）：删掉 `plugins/mail/` 之后仍 loaded、仍能发信。
+
+    ## 为什么这条是关键
+
+    M1 之前 `REQUIRES = ("mail",)` 等于"装一个叫 mail 的插件"，那个目录一删，
+    `discover()` 就把本插件当缺依赖跳过，超时再多也没人通知。M1 把发信搬进核心：
+    `runtime.build_engine()` 在插件 attach **之前** `provide_senders(registry.mail)`，
+    `discover()` 的判定改成先问 `registry.has_capability("mail")`。所以这条用例
+    **让 `qq_roleplay_bot.plugins.mail` 的 import 全部失败**，只用核心的能力，
+    再看本插件装不装得上、五连超时后信发不发得出去。
+
+    收件人前提由 `_recipient_configured()` 显式配（源码里没有默认收件人；
+    没配时核心按设计不提供"给操作者发一封"，这条就变成在验"没配"）。
+    """
+
+    registry = plugin_registry()
+    snapshots = _Snapshots()
+    registry.report = ReportSeams(snapshot=snapshots)
+    client = _CoreMailClient()
+    real_import = importlib.import_module
+
+    def fake_import(name, package=None):
+        if name.startswith("qq_roleplay_bot.plugins.mail"):
+            raise ModuleNotFoundError("No module named 'qq_roleplay_bot.plugins.mail'",
+                                      name="qq_roleplay_bot.plugins.mail")
+        return real_import(name, package)
+
+    with _recipient_configured() as recipient:
+        provide_core_mail(registry.mail, client=client)
+        assert registry.mail.knows() is True, "核心该先提供发信能力"
+
+        with mock.patch.object(plugins_module.importlib, "import_module", fake_import):
+            with _discovery_state():
+                loaded = discover(registry, only=("timeout_alert",))
+        assert "mail" not in loaded, f"这个部署没有 mail 插件：{loaded}"
+        assert "timeout_alert" in loaded, f"有核心能力就该装上：{loaded}"
+
+        plugin = _armed(registry, snapshots)
+        results = _feed(plugin, _every([0, 1, 2, 3, 4, 5]))
+
+    assert results[:5] == [None] * 5, results
+    assert results[5] is not None, results
+    assert len(client.sends) == 1, f"该正好发一封：{client.sends}"
+    assert client.sends[0]["to"] == recipient, client.sends[0]
+    assert client.sends[0]["subject"] == alert_module.SUBJECT, client.sends[0]
 
 
 def test_a_failing_send_is_logged_and_never_propagates() -> None:

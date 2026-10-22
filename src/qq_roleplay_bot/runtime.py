@@ -40,6 +40,7 @@ from .extensions import PromptSources
 from .letter_context import collect_letter_context
 from .letter_docs import load_letter_facts, load_letter_persona
 from .llm_client import OpenAICompatibleClient, apply_client_overrides
+from .mail import provide_senders as provide_mail_senders
 from .memory_config import MemorySettings
 from .memory_ops import MemoryOps
 from .memory_readonly import MemoryRead
@@ -976,6 +977,23 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
     # 本来就是"把角色查询放到共享位上"那个口，现在由核心来放，语义没变。
     # 放在 `discover()` **之前**，插件在 `register()` 里就取得到。
     registry.provide_roles(engine.group_roles)
+    # **邮件发信能力进核心**（M1，2026-10-22）：插件 attach **之前**把
+    # `operator_sender` / `address_sender` 放到 `registry.mail` 上。
+    #
+    # 为什么在这里、为什么是"先"：`plugins/mail/` 的 `register()` 里那两个 builder
+    # 是"已有人提供就不覆盖"（那是 2026-10-06 为重复装配写的守卫），所以先由核心
+    # 提供，插件再装时自然 no-op；反过来（插件先、核心后）会让"谁提供的那一条"
+    # 取决于发现顺序，而 `discover()` 的顺序不是装配契约。
+    #
+    # 判据（用户 2026-10-22）：**删掉 `plugins/mail/` 之后，`outage_notice` /
+    # `timeout_alert` 仍能装、仍能发信**。所以这一步不能放进任何插件：
+    # 核心不认识插件目录，只把"发一封"这个出站能力放到既有窄接缝上
+    # （`AGENTS.md` §2.3：出站能力属于底层）。`REQUIRES = ("mail",)` 的判定
+    # 随之变成"注册表里有没有这个能力"（`PluginRegistry.has_capability`）。
+    #
+    # 没配收件人时只提供"寄给指定地址"那一条、不提供"给操作者发一封"
+    # （fail-closed；见 `mail.provide_senders`），核心照常起。
+    provide_mail_senders(registry.mail)
     attach_plugins(registry, engine.commands)
     engine.plugin_registry = registry
     # **识图**：能力由插件给（`plugins/vision/`），核心只问"有没有"。
@@ -2974,10 +2992,11 @@ def _build_letter_client() -> OpenAICompatibleClient:
     为什么单独一份：信的 prompt 前缀又大又恒定（人设 + 信件规矩 + 已确定事实），
     跟群聊共用一份缓存隔离空间只会互相挤；分开之后它的命中率与成本都能单独看。
 
-    凭据走 `model_config` 的 **letter** 那个用途。2026-10-12 起那一行借的是
-    `judge` 那条（deepseek / `deepseek-v4-pro`）——与 reply 同一个形状：模型的哪家
-    就借哪家的 key。它自己那把 `QQBOT_LETTER_API_KEY`（mimo）留着不动，主家余额
-    耗尽切兜底时由 `FALLBACK_TASKS` + `FALLBACK_KEY` 借走（见 `model_config`）。
+    凭据走 `model_config` 的 **letter** 那个用途，模型是 `mimo-v2.6-pro`
+    （用户 2026-10-22 明确："写邮件模型是用 mimo v2.6-pro"）。它优先用自己那把
+    `QQBOT_LETTER_API_KEY`（mimo）；那把没配才按 `KEYS["letter"].fallback` 借 reply
+    的 key（xkiro）——**跨家**，模型名仍是 mimo，这是已知风险（`model_config` 的
+    `KEYS` 注释里记着）。再没有才落主 key。
 
     留在核心（而不是跟着装配搬去 `background_plugins.py`）：它要往**核心的用量账本**
     （`_USAGE_STORE`）里记一笔，那是核心状态。

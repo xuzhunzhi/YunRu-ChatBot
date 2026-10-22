@@ -18,7 +18,12 @@ r"""门槛：**插件线上只许有插件**（"插件线只管插件"的机械�
 
 1. `src/qq_roleplay_bot/plugins/**`——插件包（含 `plugins/__init__.py` 那套发现器与注册表，
    它是插件侧的装配面，不是 Stage 3 的核心模块）；
-2. 下面 `WHITELIST` 里**逐个列明**的测试文件——每一项都在字典里写清"为什么它算插件范围"。
+2. 下面 `WHITELIST` 里**逐个列明**的测试文件——每一项都在字典里写清"为什么它算插件范围"；
+3. **M1（2026-10-22）临时放行的核心镜像**：`MIRRORED_CORE_FILES` 里逐个列出的三个文件。
+   它们**不是**插件范围，而是 M1 判据（删掉 `plugins/mail/` 后两个告警插件仍能发信）要求
+   核心发信能力**同时**存在于插件树——插件树的测试在 `qq_roleplay_bot.mail` 上跑，
+   这棵树没有那份核心文件就收集不起来。放行条件是**逐字复制自 `dev`、不在这里做二次改动**；
+   M4 拆完/合回 `main` 之后这三项要删掉（见那个字典的说明）。
 
 出现别的文件 → **退出码 1，并把那些文件一个个指名**。
 
@@ -81,6 +86,30 @@ ALLOWED_PREFIXES = ("src/qq_roleplay_bot/plugins/",)
 
 #: 未跟踪文件里要看的目录前缀（根目录下那些既有产物不算，理由见模块头那段）。
 UNTRACKED_ROOTS = ("src/", "tests/", "docs/")
+
+#: **M1（2026-10-22）临时放行的核心镜像**：路径 → 为什么它必须在这棵树上。
+#:
+#: 口径：这些**不是**插件范围，是核心。放行只因为 M1 的判据要求核心发信能力
+#: **两棵树同时存在**——插件树的测试跑在 `qq_roleplay_bot.mail` 上，缺了它
+#: `test_outage_notice.py` / `test_timeout_alert.py` 的 M1 用例在收集阶段就
+#: `ImportError`。三个文件都是 `dev` 那一份的**逐字复制**（源在 `dev`，不在这里改）。
+#:
+#: **什么时候删**：M4（`plugins/mail/` 拆除、核心合回 `main`）之后，插件线不再需要
+#: 镜像核心文件，这一项应当整段删掉。**不许**把它扩成 `src/qq_roleplay_bot/**` 通配。
+MIRRORED_CORE_FILES = {
+    "src/qq_roleplay_bot/mail/__init__.py":
+        "M1 核心发信能力的 provide 点；插件树测试要 import `qq_roleplay_bot.mail`。"
+        "逐字复制自 dev，不在插件线改。M4 后删除本项。",
+    "src/qq_roleplay_bot/mail/client.py":
+        "M1 核心 `MailClient`（发信最小实现）；插件树测试用假 client 走同一条路。"
+        "逐字复制自 dev，不在插件线改。M4 后删除本项。",
+    "src/qq_roleplay_bot/runtime.py":
+        "`build_engine()` 里 provide 点在 `attach_plugins()` 之前（M1 的装配判据）。"
+        "逐字复制自 dev，不在插件线改。M4 后删除本项。",
+    "src/qq_roleplay_bot/model_config.py":
+        "写信模型 2026-10-22 由用户定为 `mimo-v2.6-pro`（letter 用自己那条 mimo key）；"
+        "插件树的写信测试要 import 同一份配置。逐字复制自 dev，不在插件线改。M4 后删除本项。",
+}
 
 #: 允许出现在插件线上的**测试**：路径 → 为什么它算插件范围。
 #:
@@ -210,6 +239,16 @@ WHITELIST = {
         "`no-store` 与 `.wasm`/字体的缓存策略、以及**改代码前**抓下来的老外壳基线逐字比对。"
         "它测的对象全在 `plugins/webui/webui_panel.py` 与 `plugins/webui/webui/v2/` 里，"
         "本体侧没有这两个东西。",
+    # 下面两个是**核心 `model_config` 的测试**，不是插件测试；之所以出现在插件线上，
+    # 是因为 2026-10-22 把写信模型改成 `mimo-v2.6-pro` 之后，插件树的写信用例要 import
+    # 同一份配置（`model_config.py` 已在 `MIRRORED_CORE_FILES` 里逐字镜像），
+    # 而这两份测试钉的正是那张表。**逐字复制自 dev**，不在插件线改；M4 之后随镜像项一起删。
+    "tests/test_model_config.py":
+        "核心 `model_config` 那张表（用途 → key → 模型）的自检，逐字复制自 dev。"
+        "写信模型 2026-10-22 改为 `mimo-v2.6-pro` 后插件树要 import 同一份配置。",
+    "tests/test_provider_failover.py":
+        "核心供应商兜底链路（402 切换 / 找不到能接的用途要老实失败），逐字复制自 dev。"
+        "写信用途从 `judge` 那条搬回自己那条 mimo key 后，这里的驱动与不变式跟着改。",
 }
 
 
@@ -342,8 +381,12 @@ def main() -> int:
     plugins_files = sorted(p for p in changed if p.startswith(ALLOWED_PREFIXES))
     whitelisted = sorted(p for p in changed
                          if not p.startswith(ALLOWED_PREFIXES) and p in WHITELIST)
+    mirrored = sorted(p for p in changed
+                      if not p.startswith(ALLOWED_PREFIXES)
+                      and p not in WHITELIST and p in MIRRORED_CORE_FILES)
     violations = sorted(p for p in changed
-                        if not p.startswith(ALLOWED_PREFIXES) and p not in WHITELIST)
+                        if not p.startswith(ALLOWED_PREFIXES)
+                        and p not in WHITELIST and p not in MIRRORED_CORE_FILES)
     unused = sorted(p for p in WHITELIST if p not in changed)
 
     print("=" * 96)
@@ -359,6 +402,12 @@ def main() -> int:
         print(f"  {path}")
         print(f"      ← {', '.join(changed[path])}")
         print(f"      为什么算插件范围：{WHITELIST[path]}")
+    if mirrored:
+        print(f"允许 · **M1 核心镜像**（{len(mirrored)} 个，逐字复制自 dev，M4 后删除本项）")
+        for path in mirrored:
+            print(f"  {path}")
+            print(f"      ← {', '.join(changed[path])}")
+            print(f"      为什么放行：{MIRRORED_CORE_FILES[path]}")
     print("-" * 96)
 
     if violations:
@@ -388,8 +437,9 @@ def main() -> int:
               "但它要显式说出来，别让人以为白名单每一项都在被用。")
         print("-" * 96)
 
-    tail = (f"范围内的文件 {len(plugins_files) + len(whitelisted)} 个"
-            f"（插件包 {len(plugins_files)} + 白名单测试 {len(whitelisted)}）")
+    tail = (f"范围内的文件 {len(plugins_files) + len(whitelisted) + len(mirrored)} 个"
+            f"（插件包 {len(plugins_files)} + 白名单测试 {len(whitelisted)}"
+            f" + M1 核心镜像 {len(mirrored)}）")
     if unused:
         tail += f"，另有 {len(unused)} 个白名单项在这条线上没出现"
     print(f"通过：{tail}，没有一个文件落在范围之外。")

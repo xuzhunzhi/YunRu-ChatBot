@@ -214,6 +214,15 @@ class InventoryShapeTests(unittest.TestCase):
         `requires`**（写回去就是把角色事实又挂到一个插件上）。
         而真正还活着的插件依赖仍然要用 `REQUIRES` 表达清楚：
         `outage_notice → mail` 是同一条规矩下的正例。
+
+        **M1（2026-10-22）之后 `requires` 这一列的含义变了、但声明没变**：
+        `mail` 已由核心提供（`qq_roleplay_bot.mail`），`REQUIRES = ("mail",)`
+        在 `discover()` 里按**能力判定**（`PluginRegistry.has_capability`），
+        不再要求 `plugins/mail/` 目录存在。清单仍然把**声明**原样列出来
+        （`["mail"]`），因为面板要告诉人的是"这个插件依赖哪项能力"，
+        不是"这次是核心提供还是插件提供"——后者由 `loaded` 那一列看。
+        所以这里的期望值**不变**，变的是它背后的判定（见
+        `test_outage_notice.py` / `test_timeout_alert.py` 的 M1 用例）。
         """
         rows = {row["name"]: row for row in plugins.inventory()}
         for name, row in rows.items():

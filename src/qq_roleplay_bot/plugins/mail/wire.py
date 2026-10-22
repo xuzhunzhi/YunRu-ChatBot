@@ -168,6 +168,12 @@ def build_operator_mail_sender(seams):
 
     ## 一件事：**已经有人提供过就不覆盖**
 
+    **M1（2026-10-22）之后这条守卫就是兼容路径**：核心已经在 `runtime.build_engine()`
+    里、插件 attach 之前调 `qq_roleplay_bot.mail.provide_senders()` 把同一条能力放好了，
+    所以本函数在真装配里走的是下面这个 `existing` 分支——**no-op，不重复提供、不报错**。
+    插件目录在 M4 之前仍然保留（还管读信回信/日报/写信），这条路径保证它和核心
+    同时在场时不会互相覆盖；M4 删掉本文件后，核心那份继续工作。
+
     `registry.mail.provide(...)` 只在**还没有**发信函数时才登记。理由是踩出来的
     （2026-10-06，写掉线通知的测试时）：`discover()` 会把前置 `mail` 装一遍——
     哪怕调用方只想要后置那一个（`only=("outage_notice",)` 也会顺着 `REQUIRES` 把 mail
@@ -252,8 +258,9 @@ def build_address_mail_sender(seams):
 
     ## 已经有人提供过就不覆盖（同上一条那次踩坑）
 
-    理由与 `build_operator_mail_sender` 那段一样：`discover()` 会把前置 `mail` 装一遍，
-    测试或部署自己先塞的那一条不该被静默换掉。
+    理由与 `build_operator_mail_sender` 那段一样。**M1 之后这一条同样是兼容路径**：
+    核心先提供 `address_sender`，本函数看到 `existing` 就 no-op；测试或部署自己先塞的
+    那一条也不该被静默换掉。M4 删掉本文件后核心那份继续工作。
     """
 
     from .mail_client import MailClient

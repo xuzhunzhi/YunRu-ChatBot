@@ -278,8 +278,10 @@ def test_a_renamed_plugin_still_loads_and_registers() -> None:
         targets.append((directory, f"zz_{name}"))
     assert len(targets) == 2
     # `outage_notice` **不参与改名**（虽然它也在这棵树里）：它声明的是
-    # `REQUIRES = ("mail",)`，副本里前置被改名成 `zz_mail`，于是它必然被
-    # `plugin_skipped_missing_dependency` 跳过——那是"前置不在就跳过自己"，**是对的**，
+    # `REQUIRES = ("mail",)`。M1（2026-10-22）之后这条依赖按**能力**判定，
+    # 但这个 worker 造的是空 `PluginRegistry()`、**没有**核心提供的能力，所以仍走
+    # "装同名前置插件"的老路；副本里前置被改名成 `zz_mail`，于是它必然被
+    # `plugin_skipped_missing_dependency` 跳过——那是"能力不在就跳过自己"，**是对的**，
     # 与"绝对自引用"无关。要把它测成绿的，就得在副本里连 `REQUIRES` 一起改写，
     # 那测的就不是同一件事了（而它本来就没有自引用，见 `test_no_plugin_has_an_...`）。
 

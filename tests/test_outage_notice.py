@@ -49,6 +49,7 @@ from plugin_support import plugin_registry
 from qq_roleplay_bot import dev_config
 from qq_roleplay_bot import plugins as plugins_module
 from qq_roleplay_bot import runtime as runtime_module
+from qq_roleplay_bot.mail import provide_senders as provide_core_mail
 from qq_roleplay_bot.plugins import PluginRegistry, discover
 from qq_roleplay_bot.plugins.mail import plugin as mail_plugin
 from qq_roleplay_bot.plugins.outage_notice import outage_notice
@@ -335,6 +336,12 @@ def test_without_the_mail_plugin_this_one_is_not_assembled() -> None:
     （`discover()` 里那条 `ModuleNotFoundError` → `failed` 分支），
     再看 `outage_notice` 有没有被装上。**只发现 `outage_notice` 这一个名字**——
     于是"本插件被列进 `only` 都没装上"这件事只剩一个原因：它的前置装不上。
+
+    **M1（2026-10-22）之后这条守的是"两边都没有"的 fail-closed**：`REQUIRES`
+    现在先问核心能力（`registry.has_capability("mail")`），这个注册表**没有**核心
+    提供的能力、`mail` 插件又被藏了，所以仍然必须跳过自己。**核心先提供能力**的
+    那一半由 `test_without_the_mail_plugin_the_core_capability_still_assembles_and_sends`
+    覆盖——两条合起来才是新语义（能力在就放行，不在就 fail-closed）。
     """
 
     registry = plugin_registry()
@@ -361,6 +368,13 @@ def test_the_requirement_points_at_mail_and_mail_is_installed_first() -> None:
 
     方向反了（写进 mail、或让 mail 依赖本插件）这条会红：
     它同时钉住"本插件只声明需要 mail"与"装配顺序按依赖走"。
+
+    **M1（2026-10-22）之后这条只覆盖"没有核心能力"的回落路径**：声明照旧是
+    `("mail",)`（不删依赖），但这个空注册表没有核心提供的能力，所以仍然走
+    "把同名前置插件先装上"的老路、`loaded` 里仍然有 `"mail"`。**有核心能力时
+    不再装 mail 插件**的那一半由
+    `test_without_the_mail_plugin_the_core_capability_still_assembles_and_sends`
+    覆盖（那里断言 `"mail" not in loaded`），两条合起来才是"能力判定"的完整语义。
     """
 
     assert tuple(outage_plugin.REQUIRES) == ("mail",), outage_plugin.REQUIRES
@@ -665,6 +679,54 @@ def test_the_mail_plugin_provides_the_sender_and_the_outage_uses_it_end_to_end()
         assert sends[0]["to"] == recipient, sends[0]
         assert sends[0]["subject"] == "云茹断线了"
         assert "断的时候是" in sends[0]["body"] and "【" not in sends[0]["body"]
+
+
+def test_without_the_mail_plugin_the_core_capability_still_assembles_and_sends() -> None:
+    """**M1 判据**（用户 2026-10-22）：删掉 `plugins/mail/` 之后，本插件仍 loaded、仍能发信。
+
+    ## 为什么这条不能靠"mail 插件先装一遍"
+
+    M1 之前 `REQUIRES = ("mail",)` 的语义是"**装一个叫 mail 的插件**"——那个目录一删，
+    `discover()` 就把本插件当成缺依赖跳过，掉线再也没人通知。M1 把发信搬进核心：
+    `runtime.build_engine()` 在插件 attach **之前** `provide_senders(registry.mail)`，
+    `discover()` 的 `REQUIRES` 判定改成先问 `registry.has_capability("mail")`。
+    所以这条用例**故意让 `qq_roleplay_bot.plugins.mail` 的 import 全部失败**，
+    只用核心的 `provide_senders` 提供能力，再看本插件装不装得上、信发不发得出去。
+
+    ## 收件人前提
+
+    由 `_recipient_configured()` 显式配（源码里没有默认收件人，用户 2026-10-16：
+    "必须由 `.env` 给"）。没配时核心按设计不提供"给操作者发一封"，这条就会变成
+    在验"没配"而不是"删了插件还能发"。
+    """
+
+    registry = plugin_registry()
+    fake = _FakeMailClient("agently-cli", workdir="unused")
+    real_import = importlib.import_module
+
+    def fake_import(name, package=None):
+        if name.startswith("qq_roleplay_bot.plugins.mail"):
+            raise ModuleNotFoundError("No module named 'qq_roleplay_bot.plugins.mail'",
+                                      name="qq_roleplay_bot.plugins.mail")
+        return real_import(name, package)
+
+    with _recipient_configured() as recipient:
+        provide_core_mail(registry.mail, client=fake)
+        assert registry.mail.knows() is True, "核心该先提供发信能力"
+
+        with mock.patch.object(plugins_module.importlib, "import_module", fake_import):
+            with _discovery_state():
+                loaded = discover(registry, only=("outage_notice",))
+
+        assert "mail" not in loaded, f"这个部署没有 mail 插件：{loaded}"
+        assert "outage_notice" in loaded, f"有核心能力就该装上：{loaded}"
+        assert registry.disconnect_receivers() != (), "本插件该登记了接收者"
+
+        _feed([True, False], _notifier(registry))
+
+    assert len(fake.sends) == 1, f"该正好发一封：{fake.sends}"
+    assert fake.sends[0]["to"] == recipient, fake.sends[0]
+    assert fake.sends[0]["subject"] == "云茹断线了", fake.sends[0]
 
 
 # --- 这个文件自己的守卫 -------------------------------------------------------

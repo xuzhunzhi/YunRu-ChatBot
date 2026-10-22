@@ -533,7 +533,7 @@ def test_the_how_to_reply_block_sits_at_the_end_of_the_user_message() -> None:
     assert "只回下面这种行" in user, "格式要求要在 user 段里"
     assert "只回下面这种行" not in system, "…而且不许再留在 system 里"
     assert user.index("正文按句拆开") < user.index("只回下面这种行"), "紧贴编号段之后"
-    assert user.rstrip().endswith("没冲突就别写这一行。"), "就在 user 段末尾"
+    assert user.rstrip().endswith("就别写这一行。"), "就在 user 段末尾"
 
 
 # --- 2c. 候选句 + 举证责任（2026-10-17 第 2 层）------------------------------

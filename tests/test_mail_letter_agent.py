@@ -255,3 +255,119 @@ def test_the_prompts_carry_no_mechanism_words():
 
     assert scan_persona_text(lw.LOOKUP_PROMPT) == []
     assert scan_persona_text(dr.REPORT_PROMPT) == []
+
+
+# --- 标题：要像一个信的名字，不是正文的第一句（2026-10-22 用户）-----------------
+#
+# 用户原话：*"标题：现在标题是从正文第一句抽词（实测 10-19 `今晚你在群里说的那些我
+# 看见了`、10-20 `今晚你叫我笨蛋云茹我看见了`、10-21 `你晚上说的换第三方包`），一看
+# 就是正文开头。要变成一个**真正的信名**。"*
+#
+# 判据是**纯函数**（`letter_writer.subject_problem`）：不叫模型、不改状态，
+# 所以这里可以直接把边界钉住。它判出来只决定"校对那一步要不要请她重给一个"，
+# 重给的仍不合格就保留原标题（同一句口径："不阻塞发信"）。
+
+
+def test_a_title_that_copies_the_first_sentence_is_rejected():
+    body = "今晚你在群里说的那些我看见了。今晚没什么事。"
+
+    assert lw.subject_problem("群里说的那些", body) == "像正文第一句", (
+        "标题与正文第一句重叠 6 字 ⇒ 就是从首句抽出来的"
+    )
+
+
+def test_a_five_character_overlap_is_still_fine():
+    """门槛是 6：好标题本来就可能与首句共享一小截。
+
+    实测依据：10-21 那封的素材里是"得换第三方包"，而一个好标题"换第三方包"
+    与正文首句正好重叠 5 个字——门槛压到 5 就会把它误伤掉。
+    """
+
+    body = "你晚上在群里说要换第三方包，我看见了。"
+
+    assert lw.subject_problem("换第三方包", body) == ""
+
+
+def test_a_repetitive_opening_is_rejected():
+    for title in ("你今晚说的那些", "你晚上说的换第三方包", "我这边没什么新事",
+                  "我今天不想说"):
+        assert lw.subject_problem(title, "今晚没什么事。") == "开头像复述", title
+
+
+def test_an_empty_title_is_fine_so_the_default_applies():
+    """空标题 = 走默认那一个（`daily_report.DEFAULT_SUBJECT`），不该被当成"不合格"。"""
+
+    for empty in ("", "   ", None):
+        assert lw.subject_problem(empty, "今晚没什么事。") == ""
+
+
+def test_a_too_long_title_is_rejected():
+    assert lw.subject_problem("这" * (lw.MAX_SUBJECT_CHARS + 1),
+                              "今晚没什么事。") == "太长"
+    assert lw.subject_problem("这" * lw.MAX_SUBJECT_CHARS, "今晚没什么事。") == ""
+
+
+def test_the_three_real_bad_titles_from_1019_to_1021_are_all_caught():
+    """实测那三封的标题（10-19 / 10-20 / 10-21）——一个都别想混过去。"""
+
+    cases = (
+        # 10-19：首句其实是"你上回说温和多了"——整句重叠抓不到它，靠复述词抓住。
+        ("今晚你在群里说的那些我看见了", "你上回说温和多了，我记着。", "复述词"),
+        # 10-20：同上（开头是"今晚你…"，不在禁开头里，但含"我看见了"）。
+        ("今晚你叫我笨蛋云茹我看见了", "你今晚在群里说小米炸tee很少见。", "复述词"),
+        # 10-21：正好命中禁开头。
+        ("你晚上说的换第三方包", "你晚上在群里说不读研就没那些烦恼。", "开头像复述"),
+    )
+    for title, first, expected in cases:
+        assert lw.subject_problem(title, first) == expected, title
+
+
+def test_the_check_request_asks_for_a_new_title_only_when_it_is_bad():
+    bad = lw.build_check_messages("今晚你叫我笨蛋云茹我看见了", "今晚没什么事。你早点睡。")
+    assert "该换标题了" in bad[1]["content"], "标题不合格时，在校对请求里请她重给"
+
+    good = lw.build_check_messages("一点小事", "今晚没什么事。你早点睡。")
+    assert "该换标题了" not in good[1]["content"], "合格的标题不打扰她"
+
+
+def test_a_good_renamed_title_replaces_the_draft_subject():
+    draft = ("<subject>我这边没什么新事</subject>\n"
+             "<body>\n今晚没什么事。\n你早点睡。\n</body>")
+    checked = '<verdict n="2" kind="none"/><subject>换第三方包</subject>'
+    _writer, (subject, body) = _write(client=_Client(draft, checked))
+
+    assert subject == "换第三方包", "校对那一步重给的合格标题要采信"
+    assert "你早点睡。" not in body, "删句照旧由代码做"
+
+
+def test_a_renamed_title_that_is_also_bad_keeps_the_original():
+    """用户 2026-10-22："仍不合格就保留原标题（不阻塞发信）"。"""
+
+    draft = ("<subject>我这边没什么新事</subject>\n"
+             "<body>\n今晚没什么事。\n你早点睡。\n</body>")
+    checked = '<verdict n="2" kind="none"/><subject>你晚上说的那些</subject>'
+    _writer, (subject, body) = _write(client=_Client(draft, checked))
+
+    assert subject == "我这边没什么新事", "改完还是不合格 ⇒ 保留原标题，信照样发"
+    assert body
+
+
+def test_the_prompt_is_no_longer_a_work_report():
+    """用户 2026-10-22："日报不是真的写汇报，云茹想说什么都可以"。"""
+
+    text = dr.REPORT_PROMPT
+
+    assert "至少接上一句" not in text, "「必须接一句他说的话」已删（用户 2026-10-22）"
+    assert "没有新事就说没有新事" not in text, "汇报口吻的引导已删"
+    assert "今晚想写什么就写什么" in text
+    assert "不写这段时间的事也可以" in text
+    assert "那不是义务" in text, "他的话仍可用作由头，但不是义务"
+    # 标题规则（用户要的"真正的信名"）
+    assert "主题那一行是这封信的名字" in text
+    assert "不超过 14 个字" in text
+    assert "不要把正文里的半句照抄过来" in text
+    assert "我看见了" in text and "你说" in text
+
+    from qq_roleplay_bot.prompt_guard import scan_persona_text
+
+    assert scan_persona_text(text) == [], "标题规则也不许混进机制词"

@@ -56,11 +56,15 @@
 | judge / memory / review / vision | `QQBOT_JUDGE_API_KEY` / `QQBOT_MEMORY_API_KEY` / `QQBOT_REVIEW_API_KEY` / `QQBOT_VISION_API_KEY` | `QQBOT_JUDGE_API_KEY` |
 
 这张表说的是 **key 条目**之间的回落；"哪个**用途**用哪条 key"由 `TASKS` 定。
-`reply` 与 `letter` 这两路现在都借 `judge` 那条（它们要的模型都在 deepseek 上）。
+`reply` 现在借 `judge` 那条（deepseek）；`letter` 用它**自己那条**（mimo 的
+`QQBOT_LETTER_API_KEY`）——2026-10-22 用户明确"写邮件的模型是 mimo-v2.6-pro"，
+所以它不再借 judge（旧注释只作历史保留，见 `TASKS` 里 letter 那一行）。
 `reply` 自己那条（`QQBOT_REPLY_API_KEY`）2026-10-14 被改成 xkiro 那把、2026-10-16
 用户拍板回 ds（原话："切换回ds。gemini好蠢。"，同日早先那句是"都改ds"）之后
-**闲置但保留**（将来一键切回 Gemini 要用，见 `KEYS`）；`letter` 自己那条是 mimo 的。
-两把在正常路径上都闲置，只在"主家余额耗尽切兜底"那条链上被借走（见 `FALLBACK_TASKS`）。
+**闲置但保留**（将来一键切回 Gemini 要用，见 `KEYS`）。
+这两把在正常路径上都不被 reply 使用：`reply` 借 judge 那条；`letter` 自己那条正是
+现在写信这一路在用的 key，只有在"主家余额耗尽切兜底"那条链上才会被借走（见
+`FALLBACK_TASKS`）。
 
 回落到最后那一条（"主 key 那条"，`QQBOT_API_KEY`）时，**地址也一起用兼容档**
 （`QQBOT_API_BASE_URL`）——因为在历史部署里那个 key 与那个地址本来就是**同一份配置**：
@@ -121,10 +125,12 @@ PROVIDERS: dict[str, dict[str, str]] = {
 #: 借 judge 那条（见这一行自己的注释）。地址跟着钥匙走（judge → deepseek），
 #: `QQBOT_REPLY_API_KEY`（现在是 xkiro 那把）因此再次闲置、原值保留在 `.env` 里。
 #: 要换回 Gemini：把这一行改回 {"key": "reply", "model": "google/gemini-2.5-flash"}。
-#: letter 是同一个形状（2026-10-12 用户拍板"信用v4pro写"）：`deepseek-v4-pro` 只挂在
-#: deepseek 那一家，所以借 `judge` 那条 key。它自己那条（`QQBOT_LETTER_API_KEY`）是
-#: mimo 的，因此闲置——但**没废**：主家余额耗尽时信会切回它（见 `FALLBACK_TASKS`）。
-#: 要换回去：把 letter 那一行改回 {"key": "letter", "model": "mimo-v2.6-pro"}。
+#: letter **不是** reply 那个形状（2026-10-22 用户明确："写邮件的模型是
+#: mimo-v2.6-pro"）：它用**自己那条** key（`QQBOT_LETTER_API_KEY`，mimo 那把）与
+#: `mimo-v2.6-pro`——地址跟着钥匙走（letter → mimo）。
+#: 历史保留一句：2026-10-12 曾拍板"信用v4pro写"，那一版让 letter 借 `judge` 那条
+#: deepseek key、把 `QQBOT_LETTER_API_KEY` 闲置；那段做法从 2026-10-22 起作废。
+#: 要换回 deepseek：把 letter 那一行改回 {"key": "judge", "model": "deepseek-v4-pro"}。
 TASKS: dict[str, dict[str, str]] = {
     # 2026-10-16（用户原话："切换回ds。gemini好蠢。"，同日早先那句是"都改ds"）：
     # 回复那一路从 xkiro 的 Gemini Flash **改回** deepseek——借 `judge` 那条 key
@@ -140,16 +146,18 @@ TASKS: dict[str, dict[str, str]] = {
     # {"key": "reply", "model": "google/gemini-2.5-flash"}——`KEYS["reply"]` 那条
     # xkiro 条目与 `.env` 里那把 key 都留着，其余不动。
     "reply": {"key": "judge", "model": "deepseek-flash"},
-    "letter": {"key": "judge", "model": "deepseek-v4-pro"},
+    # 2026-10-22 用户明确："写邮件的模型是 mimo-v2.6-pro"——用自己那条 key（mimo）。
+    "letter": {"key": "letter", "model": "mimo-v2.6-pro"},
     # 2026-10-16（同一条口径："切换回ds。gemini好蠢。"）：判定**也回到 deepseek**，
     # 用它自己那条 key（`KEYS["judge"]`，deepseek）与 `deepseek-flash`——即 2026-10-14
     # 之前那一版。依据与 reply 同一条，不是"顺带改的"：①中继的 Google 上游整段 503
     # （实测 25 分钟探针全挂）；②provider=xkiro 时 `reasoning_effort` 发不出去
     # （闸在 `llm_client`），只能吃默认档（实测"第一个 content" 1.1~14.5s、正文最慢
     # 13.9s），最慢那几次直接撞"首字 3 秒"的闸；回到 ds 后 `none` 档把它压到
-    # 0.51~1.13s。⚠️ 仍然别把 `KEYS["judge"]` 的 provider 改成 xkiro：letter 借它、
-    # memory/review/vision 回落到它，一改就会把 `deepseek-v4-pro` / `deepseek-flash`
-    # 这些模型名打到 xkiro 上。什么时候改回去：中继 Google 恢复后改
+    # 0.51~1.13s。⚠️ 仍然别把 `KEYS["judge"]` 的 provider 改成 xkiro：
+    # memory/review/vision 回落到它（letter 自 2026-10-22 起用自己那条 mimo key，
+    # 不再借它），一改就会把 `deepseek-flash` 这些模型名打到 xkiro 上。
+    # 什么时候改回去：中继 Google 恢复后改
     # {"key": "reply", "model": "google/gemini-2.5-flash"}。
     "judge": {"key": "judge", "model": "deepseek-flash"},
     # **知识块判档**（2026-10-18 用户："这块不行也加个agent，用dsflash，effort调none"）：
@@ -232,9 +240,11 @@ KEYS: dict[str, dict[str, str]] = {
 #: 有实测证据的模型名只有一个：`mimo-v2.6-pro`（`letter` 从建起来一直用它，到
 #: 2026-10-12 为止 28 次调用；2026-10-12 又把真实 judge 形状在它上面重放过，
 #: 5/5 出 `<route>`+`<topic>`）。
-#: `letter` 是 2026-10-12 新进这张表的：它的**主家**换成了 deepseek（见 `TASKS`），
-#: 于是"主家余额耗尽 → 切回 mimo"这条路对它成立了（切过去用的是它自己那把 mimo
-#: key，走 `FALLBACK_KEY` 的回落链）。
+#: `letter` 是 2026-10-12 进这张表的（当时它的主家换成了 deepseek）。2026-10-22 用户
+#: "写邮件的模型是 mimo-v2.6-pro"把它**换回 mimo**（见 `TASKS`）⇒ 它的主家与兜底那家
+#: 现在是同一家了。这件事**没有顺手改**（"只改 letter 那一行与注释"之外的行为改动不在
+#: 这一轮里）：主家 mimo 报 402 时 `resolve_fallback("letter")` 会切到 mimo 自己那条
+#: key（同一个地址、同一个模型），等于不切。要清掉这一路：把下面的 `"letter"` 删掉。
 #: 不在表里的只剩 `vision`：要传图片，mimo 那一路**没实测过**收不收图片，按
 #: "没证据就别写进生产表"的纪律先不写。主家挂着的时候这一路如实失败。
 # TODO(mimo-vision): 实测过 mimo 的图片入参之后再决定要不要加。
