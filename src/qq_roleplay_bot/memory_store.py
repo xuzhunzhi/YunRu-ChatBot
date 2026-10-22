@@ -974,19 +974,23 @@ class MemoryStore:
                                        "WHERE scope_type=? AND scope_key=? AND normalized_key=?",
                                        (now, op.scope_type, key, row["normalized_key"]))
                 elif op.op in {"ADD", "UPDATE", "MERGE"}:
-                    # 2026-10-21：**总览那条 `profile` 如果是谁手写的，模型不许覆盖它**
-                    # （用户当天："给我写入的还有之前积攒的顶掉了"）。判据是数据本身：
-                    # 那一行的 `origin` 是 `operator_seed`（面板/脚本写进来的），
-                    # 模型就只能往 `profile/<方面>` 里长——"手写的总览"和"攒起来的方面"
-                    # 各在各的行，互不顶掉。为什么不在模型那一侧靠 prompt 忍：
-                    # ADD 到同键是**就地覆盖**（见下面"同键就地更新"），一句模型改写
-                    # 就能把人工设定顶掉，那不是提示词能保证的事。
-                    if (op.kind == PROFILE_KIND and op.normalized_key == PROFILE_KIND
-                            and op.op != "DELETE"):
+                    # 2026-10-21：**人手写的那一行，模型不许覆盖**（用户当天：
+                    # "给我写入的还有之前积攒的顶掉了"）。判据是数据本身：那一行的
+                    # `origin` 是 `operator_seed`（面板/脚本写进来的），模型就只能改自己
+                    # 攒出来的内容。为什么不在模型那一侧靠 prompt 忍：ADD 到同键是
+                    # **就地覆盖**（见下面"同键就地更新"），一句模型改写就能把人工设定
+                    # 顶掉，那不是提示词能保证的事。
+                    #
+                    # 2026-10-22 从"只看 profile 总览"扩到**所有 kind/键**：同一天加了
+                    # 一条人手写的称呼（`kind=name`），它和总览一样是人工设定；只守
+                    # `profile` 的话，模型换个键就能把它顶掉。判据不看 kind 而看 origin，
+                    # 所以不会误伤模型自己攒的行（它们的 origin 是 agent_inferred）。
+                    if op.op != "DELETE":
                         existing = None
                         for tier in TIERS:
                             found = db.execute(
-                                f"SELECT origin FROM {TABLES[tier]} WHERE scope_type=? AND scope_key=?"
+                                f"SELECT origin, kind, normalized_key FROM {TABLES[tier]}"
+                                " WHERE scope_type=? AND scope_key=?"
                                 " AND normalized_key=? AND status='active' LIMIT 1",
                                 (op.scope_type, key, op.normalized_key),
                             ).fetchone()
@@ -994,12 +998,19 @@ class MemoryStore:
                                 existing = found
                                 break
                         if existing is not None and str(existing["origin"]) == "operator_seed":
+                            # 理由字符串保持旧的两档：profile 总览沿用历史名字（日志/文档
+                            # 里早就有它），其余人工行统一叫 operator_seed_readonly。
+                            reason = (
+                                "profile_overview_readonly"
+                                if str(existing["kind"]) == PROFILE_KIND
+                                and str(existing["normalized_key"]) == PROFILE_KIND
+                                else "operator_seed_readonly"
+                            )
                             db.execute("INSERT INTO audit VALUES (?,?,?,?,?)",
-                                       (batch.id, index, "profile_overview_readonly",
-                                        op.scope_type, now))
+                                       (batch.id, index, reason, op.scope_type, now))
                             logger.warning(
-                                "memory_write_rejected reason=profile_overview_readonly"
-                                " scope=%s group=%s", op.scope_type, batch.group_id,
+                                "memory_write_rejected reason=%s scope=%s group=%s",
+                                reason, op.scope_type, batch.group_id,
                             )
                             continue
                     if op.op == "ADD":

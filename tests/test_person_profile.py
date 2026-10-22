@@ -165,6 +165,40 @@ class PersonProfileTests(unittest.TestCase):
         assert all(op.op != "ADD" for op in ops), [op.op for op in ops]
         assert self.store.profile("100") == "人手写的总览。", self.store.profile("100")
 
+    def test_a_hand_written_name_record_is_not_overwritten_by_the_agent(self) -> None:
+        """人手写的**称呼**（`kind=name`）同样不许被模型覆盖（2026-10-22 扩守卫）。
+
+        由来：10-21 那道闸只认 `kind=profile` + 键 `profile`，所以只守住总览。
+        10-22 用户点头写了一条人手写的称呼（"许老板/小许/xcz 都是他"），
+        它和总览一样是人工设定；模型如果对同一个键 ADD/UPDATE 就会就地覆盖。
+        判据从"看 kind/键"改成"看 origin"，一次覆盖所有人工行。
+        """
+
+        batch = self.batch()
+        self.store.commit(batch, output(operation(
+            batch, key="preferred_name", kind="name",
+            content="他常被叫「许老板」，朋友叫「小许」，网上叫「xcz」；这几个都是他。",
+        )))
+        with self.store.connection() as db:
+            for table in ("memory_short", "memory_long"):
+                db.execute(f"UPDATE {table} SET origin='operator_seed'"
+                           " WHERE scope_key='100' AND normalized_key='preferred_name'")
+
+        self.now += 200          # 换一批，避免同一批的租约影响
+        batch = self.batch()
+        ops = self.store.commit(
+            batch, output(operation(batch, key="preferred_name", kind="name",
+                                    content="他自己说过他叫别的名字。"))
+        )
+        assert all(op.op != "ADD" for op in ops), [op.op for op in ops]
+        with self.store.connection() as db:
+            row = db.execute(
+                "SELECT content FROM memory_long WHERE scope_key='100'"
+                " AND normalized_key='preferred_name' AND status='active'"
+            ).fetchone()
+        assert row is not None
+        assert "许老板" in str(row["content"]), str(row["content"])
+
     def test_a_profile_can_be_assembled_from_several_pieces(self) -> None:
         """画像**碎片化**（2026-10-21 用户："画像不是完整的一大段啊，可以一点一点拼凑起来的"）。
 
