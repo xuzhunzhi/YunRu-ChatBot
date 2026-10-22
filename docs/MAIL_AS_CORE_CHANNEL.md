@@ -10,8 +10,9 @@
 > *"插件提供能力与事件，不参与她怎么想、怎么说、记什么"* ·
 > *"出站能力（怎么把东西发出去）属于底层，不是插件的事"*。
 
-**这是设计稿，没有动任何代码。** 下面每一条"现状"都指到 `文件:行`；
-读不出来或没核过的地方标 **待核**，不编。
+**这是设计稿；M1（发信进核心）已落地，见文末「M1 已做（进度）」。** 下面每一条
+"现状"都指到 `文件:行`；读不出来或没核过的地方标 **待核**，不编。
+（§二 / §九 里"M1 之前"的描述保留为历史口径；M1 之后的现状以文末那节为准。）
 
 ---
 
@@ -607,4 +608,76 @@ git -C dev grep -n "allowed_groups" -- src/qq_roleplay_bot/memory_service.py src
    并给主人发一封积压告警；**超额的不写"已处理"**，下轮继续；
 5. **隐含上限要说清**：`MAX_AGE_HOURS = 48`，超过 48 小时的信会被当 stale 直接跳过，
    所以"慢慢回完"最多只能拖 48 小时。
+
+---
+
+## 十一、M1 已做（进度，2026-10-22）
+
+> 计划依据：`dev/data/plans/02-邮件重构.md` §三「M1 发信核心化」。
+> 用户交办的原话：**删掉 `plugins/mail/` 之后，`outage_notice` / `timeout_alert`
+> 仍能装、仍能发信。**
+>
+> 状态：**代码已改、两棵树的离线门槛已跑（结果见交付回报）；没有部署、没有 commit。**
+> `run/` 一个字没动。
+
+### 1. 核心发信能力在哪
+
+| 落点 | 是什么 |
+| --- | --- |
+| `src/qq_roleplay_bot/mail/client.py`（新增） | 发信所需的最小一份：配置读取（`operator_recipient` / `mail_workdir`）、`agently-cli` 子进程、`MailClient.send`、`MailError` 分类、标题清洗（`sanitize_subject` / `safe_subject` / `clean_subject`）。**没搬**写信/日报/收信 |
+| `src/qq_roleplay_bot/mail/__init__.py`（新增） | `provide_senders(seams)`：把两条窄口放到 `registry.mail` 上，返回 `(operator_sender, address_sender)` |
+| `src/qq_roleplay_bot/runtime.py::build_engine()` | **provide 点**：造好 `PluginRegistry`、`provide_roles()` 之后，**`attach_plugins()` 之前**调 `provide_mail_senders(registry.mail)`（`from .mail import provide_senders as provide_mail_senders`） |
+
+两条窄口（形状没变，仍然是函数）：
+
+| `registry.mail` 字段 | 形状 | 收件人 |
+| --- | --- | --- |
+| `operator_sender` | `(subject, body) -> await dict` | `MAIL_REPORT_TO`（现读环境）→ 回落 `MAIL_OWNER_FROM`；两者都空 = **不提供**（fail-closed，只留一行 warning） |
+| `address_sender` | `(address, subject, body) -> await dict` | 调用方指定一个地址；闸门仍在 `MailSeams.send_to`（只收一个、拒换行/多收件人） |
+
+**为什么放在 `attach_plugins()` 之前**：插件侧 `plugins/mail/wire.py::build_operator_mail_sender` /
+`build_address_mail_sender` 的形状是"已有人提供就不覆盖"（2026-10-06 为重复装配写的守卫）。
+核心先放，插件再装时自然 **no-op**；反过来会让"谁提供的那一条"取决于 `discover()` 的顺序。
+**插件目录 M1 仍然保留**（还管读信回信/日报/写信，M4 才拆/删）；`plugins/mail/plugin.py`
+与 `wire.py` 只是补了注释说明它是兼容路径。
+
+### 2. `REQUIRES` 的新语义：从"插件名"变成"能力"
+
+改动只在两处：
+
+| 位置 | 改法 |
+| --- | --- |
+| `plugins/__init__.py::PluginRegistry.has_capability(name)`（新增） | `"mail"` → `registry.mail.knows()`（**只看"给操作者发一封"那一条**：当前声明 `REQUIRES = ("mail",)` 的两个插件取的都是它；`address_sender` 的使用者 `remind` / `rss` 不声明 REQUIRES）。别的名字一律 `False` |
+| `plugins/__init__.py::discover()._load()` | `REQUIRES` 里每一项**先问** `_capability_available(registry, need)`；为真就 `continue`（**不再 `_load` 同名插件**）；为假才退回"装同名前置插件"；还是装不上 → `plugin_skipped_missing_dependency`、跳过自己 |
+
+**声明一个字没改**：`outage_notice` / `timeout_alert` 仍然是 `REQUIRES = ("mail",)`。
+改的是"怎么判满足"，不是把依赖删掉——没有核心能力、也没有插件的部署里，这两个插件
+仍然必须被跳过（fail-closed），而不是装上去每次掉线都记一行发不出去。
+`_capability_available` 对"注册表没有 `has_capability`"与"判定抛异常"都按 `False` 算
+（退回老路），理由与 `_load` 里所有失败分支一致：一个插件的依赖判定坏了，只该跳过它自己。
+
+### 3. 判据现在由哪些测试钉住
+
+| 测试 | 钉住什么 |
+| --- | --- |
+| `dev/tests/test_mail_core_channel.py`（新增） | 核心两条窄口在、形状对；假 `MailClient` 下真发一封成功；失败是带 `kind` 的 `MailError`（不静默吞）；没配收件人时只缺 `operator_sender` 且 provide 不抛；`build_engine()` 里 **provide 在 attach 之前** |
+| 同上 `test_requirers_still_load_when_only_the_core_mail_capability_exists` | 临时加载根里**没有 `mail` 目录**、只有核心能力 → 两个 `REQUIRES = ("mail",)` 的探针插件 **loaded**；两边都没有 → 都跳过（fail-closed） |
+| `yunru-stage4/tests/test_outage_notice.py::test_without_the_mail_plugin_the_core_capability_still_assembles_and_sends` | 真 `outage_notice` 插件：`qq_roleplay_bot.plugins.mail` 的 import 全部失败，只用核心 `provide_senders` → 仍 loaded、喂一次真断线 → 假 `MailClient` 收到**一封** |
+| `yunru-stage4/tests/test_timeout_alert.py::test_without_the_mail_plugin_the_core_capability_still_assembles_and_sends` | 真 `timeout_alert` 插件：mail 插件 import 失败，只用核心能力 → 仍 loaded、五连超时 → 假 `MailClient` 收到**一封** |
+
+"删掉 `plugins/mail/`"在测试里**不真删目录**：`dev` 用临时加载根（`plugins.__path__` 上挂
+一个只有探针插件的临时目录），插件树用"让 `qq_roleplay_bot.plugins.mail` 的 import 失败"
+（与真删目录走 `discover()` 同一条 `ModuleNotFoundError` 分支）。工作区一个文件都不动。
+
+### 4. 这一轮**没做**的（别当成做完了）
+
+- 收信/回信、去重、配额 → M2；
+- `registry.chat` 撤掉 → M2b；
+- 日报 / 写信 → M4（`plugins/mail/` 那时才拆、才删）；
+- 插件侧 `mail_client.py` 仍然在用**自己那份**（M1 期间两份并存是刻意的：收信那三条
+  M1 不搬，现在就让插件 import 核心等于让插件树依赖"核心一定有这个模块"，而 M1
+  的判据方向相反）。M4 删目录时**两处发信行为必须逐字一致**；
+- **核心没有给插件开宽口**：插件仍然拿不到 `transport` / `engine` / `MailClient` / 凭据，
+  `MailSeams` 上仍然只有函数；
+- **没有新增模型调用**、没有动写信/日报 prompt。
 

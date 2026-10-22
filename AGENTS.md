@@ -84,6 +84,12 @@
   > "装在这里但先别启用"用 `ENABLED = False`；有前置插件用 `REQUIRES = ("roles",)`
   > （`plugins/__init__.py::discover()` 会先装前置，前置装不上就跳过自己）。
   > **"它总归要装 / 别人依赖它"不是把它塞进核心的理由**——依赖用 `REQUIRES` 表达。
+  > **2026-10-22（M1）起，`REQUIRES` 也可能是"核心能力"**：`outage_notice` /
+  > `timeout_alert` 的 `REQUIRES = ("mail",)` 现在先问
+  > `PluginRegistry.has_capability("mail")`（核心在 `build_engine()` 里、插件 attach 之前
+  > 用 `qq_roleplay_bot.mail.provide_senders()` 提供），为真就直接放行、不再要求
+  > `plugins/mail/` 目录存在；为假才退回"装同名前置插件"，还装不上就跳过自己（fail-closed）。
+  > 所以"删掉 `plugins/mail/` 后这两个插件仍能装、仍能发信"是 M1 的判据，不是放宽依赖。
   **禁止往 `stage3_main.py` 里加 `if is_xxx_command(...)`。**
   插件**只有两样东西能在声明里**：
   档位（`min_level = "public" | "admin" | "super"`）与意图（返回 `ActionRequest` / `ImageReply`）。

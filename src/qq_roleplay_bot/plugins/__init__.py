@@ -106,12 +106,15 @@ plugins/
   把看门狗本来就有的状态变成**确定的边沿**（`在线 → 掉线` 算一段），再在
   `registry.link` 上广播**"断了"这个事实**。谁来接、拿它做什么（发信 / 记日志 /
   面板弹一条）都是插件的事；核心不知道有邮件这回事，也不会去发。见 `LinkSeams`。
-  接它的那一个（`outage_notice/`）**依赖 `mail`**：`REQUIRES = ("mail",)`，方向不许反，
-  见 `MailSeams`。
+  接它的那一个（`outage_notice/`）**依赖 mail 能力**：`REQUIRES = ("mail",)`，方向不许反。
+  **M1（2026-10-22）起这条依赖按能力判定**：核心在 `build_engine()` 里先把发信能力
+  放到 `registry.mail`，所以删掉 `plugins/mail/` 也满足（`has_capability("mail")`）；
+  没有核心能力、也没有插件时仍然跳过自己（fail-closed）。见 `MailSeams` 与 `discover()`。
 - **`roles/` 曾经也是插件**（2026-10-01 用户）："一个东西搬进插件另一个插件失效不代表
   前者不能作为插件，只需要把前者作为前置插件就行。" 当时群管理与入群审批都要它，
   所以它是**前置插件**：那两个声明 `REQUIRES = ("roles",)`。那句话本身仍然成立
-  （"B 依赖 A"不是"A 该进核心"的理由，现在活着的正例是 `outage_notice → mail`）。
+  （"B 依赖 A"不是"A 该进核心"的理由；M1 之后 `mail` 是**用户拍板**进核心的，
+  不是被这条规矩推出来的——见 `MailSeams` 与 `dev/docs/MAIL_AS_CORE_CHANNEL.md`）。
   **但 2026-10-05 变了**：用户把**身份/权限事实**判给核心，角色就是这种东西，
   于是那两个插件的 `REQUIRES` 撤掉了，角色改由**核心**放进共享位
   （本体 `1c5fcf3`：`runtime.build_engine` 在 `discover()` 之前
@@ -781,7 +784,8 @@ class LinkSeams:
 
 
 class MailSeams:
-    """**"给操作者发一封普通邮件"**的能力面：谁来发由 `mail` 插件登记，别的插件只管用它。
+    """**"给操作者发一封普通邮件"**的能力面：谁来发由**核心**（M1 起）或 `mail` 插件登记，
+    别的插件只管用它。
 
     由来（2026-10-06 用户）：*"掉线可以调用 mail 插件给我发消息通知我"* ·
     *"这个作为 mail 插件的后置插件，也就是说 mail 插件是这个插件的依赖，不要搞错了"*。
@@ -797,16 +801,20 @@ class MailSeams:
 
     | 谁 | 做什么 |
     | --- | --- |
-    | `mail`（前置） | 在 `register()` 里 `registry.mail.provide(fn)` —— **提供**发信能力 |
-    | `outage_notice`（后置） | `REQUIRES = ("mail",)`，在 `register()` 里 `registry.mail.notify(...)` —— **使用** |
+    | **核心**（M1 起，`runtime.build_engine()`） | 在插件 attach **之前**用 `qq_roleplay_bot.mail.provide_senders()` 放上两条窄口 |
+    | `mail` 插件（M4 之前仍在） | `register()` 里的 builder 看到"已经有人提供过"就 **no-op**，不重复提供/不报错 |
+    | `outage_notice` / `timeout_alert` | `REQUIRES = ("mail",)`（M1 起按**核心能力**判定），在 `register()` 里取 `registry.mail` —— **使用** |
 
-    反过来（mail 认识掉线通知、或核心认识邮件）都是错的：`discover()` 保证前置先装，
-    装不上就跳过后置（见那个函数的 `REQUIRES` 一节）。
+    **方向仍然只有一个**：提供者在注册表上放函数，使用者只取函数；使用者不 import
+    提供者的模块。M1 之前"提供者"只能是 `mail` 插件，所以删掉插件 = 告警哑了；
+    现在核心先把能力放好，插件的同名能力只是**兼容路径**（M4 删目录时一并消失）。
+    `discover()` 保证别的东西按需先后（见那个函数的 `REQUIRES` 一节）。
 
     ## 它给的是"发一封信"，不是"邮件通道"
 
-    接收者拿到的是 `(subject, body) -> await`：**收件人与发信方式都由 mail 插件定**
-    （它读自己的配置 `MAIL_REPORT_TO`，与日报同一个收件人）。使用者指定不了发件人、
+    接收者拿到的是 `(subject, body) -> await`：**收件人与发信方式都由提供者定**
+    （M1 起是核心读 `MAIL_REPORT_TO` → `MAIL_OWNER_FROM`，与日报同一个收件人；
+    M1 之前是 `mail` 插件读同一份配置）。使用者指定不了发件人、
     指定不了收件人、也拿不到 `MailClient`——所以"给任意地址发信"这个原语没有被发出去。
 
     字段同样是**函数**（同 `ChatSeams` 的理由）：这里给的是插件登记的一个函数，
@@ -1013,9 +1021,10 @@ class PluginRegistry:
         #: **"给操作者发一封普通邮件"**那条接缝（见 `MailSeams`）。
         #:
         #: 与 `link` 同一形状、同一个理由：**名单/能力本来就归注册表自己管**
-        #: （由 `mail` 插件在 `register()` 里 `provide()` 填），不需要核心递引擎绑定的闭包。
-        #: 缺省是空的：没有 mail 插件时 `knows()` 为假，使用者据此**不登记**
-        #: （所以要在这里就造好，而不是等某个插件来赋值——`__slots__` 也不允许那样）。
+        #: （M1 起由核心在 `build_engine()` 里 `provide_senders()` 填；M1 之前由
+        #: `mail` 插件在 `register()` 里 `provide()` 填），不需要核心递引擎绑定的闭包。
+        #: 缺省是空的：既没有核心能力、也没有 mail 插件时 `knows()` 为假，使用者据此
+        #: **不登记**（所以要在这里就造好，而不是等某个插件来赋值——`__slots__` 也不允许）。
         self.mail: MailSeams = MailSeams()
         #: 已登记的掉线接收者（`registry.link.on_disconnect(...)` 往这里放）。
         self._disconnect_receivers: list[object] = []
@@ -1064,6 +1073,42 @@ class PluginRegistry:
         #: 装上了哪些插件（`discover()` 的返回值）。**发现只跑一次**：
         #: 跑两次会让同一个插件被登记两遍（同一条命令认两次、两份角色缓存）。
         self.loaded: tuple[str, ...] = ()
+
+    def has_capability(self, name: object) -> bool:
+        """**核心有没有提供这项能力**——`REQUIRES` 的能力判定入口（2026-10-22 M1）。
+
+        ## 为什么 `REQUIRES` 不再只等于"装一个同名插件"
+
+        M1 把**发信**从 `plugins/mail/` 搬进核心（`qq_roleplay_bot/mail/`，核心在
+        `runtime.build_engine()` 里、插件 attach 之前 `provide` 到 `registry.mail`）。
+        于是 `REQUIRES = ("mail",)` 的语义必须跟着变：它现在问的是
+        "**注册表里有没有 mail 能力**"，而不是"前置里有没有一个叫 mail 的插件"。
+        否则删掉 `plugins/mail/` 之后这两个告警插件会被 `discover()` 当成缺依赖跳过，
+        M1 的判据（删掉插件仍 loaded、仍能发信）就不成立。
+
+        ## 判据只看 `knows()`（"给操作者发一封"那条）
+
+        当前声明 `REQUIRES = ("mail",)` 的两个插件（`outage_notice` / `timeout_alert`）
+        取的都是 `registry.mail.operator_sender`；`address_sender`（寄给指定地址）
+        的使用者（`remind` / `rss`）按能力可用性判断、**不声明 REQUIRES**。
+        所以这里只认"操作者那一条"：没有它，这两个插件即使被放行也只会
+        `logger.warning` 后什么都不登记——那正是要避免的"看着装了、其实不会响"。
+
+        **什么时候改**：等有插件声明 `REQUIRES = ("mail.address",)` 这种细分能力时，
+        再给这张表加分项；在那之前不要为一个假想的使用者把判定放宽成
+        `knows() or knows_address_sender()`（那会让"没配收件人"的部署里两个告警插件
+        照旧被装配，然后每段掉线/每次采样都留一行发不出去）。
+        """
+
+        if str(name) != "mail":
+            # 只认核心已经提供的能力。别的名字仍然走"装同名插件"的老路
+            # （`discover()._load`），不要在这里顺手把未知名字当成满足。
+            return False
+        seams = self.mail
+        knows = getattr(seams, "knows", None)
+        if callable(knows):
+            return bool(knows())
+        return callable(getattr(seams, "operator_sender", None))
 
     def command(self, plugin: object) -> None:
         """登记一条命令插件（`name` / `min_level` / `match()` / `handle()`）。
@@ -1391,7 +1436,7 @@ def discover(registry: PluginRegistry, *, only: tuple[str, ...] = ()) -> tuple[s
 
     - `register(registry)`（必须）
     - `ENABLED = False`（可选，装在这里但先别启用）
-    - **`REQUIRES = ("mail",)`**（可选，**前置插件**）
+    - **`REQUIRES = ("mail",)`**（可选，**前置能力/前置插件**；2026-10-22 M1 起先是能力）
     - `VERSION = "1.2.3"` / `HOST_API = 1`（可选，见 `API_VERSION`：不声明就放行，
       `HOST_API` 声明了却不等于宿主那一份 → **拒绝加载**并记 `plugin_host_api_mismatch`）
 
@@ -1407,14 +1452,23 @@ def discover(registry: PluginRegistry, *, only: tuple[str, ...] = ()) -> tuple[s
     **但反过来也成立：进了核心的东西不再是插件依赖**（2026-10-05）。用户把
     **身份/权限事实**判给核心，`plugins/roles/` 于是不再是 `group_admin` /
     `join_approval` 的前置——那两个插件的 `REQUIRES` 已经撤掉（角色由核心注入，
-    见 `PluginRegistry.roles`）。这条规矩现在活着的正例是
-    `outage_notice → mail`（`REQUIRES = ("mail",)`，方向不许反）。
+    见 `PluginRegistry.roles`）。
+
+    **2026-10-22 M1 再进一步：`mail` 从"插件"变成"核心能力"**，于是
+    `REQUIRES = ("mail",)` 的语义也随之变成**能力判定**：
+    `PluginRegistry.has_capability("mail")` 为真就直接放行，**不再去装/要求
+    `plugins/mail/` 这个目录存在**。判据见 `dev/data/plans/02-邮件重构.md` §三 M1：
+    删掉 `plugins/mail/` 之后 `outage_notice` / `timeout_alert` 仍 loaded、仍能发信。
+    注意声明**一个字没改**（还是 `("mail",)`）：改的是"怎么判满足"，不是把依赖删掉——
+    没有核心能力、也没有插件的部署里，这两个插件仍然必须被跳过（fail-closed），
+    而不是装上去每次掉线都记一行发不出去。
 
     本函数据此做三件事：
 
-    1. **按依赖顺序装**：`_load(name)` 先递归装它的 `REQUIRES`，再装自己；
-    2. **前置装不上就跳过自己**（并记一行日志）：`mail` 没装成，
-       `outage_notice` 就不该半死不活地挂在那里；
+    1. **按依赖顺序装**：`_load(name)` 先看**核心能力**（`has_capability`），
+       没有才递归装同名前置插件，再装自己；
+    2. **前置装不上就跳过自己**（并记一行日志）：核心没这个能力、`mail` 插件也
+       没装成，`outage_notice` 就不该半死不活地挂在那里；
     3. **环依赖不会转不出来**：正在装的集合里出现重复就报错跳过。
     """
 
@@ -1462,7 +1516,13 @@ def discover(registry: PluginRegistry, *, only: tuple[str, ...] = ()) -> tuple[s
             return False
 
         for need in tuple(getattr(plugin_module, "REQUIRES", ()) or ()):
-            if not _load(str(need), required_by=name):
+            need_name = str(need)
+            # **先问核心能力，再退回"装同名插件"**（2026-10-22 M1，见本函数
+            # `REQUIRES` 那一节）：`mail` 已经是核心能力，删掉 `plugins/mail/`
+            # 不能让 `outage_notice` / `timeout_alert` 被当成缺依赖跳过。
+            if _capability_available(registry, need_name):
+                continue
+            if not _load(need_name, required_by=name):
                 logger.warning("plugin_skipped_missing_dependency name=%s need=%s", name, need)
                 loading.discard(name)
                 failed.add(name)
@@ -1516,6 +1576,29 @@ def discover(registry: PluginRegistry, *, only: tuple[str, ...] = ()) -> tuple[s
 
 #: 上一次 `discover()` 装上了哪些（`inventory()` 读它）。
 _LAST_LOADED: tuple[str, ...] = ()
+
+
+def _capability_available(registry: PluginRegistry, name: str) -> bool:
+    """`REQUIRES` 里的一项是不是**核心已经提供的能力**（2026-10-22 M1）。
+
+    为什么单独一个函数、而不是在 `_load` 里内联：判定口只有一个（注册表的
+    `has_capability`），这里只负责"老核心没有这个方法时按没有算"——`discover()`
+    会被测试直接调，测试可能塞一个鸭子类型的注册表。**鸭子类型坏了就按"没有"**
+    （fail-closed）：那会退回"装同名插件"的老路，而不是放行一个没能力的插件。
+
+    为什么把异常也吞成 `False`：`REQUIRES` 判定发生在**装一个插件的过程中**，
+    它出错的后果应当是"这个插件被跳过并留下一行日志"，不该让整个 `discover()`
+    抛出去、把别的插件一起带走（`_load` 里所有失败分支都是这个口径）。
+    """
+
+    checker = getattr(registry, "has_capability", None)
+    if not callable(checker):
+        return False
+    try:
+        return bool(checker(name))
+    except Exception:  # noqa: BLE001 - 判定坏了按"没有这个能力"算
+        logger.warning("plugin_capability_check_failed need=%s", name, exc_info=True)
+        return False
 
 
 def _host_api_ok(declared: object) -> bool:

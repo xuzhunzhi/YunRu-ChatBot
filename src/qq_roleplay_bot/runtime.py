@@ -40,6 +40,7 @@ from .extensions import PromptSources
 from .letter_context import collect_letter_context
 from .letter_docs import load_letter_facts, load_letter_persona
 from .llm_client import OpenAICompatibleClient, apply_client_overrides
+from .mail import provide_senders as provide_mail_senders
 from .memory_config import MemorySettings
 from .memory_ops import MemoryOps
 from .memory_readonly import MemoryRead
@@ -976,6 +977,23 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
     # 本来就是"把角色查询放到共享位上"那个口，现在由核心来放，语义没变。
     # 放在 `discover()` **之前**，插件在 `register()` 里就取得到。
     registry.provide_roles(engine.group_roles)
+    # **邮件发信能力进核心**（M1，2026-10-22）：插件 attach **之前**把
+    # `operator_sender` / `address_sender` 放到 `registry.mail` 上。
+    #
+    # 为什么在这里、为什么是"先"：`plugins/mail/` 的 `register()` 里那两个 builder
+    # 是"已有人提供就不覆盖"（那是 2026-10-06 为重复装配写的守卫），所以先由核心
+    # 提供，插件再装时自然 no-op；反过来（插件先、核心后）会让"谁提供的那一条"
+    # 取决于发现顺序，而 `discover()` 的顺序不是装配契约。
+    #
+    # 判据（用户 2026-10-22）：**删掉 `plugins/mail/` 之后，`outage_notice` /
+    # `timeout_alert` 仍能装、仍能发信**。所以这一步不能放进任何插件：
+    # 核心不认识插件目录，只把"发一封"这个出站能力放到既有窄接缝上
+    # （`AGENTS.md` §2.3：出站能力属于底层）。`REQUIRES = ("mail",)` 的判定
+    # 随之变成"注册表里有没有这个能力"（`PluginRegistry.has_capability`）。
+    #
+    # 没配收件人时只提供"寄给指定地址"那一条、不提供"给操作者发一封"
+    # （fail-closed；见 `mail.provide_senders`），核心照常起。
+    provide_mail_senders(registry.mail)
     attach_plugins(registry, engine.commands)
     engine.plugin_registry = registry
     # **识图**：能力由插件给（`plugins/vision/`），核心只问"有没有"。
