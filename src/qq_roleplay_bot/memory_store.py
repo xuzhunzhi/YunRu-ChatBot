@@ -2298,12 +2298,27 @@ class MemoryStore:
         for key, text in pieces:
             unique.setdefault(key, text)
         ordered = sorted(unique.items(), key=lambda item: (item[0] != PROFILE_KIND, item[0]))
-        joined = "；".join(text for _, text in ordered)
+        # 每一片单独成段（2026-10-22 用户："每一条要进行分段，跟我直接输入的那个一样"）。
+        # 原来用「；」拼成一整段，人手写总览里的空行与换行全被压平，
+        # 她和 `/super profile`、面板看到的都是一段"挤在一起"的文字。
+        separator = "\n\n"
+        joined = separator.join(text for _, text in ordered)
         if len(joined) <= PROFILE_JOIN_MAX:
             return joined
-        # 兜底：按句读断在一个整句上，加省略号——**不整条丢弃任何一片画像**。
-        head = joined[:PROFILE_JOIN_MAX]
-        for stop in ("。", "；", "，", " "):
+        # 兜底 1：能整片放下就整片放——宁可少一片，也不从半句处切。
+        kept: list[str] = []
+        total = 0
+        for _, text in ordered:
+            extra = len(text) + (len(separator) if kept else 0)
+            if total + extra > PROFILE_JOIN_MAX:
+                break
+            kept.append(text)
+            total += extra
+        if kept:
+            return separator.join(kept) + "…"
+        # 兜底 2：连第一片都放不下，才在句子/段落边界截断。
+        head = ordered[0][1][:PROFILE_JOIN_MAX]
+        for stop in ("。", "\n", "，", " "):
             cut = head.rfind(stop)
             if cut > PROFILE_JOIN_MAX // 2:
                 return head[: cut + 1] + "…"

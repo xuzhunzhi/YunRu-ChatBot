@@ -216,6 +216,11 @@ class PersonProfileTests(unittest.TestCase):
         text = self.store.profile("100")
         assert "他叫老明" in text, text
         assert "他对接口规格很较真" in text, text
+        # 每一片单独成段（2026-10-22 用户："每一条要进行分段，跟我直接输入的那个一样"）：
+        # 原来用「；」拼成一段，人手写总览里的空行/换行会被压平。
+        assert "\n\n" in text, f"碎片之间要分段而不是用「；」连成一段：{text!r}"
+        assert "；" not in text, f"碎片之间不该再用「；」拼接：{text!r}"
+        assert text.index("他叫老明") < text.index("他对接口规格很较真"), "总览那条要排在前面"
 
     def test_dialogue_prompt_shows_the_profile_of_the_speaker(self) -> None:
         current = IncomingMessage("m1", f"group:{GROUP}", "100", "在吗", MessageTarget(group_id=GROUP))
