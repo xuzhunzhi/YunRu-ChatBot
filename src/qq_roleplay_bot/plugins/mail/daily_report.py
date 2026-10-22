@@ -21,6 +21,7 @@ import re
 import time
 from dataclasses import dataclass, field
 
+from ...relationship_tiers import guard_text, likes_text
 from .mail_state import MailState
 
 logger = logging.getLogger(__name__)
@@ -262,11 +263,13 @@ class DayMaterials:
         lines = [f"（{window_label(self.window_hours)}）"]
 
         def level(names: object, value: int) -> str:
-            """取档名。两种来源都认（2026-10-20 起）：
+            """取档名。**生产只有一种来源**（2026-10-20 起）：
 
             * **函数**：`relationship_tiers.likes_text/guard_text`，把刻度值（-100..100 /
-              -30..30）直接翻成「档名——那句话」。主线核心走这条。
-            * **tuple**：旧刻度的四元组，按 0..3 索引。插件分支的核心还是旧刻度时走这条。
+              -30..30）直接翻成「档名——那句话」。`run_once` 传的就是这两个。
+
+            另外还认**元组**（按索引取）：那是旧四元组的形状，现在只有本文件的用例会传
+            `()`（人列表为空时根本走不到这里），留着是为了让"没有档名可给"的素材照样渲染。
 
             只取 `——` 前面那段（档名），后面的描述不进这份素材。
             """
@@ -313,8 +316,8 @@ def build_report_messages(
     materials: DayMaterials,
     *,
     persona: str,
-    closeness_names: tuple[str, ...],
-    guardedness_names: tuple[str, ...],
+    closeness_names: object,
+    guardedness_names: object,
     now: float | None = None,
 ) -> list[dict[str, str]]:
     """她写信用的请求（**旧路**：一次调用成稿）。`persona` 由调用方从接缝取。"""
@@ -521,8 +524,8 @@ def collect_materials(
     window_hours: float,
     since: float,
     baseline: dict[str, int] | None = None,
-    closeness_names: tuple[str, ...] = (),
-    guardedness_names: tuple[str, ...] = (),
+    closeness_names: object = (),
+    guardedness_names: object = (),
     last_failure: str = "",
     now: float | None = None,
 ) -> DayMaterials:
@@ -744,24 +747,13 @@ class DailyReporter:
             logger.info("daily_report_pending_expired at=%s", state.pending_report.get("at"))
             self.state_store.clear_pending_report(state=state)
         failure_note = last_failure_note(state.sends)
-        # 亲近/防备的档名从哪来（2026-10-20）：关系刻度改成 -100..100 / -30..30 之后，
-        # 主线核心把旧的两个四元组 `CLOSENESS_LABELS` / `GUARDEDNESS_LABELS` 删了
-        # （换成 `relationship_tiers` 的 22 档 / 7 档），而**这条插件分支的核心还是旧刻度**——
-        # 两边都要能跑，所以在调用点选一次，别在两处各猜一次。
-        # 线上那次事故就是这里：主线核心 + 旧插件 = 每分钟 `ImportError`，日报整晚没发出去。
-        #
-        # 用 `import_module` 而不是 `from ...relationship_tiers import ...`：plugins 分支上
-        # `tests/test_webui_panel.py` 会扫**所有相对 import** 并核实目标模块存在，而这条分支的
-        # 核心没有那个模块——写成 import 语句会让该门槛误报"插件引用了核心不存在的东西"。
-        # 这里要表达的本来就是"有就用新的、没有就用旧的"，动态取更贴合语义。
-        try:
-            from importlib import import_module
-
-            _tiers = import_module("qq_roleplay_bot.relationship_tiers")
-            closeness_names, guardedness_names = _tiers.likes_text, _tiers.guard_text
-        except ImportError:  # 插件树的核心仍是旧刻度（tuple，按 0..3 索引）
-            from ...stage3_runtime import CLOSENESS_LABELS, GUARDEDNESS_LABELS
-            closeness_names, guardedness_names = CLOSENESS_LABELS, GUARDEDNESS_LABELS
+        # 亲近/防备的档名只有一个来源：核心的 `relationship_tiers`（2026-10-20 起；
+        # 旧的两个四元组 `CLOSENESS_LABELS` / `GUARDEDNESS_LABELS` 已从核心删掉）。
+        # 这里原来还留着"新模块 import 不到就退回旧四元组"的 try/except——合并 main
+        # 之后插件树的核心就是新刻度，那段 fallback 已经是死代码，还以静态 import 的
+        # 形状让 `test_webui_panel` 报"插件引用了核心已经不存在的名字"（2026-10-22）。
+        # 不在插件里造旧名字的兼容导出：留不留旧常量是核心的事（AGENTS §7.1）。
+        closeness_names, guardedness_names = likes_text, guard_text
 
         materials = collect_materials(
             report,

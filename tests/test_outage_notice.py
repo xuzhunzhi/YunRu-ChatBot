@@ -118,6 +118,15 @@ def _notifier(registry):
 
 
 def _feed(states: list[bool], notifier) -> list[bool]:
+    """按顺序喂一串"连着没有"，返回每次 `observe()` 的返回值。
+
+    **2026-10-20 起每一条用例的状态串都要先喂一次 `True`**：核心口径改成
+    "只对真断线发"——这个进程**先连上过**、之后掉了才算一段掉线；启动后还没连上
+    就 `False` 不发信（否则每次重启/部署操作者都会收到一封"云茹断线了"，用户当天
+    把这当成噪音否掉了）。合并 main 之后本文件的旧状态串（一上来就 `False`）全部
+    变成了"从没连上过"，所以 `fired` 全是 `False`（2026-10-22 的红）。
+    """
+
     async def run() -> list[bool]:
         return [await notifier.observe(state) for state in states]
 
@@ -234,9 +243,9 @@ def test_one_outage_sends_exactly_one_mail_with_the_fixed_template() -> None:
 
     registry, sends = _wired()
 
-    fired = _feed([False, False, False], _notifier(registry))
+    fired = _feed([True, False, False, False], _notifier(registry))
 
-    assert fired == [True, False, False], fired
+    assert fired == [False, True, False, False], fired
     assert len(sends) == 1, f"断一次该只发一封，实际 {len(sends)} 封：{sends}"
     subject, body = sends[0]
     assert subject == outage_notice.SUBJECT == "云茹断线了", subject
@@ -283,9 +292,9 @@ def test_more_events_within_the_same_outage_send_nothing_more() -> None:
 
     registry, sends = _wired()
 
-    fired = _feed([False] * 5, _notifier(registry))
+    fired = _feed([True, False, False, False, False, False], _notifier(registry))
 
-    assert fired == [True, False, False, False, False], fired
+    assert fired == [False, True, False, False, False, False], fired
     assert len(sends) == 1, f"同一段掉线里又发了：{sends}"
 
 
@@ -298,9 +307,9 @@ def test_reconnect_and_a_second_outage_send_again() -> None:
     registry, sends = _wired()
     notifier = _notifier(registry)
 
-    fired = _feed([False, False, True, True, False, False], notifier)
+    fired = _feed([True, False, False, True, True, False, False], notifier)
 
-    assert fired == [True, False, False, False, True, False], fired
+    assert fired == [False, True, False, False, False, True, False], fired
     assert len(sends) == 2, f"第二段掉线该再发一封：{sends}"
     assert sends[0] == sends[1], "两封信只有时间可能不同，模板是同一份"
 
@@ -420,13 +429,13 @@ def test_a_failing_send_is_logged_and_never_propagates() -> None:
     notifier = _notifier(registry)
 
     with _logs("qq_roleplay_bot.plugins.outage_notice.outage_notice") as records:
-        fired = _feed([False, False], notifier)
+        fired = _feed([True, False, False], notifier)
 
-    assert fired == [True, False], "发信失败不许改变核心的状态机（这一段仍然只播一次）"
+    assert fired == [False, True, False], "发信失败不许改变核心的状态机（这一段仍然只播一次）"
     assert any("outage_notice_send_failed" in line for line in records), records
     # 核心那一侧也不该出现"接收者炸了"——异常在插件里就被接住了
     with _logs("qq_roleplay_bot.runtime") as core_records:
-        _feed([False, False], _notifier(registry))
+        _feed([True, False, False], _notifier(registry))
     assert not any("disconnect_receiver_failed" in line for line in core_records), core_records
 
 
@@ -438,7 +447,8 @@ def test_the_plugin_survives_a_failing_send_and_still_notices_the_next_outage() 
     喂进去的是**段与段之间的迁移**，不是随便几个布尔值。注意
     `在线 → 掉线 → 在线 → 掉线` 里有**两段**掉线，而第一版我写成
     `[False, False, True, False]` —— 那个尾巴上的 `False` 已经开了**第二段**，
-    于是"两段"变成三段、断言数错。现在第一段是 `[False, False]`（一段，第一枪发信），
+    于是"两段"变成三段、断言数错。现在第一段是 `[True, False, False]`（开头那次
+    `True` 是 2026-10-20 起"真断线"的前提：先连上过；掉线那一次才发信），
     第二段是 `[True, True, False]`（先重连 = 重新武装，再断 = 新的一段）。
     """
 
@@ -456,11 +466,11 @@ def test_the_plugin_survives_a_failing_send_and_still_notices_the_next_outage() 
     notifier = _notifier(registry)
 
     with _logs("qq_roleplay_bot.plugins.outage_notice.outage_notice"):
-        fired1 = _feed([False, False], notifier)     # 第一段掉线：这一封发失败
+        fired1 = _feed([True, False, False], notifier)   # 第一段掉线：这一封发失败
     attempts["fail"] = False
-    fired2 = _feed([True, True, False], notifier)    # 重连后又断：第二段，这封发得出去
+    fired2 = _feed([True, True, False], notifier)        # 重连后又断：第二段，这封发得出去
 
-    assert fired1 == [True, False], fired1
+    assert fired1 == [False, True, False], fired1
     assert fired2 == [False, False, True], fired2
     assert attempts["count"] == 2, f"两段掉线该各试一次（实际 {attempts['count']} 次）"
     assert len(sends) == 1, sends
@@ -515,7 +525,7 @@ def test_the_mail_body_carries_no_persona_mechanism_words() -> None:
     assert scan_persona_text(subject) == []
 
     _registry, sends = _wired()
-    _feed([False], _notifier(_registry))
+    _feed([True, False], _notifier(_registry))
     assert len(sends) == 1
     sent_subject, sent_body = sends[0]
     assert scan_persona_text(sent_body) == [], scan_persona_text(sent_body)
@@ -558,9 +568,10 @@ def test_the_switch_off_never_registers_a_receiver() -> None:
         outage_plugin.register(registry)
 
     assert registry.disconnect_receivers() == ()
-    # 总闸（核心那侧）关掉时也一个接收者都不叫——两层开关各管各的
+    # 总闸（核心那侧）关掉时也一个接收者都不叫——两层开关各管各的。
+    # 先喂 `True` 再造一次真断线：不然"没叫"可能只是因为"从没连上过"（2026-10-20 起）。
     with _flag(runtime_module.dev_config, "DISCONNECT_NOTICE_ENABLED", False):
-        assert _feed([False], _notifier(registry)) == [False]
+        assert _feed([True, False], _notifier(registry)) == [False, False]
 
 
 def test_a_mail_plugin_without_a_recipient_registers_nothing_and_says_so() -> None:
@@ -647,7 +658,7 @@ def test_the_mail_plugin_provides_the_sender_and_the_outage_uses_it_end_to_end()
             assert "outage_notice" in loaded, loaded
             assert registry.disconnect_receivers() != (), "本插件该登记了接收者"
 
-            _feed([False], _notifier(registry))
+            _feed([True, False], _notifier(registry))
 
         sends = [item for client in clients for item in client.sends]
         assert len(sends) == 1, f"该正好发一封，实际 {len(sends)}：{sends}"
@@ -694,8 +705,8 @@ def _call_the_receiver_twice(registry) -> None:
 
     为什么手法是这样：核心的 `_DisconnectNotifier` 只在一段掉线的**第一枪**才叫接收者，
     所以"每来一次事件就发一封"这个弱化在**正常喂事件**时根本看不出来
-    （喂 5 次 `False` 也只叫一次）。要把它变红就必须**绕开核心那一层**，
-    直接问接收者："你被叫两次，发几封？"
+    （先喂一次 `True` 表示这个进程连上过，之后连着喂 5 次 `False` 也只叫一次）。
+    要把它变红就必须**绕开核心那一层**，直接问接收者："你被叫两次，发几封？"
 
     ## 交付时真跑过一次的突变更改（2026-10-06，给读的人一个可复现的改法）
 

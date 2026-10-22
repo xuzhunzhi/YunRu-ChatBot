@@ -717,9 +717,14 @@ class _Reader:
 
 
 def test_the_materials_take_people_and_changes_from_the_readonly_reader():
-    """打过交道的人要用记忆口那份（带亲近/防备档），不是聊天日志里那串光号码。"""
+    """打过交道的人要用记忆口那份（带亲近/防备档），不是聊天日志里那串光号码。
 
-    from qq_roleplay_bot.stage3_runtime import CLOSENESS_LABELS, GUARDEDNESS_LABELS
+    档名从 `relationship_tiers` 取（2026-10-20 起核心的唯一来源；旧的两个四元组
+    `CLOSENESS_LABELS` / `GUARDEDNESS_LABELS` 已从 `stage3_runtime` 删掉——2026-10-22
+    合并 main 后这条 import 先红的就是这里，插件侧同一处也已改过来）。
+    """
+
+    from qq_roleplay_bot.relationship_tiers import guard_text, likes_text
 
     with tempfile.TemporaryDirectory() as tmp:
         store = MailStateStore(Path(tmp) / "mail_state.json")
@@ -730,7 +735,7 @@ def test_the_materials_take_people_and_changes_from_the_readonly_reader():
         draft = asyncio.run(reporter.run_once(_seams(_Client(), reader=reader)))
 
     assert draft is not None, "记忆口只是素材的一半，缺了也不该把信拦下"
-    data = writer.materials[0].as_data(CLOSENESS_LABELS, GUARDEDNESS_LABELS)
+    data = writer.materials[0].as_data(likes_text, guard_text)
     assert "242003347（亲近 " in data and "防备 " in data, "档位要跟着人一起给她"
     assert "有几个人让你改变了态度，原因是：他当面贬损羞辱。" in data
     assert reader.asked == [NOW - 86400.0], "只读口要拿到窗口起点，才能只翻这段日子"
