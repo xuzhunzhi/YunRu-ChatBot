@@ -189,6 +189,9 @@ OneBot 已连接
 
 哪些插件随代码发布、哪些需要另装，还没有定；这张表只说明有哪些插件。
 
+> **0.4.0b1 的 release 只发布核心与 Stage 3 内容**（对话 / 记忆 / 防护 / 传输 / 装配）。
+> 插件源码（含面板 `webui/`）暂不随 release 上传，等面板打磨完再单独发。
+
 `roles` 不再是独立插件：群成员角色事实已经进核心 `group_roles.py`，插件侧的重复实现已删
 （`yunru-stage4` 提交 `e16874a`）。插件之间用 `REQUIRES` 表达前置依赖，
 比如 `outage_notice` / `timeout_alert` 依赖 `mail`；前置装不上就跳过自己，核心照跑。
