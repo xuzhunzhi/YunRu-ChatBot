@@ -3823,7 +3823,9 @@ class DialogueEngine:
             if fallback:
                 lines.append("她手里关于这个人的零散记录：")
                 lines.extend(fallback)
-        # 出站正文上限 1000 字符：画像本身 ≤300 字，这里只是防多目标叠加时撞上限。
+        # 出站正文上限 1000 字符（`security.py` 的 `MAX_REPLY_LENGTH`）：碎片拼起来的
+        # 画像最长可到 `PROFILE_JOIN_MAX`（1200），所以这里**仍按 900 截**——多目标
+        # 叠加时还要给标题/关系行留余量。不能抬到 1200，那样单条画像就会撞出站上限。
         return "\n".join(lines)[:900]
 
     def _identity_lines(self, store, group_id: str | None, user_id: str) -> list[str]:
