@@ -32,9 +32,30 @@ INCLUDED_DIRS = ("02-核心设定", "03-官方设定补充", "05-同人系列原
 EXCLUDED_DIRS = ("01-Bot人设", "04-制作组背景", "06-密文与链接", "07-知乎参考", "09-废弃与趣闻")
 EXCLUDED_NAME_PATTERNS = (re.compile(r"^README", re.I), re.compile(r"会话交接"),
                           re.compile(r"缺失文档列表"))
-# **权威度**：官方口径 > 同人叙事。基准实测：885 KB 同人会把 48 KB 官方设定挤下去
-# （top-3 只有 62%，8 个漏的全是这个原因），所以排序先看权威度、再看 bm25。
-AUTHORITY = {"02-核心设定": 3, "03-官方设定补充": 2, "05-同人系列原文": 1}
+# **权威度刻度**（2026-10-18 用户裁定，原话：「官方权威程度5，面板4」「同人2，世界知识1」）：
+#
+#   官方 5 > 面板 4（`knowledge_operator.OPERATOR_AUTHORITY`）> 官方补充 3
+#   > 同人 2 > 世界知识 1（`knowledge_operator.WORLD_KNOWLEDGE_AUTHORITY`）
+#
+# 原来的刻度是官方 3 / 补充 2 / 同人 1，而面板块一直是 4 —— 面板压着官方。
+# 用户要反过来：**面板是人手写的补充，不该压过官方原文**。
+#
+# 权威度不再自己当排序键：最终分 = **相关程度 × 权威度**（2026-10-18 用户：
+# 「相关程度3挡，012，0永远不调起，优先程度用乘法」）。乘法同时实现了他要的四组关系：
+#   弱官方 1×5=5 > 强同人 2×2=4   —— 官方弱命中仍然优先；
+#   强面板 2×4=8 > 弱官方 1×5=5   —— 真对题的补充能上位；
+#   强世界 2×1=2 = 弱同人 1×2=2  —— 世界知识永远不抢占；
+#   0 档 × 任何权威度 = 0        —— 0 档一条都不取。
+AUTHORITY = {"02-核心设定": 5, "03-官方设定补充": 3, "05-同人系列原文": 2}
+#: 建索引时写进 `meta` 的刻度版本。**旧库没有这个键 = 旧刻度**（见 `_authority_scale`）。
+AUTHORITY_SCALE_VERSION = 2
+#: **库里的 `chunks.authority` 是列值**：741 块已经按旧刻度落盘（官方 3 / 补充 2 / 同人 1）。
+#: 改上面的常量**不会**改历史行；也不该为了换算去跑一次离线全量重建
+#: （`data/knowledge_tool.py build` 是离线全量，风险大、还要重算向量）。所以换算放在
+#: **读侧**：旧值 → 新值。**这张表只许读侧这一处用**（`_scaled_authority`），别在别处再写一张。
+_LEGACY_AUTHORITY = {1: 2, 2: 3, 3: 5}
+#: `meta` 里记刻度版本的那个键。
+_AUTHORITY_SCALE_KEY = "authority_scale"
 
 # 切块：按 markdown 标题切，单块太长再按段落切。
 MAX_CHUNK_CHARS = 700
@@ -69,14 +90,37 @@ AUTHOR_LINE_RE = re.compile(r"^[\w\-_·\u4e00-\u9fff]{2,20}$")
 
 MAX_QUERY_TOKENS = 12
 MIN_TRIGRAM = 3
+# **相关度筛 / 排序**（2026-10-18）。两件事一起改：
+#
+# ① 检索门口那道"判定说 YES 才查"的语义门废掉了 —— 用户裁定「我不介意查库，消息积压了
+#    就多条一判，ds速度是够的」（原话）。现在**每一轮回复都查**，于是必须有另一道闸把
+#    "撞上一个词就塞进 prompt"的东西挡掉：`limit=5` 会把名额填满，永远查就是每轮塞一堆。
+# ② 排序改成**乘法**：`最终分 = 相关程度 × 权威度`（用户原话：「相关程度3挡，012，
+#    0永远不调起，优先程度用乘法」）。相关程度 0/1/2 的定义见 `relevance_tier`。
+#
+# 为什么要有这道筛（实测，用户 2026-10-18 给的 200 条真实查询基线）：18 条面板块里，
+# 33.5% 的查询至少被抢走 1 个名额、5% 被 5 个名额全吃；官方（02+03）名额 384 → 301
+# （−21.6%）。**152 个面板块名额里 117 个（77%）是 2 字滑窗或纯数字撞出来的假命中**
+# （查询里的 `19` 撞正文里的 `1983/1984/1985`；"了一"/"一个"/"不是"/"这么"撞上任何长句），
+# 官方被挤掉的 83 个名额里 51 个由这类造成。典型：`护发精油是干什么的` → 5 个名额全被
+# 面板块占、官方 0 条。
+#
+# 所以 0 档的判据必须把这三类挡掉：**虚词**（`_STOPWORDS`，见下）、**纯数字**、
+# **只有 2 字窗口的命中**（没有 ≥3 字的连续命中时，必须靠"≥2 个内容词"才够强）。
+# 0 档**不参与排序、不占名额**（"0永远不调起"）。
+#
+# 面板块与官方语料**同一把尺子**：相关程度只看查询与正文的字面重合，不看 authority；
+# 权威度只在乘法里当系数（面板 4 < 官方 5），没有免筛。
+#
+# 筛完为空就是空态（`stage3_runtime._extension_data` 的 `（无扩展材料）`）。
+#: 纯数字 token 至少几位才算"真实命中"（`19` / `2024` 这类短数字不算）。
+MIN_DIGIT_TOKEN_LENGTH = 4
 # 语义召回的相对下限：只保留与最好那条相差不超过这个值的候选。
 # 用**相对**差值而不是绝对阈值——查询短、语料块长，余弦整体被压低（实测同义问句
 # 0.84、词面碰不上的"住处"类 0.45、完全无关 0.25），绝对阈值很难切干净。
 SEMANTIC_MARGIN = 0.12
 # 「她」在语料里的写法。只认名字：单看"她"字太平凡，几乎所有叙事段落都有。
 HER_NAME = "云茹"
-# 这句是不是在问她自己（"你在哪住""你怕什么"）。只用于兜底判断，不参与打分。
-SELF_QUERY_RE = re.compile(r"你|您|云茹|自己")
 
 # **查询扩展**（2026-09-28，用户纠正之后加的）：她自己的处境在语料里是"阿拉斯加 / 希望角 /
 # 时间屏障 / 焚风反抗军"这些词，而群里问的是"你现在住在哪""在忙什么"——一个词都撞不上。
@@ -91,7 +135,11 @@ SELF_QUERY_RE = re.compile(r"你|您|云茹|自己")
 QUERY_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"住|住处|居住|定居|落脚|在哪|在哪里|哪儿|哪里"),
      ("阿拉斯加", "希望角", "基地", "时间屏障", "最后堡垒")),
-    (re.compile(r"现在|目前|眼下|最近|近况|平时|在忙|做什么|干什么"),
+    # 2026-10-18 收窄过一次：这一组原来还认"现在/目前/眼下/最近/平时/做什么/干什么"。
+    # 实测（200 条真实查询）它们是"把无关问题扩成她的事"的主要入口——`护发精油是干什么的`
+    # 里的"干什么"会扩出大反抗军/焚风/基地，一堆无关块因此被拽进 prompt。现在只留
+    # "真的在问她在忙什么"的那几个说法；"你现在住在哪"由上一组（住/在哪）兜着，不受影响。
+    (re.compile(r"在忙|忙什么|近况|最近在"),
      ("大反抗军", "焚风", "反抗军", "基地")),
     (re.compile(r"被俘|俘虏|囚禁|被囚|关押|关在|软禁|救|获救|救出"),
      ("阿富汗", "巴米扬", "地下设施", "疾风小队", "武秀荣")),
@@ -161,6 +209,11 @@ class KnowledgeIndex:
             )
             connection.executemany(
                 "INSERT INTO chunks (source, title, content, lines, authority) VALUES (?,?,?,?,?)", deduped)
+            # **刻度版本写进 meta**（2026-10-18）：老库没有这个键，读侧据此把旧值 3/2/1
+            # 换算成 5/3/2（见 `_scaled_authority`）。新库直接是新刻度，读侧不再换算。
+            connection.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                (_AUTHORITY_SCALE_KEY, str(AUTHORITY_SCALE_VERSION)))
             connection.commit()
             embedded = self._build_vectors(connection, embedder=embedder, verbose=verbose)
         finally:
@@ -212,17 +265,24 @@ class KnowledgeIndex:
         limit: int,
         prefer_canon: bool = True,
         embedder=None,
-        her_fallback: bool = True,
     ) -> list[KnowledgeItem]:
         if not self.path.exists():
             return []
         text = sanitize_chat_text(query or "", max_length=1000)
         tokens = _query_tokens(text)
+        # 哪些词是**查询里真的写着**的（3 字窗口、"量子隧穿"这种整段），哪些是人工同义词
+        # 扩出来的（"住哪" → 阿拉斯加）。"≥3 字的连续片段命中"只认前者；后者仍算内容词。
+        literal = {token for token in tokens if token in text}
         connection = sqlite3.connect(self.path, timeout=0.5)
         connection.row_factory = sqlite3.Row
         try:
+            # 库里存的是旧刻度的 `authority` 列值，读侧换算（`_scaled_authority`）；
+            # "官方那一档"的候选要按库里**存的**值查，所以两种刻度下的官方核心值都认。
+            scale = _authority_scale(connection)
+            canon = ((AUTHORITY["02-核心设定"],) if scale >= AUTHORITY_SCALE_VERSION
+                     else (3,))
             rows: list[sqlite3.Row] = []
-            # 候选要**多取一些**再在 Python 里按权威度/扩展词/提到她重排：取太少的话
+            # 候选要多取一些再在 Python 里按相关程度/权威度重排：取太少的话，
             # 排序再好也救不回没进候选的那几条（`limit` 是最终要给她的条数）。
             candidates = max(limit * 6, 40)
             if tokens:
@@ -232,74 +292,57 @@ class KnowledgeIndex:
                 # **给官方口径单独留一档候选**：只按总 bm25 取前 N 条时，885 KB 同人会
                 # 把 48 KB 官方设定挤出候选池——排序键再对也救不回来（2026-09-28 实测：
                 # 「心灵控制是什么」就这么掉的，官方块根本没进 40 条候选）。
-                canon = max(AUTHORITY.values())
-                rows.extend(self._match(connection, tokens, max(limit * 2, 10), authority=canon))
+                rows.extend(self._match(connection, tokens, max(limit * 2, 10),
+                                        authority_in=canon))
                 # trigram 至少要 3 字：**短问句**（"你有家人吗"真正的内容词是"家人"）
                 # 在这里会一条都召不回——2026-09-28 实测 20 条自问里 5 条召回为空。
                 # 不足时再补一轮 LIKE（按命中词数打分），两路合并后统一排序。
                 if len(rows) < candidates:
                     rows.extend(self._like(connection, tokens, candidates))
             # 语义那一路（2026-09-28，用户："现在这个召回太唐了"）：换个说法问同一件事
-            # 词面撞不上，向量能撞上。它**只补充不取代**——词面召回照旧，两路按名次融合。
+            # 词面撞不上，向量能撞上。它**只补充候选**——但注意 2026-10-18 的"相关程度"
+            # 只看字面重合，所以纯靠向量撞上、字面一个词都不重合的块会被判 0 档丢掉。
+            # 线上没接 embedder（`runtime.build_knowledge_base` 不传），这条不影响生产。
             semantic = self._semantic_candidates(connection, text, limit * 2, embedder)
             if semantic:
                 rows.extend(semantic)
-            # 问的是她、召回来的却一条都没提她（"你是谁""你怕什么"这种极短问句）：
-            # 与其塞一段别人在别处的场景，不如给她**关于她本人**的资料当底。
-            # `her_fallback=False` 只给评测用：兜底会把"提到她"这个指标刷成 100%，
-            # 掩盖真正要量的东西（词面 vs 语义谁捞得到对的那一块）。
-            if her_fallback and SELF_QUERY_RE.search(text) and not any(
-                _mentions_her(row) for row in rows
-            ):
-                rows.extend(self._her_fallback(connection, 2))
         except sqlite3.Error as exc:  # 索引坏了只当没有资料
             logger.warning("knowledge_lookup_failed category=%s", type(exc).__name__)
             return []
         finally:
             connection.close()
 
-        fused: dict[tuple[str, str], dict[str, object]] = {}
-        # 这一问句触发了哪些人工同义词（"住哪" → 阿拉斯加/希望角/基地…）。
-        # 命中的块在排序里单独占一档：否则扩展只是"多召回一些"，答不对题的那几条
-        # （比如泛泛的基本信息表）还是会排到前面。
-        expanded = _expanded_terms(text)
-        for position, row in enumerate(rows):
-            if is_meta_note(row["title"], row["content"]):
+        fused: dict[tuple[str, str], object] = {}
+        for row in rows:
+            if is_meta_note(row["title"], row["content"]):  # type: ignore[index]
                 continue
-            key = (row["title"], (row["content"] or "")[:200])
-            if key in fused:  # 多路合并会撞车：同一条只算一次，取更好的名次
-                entry = fused[key]
-                entry["lexical"] = min(entry["lexical"], position)  # type: ignore[type-var]
+            key = (row["title"], (row["content"] or "")[:200])  # type: ignore[index]
+            if key in fused:  # 多路合并会撞车：同一条只算一次
                 continue
-            semantic = float(row["semantic"] or 0.0) if "semantic" in row.keys() else 0.0
-            fused[key] = {
-                "row": row,
-                "lexical": position,
-                "semantic": semantic,
-                "semantic_rank": -1 if not semantic else 0,
-                "expansion": _expansion_hits(row, expanded),
-            }
-        # 语义那一路单独给名次：两路分数（bm25 / 余弦）不同量纲，**不能直接比大小**，
-        # 用 RRF（Reciprocal Rank Fusion）按名次融合才是稳的做法。
-        semantic_rows = sorted(
-            (entry for entry in fused.values() if entry["semantic"]),
-            key=lambda entry: -float(entry["semantic"]),  # type: ignore[arg-type]
-        )
-        for rank, entry in enumerate(semantic_rows):
-            entry["semantic_rank"] = rank
-        ranked = sorted(
-            fused.values(),
-            key=lambda entry: _rank_key(entry["row"],  # type: ignore[arg-type]
-                                        lexical=int(entry["lexical"]),  # type: ignore[arg-type]
-                                        semantic_rank=int(entry["semantic_rank"]),  # type: ignore[arg-type]
-                                        has_semantic=bool(entry["semantic"]),
-                                        expansion=int(entry["expansion"]),  # type: ignore[arg-type]
-                                        prefer_canon=prefer_canon),
-        )
+            fused[key] = row
+
+        # 相关程度分三档 → **最终分 = 相关程度 × 权威度** → 降序取前 `limit` 条。
+        # 0 档（只撞上虚词/纯数字、或只有 2 字窗口且没有第二个内容词）不参与排序、不占名额。
+        scored: list[tuple[int, int, object]] = []
+        for row in fused.values():
+            tier = relevance_tier(tokens, literal, row["title"] or "", row["content"] or "")  # type: ignore[index]
+            if tier <= 0:
+                continue
+            authority = _scaled_authority(row["authority"], scale)  # type: ignore[index]
+            score = tier * authority if prefer_canon else tier
+            scored.append((score, tier, row, authority))
+        # 并列时的次序（用户："并列时你定一个稳定次序"）：先给**提到她**的（2026-09-28
+        # 的实测要求：问自己的事，回来别人在别处的场景最没用），再按来源/标题/正文前 120 字
+        # ——稳定、可复现，不依赖行的物理顺序。
+        scored.sort(key=lambda item: (
+            -item[0], -_mentions_her(item[2]),
+            str(item[2]["source"]), str(item[2]["title"]),  # type: ignore[index]
+            str(item[2]["content"])[:120],  # type: ignore[index]
+        ))
         return [
-            KnowledgeItem(source=entry["row"]["source"], title=entry["row"]["title"],
-                          content=entry["row"]["content"])
-            for entry in ranked[:limit]
+            KnowledgeItem(source=row["source"], title=row["title"], content=row["content"],  # type: ignore[index]
+                          authority=authority, tier=tier)
+            for _score, tier, row, authority in scored[:limit]
         ]
 
     @staticmethod
@@ -358,33 +401,18 @@ class KnowledgeIndex:
         return output
 
     @staticmethod
-    def _her_fallback(connection, limit):
-        """兜底：关于她本人的官方资料（提到她名字的那些块）。
-
-        只在"问的是她、却没召回一条提到她的资料"时用，条数也压得很小（2 条）：
-        它是**保底**，不是主力——真答得上问题的还是按查询召回的那些。
-        """
-
-        pattern = f"%{HER_NAME}%"
-        return connection.execute(
-            "SELECT source, title, content, authority, 0.0 AS rank FROM chunks "
-            "WHERE authority = ? AND (content LIKE ? OR title LIKE ?) LIMIT ?",
-            (max(AUTHORITY.values()), pattern, pattern, limit),
-        ).fetchall()
-
-    @staticmethod
-    def _match(connection, tokens, limit, *, authority: int | None = None):
+    def _match(connection, tokens, limit, *, authority_in: tuple[int, ...] | None = None):
         long_tokens = [t for t in tokens if len(t) >= MIN_TRIGRAM]
         if not long_tokens:
             return []
         expression = " OR ".join(f'"{t}"' for t in long_tokens)
         where = "chunks MATCH ?"
         params: list[object] = [expression]
-        if authority is not None:
-            where += " AND authority = ?"
-            params.append(authority)
+        if authority_in:
+            where += f" AND authority IN ({','.join('?' for _ in authority_in)})"
+            params.extend(authority_in)
         params.append(limit)
-        # **必须在 SQL 里先按 bm25 排一遍**：Python 那边还要按权威度/扩展词/提到她重排，
+        # **必须在 SQL 里先按 bm25 排一遍**：Python 那边还要按相关程度/权威度重排，
         # 但 `LIMIT` 是在 SQL 里生效的——不排序就等于在任意顺序上截断，好块根本进不了候选
         # （2026-09-28 踩过：问"住处"时"阿拉斯加希望角"那块压根没被取回来）。
         return connection.execute(
@@ -451,9 +479,49 @@ def _clean_heading(segment: str) -> str:
 
 
 def _authority(source: str) -> int:
-    """按顶层目录给权威度：官方设定 > 官方补充 > 同人叙事。"""
+    """按顶层目录给权威度：官方设定 > 官方补充 > 同人叙事（**新刻度**，2026-10-18）。
+
+    建索引时写进 `chunks.authority` 的就是这个值；老库里的旧值由读侧换算，见
+    `_scaled_authority`。
+    """
 
     return AUTHORITY.get(source.split("/", 1)[0], 1)
+
+
+def _authority_scale(connection) -> int:
+    """这个库是按哪一版刻度建的（`meta.authority_scale`）。查不到就是**旧刻度**（1）。
+
+    为什么要有这个标记：库里存的是 `authority` 列值，老库是 3/2/1，新库是 5/3/2。
+    **新刻度里"官方补充"也是 3**，与旧刻度里"官方核心"的 3 撞号——只看数字分不清，
+    所以拿 meta 里的版本号决定要不要换算。以后谁重建了索引，读侧自动不再换算。
+    """
+
+    try:
+        row = connection.execute(
+            "SELECT value FROM meta WHERE key = ?", (_AUTHORITY_SCALE_KEY,)).fetchone()
+    except sqlite3.Error:
+        return 1
+    try:
+        return int(row[0]) if row is not None else 1
+    except (TypeError, ValueError):
+        return 1
+
+
+def _scaled_authority(stored: object, scale: int) -> int:
+    """**读侧唯一的换算入口**：库里存的 `authority` → 新刻度。
+
+    旧刻度 3/2/1 → 新刻度 5/3/2；新刻度建的库原样返回。老库里面板块不在（它们在
+    `operator_chunks.json`），所以这里只会遇到 1/2/3。
+    """
+
+    try:
+        value = int(stored or 0)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+    if scale >= AUTHORITY_SCALE_VERSION:
+        return value
+    return _LEGACY_AUTHORITY.get(value, value)
+
 
 
 def _mentions_her(row) -> int:
@@ -463,45 +531,66 @@ def _mentions_her(row) -> int:
     return 1 if HER_NAME in (row["content"] or "") or HER_NAME in (row["title"] or "") else 0
 
 
-def _rank_key(row, *, lexical: int, semantic_rank: int, has_semantic: bool, expansion: int,
-              prefer_canon: bool):
-    """排序键（升序）：官方口径 → **同义词命中数** → 提到她 → 名次融合（RRF）。
+def _is_function_word(token: str) -> bool:
+    """这个词是不是虚词/高频词——**不许**当"相关"的依据。
 
-    四段各自的理由：
-    - `authority` 最先：885 KB 同人会淹没 48 KB 官方设定（当初加它就是为了这个）；
-    - 同义词命中：这一问句扩出来的词（"住哪" → 阿拉斯加/希望角/基地）真出现在这块里，
-      说明它答的就是这件事——排在"泛泛提到她"的前面；
-    - 「提到她」：同一档里先给写她的资料。实测词面时代把"自问 top-1 提到她"从 20%
-      拉到 100%，不能降级（2026-09-28 踩过：排到相关度之后，词面路径从 100% 掉到 60%）；
-    - 名次融合：**bm25 与余弦不同量纲，不能直接比大小**，按各自名次做 RRF
-      （`1/(60+名次)`）。没有语义那一路时它退化成词面名次，行为与从前一致。
+    判据：整词在 `_STOPWORDS` 里，或者**含有**一个停用词（"干什么"含"什么"、
+    "这么惨"含"这么"）。含停用词的 3 字窗口也不能当"≥3 字连续片段"那条强证据，
+    否则查询里的"干什么"会正撞上她任何一句"我在干什么"（实测里这类假命中占比很高）。
     """
 
-    rrf = 1.0 / (60.0 + lexical + 1)
-    if has_semantic and semantic_rank >= 0:
-        rrf += 1.0 / (60.0 + semantic_rank + 1)
-    if not prefer_canon:
-        return (-expansion if expansion else 0, -rrf, -_mentions_her(row))
-    return (-int(row["authority"] or 0), -expansion, -_mentions_her(row), -rrf)
+    if token in _STOPWORDS:
+        return True
+    return any(word in token for word in _STOPWORDS if len(word) >= 2)
 
 
-def _expanded_terms(text: str) -> tuple[str, ...]:
-    """这一问句触发了哪几组人工同义词。"""
+def relevance_tier(tokens, literal: set[str], title: str, content: str) -> int:
+    """这一块对这句话的**相关程度：2 强 / 1 弱 / 0 无关**。
 
-    terms: list[str] = []
-    for pattern, synonyms in QUERY_EXPANSIONS:
-        if pattern.search(text):
-            terms.extend(synonyms)
-    return tuple(dict.fromkeys(terms))
+    用户 2026-10-18 给的算法（原话：「相关程度3挡，012，0永远不调起，优先程度用乘法」）：
 
+    - **2（强）**：查询里有 **≥3 个字的连续片段**真的在这块里出现（即查询的 3 字窗口
+      对上了），**或**命中了 **≥2 个不同的内容词**；
+    - **1（弱）**：只命中 **1 个内容词**（典型：只撞上一个 2 字词，没有 3 字命中）；
+    - **0（无关）**：只命中虚词（了一/一个/不是/这么/什么/怎么/可以/这个/那个…）、
+      只命中纯数字、或者什么都没命中。
 
-def _expansion_hits(row, terms: tuple[str, ...]) -> int:
-    """这块里出现了几个扩展词。0 表示它跟"住哪/在忙什么"这件事其实没关系。"""
+    **0 档一条都不取**：这是本次改动的核心。实测（用户给的 200 条真实查询基线）面板块
+    抢到的 152 个名额里 117 个是 2 字滑窗/纯数字撞出来的假命中，官方名额因此从 384 掉到 301。
 
-    if not terms:
-        return 0
-    haystack = f"{row['title'] or ''}\n{row['content'] or ''}"
-    return sum(1 for term in terms if term in haystack)
+    几个细节：`tokens` 来自 `_query_tokens`（3 字窗口 + 2 字窗口 + 人工同义词），
+    `literal` 是其中**真的写在查询里**的那些——"≥3 字连续片段"只认 literal，因为
+    同义词（"住哪" → 阿拉斯加）不是查询里的字面片段；它们仍然算内容词。
+    """
+
+    haystack = f"{title or ''}\n{content or ''}"
+    strong_window = False
+    literal_words = 0
+    expansion_words = 0
+    for token in tokens:
+        if not token or token not in haystack:
+            continue
+        if token.isdigit() and len(token) < MIN_DIGIT_TOKEN_LENGTH:
+            continue  # 纯数字不算：`19` 撞上正文里的 `1983/1984/1985` 就是这么来的
+        if _is_function_word(token):
+            continue  # 虚词/高频词不算，含停用词的窗口也不算
+        if token in literal:
+            literal_words += 1
+            if len(token) >= MIN_TRIGRAM:
+                strong_window = True
+        else:
+            expansion_words += 1
+    if strong_window or literal_words >= 2:
+        return 2
+    if literal_words == 1:
+        return 1
+    # 人工同义词（"住哪" → 阿拉斯加/希望角/基地）**最多把她抬到 1 档**：
+    # 那些词不是这句里写着的字面内容，只是"可能用得上"。实测（2026-10-18）：让扩展词
+    # 能顶到 2 档时，`护发精油是干什么的` 里的"干什么"会把大反抗军/焚风/基地扩出来，
+    # 一堆与问题无关的官方块被判成"强相关"——比原来的 2 字假命中还糟。
+    if expansion_words >= 1:
+        return 1
+    return 0
 
 
 class AsyncKnowledgeBase:
@@ -529,6 +618,34 @@ def is_meta_note(title: str, content: str) -> bool:
     """这块是不是"写给 bot 看的话"（构建笔记）——是的话不给它进 prompt。"""
 
     return bool(_META_TITLE_RE.search(title or "") or _META_BODY_RE.search(content or ""))
+
+
+#: **她的档案兜底**（2026-10-18 用户要求；同一天先删过一次、这是换形状之后恢复的）。
+#:
+#: 为什么要有：改成"每一轮都查 + 0 档不调起"之后，一句"你是谁"与任何一块都撞不上 →
+#: 空态 → 她连自己是谁都没资料可看（用户："这是明显退化，不是更严格"）。
+#:
+#: 形状（用户定的）：**只在"这一轮所有候选都落在 0 档、本来会输出空态"时**注入，
+#: 短（≤200 字），**不算进那 5 条名额**——它是兜底，不是检索结果。
+#: 有 ≥1 档命中就**不**注入（避免与正常检索重复）。
+#:
+#: 措辞约束：① 不许出现机制词（检查/触发/调用/协议/提示词/上下文/记忆库/Stage…），
+#: 这份文本是进 DATA 段的，会被角色吸收（AGENTS §2.2）；② 它只讲最基础的几件事
+#: （她是谁、在哪儿、做什么的、不是士兵），**不编细节**——细节该由检索给。
+PROFILE_FALLBACK_SOURCE = "profile"
+PROFILE_FALLBACK_TITLE = "她的基本情况"
+PROFILE_FALLBACK_TEXT = (
+    "云茹，青年科学家。现在在阿拉斯加希望角的基地里主持大反抗军（焚风）的事，"
+    "那道时间屏障把这一带跟外面隔开。她做过不少武器与装置，最出名的是百夫长攻城机甲；"
+    "她本人不是士兵，也不喜欢别人把那些东西只当成武器来夸。"
+)
+
+
+def profile_fallback_item() -> KnowledgeItem:
+    """兜底那一条（调用方：`PromptSources.collect` 在**一条都没留下**时追加）。"""
+
+    return KnowledgeItem(source=PROFILE_FALLBACK_SOURCE, title=PROFILE_FALLBACK_TITLE,
+                         content=PROFILE_FALLBACK_TEXT)
 
 
 def _query_tokens(text: str) -> list[str]:
@@ -570,6 +687,10 @@ _STOPWORDS = frozenset({
     "这个", "那个", "一下", "的时候", "可以", "现在", "你们", "我们",
     # 疑问句里那些"问的是她"的虚词组合：留着只会让 LIKE 兜底捞回一堆无关段落。
     "你住", "住在", "在哪", "哪儿", "哪里", "什么", "做过", "会做", "你是谁", "就是",
+    # 2026-10-18 补：实测里"2 字窗口撞长句"占假命中的绝大多数（117/152），点名的几个。
+    # 它们同时是"相关程度"里**不许当依据**的那一批（`_is_function_word`）。
+    "了一", "一个", "不是", "这么", "也是", "什么", "怎么", "可以", "这个", "那个",
+    "就是", "还是", "有点", "其实", "然后", "因为", "所以", "但是", "已经", "一样",
 })
 
 

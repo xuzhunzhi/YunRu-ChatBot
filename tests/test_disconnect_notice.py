@@ -107,19 +107,38 @@ def _runtime_logs():
 
 
 def test_one_outage_notifies_exactly_once() -> None:
-    """掉线一次 → 接收者**正好被叫一次**；同一段里继续检查 → **不再叫**。
+    """连上过之后掉线一次 → 接收者**正好被叫一次**；同一段里继续检查 → **不再叫**。
 
     这是用户最强调的一条："断一次只发一次，不要反复调用"。
+    **2026-10-20 起**先喂一次 `True`：只有"先连上过、后来掉了"才算真断线
+    （用户原话："只对真断线发"）。
     """
 
     calls: list[str] = []
     notifier = runtime_module._DisconnectNotifier([lambda: calls.append("断了")])
 
-    results = _feed([False, False, False, False, False], notifier)
+    results = _feed([True, False, False, False, False], notifier)
 
     assert calls == ["断了"], "同一段掉线只该通知一次"
     # 返回值：只有第一枪算"新的一段掉线"（其余是同一段里的重复检查）。
-    assert results == [True, False, False, False, False], results
+    assert results == [False, True, False, False, False], results
+
+
+def test_a_never_connected_process_never_notifies() -> None:
+    """**启动后还没连上过 → 不发信**（2026-10-20 用户："只对真断线发"）。
+
+    由来：每次重启/部署，机器人先起来、NapCat 还没连上，原来这时会广播一封
+    "云茹断线了"——于是**操作者每重启一次就收到一封**，他当天把这条否掉了。
+    告警日志仍由看门狗那条 `连上来` 打印，这里只管"该不该叫她发信"。
+    """
+
+    calls: list[str] = []
+    notifier = runtime_module._DisconnectNotifier([lambda: calls.append("断了")])
+
+    results = _feed([False, False, False, False], notifier)
+
+    assert calls == [], "从没连上过就不是掉线"
+    assert results == [False, False, False, False], results
 
 
 def test_reconnect_rearms_and_the_next_outage_notifies_again() -> None:
@@ -128,10 +147,10 @@ def test_reconnect_rearms_and_the_next_outage_notifies_again() -> None:
     calls: list[str] = []
     notifier = runtime_module._DisconnectNotifier([lambda: calls.append("断了")])
 
-    results = _feed([False, False, True, True, False, False], notifier)
+    results = _feed([True, False, True, False], notifier)
 
     assert calls == ["断了", "断了"], "第二段掉线要再通知一次"
-    assert results == [True, False, False, False, True, False], results
+    assert results == [False, True, False, True], results
 
 
 def test_recovery_alone_never_notifies() -> None:
@@ -155,10 +174,10 @@ def test_an_async_receiver_is_awaited() -> None:
         calls.append("async")
 
     notifier = runtime_module._DisconnectNotifier([receiver])
-    results = _feed([False, False], notifier)
+    results = _feed([True, False], notifier)
 
     assert calls == ["async"]
-    assert results == [True, False]
+    assert results == [False, True]
 
 
 # --- 接收者抛异常不许把机器人带走 ---------------------------------------------
@@ -179,9 +198,9 @@ def test_a_raising_receiver_is_logged_and_the_rest_still_run() -> None:
     notifier = runtime_module._DisconnectNotifier([broken, lambda: calls.append("后面的")])
 
     with _runtime_logs() as records:
-        results = _feed([False, False], notifier)
+        results = _feed([True, False, False], notifier)
 
-    assert results == [True, False], "接收者失败不该改变状态机（这一段仍然只播一次）"
+    assert results == [False, True, False], "接收者失败不该改变状态机（这一段仍然只播一次）"
     assert calls == ["后面的"], "一个接收者炸了不许影响后面的"
     assert any("disconnect_receiver_failed" in line for line in records), records
 
@@ -231,7 +250,7 @@ def test_the_notifier_is_built_from_the_registry_receivers() -> None:
     notifier = runtime_module._disconnect_notifier_for(engine)
 
     assert len(notifier.receivers) == 1
-    assert _feed([False, False], notifier) == [True, False]
+    assert _feed([True, False], notifier) == [False, True]
     assert calls == ["断了"]
 
 
@@ -241,7 +260,7 @@ def test_an_engine_without_a_registry_gets_an_empty_notifier() -> None:
     notifier = runtime_module._disconnect_notifier_for(types.SimpleNamespace())
 
     assert notifier.receivers == ()
-    assert _feed([False], notifier) == [True]
+    assert _feed([False], notifier) == [False]  # 从没连上过 → 不播
 
 
 # --- 配置开关 -----------------------------------------------------------------
@@ -298,7 +317,8 @@ def test_the_watchdog_notifies_once_per_outage_end_to_end() -> None:
     calls: list[str] = []
     registry = PluginRegistry()
     registry.link.on_disconnect(lambda: calls.append("断了"))
-    transport = _Transport(connected=False)
+    # 2026-10-20 起"真断线"= 先连上过再掉：所以传输层从**连着**开始。
+    transport = _Transport(connected=True)
     notifier = runtime_module._disconnect_notifier_for(
         types.SimpleNamespace(plugin_registry=registry)
     )
@@ -307,6 +327,9 @@ def test_the_watchdog_notifies_once_per_outage_end_to_end() -> None:
         async def run() -> None:
             task = asyncio.create_task(runtime_module._watch_connection(transport, notifier))
             try:
+                await asyncio.sleep(0.10)          # 先连上（连续采样都是 True）
+                assert calls == [], "连着的时候不许通知"
+                transport.connected = False
                 await asyncio.sleep(0.15)          # 第一段掉线（多次采样）
                 assert calls == ["断了"], f"同一段掉线叫了 {len(calls)} 次"
                 transport.connected = True
@@ -450,10 +473,13 @@ def test_the_alert_log_keeps_its_ten_minute_cadence() -> None:
     assert len([line for line in records if "连上来" in line]) == 4, records
 
 
-def test_a_boot_with_nobody_connected_is_one_outage() -> None:
-    """**开机一直没连上 = 一段掉线**（用户定的第一条：机器起来了、谁也看不见）。
+def test_a_boot_with_nobody_connected_is_not_an_outage() -> None:
+    """**开机一直没连上 ≠ 掉线**，不发信（2026-10-20 用户改了口径）。
 
-    段只算一段——第一次检查广播一次，之后继续没连上**不再叫**。
+    原来（2026-10-06）这条叫 `..._is_one_outage`，口径是"机器起来了、谁也看不见"
+    值得通知。实测的后果是：**每次重启/部署都先来一段"没连上"**，于是操作者每重启
+    一次就收到一封"云茹断线了"。用户当天原话：**"只对真断线发"**。
+    现在只有"这个进程先连上过、之后掉了"才发信；告警日志照旧由看门狗打印。
     """
 
     clock = _Clock()
@@ -472,7 +498,30 @@ def test_a_boot_with_nobody_connected_is_one_outage() -> None:
 
     asyncio.run(run())
 
-    assert calls == [runtime_module.CONNECTION_WARN_AFTER_SECONDS], calls
+    assert calls == [], "从没连上过就不是掉线，一次都不该发"
+
+
+def test_a_real_outage_after_a_connection_still_notifies_through_the_ticker() -> None:
+    """同一套时钟路径上验反例：**先连上、再掉**仍然会发（别把新口径做成哑巴）。"""
+
+    clock = _Clock()
+    calls: list[float] = []
+    notifier = runtime_module._DisconnectNotifier([lambda: calls.append(clock.now)])
+    ticker = runtime_module._ConnectionTicker(notifier, clock=clock)
+    transport = _Transport(connected=True)
+
+    async def run() -> None:
+        clock.now = runtime_module.CONNECTION_WARN_AFTER_SECONDS
+        await ticker.tick(transport)                                # 连着：不发，武装
+        transport.connected = False
+        clock.now += runtime_module.CONNECTION_DETECT_EVERY_SECONDS
+        await ticker.tick(transport)                                # 掉线：发一次
+        clock.now += runtime_module.CONNECTION_DETECT_EVERY_SECONDS
+        await ticker.tick(transport)                                # 同一段：不再发
+
+    asyncio.run(run())
+
+    assert len(calls) == 1, calls
 
 
 def test_the_loop_detects_on_the_fast_rhythm_not_the_log_rhythm() -> None:

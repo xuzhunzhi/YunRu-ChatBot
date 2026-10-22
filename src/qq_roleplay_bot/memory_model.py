@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import time
 from dataclasses import dataclass, field
 from html import escape
 
@@ -25,8 +26,14 @@ OPS = {"ADD", "UPDATE", "MERGE", "DELETE", "IGNORE", "AFFINITY"}
 # 每批最多几条好感度 op。它不占 MAX_OPERATIONS 的名额，但也不能让一批里
 # 十几个人都改一遍——那样"变化要慢"这条就形同虚设。
 MAX_AFFINITY_OPERATIONS = 2
-# 好感度每轴的允许增量：只有 -1 / 0 / +1。数值本身是 0..3 的内部档位。
-AFFINITY_DELTAS = {"-1": -1, "0": 0, "+1": 1}
+# 好感度每轴的允许**写法**：带符号的整数串（"+8" / "-12" / "0"）。
+# 2026-10-20 起不再只有 {-1, 0, +1}：新刻度下模型要自己判"明确越界"下多重
+# （4–16），所以它必须能报一个数。这里只拦"写成一句人话 / 0.5 / 离谱的大数"，
+# 真正的幅度夹在 `memory_store._single_step`（普通下调 ≤4、越界 4–16、
+# 好感提升 ≤8、防备提升 ≤10）。
+AFFINITY_DELTA_PATTERN = re.compile(r"^[+-]?\d{1,3}$")
+# 写法上允许到刻度本身的最大绝对值；更大的数按脏输出整批拒掉。
+AFFINITY_DELTA_LIMIT = 100
 MAX_OPERATIONS = 5
 MAX_CONTENT = 300
 # 一条记忆最多关联几个人（含归属人）。多人条目只该用在"这事确实涉及几个人"上，
@@ -81,6 +88,14 @@ class MemoryRecord:
     # 这条记忆在哪一层（`short` = 中短期，`long` = 长期）。**不是数据库列**：
     # 两张表各自一张，读出来时由 store 标注（见 memory_store.TIERS）。
     tier: str = "short"
+    #: 这条记忆有没有**一句原话**顶着（数据库里 `source_event_ids` 非空）。
+    #:
+    #: **不是数据库列**：`source_event_ids` 是 JSON 文本、也是内部标识（面板与只读视图
+    #: 都不外露），所以由 `memory_store._record` 折算成这个布尔量带出来。渲染成
+    #: `source="quote|inferred"`（见 `MemoryMaterial.as_data`）：
+    #: 只有 `quote` 才配得上"我记得/你说过"的口吻，`inferred` 只能当印象。
+    #: 默认 `False` 是**保守的那一侧**：拿不到出处就当"只是印象"，不许冒充原话。
+    quoted: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +131,24 @@ class MemoryOperation:
     subjects: tuple[str, ...] = ()
     # 维护 agent 认为这条值得**长期**留（用户选定的强化规则之一）。
     durable: bool = False
+    # AFFINITY 专用：模型判定"这一次是明确越界"（2026-10-20）。
+    # 只有它为真时才允许 4–16 的下调；否则一并压回 ≤4。
+    severe: bool = False
+
+
+# 键的形状：普通条目是 [a-z][a-z0-9_]{0,63}；画像碎片多一段可选的
+# /方面（如 profile/work）——**2026-10-21** 画像碎片化之后，一个方面一个键。
+# 只对 profile 放开这一档，别的 kind 仍然只认扁平键（别顺手放宽整张表）。
+_KEY_FLAT = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_KEY_PROFILE = re.compile(r"profile(?:/[a-z][a-z0-9_]{0,31})?") 
+
+
+def _key_ok(key: str, kind: str) -> bool:
+    """这个键对这类条目合不合法。"""
+
+    if kind == "profile":
+        return bool(_KEY_PROFILE.fullmatch(key))
+    return bool(_KEY_FLAT.fullmatch(key))
 
 
 def parse_operations(raw: str, batch: MemoryBatch) -> tuple[MemoryOperation, ...]:
@@ -163,7 +196,13 @@ def parse_operations(raw: str, batch: MemoryBatch) -> tuple[MemoryOperation, ...
             affinity_count += 1
             if affinity_count > MAX_AFFINITY_OPERATIONS:
                 fail()
-            if set(item) != {"op", "user_id", "closeness", "guardedness", "evidence_event_ids", "reason"}:
+            # `severe` 可选（2026-10-20）：旧输出不带它，按"普通下调"处理。
+            base_fields = {"op", "user_id", "closeness", "guardedness",
+                           "evidence_event_ids", "reason"}
+            if set(item) not in (base_fields, base_fields | {"severe"}):
+                fail()
+            severe = item.get("severe", False)
+            if not isinstance(severe, bool):
                 fail()
             target_user = item["user_id"]
             if not isinstance(target_user, str) or not re.fullmatch(r"\d{5,12}", target_user):
@@ -174,9 +213,12 @@ def parse_operations(raw: str, batch: MemoryBatch) -> tuple[MemoryOperation, ...
             deltas = []
             for axis_name in ("closeness", "guardedness"):
                 value = item[axis_name]
-                if not isinstance(value, str) or value not in AFFINITY_DELTAS:
+                if not isinstance(value, str) or not AFFINITY_DELTA_PATTERN.fullmatch(value.strip()):
                     fail()
-                deltas.append(AFFINITY_DELTAS[value])
+                number = int(value)
+                if abs(number) > AFFINITY_DELTA_LIMIT:
+                    fail()
+                deltas.append(number)
             evidence = item["evidence_event_ids"]
             if not isinstance(evidence, list) or not evidence or len(evidence) > 40:
                 fail()
@@ -194,11 +236,21 @@ def parse_operations(raw: str, batch: MemoryBatch) -> tuple[MemoryOperation, ...
                 evidence_event_ids=tuple(evidence),
                 affinity_user_id=target_user,
                 closeness_delta=deltas[0], guardedness_delta=deltas[1],
+                severe=severe,
             ))
             continue
         content_count += 1
         if content_count > MAX_OPERATIONS:
             fail()
+        # 2026-10-21：模型会多写 `scope_key`（它以为要填）。从前这里是
+        # `set(item) != fields` **严格相等**，多一个键就整批 `invalid_operation`，
+        # 而维护 agent 是"整轮失败、租约到期重试同一批"——从 01:10 起每一轮都在失败，
+        # 记忆一条都没再写进去（用户报的"画像好久没有新的"就是它）。
+        # **只放过 `scope_key`**：它不改变任何东西——scope/scope_key 由服务端按批绑定
+        # （`batch.scope_key(scope)`），模型给的这个键一律忽略，记录仍然落在本批那个人身上。
+        # `subject_user_id` / `user_id` **照旧拒绝**：那两个是在指定"这条记忆算谁的"，
+        # 属于伪造身份的形状（`test_reject_foreign_scope_and_forged_model_identity` 钉着）。
+        item.pop("scope_key", None)
         fields = {"op", "scope_type", "evidence_event_ids", "targets"}
         if op != "DELETE":
             fields |= {"kind", "normalized_key", "content", "confidence", "ttl_days"}
@@ -251,7 +303,7 @@ def parse_operations(raw: str, batch: MemoryBatch) -> tuple[MemoryOperation, ...
             fail()
         if not safe_memory_text(content) or sanitize_chat_text(content) != content:
             fail()
-        if not isinstance(key, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", key):
+        if not isinstance(key, str) or not _key_ok(key, kind):
             fail()
         if not isinstance(kind, str) or kind not in KINDS:
             fail()
@@ -278,9 +330,12 @@ def parse_operations(raw: str, batch: MemoryBatch) -> tuple[MemoryOperation, ...
         if kind == "status" and scope == "group":
             fail()  # 状态是某个人的处境，不是群的公共事实
         if kind == "profile":
-            # 画像一个人一条、跨群同一条：键固定、必须挂在本人身上、不许关联别人。
-            # 挂在 user_group 会让"同一个人在两个群里有两份画像"，渲染时还得二选一。
-            if scope != "user_global" or key != "profile":
+            # 画像：**碎片化**（2026-10-21 用户："画像不是完整的一大段啊，可以是一点一点
+            # 拼凑起来的"）。一个人可以有多条：总览用键 `profile`，某个方面用
+            # `profile/<方面>`（例如 `profile/工作`、`profile/脾气`）。
+            # 仍然**必须挂在本人身上**（`user_global`）——挂在 user_group 会让同一个人
+            # 在两个群里有两份画像，渲染时还得二选一。
+            if scope != "user_global" or not (key == "profile" or key.startswith("profile/")):
                 fail()
             if subjects:
                 fail()
@@ -290,6 +345,42 @@ def parse_operations(raw: str, batch: MemoryBatch) -> tuple[MemoryOperation, ...
                                        tuple(evidence), tuple(parsed_targets),
                                        subjects=tuple(dict.fromkeys(subjects)), durable=durable))
     return tuple(results)
+
+
+#: 这一节开头那一句**规矩**（2026-10-18，用户交底：「记忆带出处（读侧）」）。
+#:
+#: 为什么需要它：记忆是模型写的，而"她自己攒下的印象"和"别人当时说的原话"在 prompt 里
+#: 长得一模一样；她于是把印象说成"你上次说过"。实测最近 2 天"断言自身过往"的 23 条里
+#: **16 条不可核实（70%）**，最硬的一例「椅子倒是拆过几张」在那一轮输入里「拆」出现 0 次。
+#: 出处标出来以后，她手里第一次有了"这条能不能当成谁说过"的判据。
+#:
+#: 三条措辞纪律：
+#: 1. **不许出现机制词**（检查/触发/调用/协议/提示词/上下文/记忆库/Stage）：这句每轮都被
+#:    递到她眼前，措辞会被吸收（AGENTS §2.2）；
+#: 2. `quote` / `inferred` 两个值**必须原样**出现——属性里写的就是这两个词，她要对得上；
+#: 3. 一句就够：这一节每轮都跟着回复走，多一句就是每轮多一句噪声。
+MEMORY_SOURCE_RULE = (
+    '每条开头都标着出处：source="quote" 的是当时那句原话，可以照"我记得""你说过"来讲；'
+    'source="inferred" 的只是你自己攒下的印象，只能当印象，别说成谁说过。'
+)
+
+
+def _age_text(record, now: float | None = None) -> str:
+    """这条记忆是多久以前的（渲染成 `age="N天前"`）。
+
+    用 `created_at`（这条**什么时候进库**），不用 `updated_at`：后者每次合并、复述都会被
+    推到当下，拿它当"多久以前"会把三年前的事说成"今天"。反过来，如果哪天需要一个
+    "最近一次被确认"的说法，那应当另开一个属性，别在这里改口径。
+
+    `now` 只是给测试用的口子；生产上一律走 `time.time()`（与 `MemoryStore.clock` 同一套
+    墙上时间——那口钟本来也是 `time.time`）。
+    """
+
+    started = float(getattr(record, "created_at", 0.0) or 0.0)
+    elapsed = (time.time() if now is None else float(now)) - started
+    # 负数是时钟跳变（或测试里的未来时间戳）：按"今天"算，别渲染出 `-1天前` 那种话。
+    days = int(max(0.0, elapsed) // 86400)
+    return f"{days}天前"
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,7 +397,10 @@ class MemoryMaterial:
 
     def as_data(self, group_id: str | None, user_id: str) -> str:
         lines = []
-        used = 0
+        # 规矩那一句也**算进这 2000 字的预算**（2026-10-18）：它每轮都跟着回复走，
+        # 不算进去就等于给自己开了一个"规矩随便写长"的后门——实测那样会顶破上限
+        # （`test_memory.py` 那条 2000 字的用例当场红：2058 > 2000）。
+        used = len(MEMORY_SOURCE_RULE) + 1
         allowed = {("group", group_id), ("user_group", f"{group_id}:{user_id}"), ("user_global", user_id)}
         for r in self.records:
             if not group_id or (r.scope_type, r.scope_key) not in allowed or r.visibility != "group_safe" or r.status != "active":
@@ -317,12 +411,21 @@ class MemoryMaterial:
             about = escape(self._about(r), quote=True)
             owner = escape(r.subject_user_id or "group", quote=True)
             detail = f' about="{about}"' if about else ""
-            line = f'<memory scope="{r.scope_type}" subject="{owner}"{detail}>{content}</memory>'
+            # 出处与新鲜度（2026-10-18）：两个属性都是**我们这边算出来的**，不是模型写的，
+            # 所以不转义（值只有 quote/inferred 与 `N天前` 两种形状）。
+            source = "quote" if getattr(r, "quoted", False) else "inferred"
+            age = _age_text(r)
+            line = (f'<memory scope="{r.scope_type}" subject="{owner}"{detail}'
+                    f' source="{source}" age="{age}">{content}</memory>')
             if used + len(line) > 2000 or len(lines) >= 5:
                 break
             lines.append(line)
             used += len(line)
-        return "\n".join(lines) or "（暂无可用长期记忆）"
+        if not lines:
+            # 没有可用记忆时**保持与改动前逐字相同**（那句规矩也跟着不出现：没有条目时
+            # "标着出处"这句话没有指称对象，纯噪声）。
+            return "（暂无可用长期记忆）"
+        return MEMORY_SOURCE_RULE + "\n" + "\n".join(lines)
 
     def as_judge_note(self, group_id: str | None, user_id: str, *, max_items: int = 2) -> str:
         """给判定 agent 的一行人话：这个人怎么称呼、他的红线是什么。

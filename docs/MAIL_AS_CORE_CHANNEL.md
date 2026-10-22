@@ -541,3 +541,70 @@ git -C dev grep -n "create_task\|run_background_plugin" -- src/qq_roleplay_bot/r
 # 记忆只认群（来源对称目前做不到）
 git -C dev grep -n "allowed_groups" -- src/qq_roleplay_bot/memory_service.py src/qq_roleplay_bot/memory_inbox.py
 ```
+
+---
+
+## 九、搬家进度（2026-10-20 实测，逐条核过代码）
+
+> 用户问：「搬家不是早就做了吗」——**做了一半**。下面每一条都在树上核过，
+> 不是照文档推的。落点：核心在 `dev\`（`main` 分支），插件在 `yunru-stage4\`（`plugins` 分支）。
+
+| 部分 | 现在在哪 | 搬了吗 |
+| --- | --- | --- |
+| **出站**（怎么把信发出去） | 核心 `runtime._build_letter_client()`（约 `runtime.py:2917`），以 `report.letter_client` 交给插件；插件不能自己连邮箱 | ✅ 搬了 |
+| **投递盖章**（身份 / 会话 / `sender_role`） | 核心 `runtime.deliver()`（约 `runtime.py:1710`）；插件只交 `DeliveredMessage`（同文件 1790 附近校验类型） | ✅ 搬了 |
+| **收信轮询**（`poll_once`、节拍） | `yunru-stage4\src\qq_roleplay_bot\plugins\mail\mail_channel.py` + `plugin.py`（节拍来自 `dev_config.MAIL_POLL_SECONDS`，默认 300 秒） | ❌ 没搬（本文**第 3 步**） |
+| **读正文 / 去重 / 回信 / 配额** | 同上：`mail_channel.py` 与 `mail_state.py`（`mark_mail_processed` / `is_mail_processed` / `record_mail_reply`） | ❌ 没搬（本文**第 2 步**） |
+| **日报 / 写信内容** | `plugins/mail/daily_report.py`、`letter_writer.py` | ❌ 没搬（本文**第 4 步**） |
+
+也就是：**第 1 步完成了**（渠道层 + 投递意图），**第 2、3、4 步没做**。
+
+> ⚠️ 核这件事必须去 `yunru-stage4`：`main` 分支的
+> `src/qq_roleplay_bot/plugins/` 里**只有一个 `__init__.py`**（插件源码不在 main，
+> 见 `AGENTS.md` §7.1-1 的新注解）。在 dev 里 grep 插件代码会得出"没这个插件"的反结论。
+
+## 十、顺带查出来的三个收信 bug（都长在"没搬"的那半）
+
+用户报「我给云茹回邮件她不回」。实测链路（2026-10-19 23:45:16 那封）：
+
+```
+23:45:16.487  mail_sender_allowed user_id=2639157559
+23:45:16.493  WARNING Stage 3 blocked request: reason=sensitive_local_request_admin_not_implemented user=2639157559 role=owner
+23:45:16.496  INFO mail_no_reply sender=xuzhunzhi@foxmail.com message_id=msg_hJM3...
+```
+
+三个独立缺陷（按因果顺序）：
+
+1. **只读未读**：`poll_once` 调 `list_messages(..., unread_only=True)`
+   （`mail_channel.py:303`），底层是 `message +list --is-unread`。
+   **服务端的"已读"不是我们的真相**——那封信在 inbox 里 `read=True`，
+   于是每 300 秒扫一遍都扫不到。配套证据：`mail.jsonl` 里**收信类 trigger 一条都没有**
+   （48 条全是 `daily_report`），说明收信通道**从来没进过模型**。
+2. **读正文会把它标成已读**：`_read_body`（`mail_channel.py:425`）为了拿全文调
+   `mail.read_message()` → `message +read`，**这个动作会在服务端把信置为已读**。
+   所以"谁点的已读"答案是：**我们自己**。读一次之后，这封就再也进不了未读列表。
+3. **回没回都算处理过**：`poll_once` 的 `finally` 里无条件
+   `mark_mail_processed(message_id)`（注释写着"无论回没回都记成处理过"）
+   ⇒ 某次没回成，这封信**既读不到（已读）、也不会重试（已标记）**，永久丢失。
+
+**CLI 实际能力（`agently-cli message +list --help` 实测）**：
+
+```
+--cursor <next_cursor>   翻页
+--after / --before       时间过滤（ISO 8601）
+--limit                  每页最多 50
+--dir                    inbox|sent|trash|spam
+--is-unread              只列未读（就是上面第 1 条那个坑）
+```
+
+**本文原稿缺的一块：收信可靠性**（这次补上，动代码前先按这个写）：
+
+1. **不用 `--is-unread`**，改用 `--after`（上次水位 − 1 小时重叠）+ `--cursor` 翻到底；
+2. **水位只在"翻完且无异常"时推进**，失败停在旧水位、下轮重扫；
+   去重靠 `message_id`，不靠服务端已读标记；
+3. **只有回信成功才写"已处理"**，失败留给下一轮（否则就是上面第 3 条那个永久丢失）；
+4. **配额与积压**：每轮回信上限 K（默认 3）；pending > M（默认 20）时只回最新 K 封
+   并给主人发一封积压告警；**超额的不写"已处理"**，下轮继续；
+5. **隐含上限要说清**：`MAX_AGE_HOURS = 48`，超过 48 小时的信会被当 stale 直接跳过，
+   所以"慢慢回完"最多只能拖 48 小时。
+

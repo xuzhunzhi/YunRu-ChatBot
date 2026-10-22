@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 from . import dev_config
+from . import notice_text
 from . import operator_config
 from . import prompt_library
 from . import provider_failover
@@ -1614,18 +1615,68 @@ class _SeamBinder:
 
         return call
 
-    async def notify(self, text: str) -> None:
-        """通知超管——走补发队列，连接断了也不会把这条提示弄丢。"""
+    async def notify(self, target: object, text: str | None = None) -> str:
+        """通知：**发出去**，然后让它留在那个会话的**上下文**里（不进历史、不进记忆）。
+
+        ## 两种调用形状（老的那个一个字不用改）
+
+        * `notify(text)`：老写法，收件人是超管（`APPROVE_NOTIFY_USER_IDS`，最多 3 个），
+          与 2026-09-30 起 `join_approval` 用的一模一样。
+        * `notify(target, text)`：`target` 是一个 `MessageTarget`（群或私聊），或者
+          从配置里读出来的映射 `{"group_id": "…"}` / `{"user_id": "…"}`。
+          **不收裸字符串**：`"800000001"` 是群号还是 QQ 号，这里猜不出来，
+          猜错等于把通知发到别处去——比不发更糟（`_notice_target` 会抛）。
+
+        ## 为什么这件事在核心做（而不是交给插件）
+
+        用户 2026-10-19 三句口径，按时间顺序（后一句覆盖前一句，别只看第一句）：
+
+        1. 「发送通知这个，包括命令的回复，能不能通过规则让云茹识别成另一个人在
+           说话」→「哎要不还是通知吧，不要当人了」——它不该被当成某个人说的话；
+        2. 「通知只在上下文，不进历史」——所以它**不写 `state.history`**；
+        3. 「**上下文要留，只是不进记忆，你别搞混了**」——它在上下文里**每轮都在**
+           （不是只出现一次），而因为不在历史里，**记忆 agent 也提取不到它**。
+
+        这件事只能在核心做：插件拿不到会话状态（`AGENTS.md` §2.3：插件不许碰对话与
+        记忆），而"这条到底发出去没有"只有这里知道。
+
+        ## "成功发出才进上下文"
+
+        `_send_or_queue` 的三种结果：
+
+        | 结果 | 进不进 | 为什么 |
+        | --- | --- | --- |
+        | `sent` | 进 | 对面收到了 |
+        | `queued` | 进 | 进了补发队列，**它一定会被补发**；补发那条路不会再回调这里，不进就等于永远丢 |
+        | `failed` | **不进** | 队列都没有/满了，这条真的没出去——进了就是让她以为发过 |
+
+        返回值是这三种状态之一（旧版返回 `None`；多这一位是为了让插件能记数，
+        `join_approval` 那种忽略返回值的调用方不受影响）。
+
+        进上下文的那一份**不是原文**：先过 `notice_text.for_history`（去 CQ 码/@、
+        脱敏 QQ 号/路径/凭据、截断 200 字）。见 `_record_notice`。
+        """
 
         engine = self._require()
         transport = self._require_transport()
-        targets = tuple(
-            str(item) for item in getattr(dev_config, "APPROVE_NOTIFY_USER_IDS", ()) if str(item)
-        )[:3]
-        for user_id in targets:
-            await _send_or_queue(
-                transport, getattr(engine, "outbox", None), MessageTarget(user_id=user_id), text
+        if text is None:
+            # 老写法：`notify(text)`。收件人由配置定，正文就是那个参数。
+            body = "" if target is None else str(target)
+            targets: tuple[MessageTarget, ...] = tuple(
+                MessageTarget(user_id=str(item))
+                for item in getattr(dev_config, "APPROVE_NOTIFY_USER_IDS", ()) if str(item)
+            )[:3]
+        else:
+            body = str(text)
+            targets = (_notice_target(target),)
+        status = "failed"
+        for item in targets:
+            status = await _send_or_queue(
+                transport, getattr(engine, "outbox", None), item, body
             )
+            if status in ("sent", "queued"):
+                _record_notice(engine, item, body)
+        return status
 
     async def remind_send(self, delivery: RemindDelivery) -> RemindSendResult:
         """把一条提醒**发出去**：`async (RemindDelivery) -> RemindSendResult`。
@@ -1763,6 +1814,9 @@ class _SeamBinder:
             target=MessageTarget(user_id=sender),
             sender_role="owner" if is_owner else "mailer",
             sender_name=_exact_text(parcel.sender_name) or (sender or "主人" if is_owner else sender),
+            # 记下"这条是从插件渠道来的"：`check_message_security` 用它决定那道
+            # 本机信息闸要不要生效（2026-10-20：只对 QQ 生效，见 `transport.IncomingMessage.channel`）。
+            channel=channel,
         )
         return await engine.handle(message)
 
@@ -2976,6 +3030,79 @@ def _build_group_actions(engine: DialogueEngine, registry, usage_store) -> None:
     engine.group_actions = built
 
 
+def _notice_target(target: object) -> MessageTarget:
+    """把插件递进来的"发给谁"统一成 `MessageTarget`。
+
+    只收两种形状（**刻意不收裸字符串**）：
+
+    * `MessageTarget`——插件可以 `from ...transport import MessageTarget`；插件 import
+      核心的类型在这一族里已有先例（`remind` 用核心的 `RemindDelivery`、
+      `timeout_alert` 用核心的快照口）。
+    * 映射 `{"group_id": "…"}` / `{"user_id": "…"}`——订阅列表这种从 JSON 读出来的
+      配置直接用得上，不必为了一个目标去 import 核心类型。
+
+    为什么不收 `"800000001"`：群号与 QQ 号都是纯数字，这里**猜不出来**。猜错的代价是
+    "通知发到了另一个人/另一个群"，那比不发更糟，而且发出去就收不回来。所以宁可抛
+    `ValueError`，让写插件的人在第一次跑的时候就看到。
+    """
+
+    if isinstance(target, MessageTarget):
+        return target
+    if isinstance(target, dict):
+        group_id = target.get("group_id")
+        user_id = target.get("user_id")
+        if group_id not in (None, ""):
+            return MessageTarget(group_id=str(group_id))
+        if user_id not in (None, ""):
+            return MessageTarget(user_id=str(user_id))
+    raise ValueError(
+        "notify 的目标要是 MessageTarget，或 {'group_id': …} / {'user_id': …} 这样的映射；"
+        f"收到的是 {type(target).__name__}（裸字符串在这里认不出是群号还是 QQ 号）"
+    )
+
+
+def _record_notice(engine, target: MessageTarget, text: str) -> None:
+    """把一条**已经发出去的通知**放进目标会话"上下文里常驻的通知清单"。
+
+    用户 2026-10-19 的口径（原话「**上下文要留，只是不进记忆，你别搞混了**」）：
+
+    * **不进历史**：不写 `state.history`，所以不落盘、不参与压缩，**也不会被记忆
+      agent 提取到**（它从历史里挑"她记得的事"）；
+    * **进上下文**：`ConversationState.notices` 里常驻，每轮拼材料时渲染出来
+      （`speaker="notice"`，紧挨着 `<history>`、在 DATA 信封里），**不是只出现一次**；
+    * **不设单独上限**：寿命跟会话状态一致（`DialogueSessions.leave` 清空、LRU 淘汰
+      时一起没）。
+
+    四条边界：
+
+    1. **只动那份材料**。出站那一步已经用原文发完了；这里洗的只是"进上下文的那一份"
+       （`notice_text.for_history`：去 CQ 码/@、脱敏、截断 200 字）。
+    2. **失败不许冒泡**：放进清单失败不能把"已经发出去"变成插件眼里的异常
+       （插件会以为自己没发成、再发一遍）。
+    3. **会建会话状态**：`DialogueSessions.state()` 会新建一个空会话。现在这件事是
+       纯无害的——清单在内存里、不进历史，所以它**不会**影响"这个群要不要补群背景"
+       （`_seed_history` 的判据是"历史非空"，而通知不写历史）。
+    4. **不做上限/过期**：用户明确否掉了（「哪来一天几十条。还有上下文最多500条，
+       怎么撑爆」），这里不要再发明一个。
+    """
+
+    sessions = getattr(engine, "sessions", None)
+    state_of = getattr(sessions, "state", None)
+    if not callable(state_of):
+        # 最小引擎替身（测试里的 `_Recorder` 那种）没有会话表：什么都不记，也不炸。
+        return
+    cleaned = notice_text.for_history(text)
+    if not cleaned:
+        return
+    from .chat_log import session_id_of
+
+    session_id = session_id_of(target)
+    try:
+        state_of(session_id).add_notice(cleaned)
+    except Exception:  # noqa: BLE001 - 放清单失败不许影响出站
+        logger.warning("plugin notice context skipped session=%s", session_id, exc_info=True)
+
+
 def _plugin_action_seams(engine: DialogueEngine, transport: QQTransport):
     """给后台插件注入的两个窄接缝：`call_action` 与 `notify`。
 
@@ -2985,7 +3112,10 @@ def _plugin_action_seams(engine: DialogueEngine, transport: QQTransport):
       `purpose="join_approval"` 那一条），再调对面，回执拆成 `data` 返回；
       失败抛异常（`onebot_ws.call_api` 已经把 retcode≠0 变成异常了）。
       插件因此不需要知道回执形状，也绕不开闸门。
-    - `notify(text)`：通知超管——走补发队列，连接断了也不会把这条提示弄丢。
+    - `notify(target, text)`：通知——**发出去，并且让它留在那个会话的上下文里**
+      （`speaker="notice"`；不进历史、不进记忆，见 `_SeamBinder.notify`）。
+      老写法 `notify(text)` 仍然可用，收件人是超管。连接断了也不会把这条提示弄丢
+      （走补发队列）。
 
     她们（后台插件）拿到的就是这两个函数，拿不到 transport 本身。
 
@@ -3517,7 +3647,8 @@ class _DisconnectNotifier:
     | 上一刻 | 这一刻看到 | 结果 |
     | --- | --- | --- |
     | 武装（看门狗刚起来就是） | 连着 | 什么都不发，仍然武装 |
-    | 武装 | 没连 | **广播一次**，这一段转成"已播过" |
+    | 武装 | 没连（**这个进程从没连上过**） | **什么都不发**（2026-10-20：启动窗口不算掉线） |
+    | 武装 | 没连（连过，之后掉了） | **广播一次**，这一段转成"已播过" |
     | 已播过 | 没连 | 什么都不发（掉线期间反复检查**不算新事件**） |
     | 已播过 | 连着 | **重新武装**，什么都不发（**恢复不发**） |
 
@@ -3531,14 +3662,16 @@ class _DisconnectNotifier:
        所以"断了"最多晚**一个检测周期**被广播；而**两次采样之间断了又连上**
        （窗口 <60 秒的瞬时抖动）仍然**不会被看见**，也就不会通知。要彻底不漏，
        得让传输层在 `_connection_ready.clear()` 那里发事件——**这次没做**。
-    2. **第一次采样在启动后 60 秒**（沿用看门狗原有的计时）：开机时对面还没连上来，
-       算**一段掉线**，会广播一次。**这是有意的**（2026-10-06 用户定的）：
-       "机器重启后 NapCat 没起来、机器人活着但谁也看不见"正是这条通知最大的价值。
-       它与那条告警日志的口径一致（"消息进不来"是同一个事实）。
+    2. **第一次采样在启动后 60 秒**（沿用看门狗原有的计时）。**2026-10-20 改**：
+       这一段**不再广播**。原来（2026-10-06 口径"机器重启后 NapCat 没起来、
+       机器人活着但谁也看不见，正是这条通知最大的价值"）会广播一封——但实测的后果是
+       **每次重启/部署都给操作者发一封"云茹断线了"**，用户当天原话："只对真断线发"。
+       现在的判据是"**这个进程先连上过、之后掉了**"才算真断线（`_ever_connected`）；
+       从没连上过只留那条告警日志，不发信。
     3. **接收者抛异常只记一笔**，不会把看门狗带走，也不影响后面的接收者。
     """
 
-    __slots__ = ("_receivers", "_enabled", "_announced")
+    __slots__ = ("_receivers", "_enabled", "_announced", "_ever_connected")
 
     def __init__(self, receivers: object = (), *, enabled: bool = True) -> None:
         self._receivers: tuple[object, ...] = tuple(receivers)  # type: ignore[arg-type]
@@ -3546,6 +3679,10 @@ class _DisconnectNotifier:
         #: 当前这一段掉线**播过没有**。名字刻意是"播过"而不是"断着"：
         #: 状态只关心边沿，不关心断了多久。
         self._announced = False
+        #: 这个进程**连上过没有**。2026-10-20 用户改口："只对真断线发"——
+        #: 启动后对面还没连上来那段**不算掉线**（那是"机器人刚起来、NapCat 还没连"），
+        #: 不再广播。只有"先连上过、之后掉了"才是真断线。
+        self._ever_connected = False
 
     @property
     def enabled(self) -> bool:
@@ -3568,7 +3705,15 @@ class _DisconnectNotifier:
         if connected:
             # 重连 = **重新武装**。这里刻意什么都不发：用户明确说过
             # "bot 本身稳定性很可靠，不用额外通知"，恢复通知只是噪音。
+            self._ever_connected = True
             self._announced = False
+            return False
+        if not self._ever_connected:
+            # 2026-10-20 用户改口："只对真断线发"。启动后还没连上来就掉 → 这不算掉线，
+            # 是"机器人先起来、NapCat 还没连"的正常窗口（重启时必然经过这一段）。
+            # 原来这里会广播一封"云茹断线了"，于是**每次重启操作者都收到一封**，
+            # 他把这当成噪音否掉了。日志那条告警照旧（`_ConnectionTicker` 自己打），
+            # 只是不再发信。真断线的判据因此是"先连上过，后来掉了"。
             return False
         if self._announced:
             # 同一段掉线里的后续检查：**不是新事件**，一次都不再叫。

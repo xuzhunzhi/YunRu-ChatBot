@@ -109,6 +109,27 @@ class EngineSnapshot:
     # 只有计数，没有正文。
     clarify_quiet: int = 0
     reply_grounding_rewrites: int = 0
+    # 「有人拿工具式的称呼在叫她」（2026-10-20）：这一轮往易变段递了那一句的**条数**。
+    # 它是**分母**（这种叫法有多常见），不是错误计数——长期为 0 才说明判据没在工作。
+    # 只有计数，**不记正文、也不记那个称呼**。
+    reply_tool_vocative_hints: int = 0
+    # 「她把过往说成事实」（2026-10-18 交底、2026-10-19 接线；同一个
+    # `ask_when_unsure` 开关下，关掉它这三个数恒为 0）：
+    # `reply_past_claim_hits` 是判据命中的次数（**分母**：含"最长片段太短、按口径放行"
+    # 的那几例——那些不核，但"她在讲自己的过去"这件事已经发生了）；
+    # `reply_past_claim_rewrites` 是材料里对不上、**打回重写一次**的次数；
+    # `reply_past_claim_unfixed` 是重写之后**仍对不上、照发**的次数——这一关**绝不丢回复**
+    # （与 `data_marker_drops` 那一关刻意不同），所以它非零只说明"这一句没救回来"，
+    # 不代表有一句话没发出去。只有计数，**不记正文**。
+    reply_past_claim_hits: int = 0
+    reply_past_claim_rewrites: int = 0
+    reply_past_claim_unfixed: int = 0
+    # 「预设型编造」（2026-10-20 加；同一个 `ask_when_unsure` 开关下，关掉它恒为 0）：
+    # 她把一件有"经历门槛"的事（六级 / 高考 / 宿舍 / 面试……）当成**已经发生过**
+    # 摆了出来，而这一轮材料里那个词出现 **0 次** → 打回重写一次的次数。
+    # 它与 `reply_past_claim_rewrites` **共用每轮一次**的重写额度，所以两者不会同时加。
+    # 只有计数，**不记正文、也不记是哪个词**。
+    reply_presupposition_rewrites: int = 0
     # 不可信数据的短码（`data_boundary`，2026-10-08）：`data_marker_retries` 是
     # "回复里抄了当轮短码、被打回重写一次"的次数；`data_marker_drops` 是"重写又抄、
     # 于是这一条没发出去"的次数（fail-closed）。只有计数，**不含短码、不含正文**。
@@ -125,6 +146,12 @@ class EngineSnapshot:
     # 与 `empty_forced_reply` 是同一件事的两头：兜底生效时那个数就不涨了。
     # **长期非零不是好消息**——模型还在漏信封，只是这次没把话丢掉。只有计数，没有正文。
     reply_recovered_from_bare_text: int = 0
+    # 超短期层（inbox）的维护计数（2026-10-20），只记数、不含正文：
+    # `memory_inbox_extended` = 到期时"从没被维护碰过"、于是被续了 TTL 的条数；
+    # `memory_inbox_expired_deleted` = 真正过期删掉的条数。前者非零说明维护漏过拍，
+    # 后者才是正常的遗忘；两个数一起看才知道"1–3 小时的 TTL 有没有在丢数据"。
+    memory_inbox_extended: int = 0
+    memory_inbox_expired_deleted: int = 0
     # 当前当值状态：热群、当值多久、排队深度。只有数字与群号，没有正文。
     focus: dict[str, object] | None = None
     # 判定采样（2026-10-10）的观测面：各会话当前档位 / 攒批条数 / 攒了几条 /

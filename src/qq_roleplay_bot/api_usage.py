@@ -45,6 +45,17 @@ COUNTER_NAMES = (
     # 「有人打探她怎么做出来的，所以这一轮不接」的次数（2026-10-09）：它**不写关系轴**，
     # 只是"这一轮为什么没开口"的出口。只记数，没有正文。
     "guard_probe_held",
+    # 「她把过往说成事实」（2026-10-18 交底、2026-10-19 接线）：命中判据的次数（分母）、
+    # 材料里对不上于是打回重写一次的次数、以及重写之后仍对不上**照发**的次数。
+    # 三者都只记数，**不记正文**；与 `data_marker_drops` 不同，这一关从不丢回复。
+    "reply_past_claim_hits", "reply_past_claim_rewrites", "reply_past_claim_unfixed",
+    # 「预设型编造」（2026-10-20）：她把一件有"经历门槛"的事（六级 / 高考 / 宿舍）
+    # 当成已经发生过的东西讲出来，而这一轮材料里那个词 0 次 → 打回重写一次。
+    # 与上面「过往断言」共用每轮一次的重写额度。只记数，**不记正文、不记是哪个词**。
+    "reply_presupposition_rewrites",
+    # 「有人拿工具式的称呼在叫她」（2026-10-20）：这一轮往易变段递了那一句的条数。
+    # 只有计数，**不记正文、也不记那个称呼**。
+    "reply_tool_vocative_hints",
     # 不可信数据边界（`data_boundary`）：`data_marker_retries` 是"回复里抄了当轮短码、
     # 被打回重写一次"的条数；`data_marker_drops` 是"重写又抄、于是这一条没发出去"的条数。
     # 两者都只记数，**不记短码、不记正文**。
@@ -56,6 +67,10 @@ COUNTER_NAMES = (
     # 被当正文发了出去（`stage3_runtime.parse_dialogue_output`）。它顶着的是
     # "判定说要回但回复空手 → 沉默"那条路。只有计数，没有正文。
     "reply_recovered_from_bare_text",
+    # 超短期层（inbox）的维护计数（2026-10-20）：到期续期一次（保险）的条数、
+    # 真正过期删掉的条数。TTL 压到 1–3 小时后，前者非零说明维护漏过拍；
+    # 两者都只记数，**不记正文**。
+    "memory_inbox_extended", "memory_inbox_expired_deleted",
 )
 
 

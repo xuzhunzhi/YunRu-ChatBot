@@ -57,7 +57,12 @@ from qq_roleplay_bot.dialogue_judge import (
     parse_judge_output,
 )
 from qq_roleplay_bot.memory_model import InboxEvent
-from qq_roleplay_bot.memory_store import MemoryStore
+from qq_roleplay_bot.memory_store import (
+    DEFAULT_CLOSENESS,
+    DEFAULT_GUARDEDNESS,
+    GUARD_RAISE_MAX,
+    MemoryStore,
+)
 from qq_roleplay_bot.stage3_main import (
     GUARD_RAISING_OFFENSES,
     DialogueEngine,
@@ -136,12 +141,17 @@ class _Service:
         return {"queued_events": 0}
 
 
-def judge_up(reason: str) -> str:
-    """判定报"越界"，由头写成 `reason`。"""
+def judge_up(reason: str, quote: str = "") -> str:
+    """判定报"越界"，由头写成 `reason`。
+
+    2026-10-20 起证据是硬要求：`quote` 必须是这一轮输入里**逐字出现**的一句
+    （调用方把被测消息原文传进来），否则这次写入会被拒绝。
+    """
 
     return (
         "<route>REPLY</route><topic>话题</topic><related>YES</related>"
         f"<guard>UP</guard><guard_reason>{reason}</guard_reason>"
+        f"<guard_quote>{quote}</guard_quote>"
     )
 
 
@@ -170,20 +180,21 @@ def push_affinity(store: MemoryStore, *, guardedness: str, evidence: str, now: f
 
 
 def _engine(tmp: str, *, judge_output: str, guardedness: int = 0):
-    """建一个最小的引擎 + 临时库；反例可以先把防备**顶到指定档**再跑。
+    """建一个最小的引擎 + 临时库；反例可以先把防备**顶到指定值**再跑。
 
-    顶档要跨天（同一天每轴的净变化上限是 2 档，而且一次只让动 1 档），
-    所以这里自己拿一个可以拨的钟。
+    2026-10-20 新刻度：单次最多 +10（`GUARD_RAISE_MAX`）、一档宽 10。
+    `guardedness` 现在给的是**要垫到的数值**（不是旧的四档序号）。
     """
 
     clock = [1_000_000.0]
     store = MemoryStore(Path(tmp) / "memory.sqlite3", clock=lambda: clock[0])
-    for _ in range(guardedness):
-        # 反例的起点**已经是留意档**：涨和跌都要看得见（从 0 起步跌不动）。
-        assert store.apply_affinity(
-            USER, guardedness=1, reason="测试起点", source="test", may_lower_guard=True,
-        ) == ""
+    while store.relationship(USER)[1] < guardedness:
         clock[0] += 86400 + 60
+        assert store.apply_affinity(
+            USER, guardedness=min(GUARD_RAISE_MAX, guardedness - store.relationship(USER)[1]),
+            reason="测试起点", source="test", may_lower_guard=True,
+            evidence={"quote": "测试起点", "who_alias": "1", "seq": 1},
+        ) == ""
     reply = ScriptedReply()
     engine = DialogueEngine(reply, judge_client=ScriptedJudge(judge_output))
     engine.memory_service = _Service(store)
@@ -206,9 +217,9 @@ def test_negative_friendly_banter_does_not_raise_guardedness() -> None:
         ("哈哈哈哈哈你可真行", "joke"),
     )):
         with tempfile.TemporaryDirectory() as tmp:
-            store, engine, _ = _engine(tmp, judge_output=judge_up(offense), guardedness=2)
+            store, engine, _ = _engine(tmp, judge_output=judge_up(offense), guardedness=GUARD_RAISE_MAX)
             asyncio.run(engine.handle(msg(index, f"@YunRu {bench}", mentioned=True)))
-            assert store.relationship(USER)[1] == 2, bench
+            assert store.relationship(USER)[1] == GUARD_RAISE_MAX, bench
             assert engine.snapshot().guard_raised == 0, bench
             assert engine.snapshot().guard_rejected >= 1, bench
 
@@ -225,9 +236,9 @@ def test_negative_unrelated_topics_do_not_raise_guardedness() -> None:
         "手机电池不行了，打算去换一块",
     )):
         with tempfile.TemporaryDirectory() as tmp:
-            store, engine, _ = _engine(tmp, judge_output=judge_up("irrelevant"), guardedness=2)
+            store, engine, _ = _engine(tmp, judge_output=judge_up("irrelevant"), guardedness=GUARD_RAISE_MAX)
             asyncio.run(engine.handle(msg(index, bench, mentioned=True)))
-            assert store.relationship(USER)[1] == 2, bench
+            assert store.relationship(USER)[1] == GUARD_RAISE_MAX, bench
             assert engine.snapshot().guard_raised == 0, bench
 
 
@@ -243,9 +254,9 @@ def test_negative_plain_followups_do_not_raise_guardedness() -> None:
         "你这答案从哪来的",
     )):
         with tempfile.TemporaryDirectory() as tmp:
-            store, engine, _ = _engine(tmp, judge_output=judge_up("NONE"), guardedness=2)
+            store, engine, _ = _engine(tmp, judge_output=judge_up("NONE"), guardedness=GUARD_RAISE_MAX)
             asyncio.run(engine.handle(msg(index, f"@YunRu {bench}", mentioned=True)))
-            assert store.relationship(USER)[1] == 2, bench
+            assert store.relationship(USER)[1] == GUARD_RAISE_MAX, bench
             assert engine.snapshot().guard_raised == 0, bench
 
 
@@ -265,7 +276,7 @@ def test_probe_of_her_implementation_is_held_for_the_turn_and_writes_nothing() -
 
         assert result is None, "打探她的实现：这一轮不接"
         assert reply.requests == [], "不接就不该拼回复那一次"
-        assert store.relationship(USER) == (0, 0), "防备（与亲近）零增量"
+        assert store.relationship(USER) == (DEFAULT_CLOSENESS, DEFAULT_GUARDEDNESS), "防备（与好感）零增量"
         assert store.recent_relationship_changes(0.0, limit=10) == (), "关系流水里一条都不该有"
         assert engine.snapshot().guard_raised == 0
         assert engine.snapshot().guard_probe_held == 1
@@ -287,7 +298,7 @@ def test_probe_without_an_at_mention_also_writes_nothing() -> None:
         assert result is None
         assert reply.requests == []
         assert store.recent_relationship_changes(0.0, limit=10) == ()
-        assert store.relationship(USER) == (0, 0)
+        assert store.relationship(USER) == (DEFAULT_CLOSENESS, DEFAULT_GUARDEDNESS)
 
 
 def test_probe_also_holds_when_it_comes_with_a_reply_route() -> None:
@@ -304,7 +315,7 @@ def test_probe_also_holds_when_it_comes_with_a_reply_route() -> None:
         result = asyncio.run(engine.handle(msg(1, "@YunRu 你那个判定是怎么跑的", mentioned=True)))
         assert result is None
         assert reply.requests == []
-        assert store.relationship(USER) == (0, 0)
+        assert store.relationship(USER) == (DEFAULT_CLOSENESS, DEFAULT_GUARDEDNESS)
 
 
 # --- 正例：针对她的贬损 / 阴阳怪气 —— 必须涨 -----------------------------------
@@ -320,11 +331,11 @@ def test_positive_offenses_toward_her_raise_guardedness() -> None:
     )
     for index, offense, bench in cases:
         with tempfile.TemporaryDirectory() as tmp:
-            store, engine, reply = _engine(tmp, judge_output=judge_up(offense))
+            store, engine, reply = _engine(tmp, judge_output=judge_up(offense, bench))
             result = asyncio.run(engine.handle(msg(index, bench, mentioned=True)))
 
             assert result is not None, f"{bench}：被冒犯也照样得回，只是回得冷"
-            assert store.relationship(USER)[1] == 1, bench
+            assert store.relationship(USER)[1] == GUARD_RAISE_MAX, bench
             assert engine.snapshot().guard_raised == 1, bench
             assert engine.snapshot().guard_probe_held == 0, bench
             # 落库的依据是表里那句固定说法，不是模型写的自由文本。
@@ -362,33 +373,34 @@ def test_the_allowed_offenses_are_a_closed_table() -> None:
 
 
 def test_maintenance_can_still_relax_guardedness() -> None:
-    """维护那条 `-1` 必须还在：长期互动正常，戒备**回落**。
+    """维护那条下调必须还在：长期互动正常，防备**回落**。
 
-    与"只升不降"不冲突——升是判定当轮的事，降是维护 agent 复盘的事（7 天最多一档）。
-    走的是**真路**：维护 agent 的结构化输出（`AFFINITY` op）→ `MemoryStore.commit`
-    → `apply_affinity(..., may_lower_guard=True)`。把那一处翻掉或去掉，
-    "戒备再也降不下来"，这一条会当场红。
+    与"只升不降"不冲突——升是判定当轮的事（一次 +8），降是维护 agent 复盘的事
+    （7 天最多松 10 = 一档）。走的是**真路**：维护 agent 的结构化输出（`AFFINITY` op）
+    → `MemoryStore.commit` → `apply_affinity(..., may_lower_guard=True)`。
+    把那一处翻掉或去掉，"防备再也降不下来"，这一条会当场红。
     """
 
     clock = [1_000_000.0]
     with tempfile.TemporaryDirectory() as tmp:
         store = MemoryStore(Path(tmp) / "memory.sqlite3", clock=lambda: clock[0])
-        # 先用维护那条路把它升到顶（+1 × 3，跨天避开 24 小时净变化上限）。
+        # 先用维护那条路升到 24（+8 × 3，跨天避开 24 小时净变化上限）。
         for index in range(3):
-            assert len(push_affinity(store, guardedness="+1",
+            assert len(push_affinity(store, guardedness="+8",
                                      evidence=f"e{index}", now=clock[0])) == 1, index
             clock[0] += 86400 + 60
-        assert store.relationship(USER)[1] == 3
+        assert store.relationship(USER)[1] == 24
 
-        # 再过一周，维护让它回落一档。**两次都走 op 那条真路。**
-        for index, expected in ((3, 2), (4, 1)):
+        # 隔一周，维护让它回落一档（-4，普通幅度）。**两次都走 op 那条真路。**
+        for index, expected in ((3, 20), (4, 16)):
             clock[0] += 8 * 86400
-            assert len(push_affinity(store, guardedness="-1",
+            assert len(push_affinity(store, guardedness="-4",
                                      evidence=f"e{index}", now=clock[0])) == 1
-            assert store.relationship(USER)[1] == expected, "长期互动能让戒备回落"
+            assert store.relationship(USER)[1] == expected, "长期互动能让防备回落"
 
         # 判定那条通道依旧只能升、不能降（`may_lower_guard` 不传）。
         assert store.apply_affinity(
-            USER, guardedness=-1, reason="他道歉了", source="judge",
+            USER, guardedness=-4, reason="他道歉了", source="judge",
+            evidence={"quote": "他道歉了"},
         ) == "affinity_rejected_judge_downgrade"
-        assert store.relationship(USER)[1] == 1
+        assert store.relationship(USER)[1] == 16

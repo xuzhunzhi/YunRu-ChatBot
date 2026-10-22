@@ -26,7 +26,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from qq_roleplay_bot import memory_readonly
-from qq_roleplay_bot.memory_store import DAY, SCHEMA_VERSION, MemoryStore
+from qq_roleplay_bot.memory_store import (
+    DAY, GUARD_RAISE_MAX, SCHEMA_VERSION, MemoryStore)
+from qq_roleplay_bot.relationship_tiers import guard_tier
 from qq_roleplay_bot.stage3_main import DialogueEngine
 from qq_roleplay_bot.transport import IncomingMessage, MessageTarget
 
@@ -181,10 +183,11 @@ def test_a_verbatim_quote_is_stored_and_answers_which_sentence() -> None:
         assert engine.snapshot().quote_unverified == 0
 
 
-def test_a_quote_that_is_not_in_the_input_is_not_stored() -> None:
-    """模型编一句/改写一句 → **不存**，只把 `quote_unverified` 加一。
+def test_a_quote_that_is_not_in_the_input_refuses_the_write() -> None:
+    """模型编一句/改写一句 → **这次写入被拒**，防备一点不动。
 
-    档位照升：证据存不下来是证据链的事，不该改变她的态度。
+    2026-10-20 用户口径：拿不到原话就拒绝这次写入，而不是记一条查不了的理由。
+    旧行为是"证据存不下来、档位照升"——那正是全库只有 1 条证据的原因。
     """
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -196,7 +199,9 @@ def test_a_quote_that_is_not_in_the_input_is_not_stored() -> None:
         snapshot = engine.snapshot()
         assert snapshot.quote_unverified == 1
         assert snapshot.evidence_stored == 0
-        assert store.relationship(USER)[1] == 1, "档位照升——那是两件事"
+        assert snapshot.guard_raised == 0
+        assert snapshot.guard_rejected == 1
+        assert store.relationship(USER)[1] == 0, "没有原话就不改防备"
 
 
 def test_a_hold_never_stores_a_quote_even_if_the_model_fills_one() -> None:
@@ -227,7 +232,7 @@ def test_broad_terms_are_masked_not_dropped() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = _store(tmp)
         store.apply_affinity(
-            USER, guardedness=1, reason="他当面贬损羞辱", source="judge",
+            USER, guardedness=8, reason="他当面贬损羞辱", source="judge",
             evidence={"quote": "这jb机器人", "who_alias": "4", "seq": 12},
         )
         rows = _evidence(store)
@@ -245,7 +250,7 @@ def test_masking_too_short_drops_the_whole_sentence() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = _store(tmp)
         store.apply_affinity(
-            USER, guardedness=1, reason="他当面贬损羞辱", source="judge",
+            USER, guardedness=8, reason="他当面贬损羞辱", source="judge",
             evidence={"quote": "你这bot", "who_alias": "4", "seq": 3},
         )
         rows = _evidence(store)
@@ -260,7 +265,7 @@ def test_system_self_quotes_are_dropped_whole() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = _store(tmp)
         store.apply_affinity(
-            USER, guardedness=1, reason="他当面贬损羞辱", source="judge",
+            USER, guardedness=8, reason="他当面贬损羞辱", source="judge",
             evidence={"quote": "认得。做云茹的那个。", "who_alias": "4", "seq": 7},
         )
         rows = _evidence(store)
@@ -276,7 +281,7 @@ def test_long_quotes_keep_120_chars_and_the_original_length() -> None:
         store = _store(tmp)
         long_text = "你" * 300
         store.apply_affinity(
-            USER, guardedness=1, reason="他当面贬损羞辱", source="judge",
+            USER, guardedness=8, reason="他当面贬损羞辱", source="judge",
             evidence={"quote": long_text, "who_alias": "4", "seq": 9},
         )
         rows = _evidence(store)
@@ -297,7 +302,7 @@ def test_evidence_expires_after_30_days_while_the_log_keeps_365() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = _store(tmp, clock=lambda: clock[0])
         store.apply_affinity(
-            USER, guardedness=1, reason="他当面贬损羞辱", source="judge",
+            USER, guardedness=8, reason="他当面贬损羞辱", source="judge",
             evidence={"quote": "总算说人话了", "who_alias": "4", "seq": 5},
         )
         assert len(_evidence(store)) == 1
@@ -316,7 +321,7 @@ def test_recent_evidence_is_never_pruned() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = _store(tmp, clock=lambda: clock[0])
         store.apply_affinity(
-            USER, guardedness=1, reason="他当面贬损羞辱", source="judge",
+            USER, guardedness=8, reason="他当面贬损羞辱", source="judge",
             evidence={"quote": "总算说人话了", "who_alias": "4", "seq": 5},
         )
         clock[0] = NOW
@@ -350,7 +355,7 @@ def _super_msg(text: str, *, group: bool = True) -> IncomingMessage:
 def _prepared_store(tmp: str) -> MemoryStore:
     store = _store(tmp)
     store.apply_affinity(
-        USER, guardedness=1, reason="他当面贬损羞辱", source="judge",
+        USER, guardedness=8, reason="他当面贬损羞辱", source="judge",
         evidence={"quote": "总算说人话了", "who_alias": "4", "seq": 5},
     )
     return store
@@ -399,7 +404,8 @@ def test_a_v6_database_opens_and_gets_the_table_without_backfill() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "memory.sqlite3"
         first = MemoryStore(path, clock=lambda: NOW)
-        first.apply_affinity(USER, closeness=1, reason="聊得来", source="test")
+        first.apply_affinity(USER, closeness=8, reason="聊得来", source="test",
+                             evidence={"quote": "聊得来", "who_alias": "1", "seq": 1})
         assert SCHEMA_VERSION == 7
 
         # 造一个"真的是 v6"的库：把新表拆掉、版本号退回 6，再存一行老流水。
@@ -461,9 +467,15 @@ def _reply_prompt_blob(store: MemoryStore, judge_output: str, text: str) -> str:
 def test_evidence_never_reaches_her_reply_prompt() -> None:
     """她只该知道"现在该收着"，不该看到"哪句话让我记下了"。
 
-    判据用**差分**：同一段对话跑两遍，一遍让判定抄回**真的**那句（于是证据落库），
-    一遍抄一句输入里没有的（于是什么都不存）。她看到的那份材料必须**逐字相同**——
-    差一个字就说明证据那边的字漏进了她的 prompt。
+    判据用**差分**：同一段对话跑两遍，一遍让判定抄回**真的**那句（于是证据落库、
+    防备 +GUARD_RAISE_MAX），一遍抄一句输入里没有的（于是这次写入被拒、防备不动）。
+
+    2026-10-20 起 0 与 GUARD_RAISE_MAX **不再同档**（「正常分寸」vs「有点端着」），
+    两份回复材料的档位文字本来就不同。所以先把那一行按**实际档位文字**
+    （`guard_tier(0).text` / `guard_tier(GUARD_RAISE_MAX).text`）抹平，其余部分
+    必须**逐字相同**；两边除了用户这条消息本身，也都不该出现证据原话——落库的
+    证词若被拼进材料，那里就会多出一份。这条同时钉住"回复侧看不到数值"
+    （否则两边的数字会不同）。
     """
 
     text = "@YunRu 你就是个没用的废话"
@@ -479,10 +491,26 @@ def test_evidence_never_reaches_her_reply_prompt() -> None:
         stored = _store(stored_tmp)
         with_text = _reply_prompt_blob(stored, guard_up(quote), text)
         assert len(_evidence(stored)) == 1, "这一步得真的存下了证据"
+        assert stored.relationship(USER)[1] == GUARD_RAISE_MAX
 
         plain = _store(plain_tmp)
         without = _reply_prompt_blob(plain, guard_up("这句根本不在输入里"), text)
         assert _evidence(plain) == (), "这一轮不该有证据"
+        assert plain.relationship(USER)[1] == 0, "没有原话，这次写入被拒"
 
-        assert with_text == without, "证据句（或它的任何标记）漏进了她的 prompt"
+        with_tier = guard_tier(GUARD_RAISE_MAX)
+        plain_tier = guard_tier(0)
+        assert with_tier.text != plain_tier.text, "0 与 GUARD_RAISE_MAX 本该不同档"
+        assert f"防备：{with_tier.name}——{with_tier.text}" in with_text
+        assert f"防备：{plain_tier.name}——{plain_tier.text}" in without
+
+        # 原话只来自用户这条消息；把它从材料里剔掉之后，哪儿都不该再有它。
+        assert quote not in with_text.replace(text, "")
+        assert quote not in without.replace(text, "")
+
+        def _blank_guard(blob: str, tier) -> str:
+            return blob.replace(f"防备：{tier.name}——{tier.text}", "防备：<档位>")
+
+        assert _blank_guard(with_text, with_tier) == _blank_guard(without, plain_tier), (
+            "证据句（或它的数值）漏进了她的 prompt")
 

@@ -273,6 +273,7 @@ netstat -ano | findstr :8080     # 看是谁占了
 | `QQBOT_SESSION_CACHE_MAX_SESSIONS` | `200` | 内存里最多同时留多少个会话的短期状态。范围夹在 10..2000，坏值回落 200。超了就淘汰**最久不活跃**的那个会话（它的两个按会话 client 也一起丢掉）；淘汰数在 `/super status` 的"短期会话"那行显示。**与开不开对话无关**：`/admin disable` 只等于"不回复"，历史与记忆照记 |
 | `QQBOT_CHAT_LOG` | 开启 | **对话日志**（实际收发，`data/logs/chat.jsonl`）。`0` 关掉整份 |
 | `QQBOT_CHAT_LOG_MAX` | `20000` | 对话日志保留多少条（按条滚动，不是按天）。范围兜在 10..1000000，**不会无限增长** |
+| `QQBOT_LOG_ARCHIVE_DAYS` | `30` | 活日志按条轮转时被裁掉的旧行**不再丢弃**，而是追加到同目录下的 `archive/<label>-YYYYMMDD.jsonl`（按归档那一刻的本地日期分文件），这里控制归档保留多少天。**所有按条滚动的日志共用这一份实现**（模型日志 judge/reply/memory/security/mail、对话日志 chat、原始事件 raw_events、金句与黑话）。范围夹在 0..3650，坏值回落 30；`0` = **不归档**（回到"裁掉就丢"的旧行为）。清理**按归档文件名里的日期**严格保留最近 N 个自然日（含今天），不看 mtime；解析不出日期的文件不删 |
 | `QQBOT_CHAT_LOG_DIR` | 空 | 空 = 与模型日志同一个 `data/logs/`；要单独搬走就写路径 |
 | `QQBOT_RAW_EVENTS` | 开启 | **原始事件日志**（`data/logs/raw_events.jsonl`）：**没被处理**的入站事件（通知/请求/其它 post_type）原样落盘。只为查"NapCat 到底推不推某种事件"（如表情回应）。`0` 关掉整份 |
 | `QQBOT_RAW_EVENTS_MAX` | `5000` | 原始事件日志保留多少条（按条滚动）。范围兜在 10..1000000，**不会无限增长** |

@@ -707,3 +707,72 @@ def test_a_whole_json_body_is_still_accepted() -> None:
     with patch("qq_roleplay_bot.llm_client._urlopen", return_value=_Response(body)):
         assert _complete(client) == "老形状"
     assert client.last_usage == {"prompt_tokens": 1, "completion_tokens": 1}
+
+
+# --- 首字闸按用途可配（2026-10-20）：默认一个字节都不变 -----------------------
+
+_STALL_ENV_NAMES = tuple(
+    [f"QQBOT_{task.upper()}_STREAM_STALL_SECONDS"
+     for task in ("reply", "letter", "judge", "relevance", "memory", "review", "vision")]
+    + ["QQBOT_STREAM_STALL_SECONDS"]
+)
+
+
+def test_stream_stall_seconds_defaults_are_unchanged_and_bad_values_fall_back() -> None:
+    """不设任何环境变量时仍是 3.0；`abc` / `0` / `999` 一律回落 3.0（越界不夹）。"""
+
+    from qq_roleplay_bot.llm_client import (STREAM_STALL_MAX_SECONDS,
+                                            STREAM_STALL_MIN_SECONDS,
+                                            stream_stall_seconds)
+
+    assert STREAM_STALL_SECONDS == 3.0
+    assert (STREAM_STALL_MIN_SECONDS, STREAM_STALL_MAX_SECONDS) == (1.0, 60.0)
+    with patch.dict(os.environ, {}, clear=False):
+        for name in _STALL_ENV_NAMES:
+            os.environ.pop(name, None)
+        assert stream_stall_seconds("memory") == 3.0
+        for bad in ("abc", "0", "999", "-1", "nan"):
+            os.environ["QQBOT_STREAM_STALL_SECONDS"] = bad
+            assert stream_stall_seconds("memory") == STREAM_STALL_SECONDS, bad
+        os.environ["QQBOT_STREAM_STALL_SECONDS"] = "15"
+        assert stream_stall_seconds("memory") == 15.0
+        assert stream_stall_seconds("judge") == 15.0
+
+
+def test_a_task_stall_override_wins_over_the_global_one() -> None:
+    """`QQBOT_<TASK>_STREAM_STALL_SECONDS` 优先于全局；坏值回落到全局那档。
+
+    `dialogue` 是回复那一路的账本名，配置名是 `REPLY`——不映射就永远读不到。
+    """
+
+    from qq_roleplay_bot.llm_client import stream_stall_seconds
+
+    with patch.dict(os.environ, {}, clear=False):
+        for name in _STALL_ENV_NAMES:
+            os.environ.pop(name, None)
+        os.environ["QQBOT_STREAM_STALL_SECONDS"] = "15"
+        os.environ["QQBOT_MEMORY_STREAM_STALL_SECONDS"] = "22"
+        os.environ["QQBOT_REPLY_STREAM_STALL_SECONDS"] = "9"
+        assert stream_stall_seconds("memory") == 22.0
+        assert stream_stall_seconds("dialogue") == 9.0
+        assert stream_stall_seconds("judge") == 15.0
+        # 按用途的坏值当没配，回落到全局
+        os.environ["QQBOT_MEMORY_STREAM_STALL_SECONDS"] = "abc"
+        assert stream_stall_seconds("memory") == 15.0
+
+
+def test_the_read_timeout_uses_the_task_stall_override() -> None:
+    """`_complete_sync` 真的用按用途那档当读超时（不是只改了函数没人调用）。"""
+
+    captured: dict = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured["timeout"] = timeout
+        return _Response(_sse({"choices": [{"delta": {"content": "ok"}}]}))
+
+    client = OpenAICompatibleClient("https://example.invalid/v1", "k", "m",
+                                    timeout=30.0, usage_role="memory")
+    with patch.dict(os.environ, {"QQBOT_MEMORY_STREAM_STALL_SECONDS": "15"}, clear=False):
+        with patch("qq_roleplay_bot.llm_client._urlopen", side_effect=fake_urlopen):
+            assert _complete(client) == "ok"
+    assert captured["timeout"] == 15.0

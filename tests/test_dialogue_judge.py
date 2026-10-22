@@ -16,6 +16,7 @@ from qq_roleplay_bot.dialogue_judge import (
     JUDGE_SYSTEM_PROMPT,
     OFFENSE_CODES,
     build_judge_messages,
+    compose_judge_system_prompt,
     parse_judge_output,
 )
 from qq_roleplay_bot.base_prompt import BASE_PROMPT
@@ -67,6 +68,20 @@ def test_judge_prompt_is_much_smaller_than_persona_prompt() -> None:
 def test_judge_is_told_not_to_speak() -> None:
     assert "不负责说话" in JUDGE_SYSTEM_PROMPT
     assert "不要写角色台词" in JUDGE_SYSTEM_PROMPT
+
+
+def test_guard_is_only_a_tone_reference_and_never_a_threshold() -> None:
+    """用户 2026-10-20：**防备只作语气参考、不参与接不接**，且不给任何接话阈值。
+
+    这条口径必须写在判定 prompt 的措辞里，不是只写在代码注释里。
+    旧的那句"只有防备到留意/戒备才明显更少主动开口"正是在拿档位当阈值，已删除。
+    """
+
+    assert "防备只作语气参考，不参与接不接" in JUDGE_SYSTEM_PROMPT
+    for gone in ("留意/戒备", "才明显更少主动开口"):
+        assert gone not in JUDGE_SYSTEM_PROMPT, gone
+    for banned in ("以上才接", "达到", "阈值", ">= 50", "≥50"):
+        assert banned not in JUDGE_SYSTEM_PROMPT, banned
 
 
 def test_judge_does_not_wake_her_for_talk_about_her_machinery() -> None:
@@ -155,6 +170,62 @@ def test_guard_draws_the_line_at_her_this_time_not_her_whole_self() -> None:
     }
 
 
+#: 判定 system 的总长度上限（字符）。2026-10-20 实测：内置 prompt 2735 + 分节规矩 207
+#: = 2942。这个数**只能靠精简别处抵消新增判据**，不许调大（`tests/test_judge_boundary.py`
+#: 里那条 `< len(SYSTEM_PROMPT) * 0.4` 是总的量级约束，这里钉的是当天那个具体水位）。
+JUDGE_PROMPT_MAX_CHARS = 2942.8
+
+
+def test_guard_asks_who_the_sentence_is_about_and_what_it_targets() -> None:
+    """判据要分开两维：**这句在说谁**、**说的是她这一句还是她这个人**（2026-10-20）。
+
+    审计依据：19 条"防备被抬高"的流水里能还原上下文的 6 条有 3 条是误判——
+    朱蝶那条是群里吵架、脏话在骂第三个人（延恒）；浪迹星海两条是纠正她的说法、
+    技术争执（"无营养废话/啰嗦""张嘴就瞎编"）。根因不是"聊技术当打探"，
+    而是判据缺了这两维：说别人的话被记成冲她这个人，说她这句话也被记成贬低她。
+
+    所以两份 prompt 都要有"在说别人（群友互喷、骂第三个人）→ HOLD"，
+    主判定那版还要有"纠正说法/技术争执 → HOLD"。
+    """
+
+    for prompt in (JUDGE_SYSTEM_PROMPT, JUDGE_ROUTING_PROMPT):
+        assert "这句在说谁" in prompt
+        assert "在说别人（群友互喷、骂第三个人）一律" in prompt
+        assert "带脏字" in prompt
+        assert "HOLD" in prompt
+    assert "只有**明确冲她本人**" in JUDGE_SYSTEM_PROMPT
+    assert "纠正她的说法/做法、技术争执" in JUDGE_SYSTEM_PROMPT
+    assert "在说别人就别当成冲她" in JUDGE_SYSTEM_PROMPT
+
+
+def test_the_judge_prompt_does_not_grow_past_its_cap() -> None:
+    """加判据不许靠加长 prompt：超了就得先精简别处（2026-10-20）。"""
+
+    assembled = compose_judge_system_prompt(JUDGE_SYSTEM_PROMPT)
+    assert len(assembled) <= JUDGE_PROMPT_MAX_CHARS, len(assembled)
+
+
+def test_offense_codes_and_up_parsing_are_unchanged() -> None:
+    """判据措辞改了，输出协议与解析行为一个字都不许动（不新增字段）。"""
+
+    assert OFFENSE_CODES == {
+        "insult": "他当面贬损羞辱",
+        "sarcasm": "他阴阳怪气地挤兑",
+        "belittle": "他看不起她、嘲她没本事",
+    }
+    verdict = parse_judge_output(
+        "<route>REPLY</route><topic>技术争执</topic>"
+        "<guard>UP</guard><guard_reason>belittle</guard_reason>"
+        "<guard_quote>换个人早做完了</guard_quote>"
+    )
+    assert verdict.should_reply is True
+    assert verdict.guard_up is True and verdict.guard_probe is False
+    assert verdict.guard_reason == "belittle"
+    assert verdict.guard_quote == "换个人早做完了"
+    # 只改判据措辞，不新增输出字段（避免动 parser 与回放脚本）。
+    assert not hasattr(verdict, "who") and not hasattr(verdict, "target")
+
+
 def test_guard_quote_is_asked_for_and_kept_verbatim() -> None:
     """`<guard_quote>`：判定要把**那一句原话**抄回来（2026-10-16）。
 
@@ -181,15 +252,22 @@ def test_guard_quote_is_asked_for_and_kept_verbatim() -> None:
     assert parse_judge_output("<guard>UP</guard><guard_reason>insult</guard_reason>").guard_quote == ""
 
 
-def test_judge_gates_the_knowledge_base() -> None:
-    """判定用 `<lore>` 回答"这一句在问她的世界吗"，引擎据此决定要不要翻资料。
+def test_lore_is_only_a_record_now() -> None:
+    """判定仍然输出 `<lore>`，但它**只是记一笔**：不再决定查不查知识库。
 
-    词面门槛做不到这件事：实测召回 100%/闲聊误召回 60%，收紧到"≥2 个词"召回只剩 54%；
-    语义门 92%/0%（`data/lore_gate_eval.py`）。
+    2026-10-18 用户裁定：「我不介意查库，消息积压了就多条一判，ds速度是够的」——
+    每一轮回复都查，按相关度取。判定这一栏的口径原来写着"议论她本人、@ 她、提她名字
+    都不算"，于是"问她自己的过去"这条路被系统性跳过（实测 1,579 条判定：NO 89.4%、
+    YES 1.3%）。现在口径改成"只记一笔，不影响翻资料"，**没有**多花一次调用：
+    标签还是同一个 `<lore>`，只是引擎不再拿它关检索（见
+    `tests/test_knowledge_base.py::test_every_reply_queries_the_knowledge_base`）。
     """
 
-    assert "<lore>YES|NO</lore>" in JUDGE_SYSTEM_PROMPT
-    assert "只是在议论她本人" in JUDGE_SYSTEM_PROMPT or "议论她本人" in JUDGE_SYSTEM_PROMPT
+    assert "<lore>YES|NO</lore>" in JUDGE_SYSTEM_PROMPT, "字段留着：删标签等于动输出协议"
+    assert "不影响" in JUDGE_SYSTEM_PROMPT and "翻资料" in JUDGE_SYSTEM_PROMPT
+    # 旧口径（误导它"只在问设定时才填 YES"）不许回来
+    assert "议论她本人、@ 她、提她名字都不算" not in JUDGE_SYSTEM_PROMPT
+    assert "议论她本人" not in JUDGE_SYSTEM_PROMPT
 
 
 def test_judge_outputs_route_and_topic() -> None:

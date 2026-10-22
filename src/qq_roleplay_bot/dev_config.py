@@ -361,8 +361,19 @@ _SAMPLING_TASK_DEFAULTS: dict[str, dict[str, float]] = {
 _REASONING_EFFORT_VALUES = {"none", "low", "high", "max"}
 
 
+#: **写死在角色配置里的思考深度**（2026-10-18 用户："这块不行也加个agent，用dsflash，
+#: effort调none"）。`relevance` 这一路是"给召回的知识块判档"，它要快、要便宜：
+#: 固定 `none`，**不读** `QQBOT_RELEVANCE_REASONING_EFFORT`、也不读
+#: `data/model_providers.json` 的覆盖——别人配的是别人的事，不该把这一层带偏。
+#: 什么时候能改回去：用户明确要求给这一路调思考深度时。
+FIXED_REASONING_EFFORT: dict[str, str] = {"relevance": "none"}
+
+
 def reasoning_effort(task: str) -> str:
     """某个用途的思考深度。**文件 > 该用途自己的变量 > 迁移老名字 > `low`**。
+
+    例外：`FIXED_REASONING_EFFORT` 里写死的用途（`relevance`）**直接返回固定值**，
+    上面那三层一律不走。
 
     三件事写在这里，改之前先看清（契约 D4 / §3.6）：
 
@@ -377,6 +388,9 @@ def reasoning_effort(task: str) -> str:
        悄悄变成默认的 `low`，那就不是"逐字不变"了（契约 §二.3 第 2 条实测）。
     """
 
+    fixed = FIXED_REASONING_EFFORT.get(task)
+    if fixed:
+        return fixed
     raw = _model_config.file_reasoning_effort(task)
     if not raw:
         raw = get(f"QQBOT_{task.upper()}_REASONING_EFFORT", "")
@@ -497,6 +511,18 @@ def session_cache_max_sessions() -> int:
 # 这一层是**最后一道网**。默认 90 秒是实测（判定约 2 秒、回复约 10 秒）的 9 倍余量；
 # **调用时现读**。（2026-10-13 更正：原来这里写"单次 `complete()` 最坏 ≈ 181 秒
 # （60 秒 × 3 次 + 退避）"——随"不重试 + 超时只管首字"作废。）
+
+
+def knowledge_tier_llm_enabled() -> bool:
+    """知识块**模型判档**那一层开不开（`QQBOT_KNOWLEDGE_TIER_LLM`，默认开）。
+
+    2026-10-18 用户："这块不行也加个agent，用dsflash，effort调none"。
+    关掉（`0`/`false`/`off`/`no`）时行为与"只有本地那套三档"**完全一致**：
+    `tests/test_knowledge_tier.py` 里有一条等价性用例钉住这条。
+    """
+
+    return get("QQBOT_KNOWLEDGE_TIER_LLM", "1").strip().lower() not in {
+        "0", "false", "off", "no"}
 
 
 def turn_timeout_seconds() -> float:

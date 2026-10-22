@@ -7,8 +7,12 @@
 离线测试入口不用 pytest fixture，临时目录在测试内部自己建。
 """
 import asyncio
+import datetime
 import json
+import os
 import tempfile
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from qq_roleplay_bot.feature_log import FeatureLog, FeatureLogs, request_parts
@@ -30,6 +34,37 @@ def read_entries(directory: Path, feature: str) -> list[dict]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def read_archive_entries(directory: Path, label: str) -> list[dict]:
+    """读 `<目录>/archive/<label>-*.jsonl` 的全部行（不依赖"现在是哪个月"）。"""
+
+    entries: list[dict] = []
+    for path in sorted((directory / "archive").glob(f"{label}-*.jsonl")):
+        entries.extend(
+            json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        )
+    return entries
+
+
+@contextmanager
+def archive_days_env(value):
+    """临时设置 `QQBOT_LOG_ARCHIVE_DAYS`；用完恢复原值（没有就删掉），不污染别的用例。"""
+
+    key = "QQBOT_LOG_ARCHIVE_DAYS"
+    previous = os.environ.get(key)
+    if value is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = value
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = previous
 
 
 # --- 基本行为 ---------------------------------------------------------------
@@ -115,6 +150,116 @@ def test_write_failure_never_raises() -> None:
         log = FeatureLog("judge", tmp, capacity=5, enabled=True)
         log.record(input="x")   # 关键：不抛异常
         assert log.write_failures >= 1
+
+
+# --- 归档（2026-10-21：日志要能查到半个月以上） ------------------------------
+
+
+def test_trim_archives_the_dropped_lines() -> None:
+    """超过 capacity*slack 触发 trim：活文件剩 capacity，被裁的行一条不丢地进归档。"""
+
+    with tempfile.TemporaryDirectory() as tmp, archive_days_env("30"):
+        log = FeatureLog("judge", tmp, capacity=10, enabled=True)
+        for index in range(25):
+            log.record(input=f"in-{index}")
+        live = read_entries(Path(tmp), "judge")
+        # 第 21 条触发一次 trim（留 12..21），随后 22..25 再追加进来。
+        assert [int(entry["seq"]) for entry in live] == list(range(12, 26))
+        archived = read_archive_entries(Path(tmp), "judge")
+        # 被裁掉的正是 1..11；归档与活文件拼起来是一条连续的 1..25。
+        assert [int(entry["seq"]) for entry in archived] == list(range(1, 12))
+        assert [entry["input"] for entry in archived] == [f"in-{i}" for i in range(11)]
+
+
+def test_zero_archive_days_keeps_the_old_discard_behaviour() -> None:
+    """`QQBOT_LOG_ARCHIVE_DAYS=0` = 不归档，被裁的确实丢弃（回退用）。"""
+
+    with tempfile.TemporaryDirectory() as tmp, archive_days_env("0"):
+        log = FeatureLog("judge", tmp, capacity=10, enabled=True)
+        for index in range(25):
+            log.record(input=f"in-{index}")
+        live = read_entries(Path(tmp), "judge")
+        assert [int(entry["seq"]) for entry in live] == list(range(12, 26))
+        assert not (Path(tmp) / "archive").exists()
+
+
+def archive_name(label: str, days_ago: int) -> str:
+    """按"今天减 N 天"造归档文件名；不硬编码年份（跨年也能跑）。"""
+
+    day = datetime.date.today() - datetime.timedelta(days=days_ago)
+    return f"{label}-{day.strftime('%Y%m%d')}.jsonl"
+
+
+def test_archive_prunes_by_filename_date_not_mtime() -> None:
+    """按文件名日期清理：40 天前的文件即使 mtime 是现在也删；10 天前的即使 mtime 很旧也留。
+
+    mtime 会被复制/解压/追加改掉，按它清理等于"看文件最近被谁碰过"，不能保证严格 30 天。
+    """
+
+    with tempfile.TemporaryDirectory() as tmp, archive_days_env("30"):
+        archive = Path(tmp) / "archive"
+        archive.mkdir()
+        expired = archive / archive_name("judge", 40)
+        expired.write_text('{"seq": -1}\n', encoding="utf-8")
+        fresh_mtime = time.time()
+        os.utime(expired, (fresh_mtime, fresh_mtime))
+
+        recent = archive / archive_name("judge", 10)
+        recent.write_text('{"seq": -2}\n', encoding="utf-8")
+        old_mtime = time.time() - 40 * 86400
+        os.utime(recent, (old_mtime, old_mtime))
+
+        today = archive / archive_name("judge", 0)
+        today.write_text('{"seq": -3}\n', encoding="utf-8")
+
+        log = FeatureLog("judge", tmp, capacity=10, enabled=True)
+        for index in range(21):
+            log.record(input=f"in-{index}")
+
+        assert not expired.exists()
+        assert recent.exists()
+        assert today.exists()
+        assert [int(entry["seq"]) for entry in read_archive_entries(Path(tmp), "judge")] != []
+
+
+def test_unparseable_archive_names_are_never_deleted() -> None:
+    """名字里解析不出日期的文件（备份、别的工具、别的扩展名）一律不动——误删比留垃圾贵。"""
+
+    with tempfile.TemporaryDirectory() as tmp, archive_days_env("30"):
+        archive = Path(tmp) / "archive"
+        archive.mkdir()
+        backup = archive / "judge-backup.jsonl"
+        backup.write_text('{"seq": -1}\n', encoding="utf-8")
+        notes = archive / "notes.txt"
+        notes.write_text("别删我\n", encoding="utf-8")
+        old_mtime = time.time() - 400 * 86400
+        os.utime(backup, (old_mtime, old_mtime))
+        os.utime(notes, (old_mtime, old_mtime))
+
+        log = FeatureLog("judge", tmp, capacity=10, enabled=True)
+        for index in range(21):
+            log.record(input=f"in-{index}")
+
+        assert backup.exists()
+        assert notes.exists()
+
+
+def test_archive_failure_still_trims_and_counts_a_failure() -> None:
+    """归档路径写不进去时：不抛异常、活文件照样裁、write_failures 增加。"""
+
+    with tempfile.TemporaryDirectory() as tmp, archive_days_env("30"):
+        blocker = Path(tmp) / "archive"
+        blocker.write_text("not a directory", encoding="utf-8")
+
+        log = FeatureLog("judge", tmp, capacity=10, enabled=True)
+        for index in range(21):
+            log.record(input=f"in-{index}")   # 关键：不抛异常
+
+        live = read_entries(Path(tmp), "judge")
+        assert len(live) == 10
+        assert int(live[-1]["seq"]) == 21
+        assert log.write_failures >= 1
+        assert blocker.is_file()
 
 
 # --- 引擎接线 ---------------------------------------------------------------

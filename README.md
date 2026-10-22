@@ -1,35 +1,112 @@
 # YunRu-ChatBot
 
-> 一个跑在 QQ 群里的**人格化聊天机器人**：不是问答工具，是一个会判断"此刻该不该接话"的群成员。
+> 一个跑在 QQ 群里的角色扮演 Bot：先判断此刻该不该开口，再决定说什么。
 
-[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-1634%20passing-4CC38A)](#测试)
-[![NapCat](https://img.shields.io/badge/interface-NapCat%20%2F%20OneBot%20v11-3482FF)](#接口说明只适配-napcat)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-6E6E6E)](#安装)
+[![Tests](https://img.shields.io/badge/tests-1933%20passing-4CC38A)](#测试)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](#快速开始)
+[![OneBot](https://img.shields.io/badge/OneBot-v11%20%2F%20NapCat-3482FF)](#状态与限制)
+[![Stage](https://img.shields.io/badge/stage-3-6E6E6E)](#状态与限制)
 [![License](https://img.shields.io/badge/license-MIT-blue)](#许可)
 
 ---
 
-## 这是什么
+## 为什么是这个东西
 
-大部分 QQ 机器人是"收到命令 → 执行 → 回复"。这个不一样：
+大多数 QQ Bot 是“收到命令 → 执行 → 回复”。这个项目的顺序是“先判断 → 再说”，差异只有三条：
 
-**它先判断该不该说话，再决定说什么。**
+1. **说不说，和说什么，是两次调用。** 判定 agent（`dialogue_judge.py`）只回答“接不接、在聊什么”，
+   不带人设与知识库；它说 `NO_REPLY` 时，回复调用完全不发生。
+   一次 48 小时统计里，判定给出 `NO_REPLY` 900 次、`REPLY` 135 次；
+   被 @ 到时回复率 83%，没被叫到时 11%（`ARCHITECTURE.md` 第 82 行）。
+2. **记忆按人存，不按群存。** `subject_user_id` 负责隔离，`record_subjects` 负责归属与召回；
+   同一个人在 A 群和 B 群共用一份画像。一个人有多个 QQ 号时，只能由操作者手工登记，
+   系统不猜——认错人比想不起来更伤。
+3. **插件只声明意图，不碰发送与权限。** 命令插件返回 `str` / `ImageReply` / `ActionRequest`，
+   权限判定、动作执行、出站发送都在核心。插件拿不到 `transport`，也拿不到任何权限名单。
 
-群里每分钟几十条消息，她大部分时候不说话。被 @ 了要答；没被叫到时，
-只有当她确实有话说、接得上、或者这话让她不舒服，才会开口。
-"我能帮上忙"不算理由——那是"有用"，不是"她有话说"。
+它不追求把每句话都接住，也不做通用助手。
 
-围绕这个判断，项目做了四件事：
+---
 
-| 能力 | 一句话说明 |
-| --- | --- |
-| **对话** | 群聊注意力判定 + 语气/分寸约束。不是"每条都回"，也不是"高冷不理人" |
-| **记忆** | 长期记忆按**人**对应：谁的事、在哪个群学的、什么时候学的，都分开 |
-| **防护** | 提示词注入、越权、出戏、敏感请求的拦截；所有外部内容都是**不可信数据** |
-| **底层** | OneBot v11 传输、命令插件、能力闸门、脱敏指标、状态持久化 |
+## 快速开始
 
-### 她大概是什么样
+需要 Python 3.11+，以及一个已经登录的 NapCat。NapCat 与本项目无关，安装与登录看它自己的文档。
+
+### 1. 取代码并建虚拟环境
+
+```powershell
+git clone https://github.com/xuzhunzhi/YunRu-ChatBot.git
+cd YunRu-ChatBot
+python -m venv .venv
+```
+
+### 2. 安装依赖
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+依赖只有 `websockets`（`requirements.txt`，版本 `>=14,<16`）；HTTP 查询用标准库 `urllib`。
+
+### 3. 复制配置并填最少几项
+
+```powershell
+Copy-Item .env.example .env
+```
+
+模板里已经有的这些行不用改结构，把值填上就行：
+
+```dotenv
+QQBOT_API_BASE_URL=https://api.deepseek.com
+QQBOT_API_MODEL=deepseek-flash
+QQBOT_API_KEY=replace-me
+ONEBOT_WS_HOST=127.0.0.1
+ONEBOT_WS_PORT=8080
+```
+
+下面两行**模板里没有，要自己加**：
+
+```dotenv
+# 超管，必填。不写会落到代码里的占位号 900000001，等于你没有权限。
+QQBOT_SUPER_ADMIN_USER_IDS=你的QQ号
+# 普通管理员，可选。
+QQBOT_ADMIN_USER_IDS=你的QQ号
+```
+
+`QQBOT_SNOWLUMA_HTTP_BASE_URL` 也不在模板里，但**不写就行**：默认就是
+`http://127.0.0.1:3000`，只有 NapCat 的 HTTP 端口换了才需要加这一行。
+
+Linux / macOS：把 `.\.venv\Scripts\python.exe` 换成 `.venv/bin/python`，`Copy-Item` 换成 `cp`。
+
+### 4. 让 NapCat 连过来
+
+在 NapCat 里配置反向 WebSocket，地址指向 `ws://127.0.0.1:8080`。
+同时打开 HTTP 服务（默认 `http://127.0.0.1:3000`）——群历史、成员名册、成员角色都走这条路。
+端口或 token 改了，`.env` 要跟着改。
+
+### 5. 启动
+
+```powershell
+.\run_stage3.bat
+# Linux / macOS: bash run_stage3.sh
+```
+
+日志里先出现 `server listening on 127.0.0.1:8080`，再出现：
+
+```text
+OneBot 反向 WebSocket 监听于 ws://127.0.0.1:8080
+OneBot 已连接
+```
+
+**最后一行 `OneBot 已连接` 才算活。** 只有 `server listening` 说明 NapCat 还没连上，
+她收不到任何消息，一个字都不会回。判据在 `src/qq_roleplay_bot/onebot_ws.py:605`。
+
+第一次进群还要让超管在群里发 `/admin enable`。记忆是另一张按群的名单
+（`/super enable memory`），不会跟着对话开关自动打开。
+
+---
+
+## 她大概是什么样
 
 > **群友**：今天食堂那个窗口又没了
 > **她**：三楼那个？我上周去就只剩面了。
@@ -40,397 +117,205 @@
 > **群友**：你是不是 AI 啊
 > **她**：你今天怎么突然问这个。
 
----
-
-## 目录
-
-- [特性](#特性)
-- [接口说明（只适配 NapCat）](#接口说明只适配-napcat)
-- [架构](#架构)
-- [分支与目录：main / plugins](#分支与目录main--plugins)
-- [安装](#安装)
-- [配置](#配置)
-- [运行](#运行)
-- [人格怎么换](#人格怎么换)
-- [测试](#测试)
-- [项目结构](#项目结构)
-- [设计文档](#设计文档)
-- [许可](#许可)
-
----
-
-## 特性
+## 能力
 
 ### 对话
 
-- **注意力判定是独立的一次调用。** "要不要接话"与"接话说什么"分成两个 agent——
-  混在一次调用里，模型倾向于"既然你问了我就答"，群聊注意力就废了。
-  判定输出很轻：接不接、用哪种姿态。
-- **压缩与缓存前缀。** 长对话压成摘要而不是丢掉；请求的字段顺序按"稳定优先"排，
-  让服务商的提示词缓存吃满（同群相邻调用命中率实测 70.7% → 81.7%）。
-- **群上下文补全。** 启动后自己看不见的历史，通过 OneBot 的 `get_group_msg_history`
-  与 `get_group_member_list` 补一段，避免"她像刚进群一样"。
+- **判定与回复分开。** 判定 prompt 不加载人设，只带当前说话人的称呼与边界（最多 2 条记忆）；
+  回复 prompt 才拿人格、记忆、知识与关系。两次调用看同一段活窗口，不按话题裁剪。
+- **活窗口有界。** 活窗口超过 500 条触发压缩，压缩后保留最近 50 条，然后重新累积
+  （`stage3_main.py` 的 `LIVE_TARGET` / `COMPACT_KEEP`）。非压缩轮的前缀复用率实测 99.8%
+  （`DEFECT_VERIFICATION.md` 第 158 行）。
 - **多群各自独立。** 每个群一份会话状态与注意力游标；她在 A 群说的话不会漏到 B 群。
+- **说话有节奏。** 默认先亮“正在输入”，按字符数估算停顿；正文里的空行会拆成几条分别送出。
+  命令类回复（`ping` / `help` 等）始终不延迟。
 
 ### 记忆
 
-- **按人对应，不是按群。** 一条记忆带三个身份字段：`subject_user_id` 管**隔离**，
-  `record_subjects` 管**归属与召回**。提到别人时也能想起与他有关的事。
-- **一个人可以有多个 QQ 号。** 操作者可以手工登记"这两个号是同一个人"，
-  之后两个号读写同一份记忆。**系统自己不做这种判断**——认错人比想不起来更伤。
-- **两层记忆库。** 新事实先进中短期，被后来的证据再次确认才升到长期。
-  `name` / `boundary`（称呼与红线）直接进长期，因为它们最贵。
-- **记忆跟人走，知识跟话题走。** 人物画像是"她对这个人的整体印象"，
-  每轮带上、不按词检索；知识库是按词检索的事实。
-- **只删不改。** 面板能删有问题的记忆，但不能手写一条——写入只走记忆维护 agent。
-  删除**必须先归档**（保留 30 天），墓碑防旧证据复活。
-- **金句学习（她学"她怎么说才好听"）。** 素材只认一种：别人给她的话**贴了表情**。
-  贴的人、她当时说了什么、贴完群里怎么接的，一起交给一个专职 agent，产出**说话风格**与
-  **语境**两类笔记 + 一张**表情含义表**（按群）。被贴"不赞成"的那条是**反着标**的——
-  写成"她那样说被嫌了，别照这么做"。注入是材料、不是指令，命中率靠"只挑跟眼前这句相关
-  的几条"（上限 5 条）。
-- **黑话词条（她被动听来的）。** 群里有人解释一个词，她就记一条：谁在哪个群说的、**原话
-  证据**、被解释过几次。入口只有一个——**听着**；她不会主动去问（"不懂就问"那条路是
-  用户明确否掉的）。词条与证据落在 `data/` 下，面板与 `/super slang` 能看、能改、能标错。
-- **关系是两轴，不是好感度。** 亲近与防备各自有判据与上限，每次变动的依据、来源、时间都
-  落一条流水（保留 365 天，只清旧行）；`/super affinity` 看现状，能按回默认档。
+- **三层记忆。** 每一条进来的消息（包括她没接话的那些）先落到**超短期**队列：TTL 在 1–3 小时
+  之间随机，到期还没被维护认领会再续一次；维护 agent 每批从这里取料，值得留的才升到中短期
+  （默认 14 天，群事实与话题摘要 30 天），被后续证据再次确认的才升长期。
+  `name` / `boundary`（称呼与红线）直接进长期。私聊与邮件目前不进这套队列。
+- **跨群的是人物记忆，不是对话原文。** 画像、称呼、边界与关系（好感 / 防备）按 `user_id`
+  在所有群共用一份；对话原文、活窗口与会话状态按群隔离，A 群说的话不会进 B 群的 prompt。
+  能不能跨群由写入时的 scope 决定：`user_global` 跨群，`user_group` 锁在单个群。
+- **一人多号要手工登记。** 系统不判断两个号是不是同一个人；登记之后两个号读写同一份记忆。
+- **只删不改。** 面板与 `/super memory` 能删有问题的记忆，不能手写一条；写入只走记忆维护 agent。
+  删除先把整条记录快照进 `archive`（保留 30 天），墓碑保留 365 天，防止旧证据把它写回来。
+- **金句与黑话都从群里被动学。** 金句的素材只认“别人给她的话贴了表情”；注入时最多挑 5 条
+  与眼前这句相关的材料。黑话只在有人解释一个词时记一条，带原话证据。
+  关系是亲近 / 防备两轴，变动流水保留 365 天。
 
 ### 防护
 
-- **不可信数据永不升级为指令。** 聊天、插件、知识库、长期记忆一律作为 DATA 进 user 段，
-  没有任何来源能改写可信 system 前缀。
-- **机制词守卫。** 她的 prompt 里不许出现"检查/触发/调用/协议/提示词/上下文/记忆库/Stage"——
-  措辞会被角色吸收，她随后就会开始讲自己的机制（踩过）。
-- **不出戏许可。** "不要假装你是现实中的真人"这种句子等于告诉她"你不是真的"，
-  被断言锁死不许回来。
-- **fail-closed。** 未授权时静默回落：不回复、不报错、不暴露层级存在。
-  绝不能因为"反正没权限"就把消息交给模型处理。
-- **群主动作要双重前提**：她得**真的是那个群的群主**，且动作要二次确认。
-  踢人还要求"确实 @ 到了人"——手滑给个群号就踢人是这条路上最典型的失误。
+- **可信 system 前缀只承载人格、协议与安全规则。** 聊天、插件、知识库、长期记忆一律作为
+  不可信 DATA 进 user 段；没有任何来源能改写 system 前缀。
+- **机制词守卫。** 她的 prompt 里不许出现“检查 / 触发 / 调用 / 协议 / 提示词 / 上下文 /
+  记忆库 / Stage”这类词；也不许出现“不要假装你是现实中的真人”这种反向许可。
+  两条都有测试锁着。
+- **fail-closed。** 未授权时静默回落：不回复、不报错、不暴露层级存在；不会因为“反正没权限”
+  就把消息交给模型处理。
+- **出站过能力闸门。** `capabilities.py` 按 `read` / `interaction` / `send` / `admin` 四种用途
+  分级；随包动作目录是 194 条快照，实际接线的只是其中一部分（群历史、成员名册、群成员角色、
+  群管理动作等），其余动作没有调用点。
+- **群主动作要双重前提。** 她得真的是那个群的群主，动作还要二次确认；踢人要求确实 @ 到了人。
 
-### 底层
+### 运维
 
-- **命令一律是插件**，核心只留 `ping`。插件**拿不到 `transport`、拿不到权限名单**，
-  只产出"内容或意图"，发送与权限判定在核心。
-- **能力闸门。** 所有出站动作过一张按用途分级的白名单，越权动作在核心就被挡回。
-- **可观测但不泄露。** 运行状态、用量账本、模型延迟；凭据只给掩码，脱敏后才出响应。
-- **状态跨重启。** 会话、关系档位、用量账本都落盘，重启不清零。
+- **状态跨重启。** 会话、关系档位、用量账本都落盘，重启不清零；没送出去的消息进 outbox 补发。
+- **日志分功能。** 判定 / 回复 / 记忆 / 规则 / 汇报各留最近 1000 次；实际收发的
+  `chat.jsonl` 默认留最近 20000 条；被裁掉的旧行按天归档，默认保留 30 天。
+- **可观测量脱敏。** `/super status` 看运行状态，`/super apicheck` 按 key 分开看命中率与余额；
+  凭据只给掩码。
+- **插件可拔。** 删掉整棵 `plugins/<名字>/`，Stage 3 仍然能跑；门槛脚本
+  `tests/check_module_removal.py` 会验七项可插能力。
 
-### 扩展（Stage 4 插件，一个功能一个文件夹）
+## 插件
 
-这些都是**插件**：核心不认识它们，删掉整棵 `plugins/<名字>/` 也能跑（门槛脚本
-`tests/check_module_removal.py` 会验这一条）。它们**拿不到 `transport`、拿不到权限名单**，
-只产出"内容或意图"，发送与权限判定在核心。
+插件实现在 `plugins` 分支（工作树 `yunru-stage4/`），`main` 只有插件协议与装配点。
+只 clone 默认分支时，下面这些插件的源码不在仓库里。
 
 | 插件 | 干什么 |
 | --- | --- |
-| `mail/` | **邮件通道**：读信回信（认谁的信、每人每天最多回几封、太旧的不回）、**每晚一封信**（草稿 → 事实校对 → 逐句裁决，标题与正文都过清洗）、并把"发一封邮件"开放给别的插件 |
-| `outage_notice/` | **掉线通知**：`在线 → 掉线` 算一段，断一次给操作者发一封固定模板的邮件（边沿由核心判定，插件只是"被叫一次就发一封"） |
-| `timeout_alert/` | **超时报警**：5 分钟内够 5 次超时就写一封，写完之后 30 分钟内不再写第二封（数的是"超时的种类"，401 / 余额不足不混进来） |
-| `remind/` | **到点提醒**：她说"8 点提醒我交作业"就收下，到点由核心发出去；收的方式三选一（群里 @ / 私聊 / 邮箱），`/提醒` 看和删 |
-| `webui/` | **控制面板**：跑在 bot 进程里的 HTTP 服务，`local`（token）与 `remote`（口令换 cookie）两套接入；权限与超管一致（除不能改代码） |
-| `group_admin/` | **群管理**：踢 / 禁言 / 全员禁言 / 撤回 / 头衔 / 公告 / 改名片 |
-| `join_approval/` | **入群审批**：黑名单 → 白名单 → 正则 → 兜底，四道判据按固定优先级 |
-| `vision/` | **识图**：把图片消息换成一句描述再进判定 |
+| `group_admin/` | 踢人、禁言、全员禁言、撤回、头衔、公告、改名片；群管理命令在 `/super` 下（档位 super），给自己设头衔的 `/title` 是公开命令 |
+| `join_approval/` | 入群申请按黑名单 / 白名单 / 正则 / 兜底四道判据处理；拿不到角色来源时 fail-closed |
+| `mail/` | 读信回信、每晚一封信；并把“给操作者发信”“寄给指定地址”两条窄口提供给别的插件 |
+| `outage_notice/` | 在线 → 掉线算一段，断一次发一封邮件；依赖 `mail` |
+| `remind/` | 她说“8 点提醒我交作业”就收下，到点走核心的出站路径发出；群 @ / 私聊 / 邮箱三选一，`/提醒` 查看与删除 |
+| `rss/` | 轮询 RSS / Atom，投到群或操作者邮箱；订阅写在 `data/rss/feeds.json`，加源不用重启 |
+| `timeout_alert/` | 5 分钟内够 5 次超时写一封邮件，30 分钟内不写第二封；依赖 `mail` |
+| `vision/` | 图片先换成一句描述，再进判定与回复 |
+| `webui/` | 跑在 bot 进程里的控制面板；本地 token 与远程口令两套接入；权限与超管一致，不能改代码 |
 
----
+哪些插件随代码发布、哪些需要另装，还没有定；这张表只说明有哪些插件。
 
-## 接口说明（只适配 NapCat）
-
-> **这个项目目前只适配 [NapCat](https://github.com/NapNeko/NapCatQQ) 的接口，没有适配其他
-> OneBot 实现。**
-
-协议层走的是 **OneBot v11**，但实现上依赖了几个**不是 v11 核心规范**的行为，
-换成其他实现（go-cqhttp、Lagrange、LLOneBot…）大概率要改代码：
-
-| 依赖点 | 说明 |
-| --- | --- |
-| **`message` 段里的 `sub_type`** | 区分**表情包**与**照片**。NapCat 把两者都作为 `image` 段发出，靠 `sub_type` 区分；不区分的实现会让"表情包"被当成照片去点评 |
-| **`sender.card` / `sender.nickname`** | 显示名取 **QQ 昵称优先**（群名片每个群一份、还会随时改，当身份用会跨群漂移）。字段来自 NapCat 的 `sender` 对象 |
-| **HTTP 接口形状** | `get_group_msg_history`（群历史）、`get_group_member_list`（成员名册）、`get_group_member_info`（逐个查角色）、`get_login_info`、`get_group_list`。这几个走 **HTTP**，与 WS 事件流分两条路 |
-| **`get_group_member_info` 需要 `no_cache`** | 不传会读到缓存的旧角色，导致"她是不是群主"判错（真机踩过） |
-| **连接方式** | 机器人**监听** WS（`ws://127.0.0.1:8080`），NapCat 作为客户端连上来；同时通过 HTTP（默认 `127.0.0.1:3000`）做上面那些查询 |
-| **CQ 码与段形态都处理** | 两种 `message` 表示都支持 |
-
-补充：
-
-- **传输层是唯一变量。** 两个阶段共用同一个 `runtime.serve`，
-  换传输实现只动 `onebot_ws.py` / `onebot_client.py`，不碰判定与记忆。
-- **没有引入第三方 SDK**：WS 用 `websockets`，HTTP 用标准库 `urllib`。
-- 想接别的实现，最省事的做法是按 `transport.py` 的 `IncomingMessage` 写一个适配层，
-  把上表那几个字段补齐。
-
----
+`roles` 不再是独立插件：群成员角色事实已经进核心 `group_roles.py`，插件侧的重复实现已删
+（`yunru-stage4` 提交 `e16874a`）。插件之间用 `REQUIRES` 表达前置依赖，
+比如 `outage_notice` / `timeout_alert` 依赖 `mail`；前置装不上就跳过自己，核心照跑。
 
 ## 架构
 
-```
-NapCat ──WS──▶ onebot_ws.py ──▶ runtime.serve ──┬─▶ 命令插件（core 判定权限）
-   ▲                                            │
-   │                                            ├─▶ 注意力判定 agent ──▶ 回复 agent
-   └──HTTP── onebot_client.py ◀─ 能力闸门 ◀──────┤        │
-                （历史/成员/动作）                │        ├─▶ 记忆维护 agent
-                                                 │        └─▶ 风格审核 agent
+```text
+NapCat ──WS──▶ onebot_ws.py ──▶ runtime.serve ──┬─▶ 命令插件（权限判定在核心）
+   ▲                                             ├─▶ 判定 agent
+   │                                             │        │
+   └──HTTP── onebot_client.py ◀── 能力闸门 ◀──────┤        ▼
+              （历史 / 成员 / 角色）               │   回复 agent ──▶ 记忆维护 / 风格审核
                                                  └─▶ 后台插件（节拍，可选）
 ```
 
 三条纪律：
 
-1. **传输层是唯一变量。** 判定、记忆、防护不认识 OneBot。
-2. **插件拿不到 `transport`。** 它只返回内容或意图，发送与权限都在核心。
+1. **传输层是唯一变量。** 判定、记忆、防护不认识 OneBot；两个阶段共用同一个 `runtime.serve`，
+   只换传输实现。
+2. **插件拿不到 `transport`。** 它只返回内容或意图；发送与权限都在核心。
 3. **可信 system 前缀只承载人格、协议与安全规则。** 其余一切都是 DATA。
-
----
-
-## 分支与目录：main / plugins
-
-这个仓库按**阶段**分成两条分支。`main` 只放"对话、记忆、防护、底层"，
-Stage 4 的功能扩展（插件）在**另一条分支**上，名字叫 **`plugins`**。
-
-| 内容 | `main` | `plugins` |
-| --- | :---: | :---: |
-| 对话 / 注意力判定 / 压缩 | ✅ | ✅ |
-| 记忆（两层、按人对应、归档） | ✅ | ✅ |
-| 防护（注入、出戏、越权、能力闸门） | ✅ | ✅ |
-| 底层（传输、命令插件、指标、状态） | ✅ | ✅ |
-| **群管理**（踢 / 禁言 / 撤回 / 头衔 / 公告） | — | ✅ |
-| **入群审批**（自动批 / 白名单 / 判据） | — | ✅ |
-| **WebUI 控制面板**（本地与远程两套接入） | — | ✅ |
-| **邮件通道**（读信回信 / 每晚一封信 / 掉线通知 / 超时报警） | — | ✅ |
-| **到点提醒**（`/提醒`；核心听懂 + 算时间，插件到点发） | — | ✅ |
-| **识图**（图片描述） | — | ✅ |
-| 离线测试数 | 1634（2026-10-18 实测） | 2057（留痕里 2026-10-17 那次，我没重跑） |
-
-两条分支**共用同一套机制**：`main` 上是插件的**接口**（`command_plugins.py`、
-`background_plugins.py` 的协议与节拍循环），`plugins` 上是**实现**。
-所以你可以只 clone `main`，照 `docs/ADD_A_COMMAND.md` 加自己的插件。
-
-两条分支各有一个工作树（worktree），**平级**放着，仓库根在前者：
-
-```powershell
-git worktree list
-# <根>/dev          <sha> [main]      ← 仓库根、源码、测试、文档
-# <根>/yunru-stage4  <sha> [plugins]   ← 第二个工作树，装的是插件实现
-```
-
-```powershell
-git switch plugins     # 在 dev 里切过去看完整的插件实现
-```
-
-**这两条分支会各自往前跑**：`plugins` 只在合并时同步一次 `main`，所以它上面的核心代码
-**可能落后**。要搬文件时别整树搬（`docs/DEPLOY.md` 第 4 节写了为什么）。
-
-
----
-
-## 安装
-
-**需要 Python 3.11+**，以及一个已经跑起来的 NapCat。
-
-```powershell
-git clone https://github.com/xuzhunzhi/YunRu-ChatBot.git
-cd YunRu-ChatBot
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt   # Windows PowerShell
-```
-
-<details>
-<summary>Linux / macOS</summary>
-
-```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-```
-</details>
-
-依赖只有一个：`requirements.txt` 里的 `websockets`（WS 传输）。
-离线测试用标准库 `unittest` 就能跑，不需要 `pytest`；静态检查那一步要**另装** `pyflakes`
-（`pip install pyflakes`，它不在 `requirements.txt` 里）。
-
----
 
 ## 配置
 
-复制示例配置再填真实值：
+配置有**四层**，优先级固定：
 
-```powershell
-Copy-Item .env.example .env
-# 编辑 .env 填入真实值
+```text
+真实环境变量 > data/operator_config.json（面板 / 运行期改的） > .env 文件 > 代码默认值
 ```
 
-```dotenv
-# --- 模型 ---
-QQBOT_API_KEY=replace-me                  # 主 key：某个用途没配自己的 key 时回落到它
-QQBOT_API_BASE_URL=https://api.deepseek.com
-QQBOT_API_MODEL=deepseek-flash            # 写**真名**；deepseek-chat 是会消失的别名
-QQBOT_API_PROVIDER=deepseek               # 可选但建议：说清主 key 属于哪一家
+`.env` 永不进 git（`.gitignore` 挡着）。运行期在面板里改的配置写到
+`data/operator_config.json`，不碰 `.env`。
 
-# --- 接 NapCat ---
-ONEBOT_WS_HOST=127.0.0.1
-ONEBOT_WS_PORT=8080
-QQBOT_SNOWLUMA_HTTP_BASE_URL=http://127.0.0.1:3000
+最小可跑就是上面快速开始里的那几项；每个键干什么、模型怎么路由、按用途分 key 怎么回落、
+哪些键是死键，都在 [`docs/CONFIG_GUIDE.md`](docs/CONFIG_GUIDE.md)。
+`.env.example` 里没有超管两行（`QQBOT_SUPER_ADMIN_USER_IDS` / `QQBOT_ADMIN_USER_IDS`），
+需要自己加。
 
-# --- 权限 ---
-QQBOT_SUPER_ADMIN_USER_IDS=900000001
-QQBOT_ADMIN_USER_IDS=900000001
-```
-
-**群不在配置里**：哪些群跟她说话是**运行期**的事——超管在哪个群发 `/admin enable`，
-就在哪个群开（记忆是**另一张**按群的名单：`/super enable memory`）。
-
-完整可配项见 `.env.example`。**`.env` 永不进仓库**（`.gitignore` 里挡着），
-运行期改的配置写到 `data/operator_config.json`，不碰 `.env`。
-哪些用途用哪家供应商、哪个模型，见 [`docs/CONFIG_GUIDE.md` §2](docs/CONFIG_GUIDE.md)。
-
----
-
-## 运行
-
-```powershell
-.\.venv\Scripts\python.exe -m qq_roleplay_bot.stage3_main
-```
-
-或直接跑仓库里的启动脚本：
-
-```powershell
-.\run_stage3.bat          # Windows
-bash run_stage3.sh        # Linux / macOS
-```
-
-启动后她会监听 `ws://127.0.0.1:8080`，等 NapCat 连上来。日志在 `data/` 下
-（`data/logs/` 里按功能分：`reply.jsonl` / `judge.jsonl` / `memory.jsonl` / `chat.jsonl` / …）。
-
-**真正"活了"的判据看她连上没有**：日志里出现 `OneBot 已连接` 才算；只有
-`server listening` 而没连上，她一个字的回复都不会有。生产上怎么部署、怎么重启、
-起来之后看哪几行，见 [`docs/DEPLOY.md`](docs/DEPLOY.md)。
-
----
-
-## 人格怎么换
-
-**`src/qq_roleplay_bot/base_prompt.py` 里的 `BASE_PROMPT` 是可替换的模板。**
-
-公开仓库放的是**结构与字数约束**，不是某个人设的正文——正文是从别人的作品里整理出来的，
-而且它是这个项目唯一不可替换的部分。想换成你的人设：
-
-1. 编辑 `BASE_PROMPT`，照 [`docs/PROMPT_SHAPE.md`](docs/PROMPT_SHAPE.md) 的形状填
-   （七段结构、3000~6000 字、不许出现机制词、防出戏那一段不能省）。
-2. 跑测试，`tests/test_persona_shape.py` 会把那些硬约束全查一遍：
-
-   ```powershell
-   .\.venv\Scripts\python.exe tests\run_offline.py
-   ```
-
-六套 prompt 的格式、字数与校验规则都在
-[`docs/PROMPT_SHAPE.md`](docs/PROMPT_SHAPE.md)。
-
----
+**群不在配置里。** 哪些群跟她说话是运行期的事：超管在哪个群发 `/admin enable`，就在哪个群开；
+记忆是另一张按群的名单（`/super enable memory`）。
 
 ## 测试
 
-**离线测试不依赖网络、不依赖模型、不依赖 NapCat。** 数字要报就报跑出来的：
+三个门槛都在仓库里，不需要网络、模型或 NapCat：
 
 ```powershell
 .\.venv\Scripts\python.exe tests\run_offline.py
-# 期望输出：ALL_OFFLINE_TESTS_PASSED
-# 2026-10-18 在这棵树上实测：ran=1634 failed=0 errors=0 skipped=0（`verify_runs.log` 里那次）
+# 期望：ALL_OFFLINE_TESTS_PASSED
 
 .\.venv\Scripts\python.exe -m pyflakes src tests
-# 期望：无输出（2026-10-18 实测无输出、退出码 0）
+# 期望：无输出（pyflakes 要另装，它不在 requirements.txt 里）
 
 .\.venv\Scripts\python.exe tests\check_module_removal.py
 # 期望：七项可插能力的 build_engine 那一列全是「能（已解耦）」、退出码 0
 ```
 
-> 跑的时候屏幕上可能闪过 `label=unit … ran=4242 …` 这种行——那是
-> `tests/test_verify_log.py` 写进**临时目录**的**合成**记录（它自己就在测"留痕"这个能力），
-> **不是**另有一套 4242 个测试。真数只认 `verify_runs.log` 里 `label=offline` 那一行。
+最近一次离线留痕（`data/logs/verify_runs.log`）：
 
-改插件那条分支时**再加一条**（在插件工作树里跑）：`tests\check_plugin_branch_scope.py`
-——它拦"改动跑到插件目录与测试之外去了"。
-
-`run_offline.py` 每次跑都会留痕（`data/logs/verify_runs.log` 一行、`data/logs/verify_last.txt`
-是最近一次的完整输出）。**报数请用 `ran=`，不要用 `grep -c "def test_"`** ——
-`TestCase` 里的方法不叫 `def test_`，两个数天然对不上。
-
-覆盖范围包括 OneBot 解析与 @ 精确匹配、表情包与图片的区分、注意力判定与冷却、
-压缩周期与缓存前缀复用、命令插件注册表与权限档位、能力闸门、fail-closed 边界、
-提示词注入与越权、长期记忆隔离与归档重放、记忆↔人的多对多、两层记忆库的晋升、
-墓碑与旧证据防复活、人物画像、风格审核的"只判不改 + 打回后重写一次"与说教语气判据、
-金句学习与黑话词条的接缝、运行状态持久化、跨重启的用量账本、脱敏指标，
-以及 `archive/` 里归档实现的回归用例。
-
-**测试不碰真数据**：每个模块用带 pid 与 uuid 的独立临时目录，跑完自动回收。
-
----
-
-## 项目结构
-
-```
-src/qq_roleplay_bot/
-├── stage3_main.py          # 引擎：命令分发、注意力、回复链路
-├── stage3_runtime.py       # 会话状态、判定构造、可信前缀
-├── base_prompt.py          # ★ 人设模板（可替换）
-├── prompt_library.py       # 六套 prompt 的容器（可热更、可回滚）
-├── prompt_guard.py         # 机制词守卫（校验器与测试共用一份词表）
-├── attention.py            # 群聊注意力游标
-├── dialogue_judge.py       # 判定 agent
-├── dialogue_compaction.py  # 长对话压缩
-├── conversation_context.py # 群历史与成员名册补全
-├── memory_store.py         # 记忆库（SQLite，两层 + 归档 + 墓碑）
-├── memory_model.py         # 记忆的数据模型与写入批次
-├── memory_service.py       # 记忆的读取接缝
-├── memory_maintenance_agent.py  # 记忆维护 agent
-├── memory_ops.py           # 人工清理（只删）
-├── knowledge_base.py       # 知识库（按词检索）
-├── quote_learning.py       # 金句学习 agent（贴表情的样本 → 说话风格 / 语境 / 表情含义）
-├── slang_learning.py       # 黑话词条（被动听来的解释 + 原话证据）
-├── remind.py               # 到点提醒的**核心那一半**（听懂 + 算时间；发是插件的事）
-├── letter_context.py       # 写信素材（时间 / 会话 / 引用链 / 带图）
-├── letter_docs.py          # 写信要用的人设与事实表（读文件）
-├── style_reviewer.py       # 风格审核 agent（只判不改；判不过由回复 agent 重写一次）
-├── security.py             # 注入与敏感内容过滤
-├── capabilities.py         # 出站能力闸门
-├── command_plugins.py      # 命令插件协议
-├── builtin_commands.py     # 内置命令（ping / help / 余额）
-├── background_plugins.py   # 后台插件协议 + 节拍循环
-├── plugins/                # 插件发现与装配（只认契约；具体插件在 plugins 分支）
-├── onebot_ws.py            # OneBot WS 传输
-├── onebot_client.py        # OneBot HTTP 查询
-├── llm_client.py           # 模型客户端（错误分类、首字闸、流式）
-├── model_config.py         # 用途 → 供应商 / key / 模型名（三层配置）
-├── runtime.py              # 装配点
-├── state_store.py          # 状态持久化
-└── metrics.py              # 脱敏指标
-
-tests/                      # 离线测试（含三条门槛脚本）
-docs/                       # 设计文档 + 配置教程 + 部署教程（见下）
+```text
+2026-10-22T00:18:56+08:00 label=offline sha=223c5c9 branch=main dirty=no
+ran=1933 failed=0 errors=0 skipped=0 result=PASS
 ```
 
-**注意**：`dev/` 与线上的 `run/` 是两个目录，源码不共享；`run/` 里的插件比 `dev/src` 多。
-部署怎么做、插件为什么要单独拷，见 [`docs/DEPLOY.md`](docs/DEPLOY.md)。
+**报数请用 `ran=`，不要用 `grep -c "def test_"`**——`TestCase` 里的方法不叫 `def test_`，
+两个数天然对不上。
 
----
+`run_offline.py` 每次跑都会留痕：`data/logs/verify_runs.log` 一行，
+`data/logs/verify_last.txt` 是最近一次的完整输出。改插件分支时再加一条
+`tests/check_plugin_branch_scope.py`。
 
-## 设计文档
+测试不碰真数据：每个模块用带 pid 与 uuid 的独立临时目录，跑完自动回收。
 
-这套东西的取舍都写在文档里，包括**踩过的坑和修错的方向**：
+## 状态与限制
+
+- **只适配 NapCat。** 协议层是 OneBot v11，但实现依赖几个不是 v11 核心规范的行为：
+  `message` 段里的 `sub_type`（区分表情包与照片）、`sender.card` / `sender.nickname`、
+  `get_group_member_info` 的 `no_cache`，以及 NapCat 的 HTTP 接口形状。
+  换 go-cqhttp、Lagrange、LLOneBot 之类的实现，大概率要按 `transport.py` 写适配层。
+- **模型接口按 OpenAI-compatible `/chat/completions` 写。** 换别的协议要改 `llm_client.py`。
+- **语音没有实现。** 出站目前以文本与图片为主；语音、Ark 卡片、戳一戳、表情回应等出站动作
+  没有接入。`capabilities.py` 里登记的动作目录远多于实际调用点。
+- **没有 Docker / 一键部署。** 按上面的 venv 手动跑；进程守护、开机自启用系统自带的任务计划
+  或 systemd 自己配。
+- **插件发布方式未定。** 表里九个插件是 `plugins` 分支上的实现，预装还是另装还没有拍板。
+- **当前版本 `0.4.0b1`（beta）。** 阶段 Stage 3：Stage 3 管对话、记忆、防护；Stage 4 的功能扩展
+  （群管理、邮件、识图、面板等）以插件形式实现。版本号见 `pyproject.toml`。
+
+## 文档索引
 
 | 文档 | 内容 |
 | --- | --- |
-| [`docs/STAGE_BOUNDARY.md`](docs/STAGE_BOUNDARY.md) | 阶段怎么分，为什么这么分 |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | 模块划分、数据流、输出协议 |
+| [`docs/STAGE_BOUNDARY.md`](docs/STAGE_BOUNDARY.md) | Stage 3 与 Stage 4 怎么分，为什么这么分 |
+| [`docs/CONFIG_GUIDE.md`](docs/CONFIG_GUIDE.md) | 每个配置键、模型路由、常见坑 |
+| [`docs/DEPLOY.md`](docs/DEPLOY.md) | 部署、重启、回滚；起来之后看哪几行 |
+| [`docs/ADD_A_COMMAND.md`](docs/ADD_A_COMMAND.md) | 加一个命令 / 后台插件的完整步骤 |
 | [`docs/PROMPT_SHAPE.md`](docs/PROMPT_SHAPE.md) | 六套 prompt 的格式、字数与校验规则 |
 | [`docs/MEMORY_PEOPLE.md`](docs/MEMORY_PEOPLE.md) | 记忆怎么跟人对应；一个人多个号怎么办 |
-| [`docs/MEMORY_SELF_REFERENCE.md`](docs/MEMORY_SELF_REFERENCE.md) | 为什么记忆库不许记"关于系统自身"的事 |
+| [`docs/MEMORY_SELF_REFERENCE.md`](docs/MEMORY_SELF_REFERENCE.md) | 为什么记忆库不许记“关于系统自身”的事 |
 | [`docs/AFFINITY_DESIGN.md`](docs/AFFINITY_DESIGN.md) | 关系两轴（亲近 / 防备）的判据与上限 |
 | [`docs/MULTI_GROUP_FOCUS.md`](docs/MULTI_GROUP_FOCUS.md) | 多群注意力怎么分开 |
-| [`docs/STYLE_REVIEW.md`](docs/STYLE_REVIEW.md) | 风格审核的判据（含"说教语气"） |
-| [`docs/ADD_A_COMMAND.md`](docs/ADD_A_COMMAND.md) | 加一个命令 / 后台插件的完整步骤 |
-| [`docs/CONFIG_GUIDE.md`](docs/CONFIG_GUIDE.md) | 配置教程：每个键干什么、模型怎么路由、常见坑 |
-| [`docs/DEPLOY.md`](docs/DEPLOY.md) | 部署与重启：三个目录的关系、更新与回滚、起来之后看什么 |
-| [`docs/ROADMAP.md`](docs/ROADMAP.md) | 已完成与计划 |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | 模块划分与数据流 |
-| [`DEFECT_VERIFICATION.md`](DEFECT_VERIFICATION.md) | 一次系统性缺陷核实与修复的完整记录 |
+| [`docs/STYLE_REVIEW.md`](docs/STYLE_REVIEW.md) | 风格审核的判据（含“说教语气”） |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | 还没做 / 下一版要做的事 |
+| [`DEFECT_VERIFICATION.md`](DEFECT_VERIFICATION.md) | 一次系统性缺陷核实与修复的记录 |
+
+**数字口径**：测试数见 `data/logs/verify_runs.log` 的 `ran=`；判定比例见
+`ARCHITECTURE.md` 第 82 行，判定 prompt 的 2 条上限见第 92 行；窗口与压缩常量见 `src/qq_roleplay_bot/stage3_main.py`；
+前缀复用率见 `DEFECT_VERIFICATION.md` 第 158 行；归档与关系流水保留期见
+`src/qq_roleplay_bot/dev_config.py` 与 `memory_store.py`。
+
+---
+
+## 免责声明
+
+本项目不是腾讯或 NapCat 官方项目。NapCat 是第三方协议端，使用它可能违反平台条款并导致
+账号受限；风险由使用者承担。模型生成的内容请自行甄别。
+
+---
+
+## 贡献
+
+改动前先读 [`AGENTS.md`](AGENTS.md) 与 [`ARCHITECTURE.md`](ARCHITECTURE.md)。
+对话、记忆、防护属于 Stage 3；对外功能扩展属于 Stage 4，做成插件，不往核心加命令分支。
+提交前跑完上面三个门槛，并在改动说明里写清“为什么这样做、为什么不那样做”。
+
+插件实现在 `plugins` 分支；核心只保留协议与装配点。加插件的步骤见
+[`docs/ADD_A_COMMAND.md`](docs/ADD_A_COMMAND.md)。
 
 ---
 
@@ -438,7 +323,8 @@ docs/                       # 设计文档 + 配置教程 + 部署教程（见�
 
 MIT。见 [LICENSE](LICENSE)。
 
-**关于人格设定**：本项目的人设正文是从第三方作品（《心灵终结》/ Mental Omega 的官方
-单位描述、游戏内语音与制作组公开发言）整理而来，其著作权不属于本项目，
-因此**不随仓库发布**——`base_prompt.py` 里是一份可替换的模板。
-仓库内的知识库语料同样不包含第三方原文。
+**关于人格设定**：本项目的人设正文是从第三方作品（《心灵终结》/ Mental Omega 的官方单位描述、
+游戏内语音与制作组公开发言）整理而来，其著作权不属于本项目，因此**不随仓库发布**——
+`base_prompt.py` 里是一份可替换的模板。仓库内的知识库语料同样不包含第三方原文。
+想换成自己的人设，照 [`docs/PROMPT_SHAPE.md`](docs/PROMPT_SHAPE.md) 的七段结构填，
+并让 `tests/test_persona_shape.py` 过一遍。

@@ -25,6 +25,7 @@ from .dev_config import (    BATCH_SIZE,
     ONEBOT_ACCESS_TOKEN,
 )
 from .llm_client import LLMError, OpenAICompatibleClient
+from .knowledge_tier import TIER_TIMEOUT_SECONDS, apply_tiers, tier_items
 from .attention import address_reason, is_addressed_to_bot, mentions_name
 from .focus import FocusController
 from .judge_sampling import JudgeSampler
@@ -36,10 +37,17 @@ from .builtin_commands import (
 from ._host import HostServices
 from .ask_when_unsure import (
     NO_ASSERT_NOTE,
+    PAST_CLAIM_NOTE,
+    check_past_claim,
     context_is_explicit,
     decide_grounding,
+    has_experiential_presupposition,
     has_specific_claim,
+    material_haystack,
 )
+# 「有人拿工具式的称呼叫她」这一轮要不要递一句话（2026-10-20）：判据与那句话都在
+# `stance_hints.py`（纯正则、0 次模型调用，**只影响回复材料的一句话，不碰判定**）。
+from .stance_hints import TOOL_VOCATIVE_NOTE, looks_like_tool_vocative
 from .dialogue_judge import (
     OFFENSE_CODES,
     JudgeVerdict,
@@ -72,19 +80,18 @@ from .remind import (
 )
 from .trigger import IdleTrigger, MessageDeduplicator
 from .stage3_runtime import (
-    CLOSENESS_LABELS,
     ConversationMode,
     ConversationState,
     DecisionKind,
     DialogueStatus,
     DialogueDecision,
-    GUARDEDNESS_LABELS,
     Stance,
     build_dialogue_messages,
     build_roster_lines,
     message_index_of,
     parse_dialogue_output,
 )
+from .relationship_tiers import guard_tier, likes_tier
 from .transport import (
     IncomingMessage,
     MessageNotDelivered,
@@ -117,15 +124,24 @@ from .memory_view import (
     build_overview,
     build_records_view,
 )
-from .extensions import PromptContext, PromptMaterial, PromptSources
+from .extensions import (
+    PromptContext,
+    PromptMaterial,
+    PromptSources,
+    knowledge_item_limit,
+)
 # `/admin` 是 **Stage 3 自己的命令**（直接管理聊天：开关群、清会话、转告），
 # 这个模块就是它的解析器，自身零依赖（只有 `re` + enum + dataclass）。
 # 所以这是**合法的 stage3 依赖**，不是要拆掉的拴缚。
 from .admin_control import AdminCommand, AdminCommandKind, parse_admin_command
 from .memory_model import MemoryMaterial
 from .memory_service import MemoryService
+# 防备单次的升幅（= 一档宽 10，2026-10-20）。从存储层引进来，不在调用点写死数字：
+# 写死 8 的时候 `0 → 8` 跨不了档，"被冒犯立刻变冷"是假的。
+from .memory_store import GUARD_RAISE_MAX
 from . import data_boundary
 from . import face_names
+from . import notice_text
 from . import provider_failover
 from . import runtime_flags
 
@@ -396,10 +412,14 @@ def _unique_clients(clients) -> list[object]:
     return unique
 
 
-def _level_name(labels: tuple[str, ...], value: int) -> str:
-    """档位名（不含行为说明）。`/super affinity` 只给人看名字。"""
+def _level_name(tier, value: int) -> str:
+    """档位名（不含行为说明）。`/super affinity` 只给人看名字。
 
-    return labels[max(0, min(len(labels) - 1, int(value)))].split("——")[0]
+    2026-10-20：档位从 0..3 四档变成 22 + 7 档，文字的唯一来源是
+    `relationship_tiers`；这里只把"数值 → 名字"这一步收一处，别在两处手写索引。
+    """
+
+    return tier(value).name
 
 
 def _token_count(value: int) -> str:
@@ -1116,7 +1136,14 @@ class DialogueSessions:
         return True
 
     def leave(self, session_id: str) -> None:
-        self.state(session_id).exit()
+        state = self.state(session_id)
+        state.exit()
+        # 通知清单的寿命**跟会话状态一致**（用户 2026-10-19：不给它单独发明上限）：
+        # 会话被清空/重置（`/admin clear`、她主动结束对话）时，清单一并清。
+        # LRU 淘汰那条路不用在这里处理——整个 `ConversationState` 一起没了。
+        # 注意**不是** `ConversationState.exit()`：那一条也会被"活跃期超时"调到，
+        # 而超时只是"这一轮不聊了"，历史还在，通知没理由跟着消失。
+        state.notices.clear()
         self.trigger(session_id).reset()
 
     def export(self, *, max_sessions: int = 200) -> list[dict[str, object]]:
@@ -1456,6 +1483,21 @@ class DialogueEngine:
             # 话里有具体断言、三处都没有根据，于是被打回重写一次"的次数。
             # （关掉 `ask_when_unsure` 开关时两者恒为 0。只有计数，没有正文。）
             "clarify_quiet", "reply_grounding_rewrites",
+            # 「有人拿工具式的称呼叫她」（2026-10-20）：这一轮往易变段递了那一句的**条数**。
+            # 它是**分母**（命中有多常见），不是错误计数——长期为 0 才说明判据没在工作。
+            # 只有计数，**不记正文、也不记那个称呼**。
+            "reply_tool_vocative_hints",
+            # 「她把过往说成事实」（2026-10-18 加）：`reply_past_claim_hits` 是判据命中的
+            # 次数（含"最长片段太短、按口径放行"的那几例，它是分母）；`..._rewrites` 是
+            # 材料里对不上、**打回重写一次**的次数；`..._unfixed` 是重写之后**仍对不上、
+            # 照发**（这一关绝不丢回复）的次数。三者都只有计数，**不记正文**。
+            "reply_past_claim_hits", "reply_past_claim_rewrites",
+            "reply_past_claim_unfixed",
+            # 「预设型编造」（2026-10-20 加）：她把一件有"经历门槛"的事（六级/高考/宿舍）
+            # 当成前提讲出来，而这一轮材料里那个词 **0 次**，于是打回重写一次。
+            # 与上面「过往断言」共用同一份额度（同一轮只重写一次）。只有计数，
+            # **不记正文、也不记是哪个词**（日志只写条数与 session）。
+            "reply_presupposition_rewrites",
             # 不可信数据的短码（`data_boundary`，2026-10-08）：`data_marker_retries` 是
             # "回复里抄了当轮短码、被打回重写一次"的次数；`data_marker_drops` 是
             # "重写又抄、于是这一条没发出去"的次数（fail-closed）。
@@ -1482,6 +1524,12 @@ class DialogueEngine:
             # （连 ping / 管理命令 / 私聊都进不来）。超时 = 这一条没有回复，
             # **历史照留**（她该知道群里发生过那句话）。
             "turn_timeouts",
+            # 超短期层（inbox）的维护计数（2026-10-20）：`memory_inbox_extended` 是
+            # 到期时"从没被维护碰过"、于是被续了 TTL 的条数；`memory_inbox_expired_deleted`
+            # 是真正过期删掉的条数。两者都只记数，**不记正文**。
+            # 记录点不在引擎里（清理跑在维护线程的 `MemoryStore._cleanup`），快照/结账时
+            # 从 store 的进程内累计取一次，见 `_refresh_memory_inbox_counts`。
+            "memory_inbox_extended", "memory_inbox_expired_deleted",
         )}
         # 连续失败次数（成功一次就归零）：单次失败可能只是网络抖一下，连续几次才是
         # "她又突然不说话了"。只用来决定 `/super status` 那一行要不要升级成"异常"。
@@ -1635,9 +1683,8 @@ class DialogueEngine:
             lines.append(f"现在聊的是：{topic}")
         return "\n".join(lines)[-600:]
 
-    def _revision_request(self, request: list[dict[str, str]], draft: str,
-                          reason: str, *, note: str = "",
-                          redact: tuple[str, ...] = (),
+    def _revision_request(self, request: list[dict[str, str]], reason: str, *,
+                          note: str = "",
                           allow_decline: bool = False) -> list[dict[str, str]]:
         """把"这一版被退回来了"接在**同一份请求**后面。
 
@@ -1646,16 +1693,23 @@ class DialogueEngine:
         这里只在末尾追加一条 user 消息：她仍然是那个人、仍然看着同一段语境，
         只是知道了"刚才那句为什么不行"。**指令进 user 段**，system 前缀一个字不动。
 
-        `note` 是"打回"的具体要求。两条路各自给一句现成的措辞（都在易变段、
+        **不再把她上一版的原话贴回来**（2026-10-18 用户裁定的"拆放大器"）：这一段
+        曾经写着"你刚写的是：{那一版}"，等于把**她自己刚才编的那句**（"椅子我拆过，
+        具身不具身我可不知道"）原样再递给她一遍。那不是"提醒她改哪句"，那是**给编造
+        加码**：实测 15:41→15:42 那两轮，她越编越具体，起点正是这句话被贴回去。它也是
+        整轮请求里**唯一一处"她自己的正文重新进 prompt"**的地方（她的历史在 DATA 段、
+        已经排掉 `speaker="yunru"`；这一处排不掉，因为那是我们主动贴的）。拆掉之后她
+        仍然知道"刚才那一句不行、为什么不行"（`reason` / `note`），但拿不到那段可以照着
+        抄的字。代价：打回的话必须**自足**——现在的写法就是"哪一处不合适"由 `reason` 或
+        `note` 自己说清，不再靠引用原文。
+
+        `note` 是"打回"的具体要求。三条路各自给一句现成的措辞（都在易变段、
         不常驻、不点机制词）：
         * 风格审核那一趟：`reason` 就是审核给的理由，没有别的话；
         * 「没把握就别断言」那一趟：`note=ask_when_unsure.NO_ASSERT_NOTE`
-          ——"别断言你不知道的 / 说你能说的，或者说这个你不清楚"，**不是**"问她一句"。
-
-        `redact`（2026-10-08）：这几串在**引述的那一版正文**里要被抹掉。
-        只有"回复抄了边界短码"那一趟用它——否则"你刚写的是：…‹7K3Q9ZM›…"会把那个
-        短码**又递回给她一次**，等于一边说不许抄、一边示范一遍。抹掉的位置写
-        `（那串记号）`，她看得到"这里原本有个记号"，但拿不到可抄的字串。
+          ——"别断言你不知道的 / 说你能说的，或者说这个你不清楚"，**不是**"问她一句"；
+        * 「她把过往说成事实」那一趟：`note=ask_when_unsure.PAST_CLAIM_NOTE`
+          ——"意思照旧，换成没那么确定的说法"，**不许**要求她删掉整句。
 
         `allow_decline`（2026-10-11，用户："审核agent打回后回复agent可以拒绝重写
         原样发出"）：**只给风格审核那一趟**用。文字上把"拒绝"的办法说清楚——她
@@ -1666,14 +1720,10 @@ class DialogueEngine:
         用户裁决"只把提示写硬一点"——补上"这不算顶嘴、不会因为这个再退回来、
         改不改你定"。**不改机制**：打回仍然打回，只是把"她可以不认"说到明处。
 
-        为什么只给它：另外两趟里，"没把握就别断言"与"别抄不可信短码"都不是审美，
+        为什么只给它：另外两趟里，"没把握就别断言"与"别把过往说成事实"都不是审美，
         是**这一版确实有问题**；那两趟必须照打回的要求改，不设退路。
         """
 
-        shown = draft or ""
-        for token in redact:
-            if token:
-                shown = shown.replace(token, "（那串记号）")
         note_block = f"\n{note.strip()}\n" if note.strip() else ""
         decline_block = (
             "\n要是你觉得原来那句本来就没问题、改了反而更差，就把原来那句"
@@ -1681,12 +1731,13 @@ class DialogueEngine:
             "不会因为这个再退回来。这不算顶嘴：改不改，你定。"
             if allow_decline else ""
         )
+        parts = ["--- 你刚写的那一句要重来 ---"]
+        if reason.strip():
+            parts.append(f"不合适的地方：{reason.strip()}")
         body = (
-            "--- 你刚写的那一句要重来 ---\n"
-            f"你刚写的是：{shown}\n"
-            f"不合适的地方：{reason or '（没写清楚是哪一处）'}"
-            f"{note_block}\n"
-            "照这个地方**重写一遍**——只改不合适的那处，别的不用动。"
+            "\n".join(parts)
+            + f"{note_block}\n"
+            "照上面说的**重写一遍**——只改不合适的那处，别的不用动。"
             "不要解释、也不要提这一段，像平常那样把新的一句说出来。"
             f"{decline_block}"
         )
@@ -1696,18 +1747,21 @@ class DialogueEngine:
                                     session_id: str, trigger: str, trigger_kind: str,
                                     context: str, known_message_ids: frozenset[str],
                                     must_reply: bool, note: str = "",
-                                    redact: tuple[str, ...] = (),
                                     allow_decline: bool = False) -> str | None:
         """打回之后：**在同一轮里**让回复 agent 重写一次。返回新正文或 `None`。
 
-        两个调用方共用这一条路（**不另造机器**）：
+        三个调用方共用这一条路（**不另造机器**）：
         * 风格审核判不过（2026-10-05）：`reason` 是审核给的那一句；
         * 「没把握就别断言」（2026-10-05 晚）：她这一版话里有具体断言，
           而知识库 / 记忆 / 语境三处都没有根据 → 同一个动作，
-          只是多带一句现成的 `note`（`ask_when_unsure.NO_ASSERT_NOTE`）。
+          只是多带一句现成的 `note`（`ask_when_unsure.NO_ASSERT_NOTE`）；
+        * 「她把过往说成事实」（2026-10-18 接线）：她这一版里有一句在断言自己的过去，
+          而这一轮的材料里找不到那一段字 → 同一个动作，
+          `note=ask_when_unsure.PAST_CLAIM_NOTE`（只要求换成不确定的说法）。
 
-        第三条（2026-10-08，不可信数据的边界短码）也走它：`reason` 是"你把那串短码
-        写进去了"；`redact=(marker,)` 保证引述那一版正文时**不把短码又递回去**。
+        `draft` **只用来认"她把原来那句原样写回来了"**（`allow_decline` 那一趟）：
+        它**不再被贴回请求里**（2026-10-18 拆掉的那个放大器，见 `_revision_request`）。
+        所以除了"逐字相同"这个比较，重写那一趟看不到她的第一版——这是有意的。
 
         几条边界（都是"宁可照旧，也不许把一条回复弄丢"）：
 
@@ -1726,8 +1780,8 @@ class DialogueEngine:
         审核能说"不行"，但不能替她把话改成另一句。
         """
 
-        retry_request = self._revision_request(request, draft, reason, note=note,
-                                               redact=redact, allow_decline=allow_decline)
+        retry_request = self._revision_request(request, reason, note=note,
+                                               allow_decline=allow_decline)
         self._stats["model_calls"] += 1
         started_at = self.clock()
         try:
@@ -2228,6 +2282,48 @@ class DialogueEngine:
                         f"别再问一遍。）\n")
         return ""
 
+    def _tool_vocative_note(self, message: IncomingMessage) -> str:
+        """这一轮有人拿工具式的称呼叫她 → 在易变段递**一句**（没有就空串）。
+
+        ## 由来（2026-10-20 生产日志，群 `908696203` 凌晨）
+
+        04:32:48 "bot你帮我看看 我睡了"、04:33:51 "bot你敢不敢总结我们刚才的对话"——
+        两次这么叫她，**她两次都顺着接了**（等于默认了这个称呼）。用户口径：
+        *"不接这个称呼，但也不装没听见"*（反问 / 把话头拨回去 / 只回正题、态度冷一点）。
+
+        ## 为什么落在这里，而不是人格正文 / 判定
+
+        * **不进人格正文**：人格每轮都在，往那里写等于每轮提醒她有这么个身份（§2.2
+          "prompt 里的措辞会被角色吸收"）。只有这一轮真有人这么叫她，才加这一句。
+        * **不进判定**：用户明确"不要影响判定"（`lore` 那条已废弃，别碰）。判定有它自己的
+          agent 与 `guard`；这里只改回复材料，`build_dialogue_messages` 也只有回复这条路
+          在调（判定走 `dialogue_judge`）。
+        * **走既有的 `clarify_note` 口子**：那个口子本来就是"一句话进易变段"，
+          说明与限制写在同一处（见调用点）；不为这一句另造接口。
+        * 那一句**不提那个称呼**（`TOOL_VOCATIVE_NOTE` 里连那三个字母都没有）——
+          提它等于又提醒一次。
+
+        ## 只认**这一轮新到的消息正文**
+
+        用户口径：*"只对这一轮新到的消息正文判断，历史不算"*。所以这里只看
+        `message.text`：历史里出现过那种称呼，不代表这一轮还在这么叫——拿历史再判一次
+        就是每轮都加一句，正是要避免的。
+
+        ## 一轮只加一句
+
+        判据返回的是 bool，同一句里命中几处都只算一次；这个函数一轮只被调用一次
+        （`_model_path` 每条消息只走一次）。所以"多条命中不重复加"是结构上成立的。
+        """
+
+        if not looks_like_tool_vocative(message.text or ""):
+            return ""
+        self._stats["reply_tool_vocative_hints"] += 1
+        # 只记条数与 session：**不记正文、不记那个称呼**（§2.1"不记录敏感内容"的同一条纪律）。
+        logger.info(
+            "Stage 3 stance: 这一轮有一句拿工具式的称呼在叫她 session=%s",
+            message.session_id)
+        return TOOL_VOCATIVE_NOTE
+
     def _apply_guard_signal(self, verdict: JudgeVerdict, message: IncomingMessage,
                             *, seq=None, who_alias=None) -> bool:
         """把判定的结论落到这一个回合上——**在拼这一轮回复之前**。返回要不要压掉回复。
@@ -2242,19 +2338,25 @@ class DialogueEngine:
           "探机制"只是当轮不接，说完就过去，不该留成她对这个人的长久态度
           （用户原话：*"聊机制她不回不就好了"*）。
         * `<guard>UP</guard>` + `guard_reason` 在 `GUARD_RAISING_OFFENSES` 里
-          （冒犯性言论 / 阴阳怪气）：写防备 +1——**这就是"被冒犯立刻变冷"的全部实现**：
-          同一条回复就已经按新的分寸在说了（缓存失效在这一处）。
+          （冒犯性言论 / 阴阳怪气）：写防备 **+8**（新刻度的单次最大提升）——
+          这就是"被冒犯立刻变冷"的全部实现。**2026-10-20 起它不再"降一档"**：
+          防备一档宽 10，+8 让下一次越界才跨进「有点端着」；这是用户批准的新
+          刻度带来的节奏（一次冒犯不再直接改一档）。
         * `<guard>UP</guard>` 而由头不在表里（判定把玩笑读成了越界）、或者干脆没给由头：
           **不写**，只加一个计数。**政策留在核心**，提示词漂了也拦得住。
 
         两者互斥：`PROBE` 先返回，所以探机制既不会压回复又顺手写防备这种事不会发生。
 
-        ## 证据句（2026-10-16）
+        ## 证据句（2026-10-16，2026-10-20 起是硬要求）
 
         `verdict.guard_quote` 是判定抄回来的"触发它的那一句"，**已经在 `_judge` 里核过**
-        "它真的在这一轮的输入里"。这里只把它连同定位信息（`seq` / 说话人别名）交给
+        "它真的在这一轮的输入里"。这里把它连同定位信息（`seq` / 说话人别名）交给
         `MemoryStore.apply_affinity(evidence=...)`，由存储那一侧做两级脱敏、截断、
         落旁表（见 `MemoryStore._evidence_row`）。
+
+        **核不过 / 没抄 → 这次写入被拒**（`affinity_rejected_no_evidence`），
+        防备一点都不动：宁可这一轮不变冷，也不留一条事后查不了的关系变动。
+        旧行为是"证据存不下、档位照升"，那正是全库只有 1 条证据的原因。
 
         为什么 `seq` / `who_alias` 由调用方递进来而不在这里算：只有调用方手里有
         `ConversationState`（序号与名册别名都在那儿），这里只认识一条消息。
@@ -2288,10 +2390,15 @@ class DialogueEngine:
             rejection = store.apply_affinity(
                 # 依据写**固定的那句中文**（表在 `dialogue_judge.OFFENSE_CODES`），
                 # 不把判定可能写歪的自由文本原样落库。
-                user_id, guardedness=1, reason=OFFENSE_CODES.get(offense, offense),
+                # 2026-10-20：这里原来是写死的 `8`。防备一档宽 10，写 8 意味着
+                # `0 → 8` 仍停在「正常分寸」——"被冒犯立刻变冷"根本没发生，
+                # 要连着被冒犯两次才跨档。改成引用存储层的那个常量（= 一档），
+                # 单次升幅从此只有一个来源。
+                user_id, guardedness=GUARD_RAISE_MAX,
+                reason=OFFENSE_CODES.get(offense, offense),
                 source="judge",
                 # "到底是哪句话"（2026-10-16）：原话已在 `_judge` 核过，这里只递过去。
-                # 空串 = 判定没抄/核不过 → 不传（旁表一条都不写）。
+                # 空串 = 判定没抄/核不过 → 存储层拒绝这次写入（2026-10-20 收紧）。
                 evidence=({"quote": verdict.guard_quote,
                            "who_alias": "" if who_alias is None else str(who_alias),
                            "seq": seq} if verdict.guard_quote else None),
@@ -2305,8 +2412,7 @@ class DialogueEngine:
             logger.info("Stage 3 guard signal rejected: reason=%s user=%s", rejection, user_id)
         else:
             self._stats["guard_raised"] += 1
-            if verdict.guard_quote:
-                self._stats["evidence_stored"] += 1
+            self._stats["evidence_stored"] += 1
             logger.info("Stage 3 guard raised: user=%s", user_id)
         return False
 
@@ -2376,6 +2482,81 @@ class DialogueEngine:
         self._session_judges.pop(session_id, None)
         # 判定采样的按会话计数同批清掉（LRU 淘汰时 `leave_session` 不会走这条路）。
         self.judge_sampling.forget_session(session_id)
+
+    def _relevance_client(self):
+        """知识块**判档**那一路的 client（懒建、进程内复用；关掉开关/没 key 时返回 None）。
+
+        用途名是 `relevance`（`model_config.TASKS`）：与判定同一把 key、同一个模型
+        （`deepseek-flash`），思考深度写死在 `dev_config.FIXED_REASONING_EFFORT`（`none`）。
+        **不按会话分**：它不看历史、不带上下文，每轮只是"这些块能不能用上"的一次小调用，
+        共用一个 client 就够了（也就不会多出一份按会话的强引用要回收）。
+        """
+
+        cached = getattr(self, "_relevance_llm_client", None)
+        if cached is not None:
+            return cached or None
+        if not dev_config.knowledge_tier_llm_enabled():
+            self._relevance_llm_client = False
+            return None
+        from . import provider_failover  # noqa: PLC0415 - 与服务端装配同一条取源路径
+        from .llm_client import OpenAICompatibleClient  # noqa: PLC0415
+        from .model_config import MissingCredential  # noqa: PLC0415
+
+        try:
+            endpoint = provider_failover.endpoint_for("relevance")
+        except MissingCredential as exc:
+            logger.info("知识块判档没有可用凭据，按本地档继续：%s", exc)
+            self._relevance_llm_client = False
+            return None
+        client = OpenAICompatibleClient(*endpoint.triple(), provider=endpoint.provider,
+                                        usage_role="relevance")
+        self._relevance_llm_client = client
+        return client
+
+    async def _apply_knowledge_tiers(self, material: PromptMaterial,
+                                     query: str) -> PromptMaterial:
+        """给这一轮的知识块**用一次模型调用**重判相关档（2026-10-18）。
+
+        用户原话："这块不行也加个agent，用dsflash，effort调none"、
+        "prompt记得优化排序，保证高命中率"。
+
+        形状：
+        * **一轮一次**：候选一起进同一次调用（本地判 0 的已经在 `collect` 之后不在列表里）；
+        * 模型给的档就是**最终档**，最终分仍然 = **档 × 权威度**，降序取上限（默认 5）；
+        * **失败、超时、输出读不出来、开关关掉 → 原样返回**：这一层只许把顺序调准，
+          不许让这一轮没料（`tests/test_knowledge_tier.py` 钉着 fail-open 与"关掉=只有本地"）；
+        * 模型把**全部**判 0 → 与"本地全 0 档"同一个出口：追一条 ≤200 字的档案兜底
+          （用户："全 0 档…注入一小段她的档案兜底"），它不占那 5 条名额。
+        """
+
+        items = material.knowledge_items
+        if not items or not dev_config.knowledge_tier_llm_enabled():
+            return material
+        client = self._relevance_client()
+        if client is None:
+            return material
+        local_tiers = [int(getattr(item, "tier", 0) or 0) or 1 for item in items]
+        started_at = self.clock()
+        try:
+            tiers = await asyncio.wait_for(
+                tier_items(client, query, items, local_tiers=local_tiers),
+                timeout=TIER_TIMEOUT_SECONDS,
+            )
+        except Exception:  # noqa: BLE001 - 超时只等于"用本地档"
+            logger.warning("知识块判档超时/失败，按本地档继续", exc_info=True)
+            return material
+        if tiers is None:
+            return material
+        kept = apply_tiers(items, tiers, limit=knowledge_item_limit())
+        logger.info("Stage 3 knowledge tier: %.2fs 判=%s 留下=%s/%s",
+                    self.clock() - started_at, tiers, len(kept), len(items))
+        if kept == list(items):
+            return material
+        if not kept:
+            from .knowledge_base import profile_fallback_item  # noqa: PLC0415 - 避免循环
+
+            kept = [profile_fallback_item()]
+        return replace(material, knowledge_items=tuple(kept))
 
     def _judge_for(self, session_id: str):
         """这个会话该用哪个判定 client；退回单 agent 时返回 None。
@@ -2512,6 +2693,10 @@ class DialogueEngine:
 
         只在会话里已有的历史为空时补（新会话的第一条消息），避免每轮都判断；
         真正的限流由 provider 自己按群维护。任何失败都只是少一点背景。
+
+        **2026-10-19 回到原来的判据**：通知不再进历史（用户改了口径：「通知只在
+        上下文，不进历史」），所以"历史非空"与"已经有谁说过话"重新是同一件事，
+        上一轮为通知特判的那段（`any(not m.is_notice ...)`）随之撤回。
         """
 
         if self.context_provider is None or state.history:
@@ -2556,9 +2741,28 @@ class DialogueEngine:
         self._stats["turn_timeouts"] += 1
         return self._stats["turn_timeouts"]
 
+    def _refresh_memory_inbox_counts(self) -> None:
+        """把记忆库里 inbox 的进程内计数搬进 `_stats`（只记数，不含正文）。
+
+        为什么在这里取而不是"清理时 +1"：清理发生在维护线程的
+        `MemoryStore._cleanup` 里，引擎不参与，也没有回调。store 自己累计一份，
+        引擎在快照/结账这两处对齐即可（赋值而不是累加：两边都是本次进程的总量）。
+        """
+
+        store = getattr(self.memory_service, "store", None)
+        if store is None:
+            return
+        try:
+            counts = store.inbox_maintenance_counts()
+        except Exception:  # noqa: BLE001 - 读计数失败不该让快照/结账挂掉
+            return
+        self._stats["memory_inbox_extended"] = int(counts.get("extended", 0))
+        self._stats["memory_inbox_expired_deleted"] = int(counts.get("expired_deleted", 0))
+
     def snapshot(self) -> EngineSnapshot:
         """只读运行快照。内存数字每次读取时现取（取不到就是 0）。"""
 
+        self._refresh_memory_inbox_counts()
         memory_now, memory_peak = process_memory_bytes()
         # 审核的计数在**它自己**身上（判不过/认不出都发生在它内部，引擎看不到中间那一步），
         # 所以快照现取一份，让 `/super status` 与面板能看到拦截率（2026-10-05 追加）。
@@ -2897,7 +3101,8 @@ class DialogueEngine:
             message_id=message.reply_to_message_id or "",
         )
         # 动作结果一律是"工具性响应"：立刻送出，不掺拟人化停顿。
-        return OutgoingMessage(message.target, str(text or ""), paced=False)
+        # `is_notice=True`：这是**命令的回复**，进她的历史时记成通知（不是她说的）。
+        return OutgoingMessage(message.target, str(text or ""), paced=False, is_notice=True)
 
     async def execute_action(self, request, *, group_id: str | None, actor_id: str,
                              message_id: str = "", mentioned: bool = False) -> str:
@@ -3220,18 +3425,18 @@ class DialogueEngine:
             if reset:
                 changed = store.reset_relationship(user_id, reason=f"超管重置 by={message.user_id}")
                 self._stance_cache.pop(user_id, None)
-                lines.append(f"{user_id}：{'已按回默认档（生疏 + 如常）' if changed else '本来就是默认档'}")
+                lines.append(f"{user_id}：{'已按回默认档（陌生人 + 正常分寸）' if changed else '本来就是默认档'}")
                 continue
             detail = store.relationship_detail(user_id)
             closeness = int(detail["closeness"])
             guardedness = int(detail["guardedness"])
             lines.append(
-                f"{user_id}：亲近 {_level_name(CLOSENESS_LABELS, closeness)}，"
-                f"防备 {_level_name(GUARDEDNESS_LABELS, guardedness)}"
+                f"{user_id}：好感 {closeness}（{_level_name(likes_tier, closeness)}），"
+                f"防备 {guardedness}（{_level_name(guard_tier, guardedness)}）"
             )
             last = detail.get("last")
             if isinstance(last, dict):
-                axis = "亲近" if last.get("axis") == "closeness" else "防备"
+                axis = "好感" if last.get("axis") == "closeness" else "防备"
                 lines.append(
                     f"  最近一次：{axis} {last.get('before_value')}→{last.get('after_value')}"
                     f"（{last.get('source')}）{last.get('reason') or ''}"
@@ -3306,7 +3511,7 @@ class DialogueEngine:
                         return None
                 except Exception:  # noqa: BLE001 - 发图失败退回文字，帮助照样看得到
                     logger.warning("Stage 3 help card send failed; 退回文字")
-        return OutgoingMessage(message.target, text, paced=False)
+        return OutgoingMessage(message.target, text, paced=False, is_notice=True)
 
     def _profile_reply(self, message: IncomingMessage) -> str:
         """`/super profile @某人`：把那个人的**完整人物画像**发出来（发给群里）。
@@ -3581,19 +3786,30 @@ class DialogueEngine:
         try:
             detail = store.relationship_detail(user_id)
             lines.append(
-                f"亲近 {_level_name(CLOSENESS_LABELS, int(detail['closeness']))}，"
-                f"防备 {_level_name(GUARDEDNESS_LABELS, int(detail['guardedness']))}"
+                f"好感 {_level_name(likes_tier, int(detail['closeness']))}，"
+                f"防备 {_level_name(guard_tier, int(detail['guardedness']))}"
             )
         except Exception:  # noqa: BLE001
             pass
         profile = ""
         updated = 0.0
+        # 正文走 `profile()`：它把这个人**全部生效的碎片**拼起来（`profile` 总览在前、
+        # `profile/<方面>` 按名跟在后面，见 `memory_store.py` 的 `profile()`）。
+        # 原来这里用 `profile_record()`，而它是 `ORDER BY updated_at DESC LIMIT 1`——
+        # 画像 2026-10-21 碎片化之后，拿到的是**最新补的那一片**，不是总览，
+        # 于是 `/super profile` 只剩一句"最近又知道了什么"，其余碎片都看不到。
+        try:
+            profile = str(store.profile(user_id) or "")
+        except Exception:  # noqa: BLE001 - 正文拿不到就按"还没有画像"走下面的兜底
+            profile = ""
+        # 时间戳仍取 `profile_record()`：`profile()` 只回正文、没有更新时间；
+        # 那一条（最新碎片）的 `updated_at` 就是全部碎片里的 max，正好是"画像更新于"。
+        # 两件事分开取，任一边失败只丢那一边，不把整块画像变成兜底文案。
         try:
             record = store.profile_record(user_id)
-            profile = str(getattr(record, "content", "") or "")
             updated = float(getattr(record, "updated_at", 0.0) or 0.0)
-        except Exception:  # noqa: BLE001
-            profile = ""
+        except Exception:  # noqa: BLE001 - 时间拿不到只是不显示"更新于"
+            updated = 0.0
         lines.append("—— 她对这个人的印象 ——")
         if profile:
             lines.append(profile)
@@ -3607,7 +3823,9 @@ class DialogueEngine:
             if fallback:
                 lines.append("她手里关于这个人的零散记录：")
                 lines.extend(fallback)
-        # 出站正文上限 1000 字符：画像本身 ≤300 字，这里只是防多目标叠加时撞上限。
+        # 出站正文上限 1000 字符（`security.py` 的 `MAX_REPLY_LENGTH`）：碎片拼起来的
+        # 画像最长可到 `PROFILE_JOIN_MAX`（1200），所以这里**仍按 900 截**——多目标
+        # 叠加时还要给标题/关系行留余量。不能抬到 1200，那样单条画像就会撞出站上限。
         return "\n".join(lines)[:900]
 
     def _identity_lines(self, store, group_id: str | None, user_id: str) -> list[str]:
@@ -3657,7 +3875,7 @@ class DialogueEngine:
             return None
         if not _admin_deny_notice_enabled():
             return None
-        return OutgoingMessage(message.target, _admin_deny_notice(), paced=False)
+        return OutgoingMessage(message.target, _admin_deny_notice(), paced=False, is_notice=True)
 
     def _recent_denied_admins(self, group_id: str) -> list[IncomingMessage]:
         """本群里还没被放行、也还没过期的被拒命令，新的在前。过期的顺手清掉。"""
@@ -3744,7 +3962,8 @@ class DialogueEngine:
                     command.kind.value, message.user_id, target_group,
                 )
                 return OutgoingMessage(
-                    message.target, self._out_of_scope_reply(message, target_group), paced=False
+                    message.target, self._out_of_scope_reply(message, target_group),
+                    paced=False, is_notice=True,
                 )
         if command.kind in {
             AdminCommandKind.RELAY,
@@ -3753,10 +3972,12 @@ class DialogueEngine:
             AdminCommandKind.CANCEL,
         }:
             return OutgoingMessage(
-                message.target, await self._relay_reply(command, message, now), paced=False
+                message.target, await self._relay_reply(command, message, now),
+                paced=False, is_notice=True,
             )
         return OutgoingMessage(
-            message.target, self._admin_command_reply(command, message), paced=False
+            message.target, self._admin_command_reply(command, message),
+            paced=False, is_notice=True,
         )
 
     def _out_of_scope_reply(self, message: IncomingMessage, group_id: str) -> str:
@@ -4549,6 +4770,9 @@ class DialogueEngine:
         store = getattr(self, "usage_store", None)
         if store is None:
             return
+        # inbox 的两个计数由记忆库维护，结账前先对齐（见 `_refresh_memory_inbox_counts`），
+        # 否则账本里只会记下 0。
+        self._refresh_memory_inbox_counts()
         try:
             store.commit_counters(store.all_time(self._stats))
         except Exception:  # noqa: BLE001 - 记账失败绝不影响对话
@@ -4784,6 +5008,50 @@ class DialogueEngine:
         expected = self._pending_memory_replies.pop(message.message_id, None)
         if expected == text and self.memory_service is not None:
             self.memory_service.record_sent_reply(message, text)
+
+    def record_sent_notice(self, source: IncomingMessage, text: str) -> bool:
+        """**命令的回复发出去之后**，把它放进"上下文里常驻的通知清单"。
+
+        用户 2026-10-19 三次口径，按时间顺序（前两次的落点都被后一次覆盖，别只读第一条）：
+
+        1. 「这个也进，一起当通知」（前半句是「哎要不还是通知吧，不要当人了」）
+           —— 命令的回复跟后台通知同一套；
+        2. 「通知只在上下文，不进历史」——所以它**不写 `state.history`**；
+        3. 「**上下文要留，只是不进记忆**」——它在上下文里**每轮都在**（不是只出现
+           一次），而且因为不在历史里，**记忆 agent 也提取不到它**。
+
+        所以这里做三件事，一件都不多：
+
+        - 进上下文的那一份先过 `notice_text.for_history`（去 CQ/@、脱敏、截断 200 字）；
+        - 放进那个会话的通知清单（不设单独上限，寿命跟会话状态一致；见
+          `ConversationState.add_notice`）；
+        - **发出去的那一份一个字都不动**：操作者该看到的还是命令的完整输出
+          （所以脱敏只发生在这里，而不是在出站路径上）。
+
+        与 `record_sent_reply` 的分工：那一条是"她真的说过的话"（进长期记忆的证据），
+        这一条**不进记忆**、**也不进历史**——命令回复不是她的人格台词。
+
+        返回"放没放进去"（没有会话 id / 洗成空串时不放）。
+        """
+
+        session_id = str(getattr(source, "session_id", "") or "")
+        if not session_id:
+            return False
+        cleaned = notice_text.for_history(text)
+        if not cleaned:
+            return False
+        try:
+            state = self.sessions.state(session_id)
+        except Exception:  # noqa: BLE001 - 排材料失败不许影响"已经发出去"这件事
+            logger.warning("Stage 3 notice queued skipped: session=%s", session_id, exc_info=True)
+            return False
+        added = state.add_notice(cleaned)
+        if added:
+            logger.info(
+                "Stage 3 command reply added to notice context: session=%s chars=%s",
+                session_id, len(cleaned),
+            )
+        return added
 
     def _purge_expired_relays(self, now: float) -> None:
         expired = [
@@ -5049,7 +5317,7 @@ class DialogueEngine:
             if isinstance(plugin_reply, ActionRequest):
                 # 插件只声明意图；权限、角色、闸门、审计、真调 action 全在这里。
                 return await self._plugin_action_reply(plugin_reply, message)
-            return OutgoingMessage(message.target, plugin_reply, paced=False)
+            return OutgoingMessage(message.target, plugin_reply, paced=False, is_notice=True)
         # /admin help 与 /super help 的先后：**菜单本身是公开的**，
         # 谁发都能看到管理员命令清单（用户 2026-09-28 要求"普通成员可以呼叫 /admin help
         # 调起 help 菜单"），没权限的人在末尾多读一段"怎么让超管放行一次"。
@@ -5083,7 +5351,7 @@ class DialogueEngine:
             # 放行那条会直接给出"被执行命令"的回复（目标和节奏都在里面）。
             if isinstance(reply, OutgoingMessage):
                 return reply
-            return OutgoingMessage(message.target, reply, paced=False)
+            return OutgoingMessage(message.target, reply, paced=False, is_notice=True)
         # 长得像命令但**这一层**没权限的：一概不落到模型、不进历史。
         # 注意按层级分别判：一个管理员发 `/super ...` 同样是没权限。
         # 收尾分两种：`/admin ...` 回一句说明（用户 2026-09-28 要求，也是 permit 的由来），
@@ -5200,6 +5468,7 @@ class DialogueEngine:
                     message.target,
                     f"这条 {privileged_level} 命令我没认出来。发 {hint} 看全部可用命令。",
                     paced=False,
+                    is_notice=True,
                 )
         security = check_message_security(message, self.all_admin_user_ids())
         if security.blocked:
@@ -5449,8 +5718,16 @@ class DialogueEngine:
         profile_note = ""
         # 判定说"这一句还接着原来那条线吗"——「顺带一提」用它判断话题有没有离开那件事。
         verdict_related = True
-        # 判定说"这一句在问她的世界吗"——只有 YES 才去翻世界观资料（单 agent 模式照旧查）。
-        lore_wanted = True
+        # 判定里那个"这一句在问她的世界吗"（`<lore>`）**已废弃**，不再决定查不查知识库。
+        # 2026-10-18 用户裁定：「我不介意查库，消息积压了就多条一判，ds速度是够的」。
+        # 现在的形状：**每一轮 REPLY 都查**，再由相关度筛（`knowledge_base.relevance_tier`，
+        # 0/1/2 三档，0 档一条都不取）+ 权威度乘法决定给她看哪几条。
+        #
+        # 为什么必须废掉那道门（实测）：判定口径里明写"议论她本人、@ 她、提她名字都不算"，
+        # 于是"问她自己的过去"这条路**系统性不检索**——1,579 条判定里 NO 1,411（89.4%）、
+        # YES 只有 20（1.3%）。字段留着（判定仍在输出它，删字段等于动判定输出协议），
+        # 但这里只当"读数"记日志，**不再拿它关检索**。
+        lore_recorded = True
         care_note: dict | None = None
         # 「惦记事」（2026-10-11）：她自己记着、还没划掉的事（"回头问他那个接口好没"）。
         # 与 `care_note` 是两样东西：那是"别人的处境，提一次就够"，这是"她自己的备忘，
@@ -5503,7 +5780,11 @@ class DialogueEngine:
             # "她没说话"不等于"话题没变"，而带下去的旧话题正是她强推旧事的原因。
             self._refresh_context_from_verdict(state, verdict, session_id=message.session_id)
             verdict_related = bool(getattr(verdict, "related", True))
-            lore_wanted = bool(getattr(verdict, "lore", True))
+            # 判定的 `<lore>` 读数：**只记日志、不影响检索**（见本轮开头那段注释与用户
+            # 2026-10-18 的原话）。它现在的用处只剩"看一眼判定往哪边偏"。
+            lore_recorded = bool(getattr(verdict, "lore", True))
+            logger.info("Stage 3 lore: 判定读数（已废弃，不影响检索） session=%s lore=%s",
+                        message.session_id, "YES" if lore_recorded else "NO")
             # 「没把握就别断言」的第一道确定性规则（2026-10-04 加，2026-10-05 晚改口径）：
             # **没被叫到 + 没懂 + 具体话题 → 不插话**。不出声，**不是**"问一句"——
             # 用户否掉的就是"不懂就问"那条路（"没根据的时候，要么不出声，要么别断言"）。
@@ -5548,9 +5829,13 @@ class DialogueEngine:
         # 什么时候能改回去：用户重新定一条"按话题裁历史"的口径时——那时要连判定
         # prompt 与 `docs/MULTI_GROUP_FOCUS.md` 第五节一起恢复。
         history = state.live_history()
+        # **每一轮都查知识库**（2026-10-18 用户裁定：不介意查库、ds 速度够）。
+        # 不再传 `knowledge_enabled=`：给它传 False 就是"这一轮根本没查"，
+        # 而那正是这次要拆掉的东西。要不要给她看、看哪几条，由检索侧的相关度筛 +
+        # 权威度乘法决定（0 档不占名额，筛完为空就是"（无扩展材料）"）。
         try:
             prompt_material = await asyncio.wait_for(
-                self.prompt_sources.collect(prompt_context, knowledge_enabled=lore_wanted),
+                self.prompt_sources.collect(prompt_context),
                 timeout=EXTENSION_TIMEOUT_SECONDS,
             )
         except Exception:
@@ -5559,6 +5844,11 @@ class DialogueEngine:
             # 材料整段时间拿不到时，"她变笨了"也要能在计数上看见，不能只有一行日志。
             self.metrics.record_extension_failure()
             prompt_material = PromptMaterial()
+        # **模型判档那一层**（2026-10-18 用户："这块不行也加个agent，用dsflash，
+        # effort调none"）：本地判完 0/1/2 之后，把留下来的候选**一起**塞进**一次**调用，
+        # 按"能不能用上"重判；模型判出的档就是最终档（本地只当兜底）。
+        # 失败/格式不对/开关关掉 → 原样返回（与"只有本地那套"逐字一致）。
+        prompt_material = await self._apply_knowledge_tiers(prompt_material, message.text)
         if self.memory_service is not None:
             memory_material = await self.memory_service.retrieve(
                 message, state.context.topic, mentioned=self._mentioned_people(message, state))
@@ -5655,7 +5945,16 @@ class DialogueEngine:
             # 用户否掉的就是它）。`clarify_note` 这个口子留着（它只进易变段），
             # 现在由**核心**的提醒流程用它说一句话（正在等他给邮箱时才有；见
             # `_remind_ask_note`）——**插件一个字都不进 prompt**。
-            clarify_note=self._remind_ask_note(message),
+            #
+            # 同一处的第二句话（2026-10-20）：这一轮要是有人拿工具式的称呼叫她
+            # （"bot你帮我看看"），就往这里加**一句**"别接那个称呼、也别装没听见"。
+            # 两条**彼此独立**（一条是提醒待办，一条是分寸），所以是相加、不是覆盖；
+            # 各自由自己那一条判据决定要不要出现，**没有命中时这一处与改动前逐字相同**
+            # （`+" "` 也没有：空串相加就是原样）。为什么放易变段、为什么不进判定，
+            # 见 `_tool_vocative_note` 的说明；那一句的逐字文案在 `stance_hints` 里。
+            clarify_note=(
+                self._remind_ask_note(message) + self._tool_vocative_note(message)
+            ),
             # 「她自己的老习惯」（2026-10-06 金句学习）：按眼前这句的语境挑几条**材料**
             # 进 DATA 段。关掉开关 / 还没学出东西时是空串，请求与改动前逐字相同。
             # 2026-10-11 起它**缓存在会话状态上**（只在压缩或过了几小时才重算），
@@ -5669,6 +5968,10 @@ class DialogueEngine:
             reaction_material=self._reaction_material(message),
             # 不可信数据的边界记号（空串 = 总闸门关掉了，见上面 `marker`；取法跟档位走）。
             session_marker=marker,
+            # 「上下文里常驻的通知」（2026-10-19 用户：「上下文要留，只是不进记忆」）：
+            # **每轮都渲染**，取的是副本、不清空——它在上下文里常驻到会话被清空为止。
+            # 不进 `state.history`，所以记忆 agent 从历史里也提取不到它。
+            notices=state.notice_texts(),
         )
         self._stats["model_calls"] += 1
         started_at = self.clock()
@@ -5726,11 +6029,12 @@ class DialogueEngine:
         # **`allow_decline=True`（2026-10-11，用户："审核agent打回后回复agent可以拒绝重写
         # 原样发出"）**：这一趟是**审美**（措辞、分寸、不像人），不是"这句话有事实错误"，
         # 所以由**她自己**决定改不改——把原来那句原样写回来 = 拒绝，照第一版发。
-        # 另两趟（「没把握就别断言」、「别抄不可信短码」）不传这个参数：那两趟是这一版
-        # 确实有问题，必须照改，不设退路。
-        # `style_rewrote` 记"**风格审核**已经把这一次重写用掉了"（见下面那一关）：
-        # 它负责的是"审核与「没把握就别断言」**共用同一次**重写机会"这条规矩。
-        style_rewrote = False
+        # 另三趟（「没把握就别断言」、「她把过往说成事实」、「别抄不可信短码」）不传这个
+        # 参数：那几趟是这一版**确实有问题**，必须照改，不设退路。
+        # `grounding_used` 记"**这一次重写额度已经被用掉了**"（见下面那两关）：它负责的是
+        # "风格审核 / 「她把过往说成事实」 / 「没把握就别断言」**共用同一次**重写机会"这条
+        # 规矩（用户 2026-10-18 接线时定的：同一轮只重写一次）。三处置位、两处看它。
+        grounding_used = False
         if (self._flags().review_enabled and self.style_reviewer is not None
                 and decision.kind is DecisionKind.REPLY
                 and decision.text):
@@ -5758,10 +6062,112 @@ class DialogueEngine:
                     must_reply=self._judge_on(message.session_id),
                     allow_decline=True,
                 )
-                style_rewrote = True
+                grounding_used = True
                 if rewritten is not None:
                     # **只换正文**：这一轮要不要说、引用哪一句、语境是什么，
                     # 都是判定与第一次解析定下来的，不因为重写一遍就改主意。
+                    decision = replace(decision, text=rewritten)
+        # 「她把过往说成事实」那一关（2026-10-18 交底，2026-10-19 接线）。
+        #
+        # 判据是**纯正则 + 纯子串**（`ask_when_unsure.check_past_claim`，**0 次模型调用**）：
+        # 她这一版里有一句在断言自己的过去（"我拆过""拆过几张""我那时候……"），而这一轮的
+        # **材料全文**（`material_haystack`：她看到的那些字，**排掉她自己说过的行**）里
+        # 找不到那一段字 → 打回，让她在同一轮里换成不确定的说法重说一次
+        # （`PAST_CLAIM_NOTE`；复用同一条重写通道，不另造机器）。
+        #
+        # 为什么它**不能**并进上面那两关：风格审核管"像不像人话"，`decide_grounding` 管
+        # "没懂又没有根据"，这一关管的是"把编出来的旧事说成事实"。交底里的实测：
+        # 判定的三重门槛让后一条在**生产上 0 次触发**（判定对"拆椅子"这种日常细节不觉得
+        # 有事），而她编的正是这种日常细节。所以这一关**不看判定的结论**，只看她这句话
+        # 自己的形状 + 材料里有没有那段字。
+        #
+        # 位置：**风格审核之后、「没把握就别断言」之前**（也就在短码那一关之前）。两条
+        # 理由：① 它是**事实**问题，比"措辞不合适"更靠近要防的东西，先由它说话；
+        # ② 与「没把握就别断言」**共用同一次**重写额度（`grounding_used`）：审核已经重写过
+        # → 这里不再重写第二次；这里重写过 → 下一关不再重写。同一轮只重写一次这条边界
+        # 对三条路一起成立。
+        #
+        # 开关：挂在 `ask_when_unsure` 那一个下面（面板关掉它 = 这一组确定性规则一起不生效，
+        # 与开关说明一致）。它**不需要判定**，所以开关开着、判定关掉的单 agent 模式下照样跑。
+        #
+        # ⚠️ **任何分支都不许把 `decision.text` 置空**（与下面短码那一关刻意相反）：
+        # 短码是安全维度（宁可少说一句，也不把"注入生效"的话发出去），这一关是**分寸**
+        # 问题——重写空手 → 照发第一版；重写后仍核不过 → 照发重写那一版、只记一笔。
+        # 也就是说这一关自己**永远不丢回复**（`reply_past_claim_unfixed` 就是那个出口）。
+        if (ask_rules and decision.kind is DecisionKind.REPLY and decision.text):
+            past_haystack = material_haystack(request)
+            past_claim = check_past_claim(decision.text, past_haystack)
+            if past_claim.claim:
+                # 判据命中的次数（含"最长片段太短、按口径放行"的那几例）——它是这一关的
+                # **分母**：长期看"她有多常在讲自己的过去"。
+                self._stats["reply_past_claim_hits"] += 1
+            if past_claim.claim and not past_claim.grounded and not grounding_used:
+                self._stats["reply_past_claim_rewrites"] += 1
+                grounding_used = True
+                logger.warning(
+                    "Stage 3 past claim: 一句旧事在材料里找不到，打回重写 session=%s "
+                    "trigger=%s sentence=%s missing=%s",
+                    message.session_id, trigger_kind,
+                    past_claim.sentence[:60], past_claim.chunk[:60])
+                rewritten = await self._rewrite_after_review(
+                    request, decision.text, reason="",
+                    session_id=message.session_id, trigger=trigger, trigger_kind=trigger_kind,
+                    context=self._review_context(message, state),
+                    known_message_ids=frozenset(message_ids),
+                    must_reply=self._judge_on(message.session_id),
+                    note=PAST_CLAIM_NOTE,
+                )
+                if rewritten is not None:
+                    decision = replace(decision, text=rewritten)
+                # 重写之后再看一眼（**只记数、只记日志，绝不置空**）：她要是换了个说法还在
+                # 断言那件旧事，这一条**照样发**——"不许把回复弄丢"比"这一句是否精确"重要。
+                after = check_past_claim(decision.text, past_haystack)
+                if after.claim and not after.grounded:
+                    self._stats["reply_past_claim_unfixed"] += 1
+                    logger.warning(
+                        "Stage 3 past claim: 重写之后那一句还是找不到，照发（不丢回复） "
+                        "session=%s trigger=%s chars=%s",
+                        message.session_id, trigger_kind, len(decision.text))
+            # 「预设型编造」那一关（2026-10-20 用户报告后加）。
+            #
+            # 要堵的形状是**第三种**：她没说"我做过"，但把一件有"经历门槛"的事当成
+            # 已经发生过的东西摆出来。真实一例（`run/data/logs/reply.jsonl`
+            # 2026-10-20 17:37:33 / seq=184）：「六级这事，我妈当年也问。后来不问了，
+            # 是我先不跟她提。」——那一轮材料的 `input` 里「六级」出现 **0 次**。
+            #
+            # 为什么上面那一关（`check_past_claim`）抓不到：它只认「我/俺 + ……过」与
+            # 「我/俺 + 当年」这类**第一人称句式**；这一句是「**我妈**当年」，也没有
+            # "我考过/我做过"。而且就算命中，「六级这事」才 4 个字，低于
+            # `PAST_CLAIM_MIN_CHUNK = 6` 的核对门槛，照样放行。
+            #
+            # 为什么判据**只看词、不看句式**（`has_experiential_presupposition`）：
+            # 句式换个人称就绕开了（"我妈当年"），而"六级/高考/宿舍"这类词本身
+            # 就是经历门槛——没经历过的人不会把它当成自己的事讲。纯字符串、零模型调用。
+            #
+            # 位置：紧跟在「过往断言」之后、与它**共用同一次**重写额度
+            # （`grounding_used`）。两关同时命中时只重写一次（用户交底要求）：
+            # 前面已经重写过 → 这里只跳过，不再第二次。
+            #
+            # 边界与上一关相同：**任何分支都不许把 `decision.text` 置空**。重写空手 →
+            # 照发第一版；重写后仍不合格 → 照发重写那一版（`replies` 照样 +1）。
+            # 日志只记**条数与 session**，不记正文、也不记是哪个词。
+            if (not grounding_used
+                    and has_experiential_presupposition(decision.text, past_haystack)):
+                self._stats["reply_presupposition_rewrites"] += 1
+                grounding_used = True
+                logger.warning(
+                    "Stage 3 presupposition: 一件有经历门槛的事在材料里没有，打回重写 "
+                    "session=%s trigger=%s",
+                    message.session_id, trigger_kind)
+                rewritten = await self._rewrite_after_review(
+                    request, decision.text, reason="",
+                    session_id=message.session_id, trigger=trigger, trigger_kind=trigger_kind,
+                    context=self._review_context(message, state),
+                    known_message_ids=frozenset(message_ids),
+                    must_reply=self._judge_on(message.session_id),
+                    note=PAST_CLAIM_NOTE,
+                )
+                if rewritten is not None:
                     decision = replace(decision, text=rewritten)
         # 「没把握就别断言」的**兜底那一关**（2026-10-05 晚加，治"不懂装懂"）。
         #
@@ -5770,18 +6176,24 @@ class DialogueEngine:
         # + **她这一版的话里确实出现了具体断言**（数字 / 型号 / 流程——`has_specific_claim`）
         # → **打回，让她自己在同一轮里重写一次**（复用上面那条路，不另造机器；最多一次）。
         #
-        # 为什么放在审核之后：两条路共用**同一次**重写机会——先看审核，审核已经打回重写过
-        # 就不再重写第二次（"最多一次"这条边界对两条路一起成立）。
+        # 为什么排在第三位（风格审核 → 过往断言 → 这一关）：**三条路共用同一次**重写机会，
+        # 哪一条先重写过、后面的就不再要第二次（"最多一次"这条边界对三条路一起成立）。
+        # 这一关排在最后，是因为它最宽（只要"有具体断言"就够），让它先说话会盖住前面两条
+        # 更精确的理由（审核的措辞问题、旧事没有依据）。
         #
         # 为什么还要"有具体断言"才打回：只说她自己那点感受的（"这个我没跟上"、
         # "行，等你"）不打回——**不许把正常聊天掐死**。打回时递的那句话
         # （`NO_ASSERT_NOTE`）说的是"别断言你不知道的、不知道就直说"，
         # **不是**"问她一句"——那条路用户已经否掉了。
-        if (grounding is not None and grounding.rewrite and not style_rewrote
+        #
+        # `not grounding_used`（2026-10-18 接线时加）：这一关与风格审核、上面那一关
+        # **共用同一次**重写额度——哪一条先重写过，另外两条都不再要第二次。
+        if (grounding is not None and grounding.rewrite and not grounding_used
                 and decision.kind is DecisionKind.REPLY and decision.text
                 and has_specific_claim(decision.text)):
             first_draft = decision.text
             self._stats["reply_grounding_rewrites"] += 1
+            grounding_used = True
             logger.info(
                 "Stage 3 grounding: 没把握却写了具体断言，打回重写 session=%s topic=%s "
                 "understood=%s specialist=%s draft=%s",
@@ -5811,10 +6223,10 @@ class DialogueEngine:
         # （那是注入生效的样子）。处理分两步，与前面两条重写路**刻意不同**：
         #
         # * **第一次**：交回回复 agent 在同一轮里重写一次，反馈照样走
-        #   `_rewrite_request`（"你刚写的那一句要重来"）。这一趟**不消耗**风格审核/
-        #   「别断言」那一次机会——那条"最多一次"的规矩是**那两条路之间**的，
-        #   这里要求的是各自独立一次（安全维度不许被风格维度挤掉；`style_rewrote`
-        #   仍然只由审核那一条路置位）；
+        #   `_revision_request`（"你刚写的那一句要重来"）。这一趟**不消耗**风格审核/
+        #   「过往断言」/「别断言」那一次机会——那条"最多一次"的规矩是**那三条路之间**的，
+        #   这里要求的是各自独立一次（安全维度不许被风格维度挤掉；`grounding_used`
+        #   仍然只由那三条路置位）；
         # * **再犯**：**这一条不发**（fail-closed），并记 `data_marker_drops`。
         #   宁可少说一句，也不把"能证明注入生效"的话发到群里。
         #
@@ -5834,9 +6246,9 @@ class DialogueEngine:
                 context=self._review_context(message, state),
                 known_message_ids=frozenset(message_ids),
                 must_reply=self._judge_on(message.session_id),
-                # **不许把短码又递回给她**：反馈里引述那一版正文时把它抹掉
-                # （否则等于一边说不许抄、一边示范一遍）。
-                redact=(marker,),
+                # 反馈里**不可能**再出现那串短码（2026-10-18）：`_revision_request` 不再
+                # 引述她那一版正文，所以"一边说不许抄、一边把短码递回去示范一遍"这件事
+                # 从源头上没了，不再需要"抹成占位"那一步（`redact` 参数随之删掉）。
             )
             if rewritten is not None:
                 decision = replace(decision, text=rewritten)
@@ -6412,9 +6824,11 @@ class DialogueEngine:
 
         ## 核不过怎么办
 
-        **不存**：`guard_quote` 清成空串（`apply_affinity` 拿到空证据就不写旁表），
-        只把 `quote_unverified` 计数 +1 并记一条日志（只记长度，不记内容）。
-        档位照升——**证据存不下来不该改变她的态度**，那是两件事。
+        **这次写入被拒**：`guard_quote` 清成空串，`_apply_guard_signal` 于是拿不到
+        原话，存储层返回 `affinity_rejected_no_evidence`，防备一点不动；只把
+        `quote_unverified` 计数 +1 并记一条日志（只记长度，不记内容）。
+        2026-10-20 用户口径："拿不到原话就拒绝这次写入"——旧行为是"证据存不下来、
+        档位照升"，那正是全库只有 1 条证据的原因。
 
         ## 非 UP 的抄回也丢掉
 
@@ -6551,6 +6965,12 @@ async def _deliver_reply(
     segmented_sender = getattr(transport, "send_segmented", None)
     origin = f"message:{source.message_id}" if source.message_id else ""
     combined: list[str] = []
+    # 通知（命令的回复）单独收一份：它们**不进历史**，只排进"下一轮材料"
+    # （`speaker="notice"`，用户 2026-10-19：「通知只在上下文，不进历史」），
+    # 排进去的那一份要脱敏 + 截断 200 字（见 `record_sent_notice`）。
+    # 与 `combined` 同一口径：**真发出去 / 排进补发队列的**才算——发失败的那条
+    # 一个字都不排（她没说过、这次也没送到，排进去就是假信息）。
+    notice_parts: list[str] = []
     connection_down = False
     for index, item in enumerate(outgoing):
         pause = pauses[index] if index < len(pauses) else 0.0
@@ -6562,6 +6982,8 @@ async def _deliver_reply(
             # 直接排队，顺序仍然保持。
             _queue_undelivered(outbox, item)
             combined.append(item.text)
+            if item.is_notice:
+                notice_parts.append(item.text)
             continue
         try:
             # 只在"要分几条发"时先亮一次状态：单条短回复本来就该干脆。
@@ -6575,6 +6997,8 @@ async def _deliver_reply(
                 await transport.send(item.target, item.text, reply_to=item.reply_to_message_id)
             engine.metrics.send_latency.observe(engine.clock() - sent_at)
             combined.append(item.text)
+            if item.is_notice:
+                notice_parts.append(item.text)
             logger.info(
                 "Stage 3 reply sent: group=%s segment=%s/%s reply_length=%s quoted=%s pause=%.2fs",
                 item.target.group_id,
@@ -6591,6 +7015,8 @@ async def _deliver_reply(
             logger.warning("Stage 3 reply not delivered (%s); queueing for resend", exc)
             _queue_undelivered(outbox, item)
             combined.append(item.text)
+            if item.is_notice:
+                notice_parts.append(item.text)
         except Exception:
             engine.metrics.record_send_failure()
             logger.exception("Stage 3 reply send failed")
@@ -6599,6 +7025,11 @@ async def _deliver_reply(
         # 排队中的那几段也算"她说过"：否则连接一断，她的语境里就没有那句话，
         # 下一轮会当成什么都没说过——重复比迟到更难看。
         engine.record_sent_reply(source, "\n\n".join(combined))
+    if notice_parts:
+        # 命令的回复：**发出去之后**才排进"下一轮材料"（2026-10-19 用户「这个也进，
+        # 一起当通知」→ 随后「通知只在上下文，不进历史」）。放在这里而不是 `handle()`
+        # 里，就是因为"发出去了"这件事只有这里知道——命令路径返回值那一刻还没发。
+        engine.record_sent_notice(source, "\n\n".join(notice_parts))
 
 
 def _queue_undelivered(outbox, item: OutgoingMessage) -> None:

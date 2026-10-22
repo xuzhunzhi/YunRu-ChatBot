@@ -155,6 +155,15 @@
   "help 卡片属于底层"）：卡片渲染（`help_card.py`）、发图消息段（`onebot_ws.send_image`）、
   菜单正文都在核心；插件只能声明"这份内容适合画成卡片"（`ImageReply`），
   画与发由核心决定。
+- **语音是 Stage 4 插件，不属于对话**（用户 2026-10-21："语音这个不属于对话你记住，
+  所以算插件，**拦截出栈文字用语音发送即可**"）。也就是说：
+  - 决定"说不说、说什么"仍然是 Stage 3，核心一个字都不为此改；
+  - 语音插件**只做出站变换**：拿到核心要发出去的那段文字 → 合成音频 → 用语音发出去；
+  - 因此它需要的是一条**窄的出站变换接缝**（按 §2.3 的规矩：逐个函数列明、由测试钉住、
+    不给引擎、不给集合），**不是**回复 prompt 的入口，也不是 `PromptPlugin`。
+  - 合成失败必须**回落成文字**（fail-closed 的反面：宁可少一条语音，不许把话吞掉）。
+  - 参考实现（别人家的，只当材料）：`Du-RuoTing/DuRuoTing_` 的 `src/duruoting_voice.py`
+    —— 合成前软化句末标点、全局/单会话两级开关持久化、失败必回落文字。
 - **两个阶段共用 `runtime.serve`。** 传输层是唯一变量；
   不允许任何一侧复制主循环或装配逻辑。
 - **共用模块的改动必须同时服务两边。** 不能为某一侧开后门。
@@ -377,7 +386,31 @@ Get-Content data\logs\verify_runs.log | Select-Object -Last 3
    `dev` 指 `dev\` 这个文件夹（那里面都算 dev）。插件那棵树（`yunru-stage4\`）是
    **另一份**，单独验（见 7.2 的门槛清单）。顺序：**在 dev 改 → 验证通过 → 才允许
    同步/部署到 `run`（线上）**。
+
+   ⚠️ **插件源码不在 `main` 分支里**（2026-10-20 实测，我在这上面判断错过一次）：
+   `dev\src\qq_roleplay_bot\plugins\` 里**只有一个 `__init__.py`**；九个插件
+   （`group_admin` / `join_approval` / `mail` / `outage_notice` / `remind` /
+   `roles` / `rss` / `timeout_alert` / `webui`）的源码**只存在于 `plugins` 分支**
+   （工作树 `yunru-stage4\`）。`run\src\qq_roleplay_bot\plugins\` 是部署时从那边
+   **手抄过去**的副本（`deploy_to_run.py` 只搬 `src/` 的核心部分，插件另走手工流程）。
+   所以：① 要读/改插件，去 `yunru-stage4`，别在 dev 里找；② `git grep` 在 dev 里
+   搜不到插件代码**不是仓库坏了**；③ 判断"某个插件功能有没有做"必须在
+   `yunru-stage4` 上核，只在 dev 看会得出反的结论。
+
+   ⚠️ **改核心的公开名字之前，先 grep 一遍插件树**（2026-10-20 的事故）：
+   当天重构关系刻度时，把 `stage3_runtime.CLOSENESS_LABELS` / `GUARDEDNESS_LABELS`
+   换成了 `relationship_tiers`，**没核插件是否还引用它们** —— 而
+   `plugins/mail/daily_report.py` 正是 `from ...stage3_runtime import CLOSENESS_LABELS`。
+   部署后日报从 23:00 起**每 60 秒 ImportError**，那封信整晚没发出去（用户第二天才看到）。
+   规矩：**删/改任何一个"插件可能 import 的核心名字"之前**，先
+   `git -C yunru-stage4 grep -n "<名字>" -- src/qq_roleplay_bot/plugins`，
+   有引用就**先让插件改用新名字（或给核心留兼容导出）再删**。
+   这条同样适用于改函数签名、改常量形状（tuple → 函数这种）。
 2. **代码派给 subagent / 专家写。**
+   **调研/选型/查资料也算"活"**（2026-10-21 用户：「插件研究派给 opencode 做啊，你又忘了」）：
+   主会话别自己把 web 搜索 + 逐个 README 读完再写报告——同样派 opencode，
+   主会话只做三件事：给约束与口径、验收它的出处与数字、把结论交给用户。
+   主会话自己动手只留两种情况：改 prompt 措辞这类要人来判的，以及"长程任务 opencode 上下文不够"。
    优先**复用已有的** subagent（`send_message` 续用同一个 agent id），不够用才新开；
    派活时可以**对它们做上下文压缩**（只给压缩过的交底，回来只收结论 + diff + 数字）。
    允许它们**直接改 `dev` 里的文件**，但**只准动 dev**。

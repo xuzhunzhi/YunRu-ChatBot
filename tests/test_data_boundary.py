@@ -47,7 +47,7 @@ from qq_roleplay_bot.data_boundary import (
     session_marker,
 )
 from qq_roleplay_bot.extensions import KnowledgeItem, PromptFragment, PromptMaterial
-from qq_roleplay_bot.memory_model import MemoryMaterial, MemoryRecord
+from qq_roleplay_bot.memory_model import MEMORY_SOURCE_RULE, MemoryMaterial, MemoryRecord
 from qq_roleplay_bot.prompt_guard import scan_persona_text
 from qq_roleplay_bot.stage3_main import DialogueEngine
 from qq_roleplay_bot.stage3_runtime import (
@@ -569,12 +569,24 @@ def test_a_wrapped_segment_has_the_exact_expected_shape() -> None:
     assert "<people>\n1=小K（QQ200）\n2=某人（QQ100）\n</people>\n" in stable
     assert _wrapped("<people>\n1=小K（QQ200）\n2=某人（QQ100）\n</people>\n") not in stable
     volatile = _volatile(_request())
+    # 记忆那一条现在带**出处与新鲜度**（2026-10-18）：`source="quote|inferred"` 与
+    # `age="N天前"`，这一节开头多一句"出处照标看"的规矩（`memory_model.MEMORY_SOURCE_RULE`）。
+    # `age` 是**墙上时间**算出来的（`_age_text`），所以这里钉"开头 + 正文 + 收尾"三段，
+    # 不把天数写死——写死的话这条测试每天都会红一次。
+    memory_lines = [line for line in volatile.split("\n") if "<memory " in line]
+    assert len(memory_lines) == 1, memory_lines
+    memory_line = memory_lines[0]
+    assert memory_line.startswith(
+        '<memory scope="user_group" subject="100" about="100" source="inferred" age="')
+    assert memory_line.endswith('">他提过这件事。</memory>')
+    assert memory_line.count('source="inferred"') == 1
+    assert f"\n{MEMORY_SOURCE_RULE}\n" in volatile
     assert _wrapped('<memory scope="user_group" subject="100" about="100">'
-                    "他提过这件事。</memory>\n") in volatile
+                    "他提过这件事。</memory>\n") not in volatile, "旧形状回来了（没有出处）"
     assert _wrapped("--- 你与这个人 ---\n"
-                    "亲近：熟络——聊得起来，你愿意多说两句。\n"
-                    "防备：收着——有些事你不想展开，点到为止。\n"
-                    "（这是你现在对他的分寸：亲近决定你愿意说多少，防备决定你收着多少。）\n"
+                    "好感：刚打过照面——记不住，也没偏向。\n"
+                    "防备：正常分寸——该说说，该停停。\n"
+                    "（这是你现在对他的分寸：好感决定你愿意说多少，防备决定你收着多少。）\n"
                     "--- 你与这个人 ---\n") in volatile
     assert _wrapped("--- 你写给他的信 ---\n"
                     "你今天早些时候给他写了一封信（主题：汇报），信里是这样说的：\n"
@@ -1116,7 +1128,12 @@ def test_a_marker_in_the_reply_is_rejected_and_rewritten_once() -> None:
     feedback = reply.requests[1][-1]["content"]
     assert "你刚写的那一句要重来" in feedback
     assert token not in feedback, "反馈里不许把短码明文写进去（等于又示范一遍）"
-    assert "（那串记号）" in feedback, "引述那一版正文时应当把短码抹成占位"
+    # 2026-10-18 拆掉放大器之后，这一条**连占位都不该出现**：打回不再引述她那一版正文
+    # （`_revision_request` 删掉了"你刚写的是：…"），所以也没有"抹成占位"这回事
+    # （`redact` 参数随之删掉）。短码不可能被递回去，是从源头上没了，不是被抹掉的。
+    assert "（那串记号）" not in feedback, \
+        "连占位都不该出现：打回不再引述那一版正文（2026-10-18 拆掉放大器）"
+    assert "你刚写的是" not in feedback
     assert reply.requests[1][0]["content"] == reply.requests[0][0]["content"], \
         "system 段一个字都不该变"
     snapshot = engine.snapshot()

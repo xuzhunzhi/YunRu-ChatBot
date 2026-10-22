@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import sqlite3
 import threading
 import time
@@ -15,6 +16,8 @@ from .memory_filters import scrub_evidence_quote, system_self_rule
 from . import dev_config
 from .memory_model import (MAX_SUBJECTS, InboxEvent, MemoryBatch, MemoryRecord,
                            MemoryValidationError, parse_operations)
+from .relationship_tiers import (GUARD_DEFAULT, GUARD_MAX, GUARD_MIN, LIKES_DEFAULT,
+                                 LIKES_MAX, LIKES_MIN)
 from .security import sanitize_chat_text
 
 # 词元切分与虚词表**只有一份**（在 `memory_grounding`）：检索按词命中、写入闸门按词
@@ -44,6 +47,13 @@ TABLES = {"short": "memory_short", "long": "memory_long"}
 PROMOTE_KINDS = frozenset({"name", "boundary", "profile"})
 # 画像不进普通记忆检索：它由"当前说话的人"每次单独取，混进列表只会重复占位。
 PROFILE_KIND = "profile"
+# 画像碎片拼起来的总长度上限（2026-10-21 碎片化之后）。
+# **不按年龄裁剪**（用户当天纠正："不要从最旧截啊"）：画像是方面不是时间线。
+# 长度靠写入侧控制：每条 ≤120 字、最多 PROFILE_MAX_PIECES 条，满了由维护 agent 合并。
+# 这个常量只是兜底（真超了在句末截断加…，不整条丢）。
+PROFILE_JOIN_MAX = 1200
+# 一个人的画像最多几片（写入侧口径，维护 agent 负责合并；这里只做渲染上限提示）。
+PROFILE_MAX_PIECES = 12
 # 状态类事实（正在发烧/明天有考试）只活在**中短期**，永远不会被强化进长期。
 STATUS_KIND = "status"
 STATUS_TTL_DAYS = 7
@@ -89,12 +99,18 @@ CREATE VIEW IF NOT EXISTS records AS
 COMMIT;
 """
 
-_FRESH_SCHEMA = f"""BEGIN IMMEDIATE;
+_INBOX_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS inbox (
     id TEXT PRIMARY KEY, group_id TEXT NOT NULL, user_id TEXT NOT NULL,
     speaker TEXT NOT NULL, text TEXT NOT NULL, occurred_at REAL NOT NULL,
-    expires_at REAL NOT NULL, lease_id TEXT);
+    expires_at REAL NOT NULL, lease_id TEXT,
+    -- 0 = 还没享受过"到期续一次"的保险；1 = 已经续过一次，再到期就删（见 `_cleanup`）。
+    extended_once INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS inbox_scope ON inbox(group_id, user_id, occurred_at);
+"""
+
+_FRESH_SCHEMA = f"""BEGIN IMMEDIATE;
+{_INBOX_SCHEMA_SQL}
 CREATE TABLE IF NOT EXISTS receipts (id TEXT PRIMARY KEY, expires_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS replays (
     id TEXT PRIMARY KEY, attempts INTEGER NOT NULL, expires_at REAL NOT NULL);
@@ -171,6 +187,12 @@ CREATE TABLE IF NOT EXISTS person_aliases (
     alias_user_id TEXT PRIMARY KEY, canonical_user_id TEXT NOT NULL,
     note TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL,
     CHECK (alias_user_id <> canonical_user_id));
+-- 键值元数据（2026-10-20 加）：目前只放"关系刻度迁移到第几版 + 迁移那一刻"。
+-- 为什么不复用 `PRAGMA user_version`：表结构版本与**数据**版本不是一回事——
+-- 刻度迁移是可重跑的数据换算，跑不跑由主会话决定；把它塞进表结构版本会逼着
+-- 每次打开旧库都自动改写关系数据（用户要求"这次不要动生产库"）。
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY, value TEXT NOT NULL);
 -- 兼容视图：v5 把 records 拆成两张表，但**所有既有工具脚本**（watch_memory.py、
 -- full_audit.py、data/ 下的各种体检脚本）都在查 records。视图让它们一行不用改。
 -- 只读：应用代码一律走 MemoryStore，不写这个视图。
@@ -229,6 +251,13 @@ COMMIT;
 """
 MAX_INBOX_EVENTS = 10000
 MAX_INBOX_EVENTS_PER_GROUP = 2000
+# 超短期层（inbox）的寿命（2026-10-20 用户定）：**每条独立随机 1–3 小时**。
+# 为什么不再用 `retention_seconds`（7 天）：那一层是"还在内存里、马上要被维护读走"的
+# 材料，不是长期记录；留 7 天等于把别人的原话存成一份没人看的转写稿。
+# `retention_seconds` **不删**：它还给"已删除记忆行的保留期"（`_cleanup` 里那两张表）
+# 与回执/重放用，语义没有变，只是不再管 inbox 的寿命。
+INBOX_TTL_MIN_SECONDS = 3600.0
+INBOX_TTL_MAX_SECONDS = 10800.0
 MAX_REPLAY_ATTEMPTS = 2
 # 被删除的记忆在归档里保留多久。比 inbox 保留期长得多，因为归档是"后悔药"，
 # 是用来救误删的——真正需要回滚时往往已经过了好几天。
@@ -324,23 +353,75 @@ WEAK_TERMS = frozenset({
     "容易", "倾向", "主动", "接受", "追问", "什么样", "为什么", "怎么样",
 })
 
-# --- 好感度（关系）---------------------------------------------------------
-# 两个轴各 4 档，内部存 0..3，**数字不给模型看**（模型对数字的分寸感差，
-# 同样的分值每次表现会飘，也没法写测试）。档位文案在 `stage3_runtime.py`。
-AFFINITY_MIN, AFFINITY_MAX = 0, 3
-# 默认：不认识的人 —— 生疏(0) + 如常(0)。查不到、读库失败、记忆关掉，一律回落到这里。
-DEFAULT_CLOSENESS = 0
-# 防备四档：0=如常 1=收着 2=留意 3=戒备。**如常是最低档**，不是"零防备"——
-# 陌生人本来就不该被交底，往下没有更松的档位可言。
-DEFAULT_GUARDEDNESS = 0
-# 滚动 24 小时每个轴的**净**变化上限。
-AFFINITY_DAILY_CAP = 2
-# 防备向下：7 天最多 1 档，而且只有维护 agent（复盘）能降。判定 agent 只升不降。
-GUARD_RELAX_PER_WEEK = 1
-# 多久没说话就衰减。衰减是机械的，不问模型。
+# --- 好感度（关系）：新刻度（2026-10-20）------------------------------------
+# 用户 2026-10-20 拍板、并逐行看过 `data/relationship-tiers.md`：
+#   好感（感性程度）`-100 … 100`，**初始 10**；防备（理性程度）`-30 … 30`，**初始 0**。
+# 旧的 0..3 四档刻度作废——14 行存量数据由 `relationship_migration` 换算。
+#
+# 为什么数字仍然**不直接给回复那一侧**：模型对数字的分寸感差，同样的分值每次表现
+# 会飘，也没法写测试。判定那边给数值（它要判断"这个人跟她是什么关系"），回复那边
+# 只给文字（`stage3_runtime.Stance.as_data`）。这是用户 2026-10-20 定的三条消费口径。
+#
+# 刻度本身的唯一来源在 `relationship_tiers.py`（22 + 7 档逐字照表）；这里只放
+# **写入规则**，不要再复制一份档位文字。
+AFFINITY_MIN, AFFINITY_MAX = LIKES_MIN, LIKES_MAX
+GUARDEDNESS_MIN, GUARDEDNESS_MAX = GUARD_MIN, GUARD_MAX
+# 默认：按那份表，初始值就落在「陌生人」（10–19）与「正常分寸」（0–9）。
+# 查不到、读库失败、记忆关掉，一律回落到这里。
+DEFAULT_CLOSENESS = LIKES_DEFAULT
+DEFAULT_GUARDEDNESS = GUARD_DEFAULT
+# 单次写入的幅度（用户 2026-10-20 定的硬规则）：
+#   * 好感提升 ≤ 8；防备提升 ≤ 10（一档宽 10，见下面的 `GUARD_RAISE_MAX`）；
+#   * 普通下调 ≤ 4；
+#   * **明确越界**（`severe=True`，由模型自己判定"这一次越界了"）时下调 4–16。
+# 为什么把"越界"做成显式参数，而不是"看数值大小自己猜"：`-5` 到底是模型判了越界，
+# 还是它把"一点点不高兴"写大了，存储层分不出来。前者是用户批准的那条路，后者必须
+# 压回 -4——两种语义要能分开，否则"普通下调 ≤ 4"这条就形同虚设。
+AFFINITY_RAISE_MAX = 8
+# 防备单独取 10（正好一档）。共用 8 时 `0 → 8` 仍停在「正常分寸」，要连续被冒犯
+# 两次（0→8→16）才跨到「有点端着」；用户要的是"被冒犯立刻变冷"（2026-10-20 修正）。
+# 这不是每日净变化上限——`GUARD_DAILY_CAP` 管"24 小时净变化多少"，两层各管各的。
+# 2026-10-20 修正：`GUARD_DAILY_CAP` 从 8 提到 **10**。取 8 时它与单次上限 10 打架，
+# 于是"净变化 0 的人被冒犯一次"会被日净上限直接拒掉，`0 → 10` 根本跨不了档——
+# 那条"被冒犯立刻变冷"就成了空话（opencode 交付时自己指出来的，实测 1889 那条
+# 测试是在"窗口内净 −10"的合法状态下才验到 0→10）。日净上限必须 ≥ 单次上限，
+# 否则单次上限永远够不着。
+GUARD_RAISE_MAX = 10
+AFFINITY_LOWER_MAX = 4
+AFFINITY_SEVERE_LOWER_MAX = 16
+# 滚动 24 小时每轴的**净**变化上限，按新刻度重算（用户 2026-10-20 要求"按新刻度
+# 重算、给出值与理由"，这两个数是本次选的）：
+#   * 好感 20：跨度 200 的 10%。必须容得下"一次明确越界的最大下调 16 + 一次小幅
+#     修正 4"，否则用户批准的那条 4–16 会在同一天里被每日上限自己顶回去；
+#     又不能大到让 8+8+8 一天连升 24（那等于旧刻度里一天连升 1.2 档）。
+#   * 防备 10：跨度 60 的 17%，**= 一次最大提升**。这个数不能小于单次上限
+#     （`GUARD_RAISE_MAX`），否则"一次冒犯就跨档"会被它自己挡掉。代价是
+#     "一天最多跨一档"变成硬约束——两句冒犯也只会停在一档（10），第二天才能再往上。
+AFFINITY_DAILY_CAP = 20
+GUARD_DAILY_CAP = 10
+# 防备向下：7 天最多松一档。新刻度一档 = 10（防备的档宽就是 10），所以从旧的
+# "7 天 1 档"直接换算成 **10 点**：一次普通下调 4 分，两次（8）还在限内，第三次
+# （12）就要等窗口滑过去。判定 agent 只升不降，降只有维护 agent 那条路。
+GUARD_RELAX_PER_WEEK = 10
+# 好感 ≥ 95（喜欢 / 爱慕）之后**不再往下**（用户 2026-10-20："限制继续降低"）。
+# 例外只有超管手动那条路：`manual=True`（面板）与 `reset_relationship`（重置）。
+AFFINITY_HIGH_HOLD = 95
+# 多久没说话就衰减。衰减是机械的，不问模型。数值按新刻度重算：
+# 旧规则是"每 30 天空闲降 1 档、停在 1 档（认得）"。新刻度一档 = 10，
+# 所以步长取 10；地板按用户 2026-10-20 的修正回到初始值 10（原来取旧 1 档的
+# 映射值 35，会把 10 分的人永久冻住）。
 AFFINITY_DECAY_SECONDS = 30 * DAY
-# 衰减时亲近最低停在这一档（认得）：不熟可以，但"聊过的人"不该退回全然的陌生人。
-CLOSENESS_DECAY_FLOOR = 1
+AFFINITY_DECAY_STEP = 10
+# 衰减时好感最低停在这里（= **初始值 10**）。原来取 35（旧「认得」档换算值），
+# 结果低于 35 的人永远不衰减：2026-10-20 复核时库里有 8 个人停在 10 分，会被永久冻结。
+# 回到初始值之后，只有"已经比陌生人更近"的人会因久不联系往下掉；10 分及以下不动，
+# 而且这条始终只降不升（见 `decay_relationships` 里的边界判断）。
+CLOSENESS_DECAY_FLOOR = LIKES_DEFAULT
+# 刻度迁移的版本号（`meta` 表里的键）。迁移函数与写入路径共用这一个口径：
+# 迁移那一刻之前的流水按旧刻度记的，不能拿来算新的 24 小时/7 天窗口。
+RELATIONSHIP_SCALE_VERSION = 2
+SCALE_VERSION_KEY = "relationship_scale_version"
+SCALE_EPOCH_KEY = "relationship_scale_at"
 
 # 单字与高频虚词命中没有区分度，只会把不相关记录抬上来。
 # （表本身在 `memory_grounding`：写入闸门与检索共用同一份，见那里的说明。）
@@ -349,10 +430,15 @@ CLOSENESS_DECAY_FLOOR = 1
 class MemoryStore:
     def __init__(self, path: Path | str, *, retention_seconds: float = 7 * DAY, clock=time.time,
                  protect=False, daily_add_limit: int = DEFAULT_DAILY_ADD_LIMIT,
-                 near_duplicate_ratio: float = NEAR_DUPLICATE_RATIO):
+                 near_duplicate_ratio: float = NEAR_DUPLICATE_RATIO,
+                 inbox_ttl_random: random.Random | None = None):
         self.path = Path(path)
         self.retention_seconds = retention_seconds
         self.clock = clock
+        # inbox 每条行的 TTL 独立随机（见 INBOX_TTL_*）。RNG 做成构造参数而不是模块级
+        # 全局 `random`：测试传 `random.Random(seed)` 就能把整个 TTL 序列钉死复现，
+        # 也不改全局随机状态（同进程里别的取样不会把"这次为什么是这个值"搅乱）。
+        self.inbox_ttl_random = inbox_ttl_random if inbox_ttl_random is not None else random.Random()
         self._init_lock = threading.Lock()
         self._ready = False
         self._protect = protect
@@ -362,6 +448,10 @@ class MemoryStore:
         # 关系流水与墓碑这两张"只增"的表按保留期清旧行，清掉的条数要看得见。
         self.pruned: dict[str, int] = {
             "relationship_log": 0, "tombstones": 0, "relationship_evidence": 0}
+        # inbox 维护的计数（2026-10-20）：`extended` = 到期时被续了 TTL 的条数，
+        # `expired_deleted` = 真正过期删掉的条数。只记数，不含正文。
+        # 引擎的 `_stats` 在快照/结账时从这里取（清理发生在维护线程，引擎不参与）。
+        self.inbox_counts: dict[str, int] = {"extended": 0, "expired_deleted": 0}
         # 被**依据闸门**拒掉的写入（按拒绝码计数，本次进程累计；只记数，不含内容）。
         # 见 `memory_grounding`：归属不是他本人说的、没有依据就改正文、正文超出原话、
         # 空正文，都在这条路径上被逐条拒掉，拒了必须看得见（`/super status`）。
@@ -483,6 +573,10 @@ class MemoryStore:
                             # 已经在 v5 的库也可能缺那张兼容视图（比如它是在视图加进来之前
                             # 就迁过来的）。每次启动补一次，幂等。
                             db.executescript(_COMPAT_VIEW_SQL)
+                    # 列级补丁**不升 `user_version`**：老库（v7）没有 `inbox.extended_once`，
+                    # 每次打开按 PRAGMA 看一遍、缺了才 ADD COLUMN，幂等。与上面兼容视图
+                    # 同一先例：结构版本号留给"会改写数据的大迁移"，只加一列不惊动它。
+                    self._ensure_inbox_schema(db)
                     self._ready = True
         db = sqlite3.connect(self.path, timeout=0.1)
         db.row_factory = sqlite3.Row
@@ -498,9 +592,40 @@ class MemoryStore:
             db.close()
 
     @staticmethod
+    def _ensure_inbox_schema(db) -> None:
+        """给老库补 `inbox.extended_once`（幂等；缺了才加）。
+
+        为什么用 `PRAGMA table_info` 而不是 `ALTER TABLE ... IF NOT EXISTS`：
+        SQLite 没有后一种写法，直接 ADD 会在"已经是新形状"的库上撞 duplicate column。
+        为什么放在每次打开都跑：迁移只跑一次，而这个补丁要能兜住"版本号是 7、列却不在"
+        的老库与中断过的迁移（先加列、还没来得及记版本号也不影响）。
+        """
+
+        columns = {row[1] for row in db.execute("PRAGMA table_info(inbox)")}
+        if not columns:
+            # 极旧的测试夹具/残缺库可能根本没有 inbox 表：补一张全的（真实 v1+ 都有）。
+            db.executescript(_INBOX_SCHEMA_SQL)
+            return
+        if "extended_once" in columns:
+            return
+        db.execute("ALTER TABLE inbox ADD COLUMN extended_once INTEGER NOT NULL DEFAULT 0")
+        db.commit()
+
+    @staticmethod
     def _record(row, tier: str = "short") -> MemoryRecord:
         data = {name: row[name] for name in MemoryRecord.__dataclass_fields__ if name in row.keys()}
         data["tier"] = tier
+        # 出处（2026-10-18）：`source_event_ids` 是 JSON 文本列，**不是** dataclass 字段
+        # （它同时是内部标识，只读视图与面板都不外露它）。这里只折算成"有没有原话"，
+        # 由 `MemoryRecord.quoted` 带到渲染那一步（`source="quote|inferred"`）。
+        # 取不到这一列（有些查询只挑几列）→ 保持默认 False：**拿不到出处就当"只是印象"**，
+        # 宁可让她说得谨慎，也不许拿一句印象去冒充"你说过"。
+        if "source_event_ids" in row.keys():
+            try:
+                evidence = json.loads(row["source_event_ids"] or "[]")
+            except (TypeError, ValueError):  # 坏行不该让整次检索失败
+                evidence = ()
+            data["quoted"] = bool(evidence)
         return MemoryRecord(**data)
 
     @staticmethod
@@ -608,9 +733,11 @@ class MemoryStore:
             if db.execute("SELECT COUNT(*) FROM inbox").fetchone()[0] >= MAX_INBOX_EVENTS:
                 return False
             inserted = db.execute(
-                "INSERT OR IGNORE INTO inbox VALUES (?,?,?,?,?,?,?,NULL)",
+                "INSERT OR IGNORE INTO inbox "
+                "(id,group_id,user_id,speaker,text,occurred_at,expires_at,lease_id,extended_once) "
+                "VALUES (?,?,?,?,?,?,?,NULL,0)",
                 (event.id, event.group_id, event.user_id, event.speaker, event.text,
-                 event.occurred_at, event.occurred_at + self.retention_seconds),
+                 event.occurred_at, event.occurred_at + self._inbox_ttl_seconds()),
             ).rowcount
             # 保留较新的活动时间；OR IGNORE 不会刷新已存在行，否则周期复查会
             # 反复回到同一批长期只产生 IGNORE 的会话。
@@ -621,8 +748,46 @@ class MemoryStore:
             )
             return bool(inserted)
 
+    def _inbox_ttl_seconds(self) -> float:
+        """这条 inbox 行的寿命：1–3 小时，**每条独立随机**（见 INBOX_TTL_*）。"""
+
+        return self.inbox_ttl_random.uniform(INBOX_TTL_MIN_SECONDS, INBOX_TTL_MAX_SECONDS)
+
+    def _extend_unclaimed_inbox(self, db, now: float) -> int:
+        """过期了但**从没被任何一次维护碰过**的行，先续一次 TTL，而不是直接删。
+
+        判据：`lease_id IS NULL`（此刻没有进行中的认领）且 `replays` 里没有它
+        （没有"看过但没采信、还给一次重放"的记录）。`release()` 会把 lease_id 清回
+        NULL——那种行正是"维护没跑成"，按这条判据会被续期，方向是对的。
+        续过一次的行 `extended_once=1`，再到期就按正常过期删（不再无限续）。
+        """
+
+        rows = db.execute(
+            "SELECT i.id FROM inbox i LEFT JOIN replays r ON r.id=i.id "
+            "WHERE i.expires_at<=? AND i.extended_once=0 AND i.lease_id IS NULL "
+            "AND r.id IS NULL", (now,)).fetchall()
+        if not rows:
+            return 0
+        db.executemany(
+            "UPDATE inbox SET expires_at=?, extended_once=1 WHERE id=?",
+            ((now + self._inbox_ttl_seconds(), row[0]) for row in rows))
+        self.inbox_counts["extended"] += len(rows)
+        logger.info("memory inbox extended: rows=%s", len(rows))
+        return len(rows)
+
+    def inbox_maintenance_counts(self) -> dict[str, int]:
+        """本次进程里 inbox 的续期 / 过期删除条数（只记数，不含正文）。"""
+
+        return dict(self.inbox_counts)
+
     def _cleanup(self, db, now):
-        db.execute("DELETE FROM inbox WHERE expires_at<=?", (now,))
+        # 删除之前先续一次保险（2026-10-20）：TTL 压到 1–3 小时后，维护只要漏跑一两拍
+        # （模型超时、进程重启、群被临时关掉），一条没人看过的消息就会被清掉——那是
+        # **丢数据**，不是遗忘。所以"从没被碰过"的行到期先续一次；续过一次的才删。
+        self._extend_unclaimed_inbox(db, now)
+        expired_deleted = db.execute("DELETE FROM inbox WHERE expires_at<=?", (now,)).rowcount
+        if expired_deleted:
+            self.inbox_counts["expired_deleted"] += int(expired_deleted)
         db.execute("DELETE FROM receipts WHERE expires_at<=?", (now,))
         db.execute("DELETE FROM replays WHERE expires_at<=?", (now,))
         db.execute("UPDATE inbox SET lease_id=NULL WHERE lease_id IN (SELECT id FROM leases WHERE until_at<=?)", (now,))
@@ -809,6 +974,45 @@ class MemoryStore:
                                        "WHERE scope_type=? AND scope_key=? AND normalized_key=?",
                                        (now, op.scope_type, key, row["normalized_key"]))
                 elif op.op in {"ADD", "UPDATE", "MERGE"}:
+                    # 2026-10-21：**人手写的那一行，模型不许覆盖**（用户当天：
+                    # "给我写入的还有之前积攒的顶掉了"）。判据是数据本身：那一行的
+                    # `origin` 是 `operator_seed`（面板/脚本写进来的），模型就只能改自己
+                    # 攒出来的内容。为什么不在模型那一侧靠 prompt 忍：ADD 到同键是
+                    # **就地覆盖**（见下面"同键就地更新"），一句模型改写就能把人工设定
+                    # 顶掉，那不是提示词能保证的事。
+                    #
+                    # 2026-10-22 从"只看 profile 总览"扩到**所有 kind/键**：同一天加了
+                    # 一条人手写的称呼（`kind=name`），它和总览一样是人工设定；只守
+                    # `profile` 的话，模型换个键就能把它顶掉。判据不看 kind 而看 origin，
+                    # 所以不会误伤模型自己攒的行（它们的 origin 是 agent_inferred）。
+                    if op.op != "DELETE":
+                        existing = None
+                        for tier in TIERS:
+                            found = db.execute(
+                                f"SELECT origin, kind, normalized_key FROM {TABLES[tier]}"
+                                " WHERE scope_type=? AND scope_key=?"
+                                " AND normalized_key=? AND status='active' LIMIT 1",
+                                (op.scope_type, key, op.normalized_key),
+                            ).fetchone()
+                            if found is not None:
+                                existing = found
+                                break
+                        if existing is not None and str(existing["origin"]) == "operator_seed":
+                            # 理由字符串保持旧的两档：profile 总览沿用历史名字（日志/文档
+                            # 里早就有它），其余人工行统一叫 operator_seed_readonly。
+                            reason = (
+                                "profile_overview_readonly"
+                                if str(existing["kind"]) == PROFILE_KIND
+                                and str(existing["normalized_key"]) == PROFILE_KIND
+                                else "operator_seed_readonly"
+                            )
+                            db.execute("INSERT INTO audit VALUES (?,?,?,?,?)",
+                                       (batch.id, index, reason, op.scope_type, now))
+                            logger.warning(
+                                "memory_write_rejected reason=%s scope=%s group=%s",
+                                reason, op.scope_type, batch.group_id,
+                            )
+                            continue
                     if op.op == "ADD":
                         rejection = self._add_rejection(db, batch, key, op, now)
                         if rejection:
@@ -941,10 +1145,25 @@ class MemoryStore:
                 elif op.op == "AFFINITY":
                     # 走**同一个**写入路径：上限与流水都在 `_apply_affinity` 里，
                     # 判定 agent 那条通道也调它。这里是维护 agent 一侧，可以降防备。
+                    #
+                    # 证据句（2026-10-20）：用户要求"每一次关系变动都必须存原话，
+                    # 拿不到原话就拒绝这次写入"。维护 agent 手上本来就有
+                    # `evidence_event_ids`（结构校验已保证至少一条是**他本人**说的），
+                    # 这里把那条原文递下去；批量事后还能对上是哪句话让他变熟的。
+                    trigger = next(
+                        (e for e in batch.events
+                         if e.id in op.evidence_event_ids
+                         and e.speaker == "user"
+                         and e.user_id == op.affinity_user_id),
+                        None,
+                    )
                     rejection = self._apply_affinity(
                         db, op.affinity_user_id,
                         closeness=op.closeness_delta, guardedness=op.guardedness_delta,
                         reason=op.content, source="maintenance", now=now, may_lower_guard=True,
+                        severe=op.severe,
+                        evidence=({"quote": trigger.text, "who_alias": "", "seq": 0}
+                                  if trigger is not None else None),
                     )
                     if rejection:
                         db.execute("INSERT INTO audit VALUES (?,?,?,?,?)",
@@ -1077,6 +1296,8 @@ class MemoryStore:
         source: str = "unknown",
         may_lower_guard: bool = False,
         evidence: dict | None = None,
+        severe: bool = False,
+        manual: bool = False,
     ) -> str:
         """**唯一的写入路径**：判定 agent 与维护 agent 都调这里。
 
@@ -1084,24 +1305,34 @@ class MemoryStore:
         不做"部分生效"）。上限、流水、防备不对称全在这一处。
 
         `evidence` 是"触发这次变动的**那一句原话**"（2026-10-16）：形如
-        `{"quote": str, "who_alias": str, "seq": int}`，**只有判定那条路会传**，
-        而且传之前已经由核心核过"它真的在这一轮的输入里"（`stage3_main._judge` 的
-        `quote in rendered_input`）；这里不再二次核对，只负责脱敏、截断、落旁表
-        （见 `_evidence_row`）。不传就是老行为，一个字都不多写。
+        `{"quote": str, "who_alias": str, "seq": int}`。**2026-10-20 起它是硬要求**：
+        判定与维护两条路都传；拿不到原话就返回 `affinity_rejected_no_evidence`，
+        **一次都不写**。为什么从"可选"改成"必须"：全库只有 1 条证据——升级时
+        没人强制存原话，事后就回答不了"她为什么突然变了"。宁可这次不改，
+        也不要记一条查不了的理由。
+
+        `severe=True` = 模型自己判定"这一次是明确越界"。只有它会放宽下调幅度到
+        4–16；普通下调一律压回 ≤4。**别从数值大小去猜**：-5 可能只是一点不高兴。
+
+        `manual=True` 只给超管人工那条路（`memory_ops.MemoryOps.affinity`）：
+        人点按钮时手上没有"哪句话"，这条本来就是用户 2026-10-20 留的例外
+        （"除超管手动设定的路径"）。模型那两条路永远不许传它。
         """
 
         with self.connection() as db:
             return self._apply_affinity(
                 db, self.canonical_user(user_id, db=db), closeness=closeness,
                 guardedness=guardedness, reason=reason, source=source, now=self.clock(),
-                may_lower_guard=may_lower_guard, evidence=evidence,
+                may_lower_guard=may_lower_guard, evidence=evidence, severe=severe,
+                manual=manual,
             )
 
     def reset_relationship(self, user_id: str, *, reason: str = "超管重置") -> bool:
-        """回落默认档（生疏 + 如常），并留一条流水。
+        """回落默认值（陌生人 + 正常分寸），并留一条流水。
 
         **不删行**：留痕才能解释"她为什么突然变了"。超管重置是人工纠正，
-        不走上限——它本来就是用来盖掉模型误判的。
+        不走上限（也不受"好感 ≥95 不再往下"那条约束——用户 2026-10-20 写明
+        例外是"除超管手动设定的路径"）。它本来就是用来盖掉模型误判的。
         """
 
         now = self.clock()
@@ -1132,7 +1363,17 @@ class MemoryStore:
         return True
 
     def decay_relationships(self, *, idle_seconds: float = AFFINITY_DECAY_SECONDS) -> int:
-        """很久没说话：亲近 −1（最低停在"认得"），防备回"如常"。机械的，不问模型。
+        """很久没说话：好感 −10（最低停在**初始值 10**），防备回「正常分寸」。
+
+        衰减是机械的，不问模型。数值按新刻度（2026-10-20）：步长 10 = 一档。
+        地板从 35 改回 `LIKES_DEFAULT`（10）：原来低于 35 的人永远不进衰减查询，
+        现在库里有 8 个人停在 10 分，等于被永久冻结；回到初始值后他们也不再往下掉，
+        但 15、20 这些"比陌生人更近"的人会继续按老节奏降。仍然**只降不升**，
+        否则 `max(地板, value-10)` 会把 8 分的人"衰减"到 10。
+
+        **好感 ≥ 95 的那几行不动**：用户 2026-10-20 说"≥95 之后限制继续降低"，
+        衰减也是一条降低的路；喜欢/爱慕不该因为久不说话就自己凉掉。
+        防备照旧回 0（那是"不在他面前端着"，不是关系降级）。
 
         衰减后把 `last_seen_at` 推到当前时间，否则每一轮都会接着降。
         """
@@ -1147,14 +1388,20 @@ class MemoryStore:
             ).fetchall()
             for row in rows:
                 user_id = row["user_id"]
-                new_closeness = max(CLOSENESS_DECAY_FLOOR, int(row["closeness"]) - 1)
+                current_closeness = int(row["closeness"])
+                new_closeness = current_closeness
+                # **只降不升**：地板是初始值 10，比它低的（脏数据/手工改过）不进
+                # `max` 的上升支。直接 `max(10, value-10)` 会把 8 分的人抬到 10。
+                if CLOSENESS_DECAY_FLOOR < current_closeness < AFFINITY_HIGH_HOLD:
+                    new_closeness = max(CLOSENESS_DECAY_FLOOR,
+                                        current_closeness - AFFINITY_DECAY_STEP)
                 db.execute(
                     "UPDATE relationships SET closeness=?,guardedness=?,updated_at=?,last_seen_at=? "
                     "WHERE user_id=?",
                     (new_closeness, DEFAULT_GUARDEDNESS, now, now, user_id),
                 )
                 for axis, before, after in (
-                    ("closeness", int(row["closeness"]), new_closeness),
+                    ("closeness", current_closeness, new_closeness),
                     ("guardedness", int(row["guardedness"]), DEFAULT_GUARDEDNESS),
                 ):
                     if before != after:
@@ -1167,10 +1414,50 @@ class MemoryStore:
             logger.info("relationship_decay count=%s", changed)
         return changed
 
+    def _scale_epoch(self, db) -> float:
+        """刻度迁移那一刻（秒）。迁移**之前**的流水按旧刻度记，不能算进新窗口。
+
+        由来（2026-10-20）：24 小时净变化与 7 天放松上限都是"读流水求和"。旧刻度
+        里一次 0→1 的换算在新刻度里是 10→35（+25），迁移完当天就会被自己的每日
+        上限顶死。迁移本身不是一次真实的关系变化，所以把它的时间点记进 `meta`，
+        那之前的流水一律不计。拿不到 `meta`（老库还没迁）就是 0.0——全部算，
+        与迁移前行为一致。
+        """
+
+        try:
+            row = db.execute("SELECT value FROM meta WHERE key=?",
+                             (SCALE_EPOCH_KEY,)).fetchone()
+        except sqlite3.OperationalError:
+            return 0.0
+        try:
+            return float(row[0]) if row else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _single_step(delta: int, *, severe: bool, axis: str) -> int:
+        """把模型报的增量压进单次允许的幅度（用户 2026-10-20 的硬规则）。
+
+        好感提升 ≤ 8；防备提升 ≤ 10（一档宽 10）；普通下调 ≤ 4；
+        `severe=True`（明确越界）时下调 4–16。
+        **不做"平均拆成几次"**：一次调用就是一次，拒绝/压缩都在这里看得见。
+        """
+
+        delta = int(delta)
+        if delta > 0:
+            raise_max = GUARD_RAISE_MAX if axis == "guardedness" else AFFINITY_RAISE_MAX
+            return min(raise_max, delta)
+        if delta == 0:
+            return 0
+        if severe:
+            # "4–16"是幅度：模型说 -2 也至少走 4，说 -30 也只到 16。
+            return -min(AFFINITY_SEVERE_LOWER_MAX, max(AFFINITY_LOWER_MAX, -delta))
+        return -min(AFFINITY_LOWER_MAX, -delta)
+
     def _apply_affinity(
         self, db, user_id: str, *, closeness: int, guardedness: int, reason: str,
         source: str, now: float, may_lower_guard: bool,
-        evidence: dict | None = None,
+        evidence: dict | None = None, severe: bool = False, manual: bool = False,
     ) -> str:
         """干活的那个。返回拒绝码或空串。所有上限都在这里，谁调都一样。"""
 
@@ -1182,11 +1469,18 @@ class MemoryStore:
         if rule:
             logger.warning("relationship_reason_redacted rule=%s source=%s", rule, source)
             reason = AFFINITY_REASON_REDACTED % rule
-        # 单次每轴最多 1 档：模型说什么都越不过这条。
-        closeness = max(-1, min(1, int(closeness)))
-        guardedness = max(-1, min(1, int(guardedness)))
+        # 单次幅度（新刻度）：模型说什么都越不过这几条。两个轴的上限不同，
+        # 防备按"一档宽 10"单独放宽到 10（好感仍是用户给的 8）。
+        closeness = self._single_step(closeness, severe=severe, axis="closeness")
+        guardedness = self._single_step(guardedness, severe=severe, axis="guardedness")
         if closeness == 0 and guardedness == 0:
             return ""
+        # **证据链**（2026-10-20 收紧）：模型那两条路必须带原话，拿不到就整次拒绝。
+        # 为什么不在 `_evidence_row` 里"记一条空的"了事：那正是旧行为——全库 1 条证据，
+        # 事后只能看到一句概括，回答不了"到底哪句话让她变冷的"。
+        quote = str((evidence or {}).get("quote") or "").strip()
+        if not manual and not quote:
+            return "affinity_rejected_no_evidence"
         if guardedness < 0 and not may_lower_guard:
             # 判定 agent 只升不降：防备受惊之后立刻回暖不合理，也给了刷好感一条新路。
             return "affinity_rejected_judge_downgrade"
@@ -1195,27 +1489,35 @@ class MemoryStore:
         ).fetchone()
         current_closeness = int(row["closeness"]) if row else DEFAULT_CLOSENESS
         current_guardedness = int(row["guardedness"]) if row else DEFAULT_GUARDEDNESS
+        # 好感 ≥ 95 之后不再往下（用户 2026-10-20）。这条挡在每日上限**之前**：
+        # 否则同一天里两次小幅下调会绕开它（第一次没到限、第二次才到限）。
+        # 例外是超管手动那条路（`manual=True`）——用户原话里写明了"除超管手动设定的路径"。
+        if closeness < 0 and current_closeness >= AFFINITY_HIGH_HOLD and not manual:
+            return "affinity_rejected_high_affinity_hold"
+        epoch = self._scale_epoch(db)
         if guardedness < 0:
             relaxed = db.execute(
                 "SELECT COALESCE(SUM(before_value-after_value),0) FROM relationship_log "
                 "WHERE user_id=? AND axis='guardedness' AND before_value>after_value AND occurred_at>?",
-                (user_id, now - 7 * DAY),
+                (user_id, max(now - 7 * DAY, epoch)),
             ).fetchone()[0]
             if int(relaxed or 0) >= GUARD_RELAX_PER_WEEK:
                 return "affinity_rejected_relax_too_soon"
-        # 滚动 24 小时的**净**变化上限，每轴分开算。
-        for axis, delta in (("closeness", closeness), ("guardedness", guardedness)):
+        # 滚动 24 小时的**净**变化上限，每轴分开算（两个数按各自跨度定，见常量说明）。
+        for axis, delta, cap in (("closeness", closeness, AFFINITY_DAILY_CAP),
+                                 ("guardedness", guardedness, GUARD_DAILY_CAP)):
             if delta == 0:
                 continue
             net = db.execute(
                 "SELECT COALESCE(SUM(after_value-before_value),0) FROM relationship_log "
                 "WHERE user_id=? AND axis=? AND occurred_at>?",
-                (user_id, axis, now - DAY),
+                (user_id, axis, max(now - DAY, epoch)),
             ).fetchone()[0]
-            if abs(int(net or 0) + delta) > AFFINITY_DAILY_CAP:
+            if abs(int(net or 0) + delta) > cap:
                 return "affinity_rejected_daily_cap"
         new_closeness = max(AFFINITY_MIN, min(AFFINITY_MAX, current_closeness + closeness))
-        new_guardedness = max(AFFINITY_MIN, min(AFFINITY_MAX, current_guardedness + guardedness))
+        new_guardedness = max(GUARDEDNESS_MIN,
+                              min(GUARDEDNESS_MAX, current_guardedness + guardedness))
         if (new_closeness, new_guardedness) == (current_closeness, current_guardedness):
             # 已经在顶/底了。这不是错误，但也不该记成一次"生效的变动"。
             return "affinity_rejected_at_boundary"
@@ -1235,11 +1537,10 @@ class MemoryStore:
                     "INSERT INTO relationship_log VALUES (?,?,?,?,?,?,?)",
                     (user_id, axis, before, after, reason[:200], source, now),
                 )
-                if evidence:
+                if quote and not manual:
                     # 证据挂在**这一行流水**上（`log_rowid` = 它的 rowid）。
                     # 一次调用若两个轴都变了，两行流水各挂一条同样的证据——这是
-                    # 如实的：每一次变动都由那一句引起。今天只有判定那条会传它，
-                    # 而那条只动 guardedness 一轴，所以实际是一对一。
+                    # 如实的：每一次变动都由那一句引起。
                     self._evidence_row(
                         db, log_rowid=int(cursor.lastrowid or 0), user_id=user_id,
                         axis=axis, occurred_at=now, evidence=evidence,
@@ -1256,10 +1557,15 @@ class MemoryStore:
 
         ## 存什么
 
-        * `quote`：**核过在输入里出现过**的那一句（校验在 `stage3_main._judge`：
-          `quote in rendered_input`，纯字符串包含）。这里只做脱敏与截断。
+        * `quote`：**核过在输入里出现过**的那一句（判定那条路在 `stage3_main._judge`
+          里核：`quote in rendered_input`，纯字符串包含；维护那条路核的是
+          `evidence_event_ids` 里**他本人**说过的那条事件正文）。这里只做脱敏与截断。
         * `quote_chars`：**原始长度**（脱敏前、截断前），"这句话有多长"本身是信息。
         * `quote_truncated` / `verify` / `rule`：下面三段说明。
+
+        注意（2026-10-20）：调用方**必须**先给出非空的 `quote`，否则
+        `_apply_affinity` 会直接拒绝这次写入——这个函数自己不再承担"没原话也记一行"
+        的兜底。走到这里时 `raw` 一定是非空的。
 
         ## 脱敏**分两级**（照搬 reason 那套会把证据抹光，实测反例见 `memory_filters`）
 
@@ -1936,13 +2242,55 @@ class MemoryStore:
     def profile(self, user_id: str) -> str:
         """这个人的**人物画像**正文；没有就返回空串。
 
-        画像一个人一条、只挂在 `user_global` 上（键固定 `profile`，见 memory_model 的
-        校验），所以这里只查一处。它不进普通检索——每次都由"当前说话的人"触发渲染，
-        这样画像跟着人走，而不是跟着话题走。
+        2026-10-21 改（用户："画像不是完整的一大段啊，可以是一点一点拼凑起来的"）：
+        画像**不再是一个人一条长文**，而是多条碎片（`profile` 总览 + `profile/<方面>`）
+        拼起来——维护 agent 每次只需补一条或改一条，不必整段重写。
+
+        **拼的顺序不按年龄**（用户当天纠正："不要从最旧截啊"）：画像是"方面"，不是时间线，
+        "半年前知道的脾气"并不比"昨天知道的爱好"更该丢。所以：
+        * **总览那条先**，其它方面按键名排序（稳定顺序，同一份画像每次渲染都一样）；
+        * 不做按龄裁剪；长度靠**写入侧**控制（每条 ≤120 字、最多 `PROFILE_MAX_PIECES` 条，
+          满了由维护 agent 合并，而不是这里静默丢）；
+        * `PROFILE_JOIN_MAX` 只是兜底：真超了就在句末截断并加 `…`，不整条丢弃。
+
+        它不进普通检索——每次都由"当前说话的人"触发渲染，画像跟着人走，不跟话题走。
         """
 
-        record = self.profile_record(user_id)
-        return str(record.content) if record is not None else ""
+        if not user_id:
+            return ""
+        now = self.clock()
+        pieces: list[tuple[str, str]] = []
+        with self.connection() as db:
+            person = self.canonical_user(user_id, db=db)
+            for tier in ("long", "short"):
+                for row in db.execute(
+                    f"SELECT kind, normalized_key AS k, content FROM {TABLES[tier]}"
+                    " WHERE scope_type='user_global' AND scope_key=? AND kind=?"
+                    " AND status='active' AND visibility='group_safe'"
+                    " AND (expires_at IS NULL OR expires_at>?)",
+                    (person, PROFILE_KIND, now),
+                ):
+                    text = str(row["content"] or "").strip()
+                    key = str(row["k"] or "")
+                    if text:
+                        pieces.append((key, text))
+        if not pieces:
+            return ""
+        # 以键去重（同一份碎片的短/长两表可能都有），总览 `profile` 排最前，其余按字母序。
+        unique: dict[str, str] = {}
+        for key, text in pieces:
+            unique.setdefault(key, text)
+        ordered = sorted(unique.items(), key=lambda item: (item[0] != PROFILE_KIND, item[0]))
+        joined = "；".join(text for _, text in ordered)
+        if len(joined) <= PROFILE_JOIN_MAX:
+            return joined
+        # 兜底：按句读断在一个整句上，加省略号——**不整条丢弃任何一片画像**。
+        head = joined[:PROFILE_JOIN_MAX]
+        for stop in ("。", "；", "，", " "):
+            cut = head.rfind(stop)
+            if cut > PROFILE_JOIN_MAX // 2:
+                return head[: cut + 1] + "…"
+        return head + "…"
 
     def person_names(self, group_id: str, user_ids) -> dict[str, str]:
         """QQ 号 → 本群显示名。渲染记忆归属用；查不到就由调用方退回号码。"""

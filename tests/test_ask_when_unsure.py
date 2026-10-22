@@ -421,7 +421,15 @@ def test_ask_budget_limits_per_topic_and_per_window() -> None:
 #: 回复侧 A/B 显示这些**赌气形状的负例**可能反过来教她这么说（同一批输入里两条新写法
 #: 带上了"行，那下次我就说'真贵'。""不杠也难受……那就忍一下。"的赌气味）。
 #: 规矩本身一条没删（不还嘴 / 不拿人当靶子 / 两组 ✗✓ 都在），只是不再把顶嘴的句式抄给她看。
-SYSTEM_PROMPT_CHARS = 7357
+#:
+#: 2026-10-19 第五次更新 **7357 → 7403（+46）**：加的是解释 `speaker="notice"` 的那一句
+#: （用户：「哎要不还是通知吧，不要当人了」+「这个也进，一起当通知」——通知与命令回复
+#: 都要进她的历史，她得知道那不是谁说的话，也不是她自己说的）。
+#: 它紧挨着解释 `speaker="yunru"` 的那一句，措辞**不绑任何具体人设**；钉子本身没放松：
+#: 那句原话由 `tests/test_notice_history.py`
+#: 的 `test_the_system_prompt_explains_the_notice_speaker_generically` 逐字钉着并逐个
+#: 禁词扫过，这里这个数字照旧按逐字长度更新（多一个字、少一个字仍然红）。
+SYSTEM_PROMPT_CHARS = 7403
 
 
 def test_the_resident_system_prompt_carries_no_unsure_rule() -> None:

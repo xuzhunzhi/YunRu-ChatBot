@@ -259,7 +259,9 @@ def test_affinity_and_roster_use_canonical_id(tmp: str) -> None:
 
     store = make_store(tmp)
     store.merge_alias(ALICE_ALT, ALICE, note="同一个人")
-    assert store.apply_affinity(ALICE_ALT, closeness=2, reason="聊得来", source="test") == ""
+    assert store.apply_affinity(
+        ALICE_ALT, closeness=8, reason="聊得来", source="test",
+        evidence={"quote": "聊得来", "who_alias": "1", "seq": 1}) == ""
     assert store.relationship(ALICE) == store.relationship(ALICE_ALT)
     assert store.relationship(ALICE)[0] > 0
 

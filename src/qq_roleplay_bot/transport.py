@@ -36,6 +36,17 @@ class IncomingMessage:
     # 见 `card_from_sender` 与 `ConversationState.note_speaker`。
     sender_card: str = ""
     is_bot_message: bool = False
+    # 这条**不是任何人说的话**，而是"这里发出来的通知"（2026-10-19 用户：
+    # 「哎要不还是通知吧，不要当人了」）。
+    #
+    # 与 `is_bot_message` 的区别：那是**她自己**说过的话（渲染成 `speaker="yunru"`），
+    # 这一条是**她这条通道替别人发出去的东西**（插件通知 / 命令回复），渲染成
+    # `speaker="notice"`。
+    #
+    # 三条随之而来的规矩（都写在 `stage3_runtime.ConversationState` 那一侧）：
+    # 不进名册、不占名册编号（`user_id` 是空串）、不许被 `<reply_to>` 引用。
+    # 正文仍然是**不可信 DATA**，渲染时照旧 sanitize。
+    is_notice: bool = False
     # 本条消息引用的上一条消息 ID（OneBot reply 段），没有则为空串。
     reply_to_message_id: str = ""
     # 本条消息 @ 到的其他人（不含机器人自己）。命令要用它当参数，
@@ -50,6 +61,15 @@ class IncomingMessage:
     # **表情包也是 image 段**（NapCat 实测，见 `media_segments`），所以识图要知道
     # 该按贴图还是按照片去描述，不能都当照片。
     media_kinds: tuple[str, ...] = ()
+    #: 这条消息**从哪个渠道进来**。空串 = QQ 传输层（`onebot_ws` 那条路）；
+    #: 非空 = 插件经 `runtime.deliver` 投进来的（目前只有 `"mail"`）。
+    #:
+    #: 2026-10-20 加。起因：邮件里正常的一句话被 `check_message_security` 判成
+    #: "要求访问本机/系统"、直接拦掉（实测两封信都被拦，她根本没看到正文）。
+    #: 用户当天定：**「mail 又碰不到核心」** —— 插件渠道进来的只是一段文字，她既没有
+    #: 工具、也执行不了命令；特权命令的形状在 `deliver` 那一步就已经被拒了。所以那道
+    #: 本机信息闸只该对 QQ 生效。判据用这个字段，**不要在别处嗅 `session_id` 前缀**。
+    channel: str = ""
 
 
 def display_name_from_sender(sender: object, *, fallback: str = "") -> str:
@@ -116,6 +136,17 @@ class OutgoingMessage:
     reply_to_message_id: str = ""
     typing_notice: str = ""
     paced: bool = False
+    # 这一条是**命令的回复**（通知），不是她自己的话（2026-10-19 用户：
+    # 「这个也进，一起当通知」）。
+    #
+    # 它只影响"**发出去之后怎么记进她的历史**"：`is_notice=True` 的那一批由
+    # `_deliver_reply` 记成 `speaker="notice"`（且进历史的那一份先过
+    # `notice_text.for_history`：脱敏 + 截断 200 字）。
+    # **发出去的那一份一个字都不变**——操作者该看到的还是命令的完整输出。
+    #
+    # 默认 `False` 与 `paced` 同一个方向的考虑：漏写只会让一条命令回复被当成
+    # 她自己的话（可以接受的退化），不会让正常对话被记成通知。
+    is_notice: bool = False
 
 
 class MessageNotDelivered(RuntimeError):

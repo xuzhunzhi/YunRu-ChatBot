@@ -77,6 +77,11 @@ EXPECTED: tuple[tuple[str, str, str, str, str], ...] = (
     # `deepseek-flash` 这些模型名打到 xkiro 上。
     ("judge", "deepseek", "https://api.deepseek.com", "deepseek-flash",
      "QQBOT_JUDGE_API_KEY"),
+    # **知识块判档**（2026-10-18 用户："这块不行也加个agent，用dsflash，effort调none"）：
+    # 与 judge 同一个形状——同一把 key（`QQBOT_JUDGE_API_KEY`）、同一个模型，**不新增
+    # key 项**。思考深度写死在 `dev_config.FIXED_REASONING_EFFORT`（`none`），不读环境。
+    ("relevance", "deepseek", "https://api.deepseek.com", "deepseek-flash",
+     "QQBOT_JUDGE_API_KEY"),
     ("memory", "deepseek", "https://api.deepseek.com", "deepseek-flash",
      "QQBOT_MEMORY_API_KEY"),
     ("review", "deepseek", "https://api.deepseek.com", "deepseek-flash",
