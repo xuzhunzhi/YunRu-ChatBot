@@ -1,5 +1,7 @@
 """读信回信：只认主人、进引擎、寄回复，以及几条防呆（幂等 / 旧信 / 上限 / 不回自己）。"""
 import asyncio
+import contextlib
+import logging
 import time
 
 from qq_roleplay_bot.plugins.mail.mail_channel import MAX_INBOUND_CHARS, MailChannel
@@ -33,6 +35,28 @@ def chat_seams_of(engine) -> ChatSeams:
     from qq_roleplay_bot import runtime
 
     return runtime._chat_seams_for(engine)
+
+
+@contextlib.contextmanager
+def warnings_of(module_name: str):
+    """抓某个 logger 的 warning 文本（离线入口不用 pytest 的 caplog）。"""
+
+    records: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = _Collect()
+    logger = logging.getLogger(module_name)
+    previous_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.WARNING)  # 显式压到这里，免得被别处调高的级别吞掉
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
 
 
 def iso(offset_hours: float = 0.0) -> str:
@@ -71,6 +95,23 @@ class _Mail:
     async def send(self, *, to, subject, body, confirmed=True, dry_run=False):
         self.sent.append({"to": to, "subject": subject, "body": body})
         return {"message_id": "sent_1"}
+
+
+class _GatedMail(_Mail):
+    """每轮 `list_messages` 都让出一次事件循环：用来制造两轮 `poll_once` 的**真重叠**。
+
+    没有这个让出点，一个 `async def` 里全是同步代码的替身会被第一个协程一口气跑完，
+    第二个协程根本没机会进来——那样"并发用例"测不到锁。
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.list_calls = 0
+
+    async def list_messages(self, **kwargs):
+        self.list_calls += 1
+        await asyncio.sleep(0)
+        return await super().list_messages(**kwargs)
 
 
 class _State:
@@ -793,3 +834,181 @@ def test_inbound_body_is_truncated() -> None:
     engine = _Engine()
     poll(channel(mail, engine))
     assert len(engine.messages[0].text) == MAX_INBOUND_CHARS
+
+
+# --- 状态真落盘 / 落盘失败 / 并发（2026-10-22）-------------------------------
+#
+# 三条实测背景（都来自 `run/data/mail_state.json` 与代码走查）：
+# 1. 那个文件顶层只有 `version…links`，**没有 `bodies` / `poll_watermark`**——
+#    `save()` 没写、`load()` 也没读，于是 `remember_body` / `advance_watermark`
+#    存完即丢（正文永远空、水位永远 0 ⇒ 每轮 `after=None` 全 inbox 重扫）；
+# 2. mutator 不返回落盘结果，写失败是静默的；
+# 3. `mail-watch` 线程的踢轮与 300 秒节拍会同时进 `poll_once`，同一封信回两次。
+
+def test_state_round_trip_keeps_bodies_and_poll_watermark() -> None:
+    """save 之后用**新实例** load（= 进程重启）：`bodies` 与 `poll_watermark` 要一致。"""
+
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from qq_roleplay_bot.plugins.mail.mail_state import MailStateStore
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "mail_state.json"
+        store = MailStateStore(path)
+        assert store.remember_body("m1", "第一封信的正文") is True
+        assert store.remember_body("m2", "第二份正文") is True
+        assert store.advance_watermark(1_700_000_000.5) is True
+        assert store.mark_mail_processed("m1") is True
+
+        # 落盘文件里必须有这两个键（不是只有内存里改了）
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        assert raw["bodies"] == {"m1": "第一封信的正文", "m2": "第二份正文"}
+        assert raw["poll_watermark"] == 1_700_000_000.5
+
+        reopened = MailStateStore(path)
+        state = reopened.load()
+        assert state.bodies == {"m1": "第一封信的正文", "m2": "第二份正文"}
+        assert state.poll_watermark == 1_700_000_000.5
+        # 读出来的那份要真的能用（`recall_body` / `poll_watermark` 不再永远空/0）
+        assert reopened.recall_body("m2") == "第二份正文"
+        assert reopened.poll_watermark() == 1_700_000_000.5
+        assert reopened.is_mail_processed("m1") is True
+
+
+def test_a_legacy_state_file_without_the_new_keys_still_loads() -> None:
+    """旧 `mail_state.json` 没有 `bodies` / `poll_watermark`：按空默认读，**不报错**。"""
+
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from qq_roleplay_bot.plugins.mail.mail_state import STATE_VERSION, MailStateStore
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "mail_state.json"
+        path.write_text(json.dumps({
+            "version": STATE_VERSION,
+            "last_report_at": 1_790_000_000.0,
+            "processed_mail": ["old-1"],
+        }), encoding="utf-8")
+        state = MailStateStore(path).load()
+        assert state.bodies == {}
+        assert state.poll_watermark == 0.0
+        assert state.processed_mail == ["old-1"]
+        assert state.last_report_at == 1_790_000_000.0
+
+
+def test_mutators_return_false_when_a_save_fails_and_never_raise() -> None:
+    """save 回 False / 抛异常：mutator 只回 False，**不炸**（调用方要看得见）。"""
+
+    import tempfile
+    from pathlib import Path
+    from unittest import mock
+
+    from qq_roleplay_bot.plugins.mail.mail_state import MailStateStore
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = MailStateStore(Path(tmp) / "mail_state.json")
+        for index, failure in enumerate((False, RuntimeError("disk on fire"))):
+            target = f"m{index}"
+            failing = (mock.Mock(return_value=False) if failure is False
+                       else mock.Mock(side_effect=failure))
+            with mock.patch.object(store, "save", failing):
+                assert store.remember_body(target, "正文") is False
+                assert store.advance_watermark(float(index)) is False
+                assert store.mark_mail_processed(target) is False
+                assert store.record_mail_reply("a@b") is False
+                assert store.link_mail("a@b", f"12345{index}") is False
+
+        # **进程内兜底**：落盘失败的那封也要算"处理过"，否则下一轮会再回一次。
+        assert store.is_mail_processed("m0") is True
+
+
+def test_a_failed_processed_mark_still_skips_the_letter_next_round() -> None:
+    """`mark_mail_processed` 落盘失败 ⇒ 返回值 False，但**这一进程**里不再回同一封。"""
+
+    import tempfile
+    from pathlib import Path
+    from unittest import mock
+
+    from qq_roleplay_bot.plugins.mail.mail_state import MailStateStore
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "mail_state.json"
+        store = MailStateStore(path)
+        with mock.patch.object(store, "save", return_value=False):
+            assert store.mark_mail_processed("m-failed") is False
+        assert store.is_mail_processed("m-failed") is True
+        # 文件里确实没有它（证明兜底是内存那一份、不是落盘成功）
+        assert "m-failed" not in MailStateStore(path).load().processed_mail
+
+
+def test_a_failed_state_write_is_logged_and_counted_but_the_poll_goes_on() -> None:
+    """`mail_channel` 在 mutator 回 False 时 `logger.warning` 并计数，这一轮照常回信。"""
+
+    class _FlakyState(_State):
+        def mark_mail_processed(self, message_id):
+            super().mark_mail_processed(message_id)
+            return False
+
+        def advance_watermark(self, stamp):
+            super().advance_watermark(stamp)
+            return False
+
+        def remember_body(self, message_id, body):
+            super().remember_body(message_id, body)
+            return False
+
+        def record_mail_reply(self, sender=""):
+            super().record_mail_reply(sender)
+            return False
+
+    state = _FlakyState()
+    mail, engine = _Mail([item()], {"m1": "在吗"}), _Engine(reply="在。")
+    ch = channel(mail, engine, state)
+    with warnings_of("qq_roleplay_bot.plugins.mail.mail_channel") as warnings:
+        assert poll(ch) == 1
+    # remember_body / record_mail_reply / mark_mail_processed / advance_watermark 各一次
+    assert ch.snapshot()["state_write_failed"] == 4, ch.snapshot()
+    assert sum("mail_state_write_failed" in text for text in warnings) == 4, warnings
+    assert len(mail.sent) == 1, "状态写失败不该把这一轮的回信吞掉"
+
+
+def test_two_concurrent_poll_once_calls_pull_only_once() -> None:
+    """watch 踢轮与节拍撞车：两个协程同时进，**只有一个真的去拉取**。"""
+
+    async def scenario():
+        mail = _GatedMail([item()], {"m1": "在吗"})
+        engine = _Engine(reply="在。")
+        ch = channel(mail, engine)
+        results = await asyncio.gather(ch.poll_once(), ch.poll_once())
+        return ch, mail, engine, results
+
+    ch, mail, engine, results = asyncio.run(scenario())
+    assert sorted(results) == [0, 1], results
+    assert mail.list_calls == 1, "只该有一轮真的去拉取"
+    assert len(mail.sent) == 1, "同一封信不许回两次"
+    assert len(engine.messages) == 1
+    assert ch.snapshot()["polls_skipped_busy"] == 1
+
+
+def test_wire_reuses_one_store_instance_per_path() -> None:
+    """装配两处（日报 / 读信通道）拿到的是**同一个** store；换路径才换实例。"""
+
+    import os
+    import tempfile
+    from pathlib import Path
+    from unittest import mock
+
+    from qq_roleplay_bot.plugins.mail import wire
+
+    with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+        with mock.patch.dict(os.environ, {"QQBOT_DATA_DIR": first}):
+            one = wire.default_store()
+            assert wire.default_store() is one
+        with mock.patch.dict(os.environ, {"QQBOT_DATA_DIR": second}):
+            other = wire.default_store()
+            assert other is not one, "路径变了就该是另一份状态文件"
+            assert other.path == Path(second).resolve() / "mail_state.json"

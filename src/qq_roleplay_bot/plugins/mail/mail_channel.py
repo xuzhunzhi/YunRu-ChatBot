@@ -204,7 +204,10 @@ class MailChannel:
                       "asked_qq": 0, "linked": 0, "link_refused": 0,
                       "link_unavailable": 0,
                       # 2026-10-20：翻页没走完的轮次（那一轮不推进水位）。
-                      "polls_incomplete": 0}
+                      "polls_incomplete": 0,
+                      # 2026-10-22：状态落盘失败（store 的 mutator 回了 False）的次数，
+                      # 以及"已经有一轮在跑、这一轮直接跳过"的次数。
+                      "state_write_failed": 0, "polls_skipped_busy": 0}
         # 注：这里原来还有 `command_refused`。**拒投已经归核心**（接缝里
         # `privileged_command_level` 那道判定），插件这边看不到"被拒了"与
         # "判定说不回"的区别（两者都是 `run()` 回 None），所以那个计数器永远停在 0——
@@ -222,6 +225,11 @@ class MailChannel:
         self._kick_loop: asyncio.AbstractEventLoop | None = None
         self._kick_pending = False
         self._kick_last_at = 0.0
+        # 一轮收信只许一个协程在跑（2026-10-22）：`mail-watch` 线程的踢轮
+        # （`_kick_from_watch` → `create_task`）与 300 秒节拍的 `poll_once` 会撞在一起，
+        # 而"标记已处理"在读到信之后才发生——两个协程都会先看到未处理，于是**同一封回两次**。
+        # 用锁而不是只靠 `is_mail_processed`：那个检查与写入之间有 await，天生有窗口。
+        self._poll_lock = asyncio.Lock()
 
     # --- 来信唤起 -------------------------------------------------------------
 
@@ -389,7 +397,7 @@ class MailChannel:
             return ""
         writer = getattr(self.state_store, "link_mail", None)
         if callable(writer):
-            writer(sender, claimed)
+            self._note_state_write("link_mail", writer(sender, claimed))
             self.stats["linked"] += 1
             logger.info("mail_link_learned sender=%s user_id=%s", sender, claimed)
         return claimed
@@ -412,6 +420,12 @@ class MailChannel:
     async def poll_once(self) -> int:
         """读一轮来信并回信；返回**真正回了**的封数。
 
+        **同一时刻只跑一轮**（2026-10-22）：`mail-watch` 线程的踢轮与 300 秒节拍
+        会同时调到这来，而"标记已处理"发生在读到信之后——两个协程都会先看到
+        "未处理"，于是同一封回两次。锁的行为是**跳过**而不是排队：排队的第二轮
+        只会在同一批信上再走一遍（正文再读一次、计数与日志重复），
+        下一拍或下一封信会再来。
+
         2026-10-20 三条口径改动（都在实测事故之后定的）：
         1. **不再用 `--is-unread`**：服务端的已读不是我们的真相——主人两封回信都被
            标成 read=True 之后永远列不出来，她一次都没看到。改用**水位**：
@@ -423,6 +437,16 @@ class MailChannel:
 
         if not self.enabled:
             return 0
+        if self._poll_lock.locked():
+            self.stats["polls_skipped_busy"] += 1
+            logger.info("mail_poll_skipped reason=already_running")
+            return 0
+        async with self._poll_lock:
+            return await self._poll_once_locked()
+
+    async def _poll_once_locked(self) -> int:
+        """真正的那一轮（只由 `poll_once` 持锁调用）。"""
+
         self.stats["polls"] += 1
         since = max(0.0, self.state_store.poll_watermark() - POLL_OVERLAP_SECONDS)
         items, complete = await self._list_window(since)
@@ -440,7 +464,8 @@ class MailChannel:
                 # 她自己的地址：回了就是死循环，直接跳过（不记账也算处理过）。
                 self.stats["ignored_sender"] += 1
                 logger.warning("mail_from_self_ignored")
-                self.state_store.mark_mail_processed(message_id)
+                self._note_state_write(
+                    "mark_mail_processed", self.state_store.mark_mail_processed(message_id))
                 continue
             if not self._accepts(sender):
                 # 配置成只读主人（或名单）时，别人的信**不进模型**。
@@ -456,7 +481,8 @@ class MailChannel:
                 # 自动回复/退信：**在进判定之前**拦掉（规则匹配，不问模型）。
                 self.stats["skipped_auto"] += 1
                 logger.info("mail_skipped_auto sender=%s", sender)
-                self.state_store.mark_mail_processed(message_id)
+                self._note_state_write(
+                    "mark_mail_processed", self.state_store.mark_mail_processed(message_id))
                 continue
             if sender != self.owner_from:
                 self.stats["strangers"] += 1
@@ -467,7 +493,8 @@ class MailChannel:
             if age is not None and age > self.max_age_hours:
                 self.stats["skipped_stale"] += 1
                 logger.info("mail_skipped_stale age_hours=%.0f", age)
-                self.state_store.mark_mail_processed(message_id)
+                self._note_state_write(
+                    "mark_mail_processed", self.state_store.mark_mail_processed(message_id))
                 continue
             if self._replies_today() >= self.max_replies_per_day:
                 self.stats["capped"] += 1
@@ -481,9 +508,11 @@ class MailChannel:
                 continue
             if handled:
                 replied += 1
-            self.state_store.mark_mail_processed(message_id)
+            self._note_state_write(
+                "mark_mail_processed", self.state_store.mark_mail_processed(message_id))
         if complete:
-            self.state_store.advance_watermark(self.clock())
+            self._note_state_write(
+                "advance_watermark", self.state_store.advance_watermark(self.clock()))
         return replied
 
     async def _list_window(self, since: float) -> tuple[list[dict], bool]:
@@ -567,7 +596,8 @@ class MailChannel:
         await self.mail.send(
             to=sender, subject=self._reply_subject(subject), body=text,
         )
-        self.state_store.record_mail_reply(sender)
+        self._note_state_write(
+            "record_mail_reply", self.state_store.record_mail_reply(sender))
         self.stats["replied"] += 1
         logger.info("mail_replied sender=%s message_id=%s length=%s", sender, message_id, len(text))
         return True
@@ -591,7 +621,8 @@ class MailChannel:
             return snippet[:MAX_INBOUND_CHARS]
         body = self._body_from_payload(payload)
         if body:
-            self.state_store.remember_body(message_id, body)
+            self._note_state_write(
+                "remember_body", self.state_store.remember_body(message_id, body))
             return body[:MAX_INBOUND_CHARS]
         return snippet[:MAX_INBOUND_CHARS]
 
@@ -646,6 +677,20 @@ class MailChannel:
         self.stats["failed"] += 1
         self.last_error = f"{where}:{type(exc).__name__}"
         logger.warning("mail_channel_failed where=%s category=%s", where, type(exc).__name__)
+
+    def _note_state_write(self, where: str, result: object) -> bool:
+        """mutator 的落盘结果：**只有明确的 False 才算失败**（测试替身回 None 照旧放行）。
+
+        为什么要计数：store 的写盘失败以前是静默的（mutator 没有返回值），于是
+        "信读到了，但没记下已处理"这种事只能靠下一轮**再回一次**来暴露。现在它至少
+        留下 `mail_channel_failed` 之外的第二个观测点：日志一行 + `state_write_failed`。
+        """
+
+        if result is False:
+            self.stats["state_write_failed"] += 1
+            logger.warning("mail_state_write_failed where=%s", where)
+            return False
+        return True
 
     def snapshot(self) -> dict[str, object]:
         return {**self.stats, "enabled": self.enabled, "owner_from": self.owner_from,

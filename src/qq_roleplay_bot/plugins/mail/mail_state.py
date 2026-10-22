@@ -34,6 +34,9 @@ PENDING_REPORT_MAX_AGE = 3 * 86400.0
 # 处理过的来信 id 留最近这些条（2026-09-30 读信回信用）：幂等靠它，重启也不会重复回。
 MAX_PROCESSED_MAIL = 100
 # 正文缓存（2026-10-20）：message +read 只在第一次返回正文，重试必须靠这份缓存。
+# 只留 12 封：`mail_state.json` 每次都是**整份重写**，而单封正文最多 4000 字，
+# 12 封最坏多出 48KB；这份缓存只服务"这一封正在重试"的那一小段窗口，
+# 留多了既帮不上重试，也把每次 save 的写盘量拖大。
 MAX_CACHED_BODIES = 12
 MAX_CACHED_BODY_CHARS = 4000
 
@@ -41,6 +44,15 @@ MAX_CACHED_BODY_CHARS = 4000
 def default_state_path() -> Path:
     root = data_dir()
     return root / "mail_state.json"
+
+
+def _as_float(value: object) -> float:
+    """把状态文件里的数读成 float；坏值当 0（新字段的兼容读，不让旧/坏文件炸掉 load）。"""
+
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 @dataclass
@@ -143,6 +155,12 @@ class MailStateStore:
         self.path = Path(path) if path is not None else default_state_path()
         self.clock = clock
         self.last_error = ""
+        # 「已处理」的**进程内兜底**（2026-10-22）：`mark_mail_processed` 落盘失败时，
+        # 文件里没有那封的 id，下一轮 `is_mail_processed` 会读不到它、于是**再回一次**。
+        # 这份内存集合让"这一封已经处理过"至少在当前进程里成立（重启后失效是已知代价，
+        # 而落盘失败本身已经是一条 warning）。上限沿用 `MAX_PROCESSED_MAIL`：
+        # 它只兜"写失败的这几封"，没必要无限长成一个泄漏。
+        self._processed_fallback: dict[str, None] = {}
 
     def load(self) -> MailState:
         try:
@@ -174,6 +192,19 @@ class MailStateStore:
                 "subject": str(pending.get("subject") or "")[:200],
                 "body": str(pending.get("body") or "")[:MAX_LETTER_CHARS],
             }
+        # `bodies` / `poll_watermark` 是 2026-10-22 才真的落盘的：旧文件里**没有这两个键**
+        # （`run/data/mail_state.json` 实测只有 `version…links` 那一串），必须当空默认读，
+        # 不许因为缺键报错——那会让一台已经跑着的机器在升级后"状态读不出来"。
+        bodies_raw = data.get("bodies")
+        bodies: dict[str, str] = {}
+        if isinstance(bodies_raw, dict):
+            for key, value in bodies_raw.items():
+                name = str(key).strip()
+                text = str(value or "")
+                if name and text:
+                    bodies[name] = text[:MAX_CACHED_BODY_CHARS]
+            if len(bodies) > MAX_CACHED_BODIES:
+                bodies = dict(list(bodies.items())[-MAX_CACHED_BODIES:])
         return MailState(
             last_report_at=float(data.get("last_report_at") or 0.0),
             attempts_day=str(data.get("attempts_day") or ""),
@@ -199,6 +230,8 @@ class MailStateStore:
                 {str(k).casefold(): str(v) for k, v in (data.get("links") or {}).items()}
                 if isinstance(data.get("links"), dict) else {}
             ),
+            bodies=bodies,
+            poll_watermark=_as_float(data.get("poll_watermark")),
         )
 
     def save(self, state: MailState) -> bool:
@@ -216,6 +249,14 @@ class MailStateStore:
             "sender_day": state.sender_day,
             "sender_counts": {k: int(v) for k, v in list(state.sender_counts.items())[-50:]},
             "links": dict(list(state.links.items())[-100:]),
+            # 正文缓存与收信水位（2026-10-22）：原来字段定义在 `MailState` 上、`save()`
+            # 却不写，于是 `remember_body` / `advance_watermark` 存完即丢、`recall_body()`
+            # 永远空、水位永远 0（每轮 `after=None` 全 inbox 重扫）。
+            "bodies": {
+                str(k): str(v)[:MAX_CACHED_BODY_CHARS]
+                for k, v in list(state.bodies.items())[-MAX_CACHED_BODIES:]
+            },
+            "poll_watermark": round(_as_float(state.poll_watermark), 3),
         }
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -238,6 +279,21 @@ class MailStateStore:
             return False
         self.last_error = ""
         return True
+
+    def _save_quietly(self, state: MailState) -> bool:
+        """落盘并把**任何异常**都变成 `False`（2026-10-22）。
+
+        `save()` 自己只兜 `OSError`；序列化错误之类仍会往上抛。而 mutator 的契约是
+        "返回 bool、不炸"——收信循环里一次写盘失败不该让整轮 polling 崩掉，更不该
+        把"这封信已经处理过"变成"这一轮抛异常、下一轮再回一次"。
+        """
+
+        try:
+            return bool(self.save(state))
+        except Exception:  # noqa: BLE001 - 状态写不进去只记一笔，绝不抛给调用方
+            self.last_error = "save_exception"
+            logger.warning("mail_state_save_exception", exc_info=False)
+            return False
 
     def record(
         self,
@@ -267,7 +323,7 @@ class MailStateStore:
             current.attempts = 0
         if not ok and kind == "report":
             current.attempts += 1
-        self.save(current)
+        self._save_quietly(current)
         return current
 
     # --- 判断"该不该发"（这两个搬到了 MailState 上，见上） ---------------------
@@ -296,7 +352,7 @@ class MailStateStore:
             "body": str(body).strip()[:MAX_LETTER_CHARS],
         })
         current.letters = current.letters[-MAX_LETTERS:]
-        self.save(current)
+        self._save_quietly(current)
         return current
 
     def save_pending_report(
@@ -323,7 +379,7 @@ class MailStateStore:
             "subject": str(subject).strip()[:200],
             "body": str(body).strip()[:MAX_LETTER_CHARS],
         }
-        self.save(current)
+        self._save_quietly(current)
         return current
 
     def clear_pending_report(self, *, state: MailState | None = None) -> MailState:
@@ -332,7 +388,7 @@ class MailStateStore:
         current = state or self.load()
         if current.pending_report:
             current.pending_report = {}
-            self.save(current)
+            self._save_quietly(current)
         return current
 
     @staticmethod
@@ -347,26 +403,42 @@ class MailStateStore:
 
     def is_mail_processed(self, message_id: str) -> bool:
         """这封信处理过没有。**读不到状态文件时返回 False**（宁可重复一次，
-        也不要因为状态坏了就永远不回信——与"宁可多发一封"同一条取舍）。"""
+        也不要因为状态坏了就永远不回信——与"宁可多发一封"同一条取舍）。
+
+        落盘失败过的那些（见 `_processed_fallback`）也在这里算"处理过"。
+        """
 
         target = str(message_id or "").strip()
         if not target:
             return True
+        if target in self._processed_fallback:
+            return True
         return target in self.load().processed_mail
 
-    def mark_mail_processed(self, message_id: str) -> None:
+    def mark_mail_processed(self, message_id: str) -> bool:
+        """标记这封信处理过，返回**落盘是否成功**（2026-10-22）。
+
+        失败时仍然返回 False 让调用方看得见；但"已处理"这一事实已经记进
+        `_processed_fallback`，所以**同一进程里下一轮不会再回一次**同一封信。
+        """
+
         target = str(message_id or "").strip()
         if not target:
-            return
+            return True
         state = self.load()
-        if target in state.processed_mail:
-            return
+        if target in state.processed_mail or target in self._processed_fallback:
+            return True
         state.processed_mail.append(target)
         state.processed_mail = state.processed_mail[-MAX_PROCESSED_MAIL:]
-        self.save(state)
+        # **先记内存、再落盘**：save 失败时文件里没有它，下一轮 `is_mail_processed`
+        # 会读不到、于是再回一次——这份兜底就是挡那一步的。只留最近 MAX_PROCESSED_MAIL 条。
+        self._processed_fallback[target] = None
+        while len(self._processed_fallback) > MAX_PROCESSED_MAIL:
+            self._processed_fallback.pop(next(iter(self._processed_fallback)))
+        return self._save_quietly(state)
 
-    def remember_body(self, message_id: str, body: str) -> None:
-        """把读到的正文存下来（2026-10-20）。
+    def remember_body(self, message_id: str, body: str) -> bool:
+        """把读到的正文存下来（2026-10-20），返回落盘是否成功。
 
         为什么必须存：`message +read` **只在第一次**返回正文，之后同一封返回空串
         （实测：主人那两封信都是第一次读有正文、我再读就是 0 字符）。而"回复失败要
@@ -378,13 +450,13 @@ class MailStateStore:
         target = str(message_id or "").strip()
         text = str(body or "")
         if not target or not text:
-            return
+            return True
         state = self.load()
         state.bodies[target] = text[:MAX_CACHED_BODY_CHARS]
         if len(state.bodies) > MAX_CACHED_BODIES:
             for stale in list(state.bodies)[: len(state.bodies) - MAX_CACHED_BODIES]:
                 state.bodies.pop(stale, None)
-        self.save(state)
+        return self._save_quietly(state)
 
     def recall_body(self, message_id: str) -> str:
         """取缓存正文；没有就空串（调用方据此决定要不要向 CLI 再要一次）。"""
@@ -399,12 +471,12 @@ class MailStateStore:
 
         return float(self.load().poll_watermark or 0.0)
 
-    def advance_watermark(self, stamp: float) -> None:
-        """只有**整轮成功**才推进（失败留在旧水位，下一轮重扫）。"""
+    def advance_watermark(self, stamp: float) -> bool:
+        """只有**整轮成功**才推进（失败留在旧水位，下一轮重扫），返回落盘是否成功。"""
 
         state = self.load()
         state.poll_watermark = float(stamp)
-        self.save(state)
+        return self._save_quietly(state)
 
     def replies_today(self) -> int:
         """今天回过几封。"""
@@ -413,8 +485,8 @@ class MailStateStore:
         today = time.strftime("%Y-%m-%d", time.localtime(self.clock()))
         return int(state.replies) if state.reply_day == today else 0
 
-    def record_mail_reply(self, sender: str = "") -> None:
-        """记一次回信（跨天自动清零）。带 `sender` 时同时记这个人的次数。"""
+    def record_mail_reply(self, sender: str = "") -> bool:
+        """记一次回信（跨天自动清零），返回落盘是否成功。带 `sender` 时同时记这个人的次数。"""
 
         state = self.load()
         today = time.strftime("%Y-%m-%d", time.localtime(self.clock()))
@@ -428,7 +500,7 @@ class MailStateStore:
                 state.sender_day = today
                 state.sender_counts = {}
             state.sender_counts[target] = int(state.sender_counts.get(target, 0)) + 1
-        self.save(state)
+        return self._save_quietly(state)
 
     def sender_replies_today(self, sender: str) -> int:
         """今天给这个地址回过几封。"""
@@ -446,18 +518,21 @@ class MailStateStore:
 
         return str(self.load().links.get(str(address or "").strip().casefold(), ""))
 
-    def link_mail(self, address: str, user_id: str) -> None:
-        """记下"这个邮箱是这个人"（来自对方在回信里自报的 QQ 号）。"""
+    def link_mail(self, address: str, user_id: str) -> bool:
+        """记下"这个邮箱是这个人"（来自对方在回信里自报的 QQ 号），返回落盘是否成功。"""
 
         address = str(address or "").strip().casefold()
         user_id = str(user_id or "").strip()
         if not address or not user_id:
-            return
+            return True
         state = self.load()
         state.links[address] = user_id
-        self.save(state)
+        return self._save_quietly(state)
 
-    def unlink_mail(self, address: str) -> None:
+    def unlink_mail(self, address: str) -> bool:
+        """删掉这个地址的绑定，返回落盘是否成功（本来就没有 = 不用写，算成功）。"""
+
         state = self.load()
         if state.links.pop(str(address or "").strip().casefold(), None) is not None:
-            self.save(state)
+            return self._save_quietly(state)
+        return True

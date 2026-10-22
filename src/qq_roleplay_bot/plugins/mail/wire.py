@@ -22,6 +22,32 @@ logger = logging.getLogger(__name__)
 # 每日汇报的检查节拍：它只做"到点了吗"，60 秒足够细（发送时刻精确到分钟）。
 REPORT_TICK_SECONDS = 60.0
 
+#: 进程内共享的 `MailStateStore`：**同一路径只造一份**（2026-10-22）。
+#:
+#: 起因：`build_daily_report` 与 `build_mail_channel` 原来各 `MailStateStore()` 一次，
+#: 两个实例各读各写同一份 `data/mail_state.json`。收信水位与正文缓存这两样没落盘时
+#: 每轮都从空状态起步（`poll_watermark` 永远 0 ⇒ 每轮重扫整个收件箱），而"已处理"
+#: 去重又有两套内存视图——同一封信在同一轮里被看见两次就回两次。
+#: 共享实例不能替代写入互斥（`MailChannel.poll_once` 那把锁才是那个），但它保证
+#: 日报与读信通道装配出来的是**同一份**状态对象。
+#:
+#: 键带上**类本身**：测试会把 `mail_state.MailStateStore` 换成一个替身
+#: （`tests/test_mail_report_window.py`），类换了就必须换实例，否则替身会被缓存下来
+#: 带进后面的用例；键里再带上路径，`QQBOT_DATA_DIR` 一改就落到另一份状态文件。
+_STORES: dict[tuple[object, object], object] = {}
+
+
+def default_store():
+    """装配用的唯一 store（同一路径复用同一实例）。"""
+
+    from .mail_state import MailStateStore, default_state_path
+
+    key = (MailStateStore, default_state_path())
+    store = _STORES.get(key)
+    if store is None:
+        store = _STORES[key] = MailStateStore()
+    return store
+
 
 def build_daily_report(report, *, registry=None):
     """装配每日汇报。**没装 CLI / 没开开关就返回 None**，对话照常。
@@ -40,10 +66,10 @@ def build_daily_report(report, *, registry=None):
     from .daily_report import DailyReporter
     from .letter_writer import LetterWriter
     from .mail_client import MailClient
-    from .mail_state import MailStateStore
 
     mail = MailClient(dev_config.MAIL_CLI, workdir=mail_workdir())
-    store = MailStateStore()
+    # 与读信通道**共用同一个 store**（2026-10-22）：见 `default_store` 的说明。
+    store = default_store()
     # 写信 agent 用**自己的 client 与 user_id**（2026-09-30 用户要求）：
     # 以前借用回复 agent 的 client，信与群聊共用一份缓存隔离空间。
     #
@@ -272,7 +298,6 @@ def build_mail_channel(chat):
         return None
     from .mail_channel import MailChannel
     from .mail_client import MailClient
-    from .mail_state import MailStateStore
 
     # 邮件进来时走的是"私聊"这条路，主人那份用他自己的 QQ 号；陌生发件人由通道在
     # 收到信时**自己登记**进私聊白名单（策略留在 Stage 4 通道里，引擎的判定不动）。
@@ -285,7 +310,7 @@ def build_mail_channel(chat):
         )
     return MailChannel(
         mail_client=MailClient(dev_config.MAIL_CLI, workdir=mail_workdir()),
-        state_store=MailStateStore(),
+        state_store=default_store(),
         chat=chat,
         owner_from=dev_config.MAIL_OWNER_FROM,        owner_user_id=dev_config.MAIL_OWNER_USER_ID,
         enabled=True,
