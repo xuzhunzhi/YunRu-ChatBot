@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 #: 她这一趟能看的东西（也是 `letter_writer.TOOLS_PROMPT` 里那张目录的口径）。
 #: 加一样就要两处一起加：这里与那一段目录（测试钉着两边不漏项）。
-TOOL_NAMES = ("time", "lookup", "recent", "old", "person", "his", "letters", "group", "lore")
+TOOL_NAMES = ("time", "lookup", "recent", "old", "person", "his", "letters", "group", "lore", "web")
 
 #: 一次查询词最多留这么长（她偶尔会写一整句话过来）。
 MAX_QUERY_CHARS = 80
@@ -79,7 +79,7 @@ class ToolAnswer:
     def label(self) -> str:
         """进 prompt / 证据包的那一行抬头（`<lookup>考试</lookup>` 这种原始写法）。"""
 
-        if self.tool in ("lookup", "person", "lore"):
+        if self.tool in ("lookup", "person", "lore", "web"):
             return f"<{self.tool}>{self.query}</{self.tool}>"
         return f"<{self.tool}>"
 
@@ -106,7 +106,7 @@ def parse_tool_call(raw: str, *, names: tuple[str, ...] = TOOL_NAMES):
     best: tuple[int, str, str] | None = None
     for name in names:
         lowered = name.casefold()
-        if name in ("lookup", "person", "lore"):
+        if name in ("lookup", "person", "lore", "web"):
             pattern = re.compile(rf"<\s*{re.escape(name)}\s*>(.*?)</\s*{re.escape(name)}\s*>",
                                  re.IGNORECASE | re.DOTALL)
             found = pattern.search(text)
@@ -156,7 +156,7 @@ class LetterToolbox:
     def __init__(self, *, materials=None, memory=None, letters=(), lore=None,
                  now: float = 0.0, clock=time.time,
                  closeness_names=None, guardedness_names=None,
-                 lookup=None) -> None:
+                 lookup=None, web_search=None) -> None:
         #: `daily_report.DayMaterials`（窗口热度、他的句子、人的档位）。
         self.materials = materials
         #: 核心的只读记忆口（`MemoryRead`）：只有 recall / recent / older / people。
@@ -171,6 +171,9 @@ class LetterToolbox:
         self.guardedness_names = guardedness_names
         #: `<lookup>` 的替身（测试与老调用点用；生产走 `memory.recall`）。
         self.lookup = lookup
+        #: `<web>` 的替身：`(query) -> str`（生产走 `plugins/web_search/search.py`）。
+        #: 传 None 时 `_web` 会懒加载那一个模块；测试可以塞一个假的，不联网。
+        self.web_search = web_search
 
     # --- 跑一样 -------------------------------------------------------------
 
@@ -350,3 +353,25 @@ class LetterToolbox:
         if not query or not callable(self.lore):
             return ""
         return str(self.lore(query) or "").strip()
+
+    def _web(self, query: str) -> str:
+        """上网搜一下：只回标题 / 链接 / 摘要（最多 3 条）。
+
+        **不是**"她身边发生的事"：结果来自公开网页，只当参考。查不到、断网、
+        解析失败一律回空串（`run()` 会把它记成"没翻着"），绝不挡写信。
+        """
+
+        if not query:
+            return ""
+        taker = self.web_search
+        if not callable(taker):
+            try:
+                from ..web_search.search import search as taker  # noqa: PLC0415 - 懒加载
+            except Exception:  # noqa: BLE001 - 没装这个插件就当没有联网搜索
+                logger.warning("letter_tool_web_missing", exc_info=True)
+                return ""
+        try:
+            return str(taker(query) or "").strip()
+        except Exception:  # noqa: BLE001 - 搜不到就是没有
+            logger.warning("letter_tool_web_failed", exc_info=True)
+            return ""
