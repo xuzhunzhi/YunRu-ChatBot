@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from urllib.parse import urlencode
 
 from .onebot_ws import TYPING_NOTICE_TIMEOUT_SECONDS, parse_message_event
@@ -22,6 +23,7 @@ from .transport import (
     IncomingMessage,
     MessageNotDelivered,
     MessageTarget,
+    drop_temp_session_params,
     note_private_send_refusal,
 )
 
@@ -88,6 +90,8 @@ class OneBotClientTransport:
         self.reconnect_seconds = max(0.1, reconnect_seconds)
         self._messages: asyncio.Queue[IncomingMessage | None] = asyncio.Queue()
         self._pending: dict[str, asyncio.Future[dict[str, object]]] = {}
+        # 好友申请的处理口（与反向 WS 那条通道同一个形状，见 `onebot_ws`）。
+        self.on_friend_request: Callable[[dict[str, object]], Awaitable[object]] | None = None
         self._socket = None
         self._closed = False
         self._connected = asyncio.Event()
@@ -167,8 +171,21 @@ class OneBotClientTransport:
             await self.call_api("send_group_msg", params)
             return
         params.update(message_type="private", user_id=_id_value(target.user_id or ""))
+        if target.temp_group_id:
+            # 群临时会话：`send_private_msg` 带上发起群才会走 `grpTmp`（判据与
+            # 反向 WS 那条通道共用一份，见 `onebot_ws._target_params`）。
+            # 不带群号就按好友私聊发，非好友必被拒。
+            params["group_id"] = _id_value(target.temp_group_id)
         try:
-            await self.call_api("send_private_msg", params)
+            try:
+                await self.call_api("send_private_msg", params)
+            except DeliveryRejected as exc:
+                fallback = drop_temp_session_params(params, exc)
+                if fallback is None:
+                    raise
+                # 临时会话失效时退回好友私聊再试一次（判据见 `transport`，
+                # 与反向 WS 那条通道共用）。不是"失败就重发"。
+                await self.call_api("send_private_msg", fallback)
         except DeliveryRejected as exc:
             # 私聊被**有理由地**拒收（对方还不是好友 / 没有临时会话）时补一句人话给
             # 操作者。判据与说法跟反向 WS 那条通道**共用一份**
@@ -185,6 +202,8 @@ class OneBotClientTransport:
             params.update(message_type="group", group_id=_id_value(target.group_id))
         else:
             params.update(message_type="private", user_id=_id_value(target.user_id or ""))
+            if target.temp_group_id:
+                params["group_id"] = _id_value(target.temp_group_id)
         try:
             await asyncio.wait_for(
                 self.call_api("set_input_status", params),
@@ -301,6 +320,22 @@ class OneBotClientTransport:
         message = parse_message_event(payload)
         if message is not None:
             await self._messages.put(message)
+            return
+        # 好友申请：与反向 WS 那条通道同一套（判定在核心）。这里同样只交事件，
+        # 丢进任务里，别让一次 API 调用堵住收消息。
+        if (payload.get("post_type") == "request"
+                and payload.get("request_type") == "friend"
+                and self.on_friend_request is not None):
+            asyncio.create_task(self._dispatch_friend_request(payload))
+
+    async def _dispatch_friend_request(self, payload: dict[str, object]) -> None:
+        handler = self.on_friend_request
+        if handler is None:
+            return
+        try:
+            await handler(payload)
+        except Exception:  # noqa: BLE001 - 一条申请不能带走接收循环
+            logger.warning("好友申请处理失败", exc_info=True)
 
     async def _teardown_socket(self) -> None:
         socket = self._socket

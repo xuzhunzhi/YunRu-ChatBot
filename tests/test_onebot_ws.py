@@ -373,6 +373,149 @@ def test_the_missing_temp_session_refusal_also_gets_a_human_note() -> None:
     assert private_send_refusal_note("OneBot send_msg 失败: {'retcode': 100, 'message': '被禁言'}") == ""
 
 
+# --- 群临时会话要按临时会话回（2026-10-26）---------------------------------------
+#
+# 由来：QQ 里"私聊"其实有两条路——好友私聊（`sub_type=friend`）与群临时会话
+# （`sub_type=group`，发起群号在 `sender.group_id`）。群友从群里点开她发起的
+# 就是后者。修复前解析层把 `sender.group_id` 丢了，回复时不带群号，NapCat 就按
+# 好友私聊发 → 非好友被 QQ 拒成 `result=16 发送失败，请先添加对方为好友`
+# （2026-10-26 10:25:42 实测，见 `run/data/bot.err.log`）。
+#
+# 这里钉五件事：
+# 1. 解析层**留住**发起群号（丢了 → 第一、二条红）；
+# 2. 好友私聊**不许多带**群号；
+# 3. 回临时会话时**必须**带上群号；
+# 4. 会话失效时退回好友私聊**只重试一次**；
+# 5. "不是好友"不是临时会话的错，**不许**因此重试。
+
+#: 2026-10-26 实测的那条事件形状（`SnowLuma\data\3655414729\messages.db` 原文摘录）。
+_TEMP_SESSION_EVENT: dict[str, object] = {
+    "post_type": "message",
+    "message_type": "private",
+    "sub_type": "group",
+    "message_id": 1299000316,
+    "user_id": 475842590,
+    "message": [{"type": "text", "data": {"text": "yunru"}}],
+    "raw_message": "yunru",
+    "sender": {"user_id": 475842590, "nickname": "宋秋湙", "group_id": 1084401296},
+}
+
+_OK_RECEIPT: dict[str, object] = {"status": "ok", "retcode": 0, "data": {"message_id": 1}}
+
+
+def test_a_group_temp_session_keeps_the_origin_group() -> None:
+    """群临时会话 = 私聊 + 发起群号；群号必须留在目标上（回复要用它）。"""
+
+    message = parse_message_event(dict(_TEMP_SESSION_EVENT))
+
+    assert message is not None
+    assert message.session_id == "private:475842590"
+    assert message.target.user_id == "475842590"
+    assert message.target.group_id is None, "临时会话不是群消息"
+    assert message.target.temp_group_id == "1084401296"
+
+
+def test_a_friend_private_message_has_no_temp_group() -> None:
+    """真好友的私聊不带群号——那条路本来就是好友私聊，多带群号反而会走错门。"""
+
+    event = dict(_TEMP_SESSION_EVENT)
+    event["sub_type"] = "friend"
+    event["sender"] = {"user_id": 475842590, "nickname": "宋秋湙"}
+
+    message = parse_message_event(event)
+
+    assert message is not None
+    assert message.target.user_id == "475842590"
+    assert message.target.temp_group_id is None
+
+
+def test_replying_to_a_temp_session_sends_the_origin_group() -> None:
+    """回群临时会话时，出站帧必须带 `group_id`；不带就变成好友私聊，非好友收不到。"""
+
+    from qq_roleplay_bot.transport import MessageTarget
+
+    failure, requests, _ = _refused_send(
+        _OK_RECEIPT, MessageTarget(user_id="475842590", temp_group_id="1084401296")
+    )
+
+    assert failure is None, failure
+    assert len(requests) == 1
+    params = requests[0]["params"]
+    assert params["message_type"] == "private"
+    assert params["user_id"] == 475842590
+    assert params["group_id"] == 1084401296, "临时会话必须带上发起群"
+
+
+def test_a_friend_private_reply_carries_no_group() -> None:
+    """普通私聊（没有 `temp_group_id`）出站帧里**不许**出现 `group_id`。"""
+
+    from qq_roleplay_bot.transport import MessageTarget
+
+    failure, requests, _ = _refused_send(_OK_RECEIPT, MessageTarget(user_id="2468"))
+
+    assert failure is None
+    assert len(requests) == 1
+    assert "group_id" not in requests[0]["params"], requests[0]["params"]
+
+
+class _ScriptedConnection:
+    """假对面：按顺序回不同的回执（第一次拒收、第二次成功）。"""
+
+    def __init__(self, payloads: list[dict[str, object]]) -> None:
+        self.payloads = payloads
+        self.requests: list[dict] = []
+        self.on_frame = None
+
+    async def send(self, raw: str) -> None:
+        request = json.loads(raw)
+        self.requests.append(request)
+        index = min(len(self.requests) - 1, len(self.payloads) - 1)
+        assert self.on_frame is not None
+        await self.on_frame(json.dumps({**self.payloads[index], "echo": request.get("echo")}))
+
+
+def test_an_expired_temp_session_falls_back_to_a_plain_private_send_once() -> None:
+    """临时会话没了（NapCat 重启/超过 7 天）→ 退回好友私聊**重试一次**，不带群号。"""
+
+    from qq_roleplay_bot.transport import MessageTarget
+
+    async def run():
+        transport = OneBotWebSocketTransport(chat_log=ChatLog(enabled=False))
+        connection = _ScriptedConnection([_TEMP_SESSION_REFUSAL, _OK_RECEIPT])
+        connection.on_frame = transport._handle_payload
+        transport._connection = connection
+        transport._connection_ready.set()
+        try:
+            await transport.send(
+                MessageTarget(user_id="2468", temp_group_id="717151356"), "在吗"
+            )
+        except Exception as exc:  # noqa: BLE001 - 这里期望不抛
+            return exc, connection.requests
+        return None, connection.requests
+
+    failure, requests = asyncio.run(run())
+
+    assert failure is None, failure
+    assert len(requests) == 2, requests
+    assert requests[0]["params"]["group_id"] == 717151356
+    assert "group_id" not in requests[1]["params"], "退回好友私聊时不该再带群号"
+
+
+def test_a_plain_friend_refusal_does_not_retry() -> None:
+    """"不是好友"不是临时会话的错：不许因此多打一帧（重发只会是噪音）。"""
+
+    from qq_roleplay_bot.transport import DeliveryRejected, MessageTarget
+
+    failure, requests, _ = _refused_send(
+        _FRIEND_REFUSAL, MessageTarget(user_id="2468", temp_group_id="717151356")
+    )
+
+    assert isinstance(failure, DeliveryRejected)
+    assert len(requests) == 1, requests
+    assert requests[0]["params"]["group_id"] == 717151356
+
+
+
 def test_both_notes_carry_no_mechanism_words() -> None:
     """两句说明都零机制词（口径见 `AGENTS.md` §2.2 与这份派活的硬要求）。"""
 

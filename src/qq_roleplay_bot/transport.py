@@ -9,14 +9,31 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class MessageTarget:
-    """一条回复的目标，目前只支持私聊和群聊。"""
+    """一条回复的目标，目前只支持私聊和群聊。
+
+    `temp_group_id` 是**私聊的一条附带信息**，不是第二个目标：它记的是"这条私聊
+    是从哪个群发起的"（QQ 的群临时会话）。QQ 那边私聊实际有两条路——
+
+    * 好友私聊（`c2c`）；
+    * 群临时会话（`grpTmp`），协议里必须带上**发起那个群的群号**。
+
+    对方不是好友时只有后一条能送出去：不带群号就按好友私聊发，服务端会拒成
+    `result=16 发送失败，请先添加对方为好友`（2026-10-26 实测，`run/data/bot.err.log`）。
+    所以这个字段**只影响"私聊怎么发"**，不改变 `MessageTarget` 仍是私聊这件事
+    （`user_id` 与 `group_id` 的二选一校验照旧，避免调用方把它当群消息发出去）。
+    """
 
     user_id: str | None = None
     group_id: str | None = None
+    temp_group_id: str | None = None
 
     def __post_init__(self) -> None:
         if (self.user_id is None) == (self.group_id is None):
             raise ValueError("MessageTarget 必须且只能设置 user_id 或 group_id")
+        if self.temp_group_id is not None and self.user_id is None:
+            # 群临时会话是"私聊"的一种，脱离 user_id 没有意义；允许这种组合
+            # 只会让发送端把群号当成群消息目标发出去。
+            raise ValueError("temp_group_id 只能与 user_id 一起使用")
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +226,33 @@ def private_send_refusal_note(text: str) -> str:
         if any(marker.casefold() in haystack for marker in markers):
             return note
     return ""
+
+
+def is_missing_temp_session(exc: BaseException) -> bool:
+    """这次拒收是不是"群临时会话已经没了"（NapCat 重启或超过 7 天没再收到）。
+
+    只有这一种情况可以退回好友私聊重试；别的拒收（被禁言、真不是好友）退回也没用，
+    重试只会多一帧噪音。判据就是 NapCat 的原话，见上面 `_PRIVATE_REFUSAL_NOTES`。
+    """
+
+    return isinstance(exc, DeliveryRejected) and "no such temp session" in str(exc).casefold()
+
+
+def drop_temp_session_params(params: dict[str, object], exc: BaseException) -> dict[str, object] | None:
+    """临时会话失效时，把一帧私聊请求退回"好友私聊"（去掉 `group_id`）。
+
+    返回 None 表示**不该重试**（不是临时会话的错、或这一帧本来就不是私聊）。
+    这么做是为了"不会比修复前更差"：对方若是好友，去掉群号照样能送到；
+    若不是好友，第二帧会以"请先添加对方为好友"如实失败，操作者看到的仍是那句话。
+    """
+
+    if not is_missing_temp_session(exc):
+        return None
+    if params.get("message_type") != "private" or "group_id" not in params:
+        return None
+    fallback = dict(params)
+    fallback.pop("group_id", None)
+    return fallback
 
 
 def note_private_send_refusal(target: MessageTarget, exc: BaseException) -> bool:

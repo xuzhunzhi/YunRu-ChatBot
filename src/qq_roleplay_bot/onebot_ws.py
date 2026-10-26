@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import uuid
+from collections.abc import Awaitable, Callable
 from urllib.parse import parse_qs, urlparse
 
 from websockets.asyncio.server import ServerConnection, Server, serve
@@ -22,6 +23,7 @@ from .transport import (
     MessageTarget,
     display_name_from_sender,
     card_from_sender,
+    drop_temp_session_params,
     note_private_send_refusal,
 )
 
@@ -183,7 +185,28 @@ def parse_message_event(event: dict[str, object]) -> IncomingMessage | None:
         target = MessageTarget(group_id=group_id)
         session_id = f"group:{group_id}"
     elif message_type == "private":
-        target = MessageTarget(user_id=user_id)
+        # 私聊在 QQ 里其实是**两条路**，事件形状能分辨：
+        #   * 好友私聊   → `sub_type="friend"`，没有群号；
+        #   * 群临时会话 → `sub_type="group"`，发起群号在 `sender.group_id`
+        #     （2026-10-26 实测：SnowLuma 的 OneBot 事件**顶层没有** `group_id`，
+        #     群号只挂在 sender 上；`messages.db` 里那条 `yunru` 就是这样）。
+        # 群号必须留着：回这条私聊时要原样带上，QQ 才会走 `grpTmp` 那条路。
+        # 丢了它，非好友的私聊会被服务端拒成 `result=16 请先添加对方为好友`
+        # （2026-10-26 实测，见 `run/data/bot.err.log` 10:25:42）。
+        temp_group = ""
+        if str(event.get("sub_type") or "").strip().lower() == "group":
+            sender_obj = event.get("sender")
+            for candidate in (
+                sender_obj.get("group_id") if isinstance(sender_obj, dict) else None,
+                event.get("group_id"),
+            ):
+                text_group = str(candidate or "").strip()
+                if text_group.isdigit():
+                    temp_group = text_group
+                    break
+        # 群号认不出（非数字/缺失）就当作没有：宁可退回好友私聊，
+        # 也不拿一个可疑的值去拼协议。
+        target = MessageTarget(user_id=user_id, temp_group_id=temp_group or None)
         session_id = f"private:{user_id}"
     else:
         return None
@@ -276,6 +299,11 @@ class OneBotWebSocketTransport:
         self._server: Server | None = None
         self._connection_ready = asyncio.Event()
         self._pending: dict[str, asyncio.Future[dict[str, object]]] = {}
+        # **好友申请的处理口**（2026-10-26）：由 `runtime.serve` 接到
+        # `FriendRequestGate.handle` 上。传输层在这里**不做任何判定**——
+        # 谁该批、要不要通知，全在核心（AGENTS §2.3：权限判定留在核心）。
+        # 没接就是 None，申请照旧只落 `raw_events.jsonl`。
+        self.on_friend_request: Callable[[dict[str, object]], Awaitable[object]] | None = None
 
     async def start(self) -> None:
         self._server = await serve(self._handle_connection, self.host, self.port)
@@ -347,6 +375,28 @@ class OneBotWebSocketTransport:
         await self._send_text(target, text, reply_to=reply_to,
                               part=part, total=total, origin=origin)
 
+    def _target_params(self, target: MessageTarget) -> dict[str, object]:
+        """把目标拼成 OneBot 的会话字段（`message_type` + 群号/QQ 号）。
+
+        私聊带 `temp_group_id` 时**必须**把发起群一起带上：NapCat 的判据是
+        "`message_type="private"` 且带了 `group_id`"（`isTempReply`），带群号才走
+        `grpTmp`（群临时会话），不带一律走好友私聊。非好友的好友私聊会被 QQ 拒成
+        `result=16 发送失败，请先添加对方为好友`（2026-10-26 实测）。
+
+        群临时会话是**对方开过的门**（NapCat 只在收到临时会话后记 7 天），
+        所以这不是"绕过好友限制"，是用对面本来就走的那条路回话。
+        """
+
+        if target.group_id is not None:
+            return {"message_type": "group", "group_id": self._id_value(target.group_id)}
+        params: dict[str, object] = {
+            "message_type": "private",
+            "user_id": self._id_value(target.user_id or ""),
+        }
+        if target.temp_group_id:
+            params["group_id"] = self._id_value(target.temp_group_id)
+        return params
+
     async def _send_text(self, target: MessageTarget, text: str, *, reply_to: str = "",
                          part: int | None = None, total: int | None = None,
                          origin: str = "") -> None:
@@ -354,10 +404,7 @@ class OneBotWebSocketTransport:
             # 空正文本来就没发出去，日志里也不该出现"发了条空的"。
             return
         params: dict[str, object] = {"message": self._compose_message(text, reply_to)}
-        if target.group_id is not None:
-            params.update(message_type="group", group_id=self._id_value(target.group_id))
-        else:
-            params.update(message_type="private", user_id=self._id_value(target.user_id or ""))
+        params.update(self._target_params(target))
         await self._send_logged("send_msg", params, target, body=text, kind="text",
                                 reply_to=reply_to, part=part, total=total, origin=origin)
 
@@ -393,10 +440,7 @@ class OneBotWebSocketTransport:
         segments.append({"type": "at", "data": {"qq": self._id_value(qq)}})
         segments.append({"type": "text", "data": {"text": " " + text}})
         params: dict[str, object] = {"message": segments}
-        if target.group_id is not None:
-            params.update(message_type="group", group_id=self._id_value(target.group_id))
-        else:
-            params.update(message_type="private", user_id=self._id_value(target.user_id or ""))
+        params.update(self._target_params(target))
         await self._send_logged("send_msg", params, target, body=f"@{qq} {text}", kind="text",
                                 reply_to=reply_to, part=None, total=None, origin="")
 
@@ -421,10 +465,7 @@ class OneBotWebSocketTransport:
             "data": {"file": "base64://" + base64.b64encode(png).decode("ascii")},
         })
         params: dict[str, object] = {"message": segments}
-        if target.group_id is not None:
-            params.update(message_type="group", group_id=self._id_value(target.group_id))
-        else:
-            params.update(message_type="private", user_id=self._id_value(target.user_id or ""))
+        params.update(self._target_params(target))
         await self._send_logged("send_msg", params, target,
                                 body=f"（图片 1 张，{len(png)} 字节）", kind="image",
                                 reply_to=reply_to, part=None, total=None, origin="")
@@ -443,7 +484,18 @@ class OneBotWebSocketTransport:
         """
 
         try:
-            result = await self.call_api(action, params)
+            try:
+                result = await self.call_api(action, params)
+            except DeliveryRejected as exc:
+                fallback = drop_temp_session_params(params, exc)
+                if fallback is None:
+                    raise
+                # 临时会话已经失效（NapCat 重启过 / 超过 7 天没再收到对方的消息）。
+                # 退回好友私聊再试**一次**：对方是好友就照样送到，不是好友会以
+                # "请先添加对方为好友"如实失败——与修复前的行为一致，不会更差。
+                # 只对这一种原因重试，别把它读成"发送失败就重发"。
+                logger.info("群临时会话已失效，改按好友私聊重发一次：%s", target.user_id or "未知")
+                result = await self.call_api(action, fallback)
         except Exception as exc:  # noqa: BLE001 - 记完这一笔再原样抛出，失败分类不能变
             self._note_chat(target, body=body, kind=kind, reply_to=reply_to, part=part,
                             total=total, origin=origin, outcome="failed",
@@ -527,10 +579,7 @@ class OneBotWebSocketTransport:
         """
 
         params: dict[str, object] = {"event_type": 1 if notice == "typing" else 0}
-        if target.group_id is not None:
-            params.update(message_type="group", group_id=self._id_value(target.group_id))
-        else:
-            params.update(message_type="private", user_id=self._id_value(target.user_id or ""))
+        params.update(self._target_params(target))
         try:
             await asyncio.wait_for(
                 self.call_api("set_input_status", params),
@@ -646,11 +695,30 @@ class OneBotWebSocketTransport:
         # 对话日志（`kind="reaction"`），与 in/out 记录并列。下面那条 raw 照旧也写一份：
         # 对话日志里是给人看的那一行，raw 里是**排障用的原始底稿**，两份不冲突。
         self._note_reaction(payload)
+        # **好友申请**：NapCat 实测会推 `post_type=request, request_type=friend`
+        # （`convertFriendRequest`，字段 user_id / comment / flag）。判定与发送都在核心，
+        # 这里只把事件交出去。**丢到任务里**而不是 `await`：处理要调一次 API，
+        # 最坏等满 `send_timeout`，不能让一条申请把后面的群消息堵在门外。
+        if (payload.get("post_type") == "request"
+                and payload.get("request_type") == "friend"
+                and self.on_friend_request is not None):
+            asyncio.create_task(self._dispatch_friend_request(payload))
         # **没被当成消息收下的那些事件**（notice / request / 其它 post_type，
         # 以及解析失败的消息事件）：核心历来是**直接丢掉**的，于是"NapCat 到底推不推
         # 这种事件"永远查不出来。这里原样落一行（心跳排除），只为看清真实形状。
         # 它**不进 `_messages`**、不碰引擎、不发任何模型调用——落盘不是"收到"。
         self._note_raw_event(payload)
+
+    async def _dispatch_friend_request(self, payload: dict[str, object]) -> None:
+        """把好友申请交给核心；**任何异常都只记一行**，不能让一条申请带走连接。"""
+
+        handler = self.on_friend_request
+        if handler is None:
+            return
+        try:
+            await handler(payload)
+        except Exception:  # noqa: BLE001 - 申请处理失败不该影响收消息
+            logger.warning("好友申请处理失败", exc_info=True)
 
     def _authorized(self, connection: ServerConnection) -> bool:
         if not self.access_token:

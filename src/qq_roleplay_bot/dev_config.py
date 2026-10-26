@@ -740,6 +740,20 @@ BALANCE_CACHE_SECONDS = _float("QQBOT_BALANCE_CACHE_SECONDS", 60.0)
 # 默认给超管：名单为空时私聊只能靠 20 条 / 60 秒的批量触发触发，等于没人能在私聊里
 # 正常说话——2026-09-27 实测就是这个状态。要改就写 QQBOT_PRIVATE_DEBUG_USER_IDS。
 PRIVATE_DEBUG_USER_IDS = _csv_ids("QQBOT_PRIVATE_DEBUG_USER_IDS") or SUPER_ADMIN_USER_IDS
+# **私聊对所有人开放**（2026-10-25 用户："所有人可以私聊"）。
+# 默认关：名单外的人私聊只能靠 20 条/60 秒批量，实际等于没人能正常私聊；
+# 打开后任何人的私聊都进普通对话流程（要不要回仍由判定决定，不是"一定回"）。
+# 为什么做成开关而不是直接改默认：它改变的是**谁能占用模型调用**，
+# 一声不响全开会给陌生人开一条刷 token 的路；留着开关，部署侧显式写
+# `QQBOT_PRIVATE_REPLY_ALL=1` 即可，随时能关回去。
+PRIVATE_REPLY_ALL = get("QQBOT_PRIVATE_REPLY_ALL", "0").lower() in {"1", "true", "yes", "on"}
+
+
+# 私聊**申请制**（2026-10-25 用户口径：群里发 `/yunru private`，主人回复那条再发
+# `/super enable` 开通）。批过的人写进这个文件，重启后仍然有效；
+# 它只存 QQ 号与时间，不存任何聊天内容。
+def private_allow_file() -> Path:
+    return data_dir() / "private_allow.json"
 
 # --- Agent Mail（Stage 4：每天一封汇报）-------------------------------------
 # 迁移要点：这三项全在配置里，**没有任何绝对路径**。换机器只要重装 CLI 并授权
@@ -905,6 +919,13 @@ APPROVE_REJECT_REASON = get("QQBOT_APPROVE_REJECT_REASON", "本群暂不接受�
 APPROVE_POLL_SECONDS = _float("QQBOT_APPROVE_POLL_SECONDS", 60.0)
 # 一条申请最多通知几个人（私聊）。默认超管；不填就不通知。
 APPROVE_NOTIFY_USER_IDS = _csv_ids("QQBOT_APPROVE_NOTIFY_USER_IDS") or SUPER_ADMIN_USER_IDS
+# **好友申请**没通过时通知谁（私聊）。默认超管；不填就不通知。
+#
+# 与 `APPROVE_NOTIFY_USER_IDS` 分开，是因为两者是不同的事（入群 vs 加好友），
+# 将来若想只收其中一种，改一个变量就够。语义相同：这里要的是"人"，不是"功能开关"。
+FRIEND_REQUEST_NOTIFY_USER_IDS = (
+    _csv_ids("QQBOT_FRIEND_NOTIFY_USER_IDS") or SUPER_ADMIN_USER_IDS
+)
 # 同一批申请最多处理几条（每处理一条要一次写调用，别让积压把一轮拖死）。
 APPROVE_MAX_PER_TICK = _int("QQBOT_APPROVE_MAX_PER_TICK", 5)
 MAIL_POLL_SECONDS = _float("QQBOT_MAIL_POLL_SECONDS", 300.0)

@@ -856,6 +856,10 @@ def build_engine(transport: QQTransport, *, state_store=None) -> DialogueEngine:
         judge_client_factory=_judge_client_factory if judge_client is not None else None,
         prompt_sources=prompt_sources,
         style_reviewer=style_reviewer,
+        # 私聊对所有人开放（2026-10-25 用户："所有人可以私聊"）：默认关，
+        # 部署侧在 `.env` 写 `QQBOT_PRIVATE_REPLY_ALL=1` 才打开。装配点显式传，
+        # 不依赖 `DialogueEngine` 默认参数在 import 时冻结成旧值。
+        private_reply_all=dev_config.PRIVATE_REPLY_ALL,
         # 识图（`vision`）**不在这里**：它是 Stage 4 插件，`attach_plugins()` 之后
         # 由 `registry.vision` 那个工厂现造（见下面那一行）。`engine.vision` 缺省
         # 是 `None` = 有图的消息只留 `[图片]` 占位符。
@@ -3484,6 +3488,120 @@ def _start_quote_learning(engine: DialogueEngine, *, allowed_groups):
     return agent, asyncio.create_task(agent.run(), name="quote-learning")
 
 
+async def notify_operator(transport: QQTransport, engine: object, text: str) -> str:
+    """给操作者发一条通知：**先私聊，发不出去再走邮件**。
+
+    用户 2026-10-26 定：「申请被拒建议给我发，通过邮件或者私聊」。两条都试过还是
+    发不出去就只记 warning——通知失败绝不能把申请处理本身带崩。
+
+    收件人是 `dev_config.FRIEND_REQUEST_NOTIFY_USER_IDS`（默认超管），最多 3 个，
+    与入群审批那条通知同一个口径。返回 `"sent"` / `"queued"` / `"mailed"` / `"failed"`。
+    """
+
+    status = "failed"
+    for item in tuple(getattr(dev_config, "FRIEND_REQUEST_NOTIFY_USER_IDS", ()) or ())[:3]:
+        if not str(item).strip():
+            continue
+        status = await _send_or_queue(
+            transport, getattr(engine, "outbox", None), MessageTarget(user_id=str(item)), text
+        )
+        if status in ("sent", "queued"):
+            return status
+    # 私聊这条路不通（没配超管 / 对方不是好友 / 连接不在）→ 换邮件。
+    # 邮件是核心在 `build_engine` 里 provide 的那条窄口，没配收件人时是 None。
+    registry = getattr(engine, "plugin_registry", None)
+    sender = getattr(getattr(registry, "mail", None), "operator_sender", None)
+    if callable(sender):
+        try:
+            await sender("好友申请", text)
+            return "mailed"
+        except Exception:  # noqa: BLE001 - 通知失败只记日志
+            logger.warning("好友申请通知：邮件也没发出去", exc_info=True)
+    logger.warning("好友申请通知没能送达操作者（私聊与邮件都不可用）")
+    return "failed"
+
+
+class FriendRequestGate:
+    """好友申请：**名单内的自动通过，名单外的通知操作者**（2026-10-26 用户定）。
+
+    名单只有一份——私聊白名单（`data/private_allow.json`，`/super enable` 写）。
+    用户原话：「加好友的白名单跟 private 进行同步，这两个作为一份白名单」、
+    「申请被拒建议给我发，通过邮件或者私聊」。
+
+    三条硬性质（都是"别猜"）：
+
+    1. **名单外一律不批**，也不给对方回话（fail-closed，静默留在 QQ 里）；
+    2. **没有 `flag` 就批准不了**（`set_friend_add_request` 只认它）——按失败处理并通知，
+       不拿 QQ 号去猜一个 flag；
+    3. **自动通过失败也要通知**：申请会一直挂着，操作者得知道。
+
+    去重按 `flag`（同一条申请重复推送时不重复打扰），有上限，不会无限长。
+    """
+
+    def __init__(self, transport: QQTransport, engine: object, *, notify=None,
+                 max_seen: int = 200) -> None:
+        self.transport = transport
+        self.engine = engine
+        self._notify = notify
+        self._seen: dict[str, None] = {}
+        self._max_seen = max(1, int(max_seen))
+
+    def _allowed(self, user_id: str) -> bool:
+        allowed = getattr(self.engine, "private_debug_user_ids", ()) or ()
+        return user_id in {str(item) for item in allowed}
+
+    async def _tell(self, text: str) -> object:
+        if self._notify is not None:
+            return await self._notify(text)
+        return await notify_operator(self.transport, self.engine, text)
+
+    def _remember(self, key: str) -> bool:
+        """记一条已处理过的申请；见过就返回 False（防重复打扰）。"""
+
+        if not key:
+            return True
+        if key in self._seen:
+            return False
+        self._seen[key] = None
+        while len(self._seen) > self._max_seen:
+            self._seen.pop(next(iter(self._seen)))
+        return True
+
+    async def handle(self, payload: dict[str, object]) -> None:
+        if payload.get("post_type") != "request" or payload.get("request_type") != "friend":
+            return
+        user_id = str(payload.get("user_id") or "").strip()
+        flag = str(payload.get("flag") or "").strip()
+        comment = str(payload.get("comment") or "").strip()
+        if not user_id.isdigit():
+            return
+        if not self._remember(flag or f"user:{user_id}"):
+            return
+        if self._allowed(user_id) and flag:
+            try:
+                await self.transport.call_api(
+                    "set_friend_add_request", {"flag": flag, "approve": True}
+                )
+            except Exception as exc:  # noqa: BLE001 - 失败要告诉操作者，不能静默
+                logger.warning("Stage 3 friend approve failed: user=%s err=%s",
+                               user_id, type(exc).__name__)
+                await self._tell(
+                    f"自动通过好友申请失败：QQ {user_id}（{type(exc).__name__}）。\n"
+                    "申请还留在 QQ 里，需要你手动处理。"
+                )
+                return
+            logger.info("Stage 3 friend approved: user=%s", user_id)
+            return
+        # 名单外（或没有 flag）：不批，通知操作者。留言原样带上，方便判断是谁。
+        reason = "没有可用的申请凭证" if self._allowed(user_id) else "不在私聊白名单里"
+        extra = f"\n留言：{comment[:200]}" if comment else ""
+        await self._tell(
+            f"有人申请加云茹好友：QQ {user_id}\n"
+            f"{reason}，这次没有通过。{extra}\n"
+            "要放行：让他在群里发 /yunru private，你再回那条发 /super enable。"
+        )
+
+
 async def serve(transport: QQTransport, *, stage_label: str = "Stage 3") -> None:
     """装配并运行主循环，直到传输层关闭。
 
@@ -3529,6 +3647,12 @@ async def serve(transport: QQTransport, *, stage_label: str = "Stage 3") -> None
         # 事件循环补上：`build_engine` 是同步的，那时候还没有运行中的循环。
         # 跨线程往主循环丢协程的插件（面板）靠它。
         plugin_registry.set_loop(asyncio.get_running_loop())
+    # **好友申请**（2026-10-26 用户定："加好友的白名单跟 private 进行同步"）：
+    # 名单就是私聊白名单那一份，批/不批与通知都在 `FriendRequestGate` 里。
+    # 接在传输层的推事件上（NapCat 会推 `post_type=request, request_type=friend`），
+    # 不是新开一条轮询——`background_plugins` 那条节拍一个都不动。
+    if hasattr(transport, "on_friend_request"):
+        transport.on_friend_request = FriendRequestGate(transport, engine).handle  # type: ignore[attr-defined]
     background = build_background_plugins(engine)
     await transport.start()
     if memory is not None:
