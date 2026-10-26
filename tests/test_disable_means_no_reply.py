@@ -322,6 +322,46 @@ def test_a_private_message_from_a_stranger_is_recorded_but_not_answered() -> Non
 # --- 二、命令：解析、按群、私聊、权限、落盘 -----------------------------------
 
 
+def test_private_chat_can_be_opened_to_everyone_by_a_switch() -> None:
+    """`QQBOT_PRIVATE_REPLY_ALL=1` → 陌生人的私聊不再被会话闸门丢掉（2026-10-25 用户："所有人可以私聊"）。
+
+    默认关：白名单外照旧"记进记忆、不回"（Fail-closed，见 AGENTS §2.1）。
+    打开后私聊进普通对话流程——**要不要回仍由判定决定**，不是"一定回"。
+    这里只钉"有没有被闸门丢掉"：判定替身回 NO_REPLY，看它是否真的被调到了。
+    """
+
+    class _JudgeNoReply:
+        def __init__(self):
+            self.calls = 0
+
+        async def complete(self, request):
+            self.calls += 1
+            return "<route>NO_REPLY</route><topic>x</topic><related>YES</related><guard>HOLD</guard>"
+
+    async def scenario():
+        with harness(memory=(GROUP,)) as case:
+            judge = _JudgeNoReply()
+            case.engine.private_debug_user_ids = frozenset()
+            case.engine.judge_client = judge
+            case.engine.private_reply_all = False
+            stranger = IncomingMessage(
+                message_id="p1", session_id="private:404", user_id="404",
+                text="在吗", target=MessageTarget(user_id="404"),
+            )
+            assert await case.deliver(stranger) is None
+            assert judge.calls == 0, "开关关着时不该走到判定"
+
+            allowed = IncomingMessage(
+                message_id="p2", session_id="private:404", user_id="404",
+                text="在吗", target=MessageTarget(user_id="404"),
+            )
+            case.engine.private_reply_all = True
+            await case.deliver(allowed)
+            assert judge.calls == 1, "开关打开后私聊要进判定（回不回由判定定）"
+
+    run(scenario())
+
+
 def test_the_memory_switch_parses_like_the_chat_switch() -> None:
     assert parse_super_command("/super enable memory") is SuperAction.MEMORY_ON
     assert parse_super_command("/super disable memory") is SuperAction.MEMORY_OFF
@@ -476,8 +516,9 @@ def test_super_memory_says_whether_this_group_is_recorded() -> None:
 
 
 def test_help_lists_the_memory_switch() -> None:
-    assert "/super enable memory" in SUPER_HELP
-    assert "/super disable memory" in SUPER_HELP
+    assert "/super memory enable" in SUPER_HELP, "2026-10-25 起帮助文案推功能在前的写法"
+    assert "/super memory disable" in SUPER_HELP
+    assert "/super memory disable" in SUPER_HELP
 
 
 def test_the_switch_is_audited() -> None:

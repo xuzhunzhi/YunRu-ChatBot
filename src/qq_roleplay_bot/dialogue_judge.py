@@ -31,10 +31,16 @@
 """
 from __future__ import annotations
 
+import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from html import escape
 
+from .affinity_caliber import (
+    BELITTLE_WORDS,
+    CORRECTION_WORDS,
+    profile_caliber,
+)
 from .security import sanitize_chat_text
 from .remind import RemindIntent
 from .stage3_runtime import (
@@ -47,6 +53,8 @@ from .stage3_runtime import (
     render_roster,
 )
 from .transport import IncomingMessage
+
+logger = logging.getLogger(__name__)
 
 # 判定看多少条上下文。**这个常量现在没有消费者了**（2026-10-15 核过：本文件里
 # 只有这一行本身）。它原来的用途是"没有话题起点时的兜底窗口"，而那个按话题裁视图的
@@ -153,12 +161,11 @@ JUDGE_SYSTEM_PROMPT = """你是 QQ 群聊的**回应判定器**，只判断"云�
 - 发她的截图/原话来取笑她这个人。
 
 不记 `UP`（这些是在教她、在纠正她，不是嫌她）：
-- 说她这一句说得不对、说法有问题、答得离谱、没营养、太啰嗦；
-- 纠正她的说法/做法、技术争执、给她换个说法、让她别插话/别说了/先听着；
-- 追问、质疑、否定她刚说的那句话；
-- 指出她不懂、装懂、跑题。
-"不懂就别插话""这句说错了"都属于这四条，是在带她：可以难听、可以带脏字、
-可以说得她下不来台，都还是 `HOLD`；只有从"她这一句"滑到"她这个人"才记 `UP`。
+- 说她这一句说错了、答得离谱、没营养、太啰嗦；
+- 纠正她的说法/做法、技术争执、让她别插话/别乱说、"记不住"、"别把话说满"；
+- 追问、质疑、否定她刚说的那句话；指出她不懂、装懂、跑题。
+难听、带脏字也算带她，是 `HOLD`；`belittle` 只认骂她这个人。
+"不懂就别插话""这句说错了"都算在带她，不是嫌她：只有从"她这一句"滑到"她这个人"才记 `UP`。
 
 分不清时只看两点，但先看**这句在说谁**：在说别人（群友互喷、骂第三个人）一律 `HOLD`，
 带脏字也是。冲她的看两点：① 说的是"这一次的这句话/这件事"还是"她这个人向来就这样、这个人不行"；
@@ -330,6 +337,23 @@ class JudgeVerdict:
         """
 
         return self.understood in {"unsure", "lost"}
+
+
+def compose_identity_note(identity: str, profile: str) -> str:
+    """把画像里的"带教口径"接在称呼/边界后面，仍然只占 `identity` 这一个参数。
+
+    为什么合成同一个参数而不是新增 prompt 段：判定 prompt 有"必须远小于人格"的
+    硬约束（`tests/test_dialogue_judge.py` 钉着总长度），多一段就多一处要守的上限；
+    而这一行本来就该紧贴着"这个人的称呼与边界"读。取不到口径时**一个字都不加**。
+
+    依据：2026-10-24 事故里判定只拿到了称呼与边界（`identity_for`），画像里那句
+    "那不是瞧不起你，是在带你"根本没送到判定眼前。
+    """
+
+    line = profile_caliber(profile)
+    if not line:
+        return identity
+    return f"{identity}\n{line}" if identity else line
 
 
 def build_judge_messages(
@@ -525,7 +549,46 @@ _UNDERSTOOD_ALIASES = {
 }
 
 
-def parse_judge_output(raw: str, *, must_reply: bool = False) -> JudgeVerdict:
+def downgrade_correction_misread(verdict: JudgeVerdict, *, user_id: str = "") -> JudgeVerdict:
+    """`belittle` 的机械闸门：原话是"纠正式的话"且没有贬损词时，降级为 HOLD。
+
+    为什么不能只靠 prompt 自律：2026-10-24 20:52 的真实事故里，prompt 已经写着
+    "让她别插话……都是在带她"，判定仍然把"你不了解的事情为什么要插嘴呢"读成
+    `belittle`，并把 guardedness 0→10。口径写在 prompt 里是软约束，模型会漏；
+    这里按**原话里的词**做一次硬拦，不依赖语气理解。
+
+    为什么只在"有纠正式词且没有任何贬损词"时降：两个词表同时命中时（例如
+    "你他妈就是个废物，别插嘴"），先保住贬损那一侧——宁可漏降一次，也不把真正的
+    羞辱读成带教。原话为空时一律不降：没有依据就不改判。
+
+    为什么降级要清掉 `guard_reason` 和 `guard_quote`：HOLD 没有"变冷的由头"，
+    留着它们会让下游的审计与证据表以为这一轮仍然发生过贬低。
+
+    什么时候能改回去：用户收回"带教式纠正不算贬低"这条口径时，连同
+    `affinity_caliber` 的词表一起删。
+    """
+
+    if not verdict.guard_up:
+        return verdict
+    if (verdict.guard_reason or "").strip().casefold() != "belittle":
+        return verdict
+    quote = (verdict.guard_quote or "").strip()
+    if not quote:
+        return verdict
+    if not any(word in quote for word in CORRECTION_WORDS):
+        return verdict
+    if any(word in quote for word in BELITTLE_WORDS):
+        return verdict
+    # 只记谁、为什么、哪张表命中；**不记原话**（原话可能含隐私，也有脱敏规矩）。
+    logger.info(
+        "Stage 3 judge belittle 降级为 HOLD: user=%s reason=correction_words",
+        user_id or "-",
+    )
+    return replace(verdict, guard_up=False, guard_reason="", guard_quote="")
+
+
+def parse_judge_output(raw: str, *, must_reply: bool = False,
+                       user_id: str = "") -> JudgeVerdict:
     """解析判定输出。
 
     解析失败一律回落到 NO_REPLY：判定坏了应当表现为"不出声"，
@@ -534,6 +597,9 @@ def parse_judge_output(raw: str, *, must_reply: bool = False) -> JudgeVerdict:
     `must_reply=True` 是 **judge'**（给积压消息用的那一版）：她已经答应过人家"稍等"，
     "要不要回"已经定了，所以这一版的 prompt 里没有 route；即使模型仍然吐出
     `<route>NO_REPLY</route>`（学舌），也一律按 REPLY 处理——那个选择权不该在它手里。
+
+    `user_id` 只给 `belittle` 那道机械闸门写日志用（"是谁的原话被降级了"），
+    不进入任何判定逻辑，也不改变解析结果。
 
     **这里原来还解析 `<topic_start>`**（并用 `known_seqs` 校验它在不在可见范围里，
     校验函数 `_parse_seq`）。2026-10-15 一并删掉：用户原话 *"我还要说几次，不切话题"*，
@@ -589,10 +655,14 @@ def parse_judge_output(raw: str, *, must_reply: bool = False) -> JudgeVerdict:
                   # 不额外问模型。解析不出（没给、只给一半、太长）就是 None。
                   remind=_parse_remind(_extract(raw, "remind")))
     if must_reply:
-        return JudgeVerdict(should_reply=True, **common)
-    if "REPLY" not in route or route.startswith("NO"):
-        return JudgeVerdict(should_reply=False, **common)
-    return JudgeVerdict(should_reply=True, **common)
+        verdict = JudgeVerdict(should_reply=True, **common)
+    elif "REPLY" not in route or route.startswith("NO"):
+        verdict = JudgeVerdict(should_reply=False, **common)
+    else:
+        verdict = JudgeVerdict(should_reply=True, **common)
+    # 机械闸门放在**所有出口之后**：两条判定路径（主判定 / 积压判定）与三种
+    # 返回形状共用同一道拦，不靠调用方记得。
+    return downgrade_correction_misread(verdict, user_id=user_id)
 
 
 def _parse_remind(raw: str) -> RemindIntent | None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -19,6 +20,7 @@ from .dev_config import (    BATCH_SIZE,
     ADMIN_USER_IDS,
     SUPER_ADMIN_USER_IDS,
     PRIVATE_DEBUG_USER_IDS,
+    PRIVATE_REPLY_ALL,
     TARGET_GROUP_ID,
     ONEBOT_WS_HOST,
     ONEBOT_WS_PORT,
@@ -49,9 +51,9 @@ from .ask_when_unsure import (
 # `stance_hints.py`（纯正则、0 次模型调用，**只影响回复材料的一句话，不碰判定**）。
 from .stance_hints import TOOL_VOCATIVE_NOTE, looks_like_tool_vocative
 from .dialogue_judge import (
-    OFFENSE_CODES,
     JudgeVerdict,
     build_judge_messages,
+    compose_identity_note,
     parse_judge_output,
 )
 from .dialogue_compaction import (
@@ -321,6 +323,39 @@ SUPER_PROFILE_PATTERN = re.compile(
     r"^[/#]super\s+(?:profile|画像|人物画像|portrait)(?:\s.*)?$",
     re.IGNORECASE,
 )
+# 公开的"只看自己"命令（2026-10-25 用户：*"affinity和profile只看自己的无需super权限，
+# 只需输入/yunru affinity或者/yunru profile即可"*）。
+# 两条都留在核心：它们要读长期记忆，按 AGENTS §2.3 插件碰不到记忆。
+# **必须排在 `/super` 解析之前判**（用户明确要求，`handles_command` 与 `handle` 都照办）；
+# 带参数一律不执行——目标只能是自己，@ 或 QQ 号会被拒绝，绝不读别人的数据。
+SELF_AFFINITY_PATTERN = re.compile(
+    r"^[/#]?\s*yunru\s+(?:affinity|关系|好感|好感度)(?P<extra>\s.*)?$",
+    re.IGNORECASE,
+)
+SELF_PROFILE_PATTERN = re.compile(
+    r"^[/#]?\s*yunru\s+(?:profile|画像|人物画像|portrait)(?P<extra>\s.*)?$",
+    re.IGNORECASE,
+)
+
+
+# `/yunru private`（2026-10-25）：不想"所有人直接能私聊"，改成**申请制**——
+# 群里发这一条登记申请，主人回这条再发 `/super enable` 放行。
+# 放行名单落 `data/private_allow.json`（只存 QQ 号/时间/谁批的），重启仍然有效。
+SELF_PRIVATE_PATTERN = re.compile(
+    r"^[/#]?\s*yunru\s+(?:private|私聊|私信)\s*$",
+    re.IGNORECASE,
+)
+# `/super enable`（**不带参数**）＝放行这个群里最近一条私聊申请；
+# `/super enable memory` 有自己的模式（先判），不会被这条吃掉。
+SUPER_PRIVATE_APPROVE_PATTERN = re.compile(
+    # 新语法：功能在前（2026-10-25 用户："enable 是对功能的响应" → `/super private enable`）
+    r"^[/#]super\s+(?:private|私聊|私信)\s+(?:enable|开启|打开|approve)\s*$"
+    # 兼容旧写法（用户先前提过的那句 `/super enable`）
+    r"|^[/#]super\s+(?:enable|开启|打开|approve)\s*$",
+    re.IGNORECASE,
+)
+# 拒绝时只说这一句，**不执行、不查任何人的库**（用户口径："这条只能看自己的"）。
+SELF_ONLY_REFUSAL = "这条只能看自己的；要看别人的用 `/super …`"
 # `/super quote`：金句学习学出来的**表情含义表 + 笔记**（只读），
 # 后面可以跟一段"人工改这个表情的方向"（`/super quote 128516 不赞成 在损她`）。
 # 单独一条模式而不是塞进共享的 topic 组：后面跟的是 emoji_id 与自由文字，
@@ -347,6 +382,14 @@ SUPER_SLANG_PATTERN = re.compile(
 # （它和 `/admin enable|disable` 是同一套用法，只是管的是另一张名单）。
 # 尾部那个 group 捕获**不是参数**：它是用来"认出并拒绝手滑带了群号"的，
 # 与 `/admin enable 群号` 的处理一致（`_admin_command_reply` 里那段说明）。
+# **功能在前、动作在后**（2026-10-25 用户：*"enable是对功能的响应。所以这个功能应该
+# 放在enable前面。比如 /super memory enable"*）。旧写法 `/super enable memory`
+# 保留为兼容别名，但帮助文案只推新写法。
+SUPER_MEMORY_FIRST_PATTERN = re.compile(
+    r"^[/#]super\s+(?P<target>memory|记忆)\s+"
+    r"(?P<action>enable|disable|开启|关闭|打开|停止)\s*$",
+    re.IGNORECASE,
+)
 SUPER_MEMORY_SWITCH_PATTERN = re.compile(
     r"^[/#]super\s+(?P<action>enable|disable|开启|关闭|打开|停止)\s+(?P<target>memory|记忆)"
     r"(?:\s+(?P<group>\S+))?\s*$",
@@ -362,6 +405,10 @@ SLANG_LIST_MAX_ROWS = 20
 # 关系缓存的有效期（秒）。写入时我们会主动失效，所以"当轮变冷"不依赖它；
 # TTL 是给维护 agent 那条通道兜底的——它在别的线程改库，引擎并不知情。
 STANCE_CACHE_TTL_SECONDS = 60.0
+#: "被冒犯立刻变冷"在内存里挂多久（秒）。2026-10-24 用户口径：*"这个只要写缓存就好"*
+#: ——判定没有持久化写权限，冷感是缓存态；关系轴归维护 agent（海马体）。
+#: 1800 秒 = 半小时：够覆盖当场那几句；过期自动消失，不需要清理线程。
+GUARD_FLASH_SECONDS = 1800.0
 # --- 防备轴**只在这几种由头下**才升（2026-10-09 用户改的设计）-----------------
 #
 # 用户原话两句：*"聊机制她不回不就好了"*、*"戒备我认为只有冒犯性的话或者阴阳怪气
@@ -514,6 +561,7 @@ class SuperAction(str, Enum):
     LAN = "lan"
     FAN = "fan"
     PERMIT = "permit"
+    PRIVATE_ON = "private_on"
     RESTART = "restart"
     API_CHECK = "api_check"
     MAIL = "mail"
@@ -537,6 +585,35 @@ class SuperAction(str, Enum):
     SLANG = "slang"
 
 
+class SelfAction(str, Enum):
+    """公开的"只看自己"命令的动作。"""
+
+    AFFINITY = "self_affinity"
+    PROFILE = "self_profile"
+    PRIVATE = "self_private"
+
+
+def parse_self_command(text: str) -> tuple[SelfAction, str] | None:
+    """解析 `/yunru affinity` / `/yunru profile`；返回动作与多余参数。
+
+    **只解析、不执行、不鉴权**：这两条命令本来就是公开的，调用方只需判断
+    `extra`（以及消息里的 @ / QQ 号）——非空时拒绝，绝不把目标交给别人。
+    """
+
+    if not isinstance(text, str):
+        return None
+    stripped = text.strip()
+    for action, pattern in (
+        (SelfAction.AFFINITY, SELF_AFFINITY_PATTERN),
+        (SelfAction.PROFILE, SELF_PROFILE_PATTERN),
+        (SelfAction.PRIVATE, SELF_PRIVATE_PATTERN),
+    ):
+        match = pattern.fullmatch(stripped)
+        if match:
+            return action, (match.groupdict().get("extra") or "")
+    return None
+
+
 def parse_super_command(text: str) -> SuperAction | None:
     """解析 /super 系列命令；非超管前缀一律返回 None。
 
@@ -550,6 +627,11 @@ def parse_super_command(text: str) -> SuperAction | None:
     if SUPER_HELP_PATTERN.fullmatch(stripped):
         return SuperAction.HELP
     # 记忆开关先于通用模式判（形状与 `/admin enable|disable` 对称）。
+    switch_first = SUPER_MEMORY_FIRST_PATTERN.fullmatch(stripped)
+    if switch_first:
+        act = (switch_first.group("action") or "").casefold()
+        return (SuperAction.MEMORY_ON if act in {"enable", "开启", "打开"}
+                else SuperAction.MEMORY_OFF)
     switch = SUPER_MEMORY_SWITCH_PATTERN.fullmatch(stripped)
     if switch:
         action = (switch.group("action") or "").casefold()
@@ -571,6 +653,9 @@ def parse_super_command(text: str) -> SuperAction | None:
     # 塞进去还会顺手让 `/super restart permit` 之类的组合变成合法命令（踩过）。
     if SUPER_PERMIT_PATTERN.fullmatch(stripped):
         return SuperAction.PERMIT
+    # `/super enable`（无参）＝放行最近一条私聊申请；`enable memory` 先被上面的记忆模式吃掉。
+    if SUPER_PRIVATE_APPROVE_PATTERN.fullmatch(stripped):
+        return SuperAction.PRIVATE_ON
     # 画像要在通用模式之前判：`/super profile ...` 不能被当成 `/super <topic>` 吃掉。
     if SUPER_PROFILE_PATTERN.fullmatch(stripped):
         return SuperAction.PROFILE
@@ -1192,6 +1277,7 @@ class DialogueEngine:
         *,
         target_group_id: str = TARGET_GROUP_ID,
         private_debug_user_ids: frozenset[str] = PRIVATE_DEBUG_USER_IDS,
+        private_reply_all: bool = PRIVATE_REPLY_ALL,
         sessions: DialogueSessions | None = None,
         deduplicator: MessageDeduplicator | None = None,
         prompt_sources: PromptSources | None = None,
@@ -1243,6 +1329,12 @@ class DialogueEngine:
         self._session_judges: dict[str, object] = {}
         self.target_group_id = target_group_id
         self.private_debug_user_ids = private_debug_user_ids
+        # 私聊对所有人开放（2026-10-25）：默认关，部署侧 `QQBOT_PRIVATE_REPLY_ALL=1` 打开。
+        self.private_reply_all = bool(private_reply_all)
+        # 私聊申请制（2026-10-25）：待批申请按群保留最近一条；批过的号落盘。
+        self._private_applications: dict[str, dict] = {}
+        self.private_debug_user_ids = set(self.private_debug_user_ids)
+        self._load_private_allow()
         self.sessions = sessions or DialogueSessions()
         # 会话被 LRU 淘汰时，把那个会话的按会话 client 也一起丢掉
         # （2026-10-08 隔离增长审计 [5]）：`_session_clients` / `_session_judges` 是
@@ -1467,8 +1559,10 @@ class DialogueEngine:
             # `guard_probe_held` 是"有人打探她怎么做出来的，所以这一轮不接"的次数
             # （2026-10-09 加）：它**不写关系轴**，只是"这一轮没开口"的出口。
             # `quote_unverified` / `evidence_stored`（2026-10-16）：判定抄回来的
-            # "那一句原话"里，**核不过输入**的有几条（不存，只记数）、真正存下证据的
-            # 有几次。两个数一起看才知道"证据链有没有断"。
+            # "那一句原话"里，**核不过输入**的有几条（不存，只记数）。2026-10-24 拆权后
+            # 判定不落证据，所以 `evidence_stored` 在判定侧恒为 0（真存证在维护那条路，
+            # 由 `MemoryStore.apply_affinity` 的 `evidence=...` 落旁表）；两个数一起看
+            # 才知道"判定核过的原话"与"真存下的证词"各在哪一侧。
             "guard_raised", "guard_rejected", "guard_probe_held",
             "quote_unverified", "evidence_stored",
             # 风格审核（只判不改）：被打回、要求重写的条数，"重写后仍被拒、
@@ -1547,6 +1641,14 @@ class DialogueEngine:
         # 判定那条通道写入时主动失效（"立刻变冷"靠这个），TTL 是给维护 agent
         # 那条通道兜底的——它在别的线程改库，引擎收不到通知。
         self._stance_cache: dict[str, tuple[Stance, float]] = {}
+
+        # "被冒犯立刻变冷"的**缓存态**（2026-10-24 用户原话：*"这个只要写缓存就好"*）：
+        # 判定没有任何持久化写权限，冷感只挂在引擎内存里（人 → (防备增量, 到期时刻)）。
+        # 为什么不落库：关系轴是海马体（维护 agent）的地盘，判定是语言中枢，只决定
+        # "接不接、这一轮什么语气"；落库会让一次误读变成对这个人的长期态度。
+        # 为什么用 TTL 而不是"这一轮用完就清"：同一段对话里接下来两三条也该是冷的，
+        # 只冷一问会显得她"被骂完立刻又凑上来"。
+        self._guard_flash: dict[str, tuple[int, float]] = {}
 
     @property
     def self_roles(self):
@@ -1872,9 +1974,13 @@ class DialogueEngine:
 
         关系是**按人、跨群**的：同一个人在哪个群都是同一段关系。
 
-        缓存有 TTL：判定那条通道写入时我们会主动失效（"立刻变冷"靠这个），
-        但**维护 agent 是在别的线程里改库的**，引擎不知情——没有 TTL 就会一直
-        读到旧档位。60 秒对"关系按天变"这件事足够细，对"当轮变冷"没有影响。
+        缓存有 TTL：维护 agent 在别的线程里改库，引擎不知情——没有 TTL 就会一直读到
+        旧档位；60 秒对"关系按天变"足够细。
+
+        **"被冒犯立刻变冷"不从这里写库**（2026-10-24）：判定只往内存里挂一个
+        `_guard_flash`，读的时候叠在库里的档位上（`_with_flash`）。所以同一轮里
+        判定与回复看到的都是"冷着的"她，但库里一个字都没变——要不要真记凉，
+        由维护 agent（海马体）按批决定。
         """
 
         user_id = message.user_id
@@ -1884,16 +1990,28 @@ class DialogueEngine:
         now = self.clock()
         cached = self._stance_cache.get(user_id)
         if cached is not None and now - cached[1] <= STANCE_CACHE_TTL_SECONDS:
-            return cached[0]
+            return self._with_flash(user_id, cached[0], now)
         try:
             closeness, guardedness = store.relationship(user_id)
         except Exception:  # noqa: BLE001 - 读不到就当陌生人，不能挡住对话
             logger.exception("Stage 3 stance read failed")
-            return Stance()
+            return self._with_flash(user_id, Stance(), now)
         if len(self._stance_cache) > 512:
             self._stance_cache.clear()
         self._stance_cache[user_id] = (Stance(closeness, guardedness), now)
-        return self._stance_cache[user_id][0]
+        return self._with_flash(user_id, self._stance_cache[user_id][0], now)
+
+    def _with_flash(self, user_id: str, base: Stance, now: float) -> Stance:
+        """把内存里的"刚被冒犯"叠到库里的档位上（过期就丢）。"""
+
+        entry = self._guard_flash.get(user_id)
+        if entry is None:
+            return base
+        delta, until = entry
+        if now >= until:
+            self._guard_flash.pop(user_id, None)
+            return base
+        return Stance(base.closeness, base.guardedness + delta)
 
     def _note_remind(self, message: IncomingMessage, verdict: JudgeVerdict) -> None:
         """判定认出来的"到点提醒我"：**核心算时间，把请求交给插件**（2026-10-08）。
@@ -2328,8 +2446,9 @@ class DialogueEngine:
                             *, seq=None, who_alias=None) -> bool:
         """把判定的结论落到这一个回合上——**在拼这一轮回复之前**。返回要不要压掉回复。
 
-        **它只升不降**：`may_lower_guard` 不传。降交给维护 agent（7 天最多一档），
-        免得"他道了个歉"就立刻回暖。
+        **它不写库**（2026-10-24 拆权）：判定的冷感只挂在引擎内存里（`_guard_flash`），
+        关系轴 / 证据行的持久化全部归维护 agent（海马体）。用户原话：
+        *"判定没有任何写权限，判定只能调起回复"*、*"被冒犯立刻变冷……这个只要写缓存就好"*。
 
         ## 三种取值，各自的待遇（2026-10-09 用户改的设计）
 
@@ -2338,29 +2457,23 @@ class DialogueEngine:
           "探机制"只是当轮不接，说完就过去，不该留成她对这个人的长久态度
           （用户原话：*"聊机制她不回不就好了"*）。
         * `<guard>UP</guard>` + `guard_reason` 在 `GUARD_RAISING_OFFENSES` 里
-          （冒犯性言论 / 阴阳怪气）：写防备 **+8**（新刻度的单次最大提升）——
-          这就是"被冒犯立刻变冷"的全部实现。**2026-10-20 起它不再"降一档"**：
-          防备一档宽 10，+8 让下一次越界才跨进「有点端着」；这是用户批准的新
-          刻度带来的节奏（一次冒犯不再直接改一档）。
+          （冒犯性言论 / 阴阳怪气）：往 `_guard_flash` 挂一段冷感（`GUARD_RAISE_MAX`，
+          一档宽 10，正好跨进「有点端着」）——这就是"被冒犯立刻变冷"的全部实现。
+          库里一个数都不动；要不要真记凉，由维护 agent 按批决定。
         * `<guard>UP</guard>` 而由头不在表里（判定把玩笑读成了越界）、或者干脆没给由头：
-          **不写**，只加一个计数。**政策留在核心**，提示词漂了也拦得住。
+          **不挂冷感**，只加一个计数。**政策留在核心**，提示词漂了也拦得住。
 
-        两者互斥：`PROBE` 先返回，所以探机制既不会压回复又顺手写防备这种事不会发生。
+        两者互斥：`PROBE` 先返回，所以探机制既不会压回复又顺手挂冷感这种事不会发生。
 
-        ## 证据句（2026-10-16，2026-10-20 起是硬要求）
+        ## 证据句（2026-10-16；2026-10-24 起只核对、不落库）
 
         `verdict.guard_quote` 是判定抄回来的"触发它的那一句"，**已经在 `_judge` 里核过**
-        "它真的在这一轮的输入里"。这里把它连同定位信息（`seq` / 说话人别名）交给
-        `MemoryStore.apply_affinity(evidence=...)`，由存储那一侧做两级脱敏、截断、
-        落旁表（见 `MemoryStore._evidence_row`）。
+        "它真的在这一轮的输入里"。拆权后判定不落证据行，所以这里不再把它交给
+        `MemoryStore.apply_affinity`；核对结果只留在 `quote_unverified` 计数与日志里。
+        原话真正落旁表的是维护那条路（`MemoryStore.commit` 的 `AFFINITY` op）。
 
-        **核不过 / 没抄 → 这次写入被拒**（`affinity_rejected_no_evidence`），
-        防备一点都不动：宁可这一轮不变冷，也不留一条事后查不了的关系变动。
-        旧行为是"证据存不下、档位照升"，那正是全库只有 1 条证据的原因。
-
-        为什么 `seq` / `who_alias` 由调用方递进来而不在这里算：只有调用方手里有
-        `ConversationState`（序号与名册别名都在那儿），这里只认识一条消息。
-        两者取不到时是空/0——证据照样存，"大概哪一句"仍然答得上。
+        为什么 `seq` / `who_alias` 仍由调用方递进来：维护那条路要用它们定位证据行；
+        判定这里已经不用，但保留参数形状，避免为了这次拆权改动调用点（最小改动）。
         """
 
         user_id = message.user_id
@@ -2378,43 +2491,37 @@ class DialogueEngine:
             return False
         offense = (verdict.guard_reason or "").strip().casefold()
         if offense not in GUARD_RAISING_OFFENSES:
-            # **不是表里那几种由头 → 一个字都不写。** 这里从前是直接 +1 的，
+            # **不是表里那几种由头 → 什么都不做。** 这里从前是直接 +1 的，
             # 于是"判定把一句玩笑/一句探机制读成越界"会当场变成那个人一周的冷遇。
             self._stats["guard_rejected"] += 1
             logger.info(
-                "Stage 3 guard signal 没有可用由头，防备不动: offense=%s user=%s",
+                "Stage 3 guard signal 没有可用由头，冷感不挂: offense=%s user=%s",
                 offense or GUARD_RAISE_WITHOUT_OFFENSE, user_id,
             )
             return False
-        try:
-            rejection = store.apply_affinity(
-                # 依据写**固定的那句中文**（表在 `dialogue_judge.OFFENSE_CODES`），
-                # 不把判定可能写歪的自由文本原样落库。
-                # 2026-10-20：这里原来是写死的 `8`。防备一档宽 10，写 8 意味着
-                # `0 → 8` 仍停在「正常分寸」——"被冒犯立刻变冷"根本没发生，
-                # 要连着被冒犯两次才跨档。改成引用存储层的那个常量（= 一档），
-                # 单次升幅从此只有一个来源。
-                user_id, guardedness=GUARD_RAISE_MAX,
-                reason=OFFENSE_CODES.get(offense, offense),
-                source="judge",
-                # "到底是哪句话"（2026-10-16）：原话已在 `_judge` 核过，这里只递过去。
-                # 空串 = 判定没抄/核不过 → 存储层拒绝这次写入（2026-10-20 收紧）。
-                evidence=({"quote": verdict.guard_quote,
-                           "who_alias": "" if who_alias is None else str(who_alias),
-                           "seq": seq} if verdict.guard_quote else None),
-            )
-        except Exception:  # noqa: BLE001 - 写不进去也不能打断这一轮回复
-            logger.exception("Stage 3 guard write failed")
-            return False
-        self._stance_cache.pop(user_id, None)
-        if rejection:
-            self._stats["guard_rejected"] += 1
-            logger.info("Stage 3 guard signal rejected: reason=%s user=%s", rejection, user_id)
-        else:
-            self._stats["guard_raised"] += 1
-            self._stats["evidence_stored"] += 1
-            logger.info("Stage 3 guard raised: user=%s", user_id)
+        # 2026-10-24 拆权：**判定没有任何持久化写权限**（用户口径："判定只能调起回复"、
+        # "被冒犯立刻变冷……这个只要写缓存就好"）。所以这里只往内存挂一段冷感，
+        # 不调 `apply_affinity`、不写关系流水、不落证据行——关系轴归维护 agent。
+        # 依据那块（原话已核过在输入里）留在判定日志里；库里一个字都不写。
+        self._flash_guard(user_id, GUARD_RAISE_MAX)
+        self._stats["guard_raised"] += 1
+        logger.info(
+            "Stage 3 guard flash: user=%s offense=%s ttl=%ss（只挂缓存，不写关系轴）",
+            user_id, offense, int(GUARD_FLASH_SECONDS),
+        )
         return False
+
+    def _flash_guard(self, user_id: str, delta: int) -> None:
+        """把"刚被冒犯"挂进内存（同一段对话里接下来几条都是冷的，过期自动消失）。
+
+        为什么不落库：关系轴是海马体（维护 agent）的地盘；判定是语言中枢，只负责
+        这一轮接不接、什么语气。落库会让一次误读变成对这个人的长期态度——
+        2026-10-24 的 `belittle` 误判就是这么把防备写成 0→10 的。
+        """
+
+        now = self.clock()
+        previous, _until = self._guard_flash.get(user_id, (0, 0.0))
+        self._guard_flash[user_id] = (max(previous, delta), now + GUARD_FLASH_SECONDS)
 
     def stance_delay_for(self, message: IncomingMessage) -> float:
         """这条回复要不要先搁一下（秒）。命令路径不调它。"""
@@ -2899,6 +3006,8 @@ class DialogueEngine:
         if action is SuperAction.PERMIT:
             # 唯一一条不返回文本的超管命令：放行会**执行**那条命令，回复就是执行结果。
             return await self._permit_reply(message, now=self.clock())
+        if action is SuperAction.PRIVATE_ON:
+            return self._approve_private_reply(message)
         if action in {SuperAction.AFFINITY, SuperAction.AFFINITY_RESET,
                       SuperAction.AFFINITY_EVIDENCE}:
             return self._affinity_reply(
@@ -3048,6 +3157,9 @@ class DialogueEngine:
             return True
         text = message.text or ""
         if is_admin_help_command(text):
+            return True
+        # 公开的"只看自己"两条也要提前：它们要排在 `/super` 之前、且不进模型。
+        if parse_self_command(text) is not None:
             return True
         return parse_super_command(text) is not None
 
@@ -3427,25 +3539,49 @@ class DialogueEngine:
                 self._stance_cache.pop(user_id, None)
                 lines.append(f"{user_id}：{'已按回默认档（陌生人 + 正常分寸）' if changed else '本来就是默认档'}")
                 continue
-            detail = store.relationship_detail(user_id)
-            closeness = int(detail["closeness"])
-            guardedness = int(detail["guardedness"])
-            lines.append(
-                f"{user_id}：好感 {closeness}（{_level_name(likes_tier, closeness)}），"
-                f"防备 {guardedness}（{_level_name(guard_tier, guardedness)}）"
-            )
-            last = detail.get("last")
-            if isinstance(last, dict):
-                axis = "好感" if last.get("axis") == "closeness" else "防备"
-                lines.append(
-                    f"  最近一次：{axis} {last.get('before_value')}→{last.get('after_value')}"
-                    f"（{last.get('source')}）{last.get('reason') or ''}"
-                )
-            else:
-                lines.append("  还没有变化记录。")
+            lines.extend(self._relationship_lines(store, user_id, label=user_id))
             if evidence:
                 lines.extend(self._evidence_lines(store, user_id))
         return "\n".join(lines)
+
+    @staticmethod
+    def _relationship_lines(store, user_id: str, *, label: str) -> list[str]:
+        """关系两轴的展示行（`/super affinity` 与公开的 `/yunru affinity` 共用）。
+
+        `label` 只决定第一行的称呼：超管看别人时是那个人的 QQ 号，看自己时是"你"。
+        两条命令的口径必须一样，所以这里不复制第二份渲染。
+        """
+
+        detail = store.relationship_detail(user_id)
+        closeness = int(detail["closeness"])
+        guardedness = int(detail["guardedness"])
+        lines = [
+            f"{label}：好感 {closeness}（{_level_name(likes_tier, closeness)}），"
+            f"防备 {guardedness}（{_level_name(guard_tier, guardedness)}）"
+        ]
+        last = detail.get("last")
+        if isinstance(last, dict):
+            axis = "好感" if last.get("axis") == "closeness" else "防备"
+            lines.append(
+                f"  最近一次：{axis} {last.get('before_value')}→{last.get('after_value')}"
+                f"（{last.get('source')}）{last.get('reason') or ''}"
+            )
+        else:
+            lines.append("  还没有变化记录。")
+        return lines
+
+    def _self_affinity_reply(self, message: IncomingMessage) -> str:
+        """公开的 `/yunru affinity`：**只看自己**，没有 reset / evidence 两支。
+
+        2026-10-25 用户："affinity和profile只看自己的无需super权限，只需输入
+        /yunru affinity或者/yunru profile即可"。重置与证据句属于超管操作面，
+        不因为这条命令公开就一起开放。
+        """
+
+        store = getattr(self.memory_service, "store", None)
+        if store is None:
+            return "当前没有接入长期记忆，关系信息不可用。"
+        return "\n".join(self._relationship_lines(store, message.user_id, label="你"))
 
     @staticmethod
     def _evidence_lines(store, user_id: str, *, limit: int = 5) -> list[str]:
@@ -3543,6 +3679,120 @@ class DialogueEngine:
                 blocks_by_person[person] = self._profile_block(store, user_id, message)
         blocks.extend(blocks_by_person.values())
         return "\n\n".join(blocks)
+
+    def _load_private_allow(self) -> None:
+        """启动时把批过的私聊号读回来（2026-10-25 申请制）。
+
+        文件不存在、坏 JSON、盘上写坏了 → 都只 warning，不挡启动：
+        少一个能私聊的人比 bot 起不来轻得多。
+        """
+
+        try:
+            from .dev_config import private_allow_file
+
+            path = private_allow_file()
+            if not path.exists():
+                return
+            data = json.loads(path.read_text(encoding="utf-8"))
+            ids = {str(row.get("user_id")) for row in data
+                   if isinstance(row, dict) and str(row.get("user_id") or "").isdigit()}
+            self.private_debug_user_ids |= ids
+        except Exception:  # noqa: BLE001 - 读不到就当没有申请记录
+            logger.warning("private allowlist load failed", exc_info=True)
+
+    def _save_private_allow(self, user_id: str, *, by: str) -> None:
+        """把一个号写进 `data/private_allow.json`（**只存号/时间/谁批的**，不存聊天内容）。"""
+
+        try:
+            from .dev_config import private_allow_file
+
+            path = private_allow_file()
+            rows = []
+            if path.exists():
+                try:
+                    rows = json.loads(path.read_text(encoding="utf-8")) or []
+                except Exception:  # noqa: BLE001 - 坏文件就重写，不挡放行
+                    rows = []
+            rows = [row for row in rows
+                    if isinstance(row, dict) and str(row.get("user_id")) != user_id]
+            # 落盘的时间戳用**墙上时钟**：`self.clock()` 默认是 `time.monotonic`，
+            # 只适合算时长，重启后会从另一个基数开始；写进文件就成了一条
+            # "看不懂、也跨不了重启"的数字。这里要的是人能读的 epoch 秒。
+            rows.append({"user_id": user_id, "by": by, "at": self.wall_clock()})
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:  # noqa: BLE001 - 写不进去也不能挡放行（本次运行内仍有效）
+            logger.warning("private allowlist save failed", exc_info=True)
+
+    def _self_private_reply(self, message: IncomingMessage) -> str:
+        """`/yunru private`：在群里登记一条私聊申请，等主人放行（2026-10-25 申请制）。
+
+        为什么不直接开：私聊会绕开群的注意力判定、直接进普通对话流程，
+        等于给陌生人一条刷模型的路。申请制把"放行"这一步留给主人。
+        申请按群只保留**最近一条**（30 分钟），避免堆一屏没人处理。
+        """
+
+        group_id = message.target.group_id or ""
+        if not group_id:
+            return "在群里发 `/yunru private` 就行——私聊申请要在群里登记。"
+        name = ""
+        store = getattr(self.memory_service, "store", None)
+        if store is not None:
+            try:
+                name = str((store.person_names(group_id, [message.user_id]) or {}).get(
+                    message.user_id) or "")
+            except Exception:  # noqa: BLE001 - 名字拿不到不影响申请
+                name = ""
+        self._private_applications[group_id] = {
+            "user_id": message.user_id or "",
+            "name": name,
+            "at": self.clock(),
+        }
+        who = f"{name}（QQ {message.user_id}）" if name else f"QQ {message.user_id}"
+        logger.info("Stage 3 private request: user=%s group=%s", message.user_id, group_id)
+        return f"私聊申请已登记：{who}。\n主人回这条消息发 `/super enable` 就能开通。"
+
+    def _approve_private_reply(self, message: IncomingMessage) -> str:
+        """`/super enable`（无参）：放行本群最近一条私聊申请。
+
+        只认**30 分钟内的最新一条**：群里可能同时有多个人在申请，主人回的是哪条
+        我们拿不到稳定绑定（bot 回复的消息 id 在发送后才有），所以用"最近一条 +
+        时间窗"这条最不容易放错人的规则；过期就让他重发。
+        """
+
+        group_id = message.target.group_id or ""
+        app = self._private_applications.get(group_id)
+        if not app:
+            return ("这个群没有待批的私聊申请。让他在群里发 `/yunru private`，"
+                    "你再回这条发 `/super enable`。")
+        if self.clock() - float(app.get("at") or 0) > 1800.0:
+            self._private_applications.pop(group_id, None)
+            return "这条申请超过 30 分钟，作废了；让他重发一次 `/yunru private`。"
+        user_id = str(app.get("user_id") or "")
+        if not user_id.isdigit():
+            self._private_applications.pop(group_id, None)
+            return "这条申请没有可用的 QQ 号，让他重发一次。"
+        self.private_debug_user_ids.add(user_id)
+        self._save_private_allow(user_id, by=str(message.user_id or ""))
+        self._private_applications.pop(group_id, None)
+        name = str(app.get("name") or "")
+        who = f"{name}（QQ {user_id}）" if name else f"QQ {user_id}"
+        logger.info("Stage 3 private approved: user=%s by=%s group=%s",
+                    user_id, message.user_id, group_id)
+        return f"已开通：{who} 可以私聊了。"
+
+    def _self_profile_reply(self, message: IncomingMessage) -> str:
+        """公开的 `/yunru profile`：**只看自己**的人物画像，与超管那支同为只读。
+
+        2026-10-25 用户要求这条无需 super、输入 `/yunru profile` 即可。渲染完全复用
+        `_profile_block`（碎片拼装、没画像时的兜底都在那里），这里只换成"这个人
+        就是发命令的人"，不从正文里抓别人的 QQ 号。
+        """
+
+        store = getattr(self.memory_service, "store", None)
+        if store is None:
+            return "当前没有接入长期记忆，人物画像不可用。"
+        return self._profile_block(store, message.user_id, message)
 
     def _quote_reply(self, message: IncomingMessage) -> str:
         """`/super quote`：看金句学习学出来的**表情含义表 + 她的老习惯**，并**改一个字**。
@@ -5318,6 +5568,33 @@ class DialogueEngine:
                 # 插件只声明意图；权限、角色、闸门、审计、真调 action 全在这里。
                 return await self._plugin_action_reply(plugin_reply, message)
             return OutgoingMessage(message.target, plugin_reply, paced=False, is_notice=True)
+        # 公开的"只看自己"命令（2026-10-25）：**不要求任何权限**，在哪儿发就在哪儿回。
+        # 必须排在 `/super` 解析之前（用户要求），所以放在这里而不是 `_super_reply` 里。
+        # 目标只能是本人：带 @ 或 QQ 号一律拒绝，绝不因为消息里点了别人就去读那个人的库。
+        self_command = parse_self_command(message.text)
+        if self_command is not None:
+            action, extra = self_command
+            if not self.deduplicator.accept(message.message_id):
+                self._stats["ignored_messages"] += 1
+                return None
+            self._stats["accepted_messages"] += 1
+            has_qq_number = bool(re.search(r"(?<!\d)\d{5,12}(?!\d)", message.text or ""))
+            if action is SelfAction.PRIVATE:
+                reply = self._self_private_reply(message)
+            elif message.mentioned_user_ids or has_qq_number or extra.strip():
+                reply = SELF_ONLY_REFUSAL
+            elif action is SelfAction.AFFINITY:
+                reply = self._self_affinity_reply(message)
+            else:
+                reply = self._self_profile_reply(message)
+            logger.info(
+                "Stage 3 public self command: action=%s user=%s group=%s private=%s",
+                action.value,
+                message.user_id,
+                message.target.group_id,
+                message.target.user_id is not None,
+            )
+            return OutgoingMessage(message.target, reply, paced=False, is_notice=True)
         # /admin help 与 /super help 的先后：**菜单本身是公开的**，
         # 谁发都能看到管理员命令清单（用户 2026-09-28 要求"普通成员可以呼叫 /admin help
         # 调起 help 菜单"），没权限的人在末尾多读一段"怎么让超管放行一次"。
@@ -5385,7 +5662,8 @@ class DialogueEngine:
         allowed_group = message.target.group_id in self.enabled_group_ids
         allowed_private = (
             message.target.user_id is not None
-            and message.target.user_id in self.private_debug_user_ids
+            and (self.private_reply_all
+                 or message.target.user_id in self.private_debug_user_ids)
         )
         if not allowed_group and not allowed_private and not is_admin_control:
             self._stats["ignored_messages"] += 1
@@ -5763,11 +6041,12 @@ class DialogueEngine:
             verdict = await self._judge(
                 message, state, trigger=trigger, addressed=addressed, must_reply=must_reply
             )
-            # 判定说"这一句越界了" → 先落库 + 让缓存失效，**再**拼回复的 prompt。
+            # 判定说"这一句越界了" → 先挂内存缓存，**再**拼回复的 prompt。
             # 顺序就是这条需求本身：让她变冷的那句话，回复当场就是冷的。
+            # 2026-10-24 拆权后它**不写库**：关系轴与证据行归维护 agent（海马体）。
             # 它同时回答"这一轮要不要接"：判定报 `PROBE`（有人打探她怎么做出来的）
-            # 时返回 True，这一轮就不接（不写关系轴、也不调回复那一次）。
-            # `seq` / `who_alias` 只用来给证据句定位（"是哪一条、谁说的"）。
+            # 时返回 True，这一轮就不接（不挂冷感、也不调回复那一次）。
+            # `seq` / `who_alias` 仍递进来，留给证据定位那条真路（维护）用。
             if self._apply_guard_signal(verdict, message,
                                        seq=state.seq_of(message),
                                        who_alias=state.alias_of(message)):
@@ -6726,6 +7005,13 @@ class DialogueEngine:
                 memory_group_for(message.target.group_id, message.user_id,
                                  channel=message.channel),
                 message.user_id)
+            # **画像里的"他怎么对待你"也要进判定**（2026-10-24）：判定从前只拿到
+            # 称呼与边界，于是把"你不了解的事情为什么要插嘴呢"读成 `belittle`。
+            # 画像那句"那不是瞧不起你，是在带你"合成进同一个 `identity` 参数，
+            # 不新增 prompt 段（判定 prompt 有体积硬约束）；取不到就一个字符都不加。
+            reader = getattr(self.memory_service, "profile_for", None)
+            if reader is not None:
+                identity = compose_identity_note(identity, await reader(message))
             # 「惦记事」：她自己记着的事，判定这边一样只看得到、只是 DATA（"判定这边我不是
             # 很确定，你看着办"——看着办的结果是**给它**：判定要判"还在不在同一条线上"，
             # 而"她答应过回头问一句"正是这条线上的一件事）。
@@ -6805,7 +7091,8 @@ class DialogueEngine:
         # 下一个人照 `JudgeVerdict.topic_start` 就能把裁切接回来。判定 prompt 里的
         # `<topic_start>` 提问与 `parse_judge_output` 的解析也一并删了（同一个提交）。
         # 什么时候能改回去：用户重新定一条"按话题裁历史"的口径时。
-        verdict = parse_judge_output(raw, must_reply=must_reply)
+        verdict = parse_judge_output(raw, must_reply=must_reply,
+                                     user_id=message.user_id)
         # 「到底是哪一句话让她变冷的」（2026-10-16）：判定把那一句原话抄回来了，
         # **先核它真的在这一轮的输入里**（`quote in rendered_input`，纯字符串包含）。
         # 核不过就当场清掉，绝不带着"可能是模型编的"往后走——见 `_verify_guard_quote`。
@@ -6832,16 +7119,17 @@ class DialogueEngine:
 
         ## 核不过怎么办
 
-        **这次写入被拒**：`guard_quote` 清成空串，`_apply_guard_signal` 于是拿不到
-        原话，存储层返回 `affinity_rejected_no_evidence`，防备一点不动；只把
-        `quote_unverified` 计数 +1 并记一条日志（只记长度，不记内容）。
-        2026-10-20 用户口径："拿不到原话就拒绝这次写入"——旧行为是"证据存不下来、
-        档位照升"，那正是全库只有 1 条证据的原因。
+        **只计数、不落库**：`guard_quote` 清成空串，`quote_unverified` 计数 +1 并记一条
+        日志（只记长度，不记内容）。2026-10-24 拆权后判定没有关系轴/证据行的写权限
+        （用户原话：*"判定没有任何写权限，判定只能调起回复"*），所以这里不再有
+        "这次写入被拒"这一步；原话真正落旁表的是维护那条路。
+        2026-10-20 用户口径"拿不到原话就拒绝这次写入"仍然成立——它约束的是
+        `MemoryStore.apply_affinity` 的调用方（维护 agent），不是判定的内存缓存。
 
         ## 非 UP 的抄回也丢掉
 
         `HOLD` / `PROBE` 时模型偶尔也会填这一段（学舌），一律清空：那两种没有"变冷"
-        可解释，存下来只会让旁表混进无关句子。
+        可解释，留着只会让判定日志混进无关句子。
         """
 
         quote = (verdict.guard_quote or "").strip()

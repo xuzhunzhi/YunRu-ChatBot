@@ -155,7 +155,8 @@ def build_audit_view(rows: list[dict[str, object]], *, total: int) -> MemoryView
 SUPER_HELP = (
     "超管命令（仅超级管理员）\n"
     "记忆（在哪个群说，就动哪个群；与 /admin 的对话开关是两张名单）\n"
-    "· /super enable memory 打开本群记忆 / /super disable memory 关闭本群记忆\n"
+    "· /super memory enable 打开本群记忆 / /super memory disable 关闭本群记忆\n"
+    "· /super private enable 放行本群最近一条私聊申请（旧写法 /super enable 仍可用）\n"
     "  （关掉不删已有的待处理材料，重新打开就接着处理；关对话不影响记忆）\n"
     "记忆查看\n"
     "· /super memory 记忆库概览（计数）+ 本群记不记\n"

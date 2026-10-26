@@ -471,3 +471,84 @@ outage_notice **取用**它；mail 那一侧不认识任何使用者的名字。
   未核实项）与 `data/docs-index.md`（`data/` 下散落报告的总索引，**没删任何文件**）；
   修正了 `ARCHITECTURE.md`、`docs/CONFIG_GUIDE.md`、`docs/FILE_MAP.md`、`README.md`、
   `docs/STAGE_BOUNDARY.md`、`AGENTS.md` 里已过期的条目（逐条见盘点报告）。
+
+---
+
+## 十一、2026-10-23 ～ 10-26：架构定调 + 判定交出写权限 + 私聊申请制/好感上限上线
+
+> 这一节是**补记**：§十 停在 10-22 20:04，之后没人回写。  
+> 来源分两层并逐条标注：**[会话]** = 那几天的主会话报告（我没重跑门槛）；**[实测]** = 2026-10-26 10:40 当场跑命令看到的。  
+> ⚠️ 先说最要紧的一条：**这几天上线的东西大部分没有提交**，`main` 的 HEAD 还停在 `c152184`（10-22 23:26）。见 §11.5。
+
+### 11.1 架构定调：语言中枢 vs 海马体（10-24 夜，用户拍板）
+
+用户用比喻定下的分工，**这是边界不是建议**：
+
+| 部分 | 包含 | 职责 | 写权限 |
+| --- | --- | --- | --- |
+| 语言中枢 | 判定 agent + 回复 agent | 只回答"现在说什么 / 接不接这句" | **没有任何写权限** |
+| 海马体 | 记忆 / 画像 / 关系 | 独立运行、按批处理 | 读写都在它内部；语言中枢只**读**它的输出 |
+
+落实（[会话] 10-25 00:00 那轮）：
+- 删掉判定 → `apply_affinity` 的写关系路径（`_apply_guard_signal` 里那段 `guardedness=+10, source=judge`）。
+- 判定输出里的 `guard>UP` / `guard_reason` / `OFFENSE_CODES` / `_verify_guard_quote` 整节失去消费者，变成死代码。
+- 判定不再读画像口径（`compose_identity_note` 撤回）；**保留** `PROBE`（当面打探机制）当轮不接。
+- 判定只往**内存**挂 30 分钟"冷感"（`GUARD_FLASH_SECONDS = 1800`），不落库；关系/画像/记忆的写入全部归维护 agent。
+- 门槛 `ran=1972 failed=0`（[会话] 10-25 00:24）。
+
+### 11.2 已上线（10-25 三次部署，每次都重启过）
+
+| 时间 | 内容 | 落点 |
+| --- | --- | --- |
+| 00:36:53 | 判定交出写权限那批（5 个文件）+ 重启，PID 56736/13864；备份 `run\backups\src-20261025-003545` | `stage3_main.py`、`dialogue_judge.py`、`memory_maintenance_agent.py`、`memory_model.py`、`affinity_caliber.py` |
+| 15:13:00 | **私聊申请制**：群内 `/yunru private`（别名 `/yunru 私聊` / `/yunru 私信`）登记 → 主人在群里 `/super enable` 放行 | 新 `run\data\private_allow.json`（只存号/时间/谁批的，重启仍有效）；按群只留**最近一条**、30 分钟有效；`QQBOT_PRIVATE_REPLY_ALL` 保留但**没开** |
+| 16:35:49 | **好感三道上限** + **命令语法改"功能在前"** | `U≥85` 需主人到 95；`80≤U<85` 需落后主人 5 点以上；其余 `U−O>20` 冻结到主人追平（`O≥U`）。只拦"别人"的正增量，主人自己/`manual`/负增量不受限。新写法 `/super memory enable`、`/super private enable`，旧写法保留为别名 |
+
+同批还上线了（[会话] 10-25 14:40 前后）：画像出身闸 `ORIGIN_CLAIM`、维护 prompt「画像只写印象、句句有出处」、`data\logs\profile.jsonl` 画像流水（`ran=1992`）；写信的 7 条有出处写法 + 一道机械网（事实只能来自事件原文、看不懂不许编场景、数字照抄不换算）。  
+数据侧修正（先备份）：删「山东临沂人」那条；fa_555 的籍贯改成「山东人；自称『比较老广』是玩笑」，`origin=operator_seed`（模型以后改不动）。
+
+### 11.3 判过但不做 / 已纠正的口径
+
+- **SAG 检索架构**（10-24 21:38）：试"查询时实体展开"后全量 Recall@5 **25.0% → 20.0%**（real 20.8→16.7、synthetic 27.8→22.2），没到用户定的 +10 门槛 → **不改 core**。
+- **判定 prompt 尺寸上限**：`JUDGE_PROMPT_MAX_CHARS = 2942.8` 是 2026-10-20 某个 agent 自己量出来钉死的水位，**不是用户要求**，10-24 已撤回该理由；要不要继续受它约束由用户定。
+- **webui 安全五条**（10-23 00:08 用户逐条拍板）：令牌文件权限**不做**；`api_base_url` 校验**做**（协议/主机白名单 + 私网段拒绝 + 改地址二次确认）；remote 模式 DoS **不做**，以后走 SSH 隧道（写进部署文档，不改代码）；注销不生效 + 认证失败不记日志**做**。
+- **`#sl` 不是云茹发的**（10-25 14:50）：NapCat Desktop 的 `SnowLuma` 组件与云茹**共用同一个 QQ 号**，`#sl` 由它处理；我们只处理入站，`reply.jsonl` 里查不到它。SnowLuma 只做动作/命令、不聊天，不冲突。
+
+### 11.4 10-24 夜两笔数据事故（已回正，教训要留）
+
+1. 维护 agent 在**画像就摆在输入里**的情况下，把「他说话直、在带你、不是嫌你」读成"语气不好" → 好感 44→40（同一份输入里 `在带你`/`那不是瞧不起你`/`让你别插话` 三个片段都在）。
+2. 判定 agent 把「他看不起她」直接写成防备 0→10。
+
+修法与结果：两条路各加硬闸门（判定那条已按 §11.1 整个删掉）；数据 40/10 → **44/0**，每笔留 `source=manual_correction` 流水、原记录不删；备份 `run\data\memory\memory.sqlite3.bak-20261024-221810`（6,828,032 B，backup API 带 WAL）。  
+另一笔根因：「她记不住」不是模型不听话——`memory.jsonl` seq 1780 那次维护**只写了好感（AFFINITY −4）、没写任何记忆**，当时 inbox 积压 388 条（19:04–22:10）。
+
+### 11.5 未提交状态（⚠️ 2026-10-26 10:40 [实测]，全场最要紧）
+
+| 树 | 状态 |
+| --- | --- |
+| `dev`（`main`） | HEAD `c152184`（10-22 23:26）；**24 项未提交**（19 改 + 5 新，`+1122/−174`）；新文件 `src\qq_roleplay_bot\affinity_caliber.py` + 4 个新测试。⚠️ 10:52 再测已是 **29 项**：另一路在 **10:39** 又改了 `onebot_ws.py` / `onebot_client.py` / `transport.py` / `test_onebot_ws.py`（群临时会话私聊），加上本节补记的 `PENDING.md` 本身 |
+| `yunru-stage4`（`plugins`） | `04e45f4`；**6 项未提交**（`webui_access.py`/`webui_panel.py` 的 #4/#5、`mail/daily_report.py`/`letter_writer.py`、2 个测试）；**ahead origin 48**（用户「所有插件先不上传」）；相对 `main` **157 ahead / 11 behind** |
+| `run`（生产） | 无 git；`src` 最新文件时间 **10-25 16:22** ⇒ 线上跑的是**那一刻的 dev 工作区**（既不是 HEAD，也不是现在的工作区——10-26 08:01 又改过 `stage3_main.py`/`runtime.py`） |
+| 门槛凭证 | 可用的绿是 `2026-10-26T10:43:33 ran=2015 failed=0 errors=0 skipped=0 result=PASS`（`dirty=yes`）；`08:07:39` 那条是 `ran=2009`。日志末尾另有 3 条 FAIL，成因见本节末 ⚠️ |
+
+**下一任第一件事**：把这 24 项按主题分组提交（好感上限 / 自指画像与纠偏 / 判定冷感 / 命令语法 / 画像流水 / 文档），再跑一遍三门槛，让 `verify_runs.log` 出现一条 **`dirty=no`** 的 PASS。
+
+**门槛实跑（2026-10-26，[实测]）**：离线套件 `10:43:33 ran=2015 failed=0 errors=0 skipped=0 result=PASS`（`dirty=yes`，本次只改本文档）；`pyflakes src tests` 无输出（exit 0）；`check_module_removal.py` 七项全"能（已解耦）"（exit 0）。
+
+> ⚠️ 同一份日志后面还有 **3 条 `ran=2015 failed=6 errors=606` 的 FAIL**（10:45 / 10:48 / 10:50），别按字面读：
+> - **10:45、10:48 是我造成的环境失败**：我把 `TEMP` 指进工作区后重跑，sqlite 在沙箱下建不出库（`unable to open database file`），606 条是连锁。
+> - **10:50:49 那次不是我跑的**：同一天 **10:39** 另有一路改动写进了 `onebot_ws.py` / `onebot_client.py` / `transport.py` / `test_onebot_ws.py`（群临时会话私聊），那一路也在同一棵树上跑套件。
+> - 判据用 **10:43:33 那条 PASS**，或自己重跑一次再记账。**跑门槛前先确认没有第二路在同树动手**——两套 `run_offline` 会互踩 `.tmp_test_run/`。
+
+### 11.6 仍然挂着
+
+- **webui**：前端退出要补 `POST /api/logout`（`app.js:2756` 现在只清 `localStorage`，改完要重取 `test_webui_v2_static.py` 的字节基线）；上传前清理 `compose-src\evidence\` 175 个文件（19 张带真实 QQ）、`NOTES.md:223` 的 self_id、`composeApp.js` 的本机绝对路径，`build\` 不提交；然后 `merge main` 进 `plugins` + 四门槛。**详单在 `data\webui-handoff-20261025.md`（7.4KB，路径/行号/验收都在里面，别重写一份）**。
+- **面板布局**（10-23 00:21 的计划，未落地）：1920 宽下内容列 1320px 左对齐、右侧空 480px → ≥1500 宽改 `max-width: 760px` 居中。
+- 顺序仍按 §八：称呼 → 邮件 M2–M4 → 语音（排队）→ 小红书（排队）→ 跨群（V2.0）；napcat 掉线不管。
+- 沿用 §七 没结的账：`memory_maintenance_failed category=MemoryValidationError`、`bot.err.log` 缺行（30.8% 打回率 vs 551 行）、1,194 条「群未启用却在叫她」。
+
+### 11.7 会话侧的意外（与 bot 无关，别算在 bot 头上）
+
+上一个主会话（DSH，标题「阅读工作区内容」，`session-642c6f37…`）从 **10-25 23:04** 起发不出消息：历史里引用的两个附件对象被删（`sha256:19fd3b5a…` 一张 computer-use 截图、`sha256:0598…` 上传的 `miuix-0.9.4.zip`），DSH 每次请求都在本地准备阶段读不到 → `ATTACHMENT_NOT_FOUND` → 被适配器兜底 catch 包成 `TRANSPORT`（文案 `DeepSeek Messages transport failed`），每次尝试 20–60ms 就失败、**零 HTTP 请求**、退避重试 5 次全败。  
+2026-10-26 10:39 已按方案 C 修复：往 `session.v4.jsonl.zstd` 末尾追加一条 `image/offload` 事件（`seq=111483`，target `seq=107542`、`imageIndexes=[0]`），备份 `session.v4.jsonl.zstd.bak-20261026023954.`，**重启 DSH 后生效**。
+

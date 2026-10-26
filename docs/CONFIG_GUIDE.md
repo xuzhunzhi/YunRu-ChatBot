@@ -396,6 +396,7 @@ bot 又跑起来了。想看它有没有攒着：`/super mail` —— 里面 `pe
 | `QQBOT_SUPER_ADMIN_USER_IDS` | 超管 QQ 号，逗号分隔。**不配则用代码里的占位号 `900000001`** |
 | `QQBOT_ADMIN_USER_IDS` | 普通管理员，逗号分隔 |
 | `QQBOT_PRIVATE_DEBUG_USER_IDS` | 谁能私聊她；不配取超管 |
+| `QQBOT_PRIVATE_REPLY_ALL` | 默认 `0`（关）。设 `1` 后**任何人**的私聊都进普通对话流程；是否回复仍由判定决定（不是"一定回"） |
 | `QQBOT_BALANCE_PRIVATE_USER_IDS` | `/balance` 私聊白名单；不配取超管 |
 | `QQBOT_BALANCE_GROUP_IDS` | 允许在哪些群查余额；**留空 = 群里不可用**（fail-closed） |
 
@@ -405,6 +406,22 @@ bot 又跑起来了。想看它有没有攒着：`/super mail` —— 里面 `pe
 > 把真实号写在里面，只是一处未提交的本地修改——**一次 `git checkout` 就会把它
 > 还原成占位号 `900000001`，超管当场失去全部权限，而且没有任何告警**（真实发生过）。
 > 写在 `.env` 里则换分支、重装都冲不掉。
+
+### 私聊申请制（默认做法，2026-10-25）
+
+私聊默认**不是全开**：名单外的人只能走申请，超管点头后才放行。
+
+1. 他先在**群里**发 `/yunru private`（别名 `/yunru 私聊` / `/yunru 私信`；`#`、裸 `yunru` 也认）。
+   在私聊里发这条只会被回一句"在群里发"。
+2. 这条命令只**登记待批申请**，不会直接开通；每个群只保留**最近一条**，30 分钟内有效。
+3. 超管回那条消息发 `/super enable`（新写法 `/super private enable`）→ 申请人立刻进白名单，
+   回复"已开通"。
+4. 放行名单写在 `data/private_allow.json`（`dev_config.private_allow_file()`），
+   每条只有 `user_id` / `by` / `at`，**不存聊天内容**；重启时自动读回。
+
+**备用"全开"开关**：`QQBOT_PRIVATE_REPLY_ALL=1`（不设 = 关）。它让**所有人**的私聊都进
+普通对话流程，绕过申请制；只有明确要全开时才打开，平时不要用。
+名单外私聊默认仍然"进记忆、不回、不进会话历史、不调模型"（fail-closed）。
 
 ---
 
@@ -435,6 +452,7 @@ bot 又跑起来了。想看它有没有攒着：`/super mail` —— 里面 `pe
 | `/balance` | 超管私聊 | 账户余额。群里默认**不可用**（要显式配 `QQBOT_BALANCE_GROUP_IDS`） |
 | `/提醒` | 公开 | 到点提醒（插件）：`/提醒` 看还有哪些、`/提醒 删 2`、`/提醒 换 2` 换"以后叫我"的方式（群里 @ / 私聊 / 邮箱）。**"8 点提醒我交作业"那句是对话调起的**，这条命令只用来**看和改** |
 | `/title 头衔` | 公开 | 她给自己设群头衔（**要在她当群主的群**才改得动）。别名 `#title` / `/yunru title` |
+| `/yunru affinity` / `/yunru profile` | 公开 | 只看**你自己**的关系 / 人物画像（无需超管；命令里带 @ 或 QQ 号会被拒绝） |
 
 `/super` 这一层（**只有超管**）：
 
@@ -444,7 +462,8 @@ bot 又跑起来了。想看它有没有攒着：`/super mail` —— 里面 `pe
 | `/super status` | 本次重启后的概览：运行时长、内存、计数、连续失败、最近日志 |
 | `/super apicheck` | 按 agent 对账：回复/判定/记忆/审核/识图/写信的命中率与余额 |
 | `/super mail` | 邮箱与汇报状态：收件人、发送时间、上次/下次、今天还能重试几次、**攒着没发的那封** |
-| `/super enable memory` / `disable memory` | **本群**记忆开关（在哪个群说就动哪个群；与 `/admin` 的对话开关是两张名单） |
+| `/super memory enable` / `memory disable` | **本群**记忆开关（在哪个群说就动哪个群；与 `/admin` 的对话开关是两张名单）。旧写法 `/super enable memory` 仍兼容 |
+| `/yunru private` → `/super private enable` | 私聊申请制：他先在群里发 `/yunru private`，超管再发这一条放行（旧写法 `/super enable` 仍兼容） |
 | `/super memory` + `records` / `inbox` / `audit` / `archive` | 记忆库概览与明细、待处理材料、维护流水、已删归档（保留 30 天） |
 | `/super quote` | 金句学习学出来的**表情含义表 + 老习惯**；`/super quote <表情id> <方向> [说明]` 人工纠正、`auto` 撤销、`note <id> off\|on` 停用一条笔记 |
 | `/super slang` | 她**被动听来的黑话词条**；`why <词>` 看原话证据、`set` / `del` / `wrong` 改删标错、`all` 看所有群 |
