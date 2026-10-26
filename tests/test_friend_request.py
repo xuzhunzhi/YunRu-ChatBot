@@ -256,10 +256,9 @@ def test_poll_approves_a_whitelisted_pending_request() -> None:
     async def notify(text):
         notes.append(text)
 
-    gate = FriendRequestGate(transport, _engine({"900"}), notify=notify, interval_seconds=1800)
+    gate = FriendRequestGate(transport, _engine({"900"}), notify=notify)
     asyncio.run(gate.poll_once())
 
-    assert gate.interval_seconds == 1800.0, "用户要求 30 分钟一次"
     actions = [action for action, _ in transport.calls]
     assert actions == ["get_doubt_friends_add_request", "set_doubt_friends_add_request"], actions
     assert transport.calls[1][1] == {"flag": "uid-900", "approve": True}
@@ -333,4 +332,46 @@ def test_poll_skips_when_the_transport_is_offline() -> None:
     gate = FriendRequestGate(transport, _engine({"900"}), notify=lambda text: None)
     assert asyncio.run(gate.poll_once()) is None
     assert transport.calls == [], "没连上就别去撞 API"
+
+
+# --- 只补读一次（启动后连上那一刻，2026-10-26）---------------------------------
+#
+# 用户：「那就不需要轮询了啊」→ 周期轮询撤掉，只在启动后读一次。
+# 但"等连接"这一步不能省：开机时 bot 常比 NapCat 先起来（今天断了 1.5 小时）。
+
+
+def test_catchup_polls_once_after_the_transport_comes_online() -> None:
+    from qq_roleplay_bot.runtime import _friend_catchup
+
+    class Connecting(_FakeTransport):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.checks = 0
+
+        @property
+        def connected(self):
+            self.checks += 1
+            return self.checks >= 2  # 第一次问还没连上，之后就绪
+
+    transport = Connecting(api_results=_PENDING_APPROVED)
+    gate = FriendRequestGate(transport, _engine({"900"}), notify=None)
+
+    asyncio.run(_friend_catchup(gate, wait_seconds=1.0, step=0.01))
+
+    actions = [a for a, _ in transport.calls]
+    assert actions == ["get_doubt_friends_add_request", "set_doubt_friends_add_request"], actions
+
+
+def test_catchup_gives_up_quietly_when_the_transport_never_connects() -> None:
+    from qq_roleplay_bot.runtime import _friend_catchup
+
+    class Offline(_FakeTransport):
+        connected = False
+
+    transport = Offline(api_results=_PENDING_APPROVED)
+    gate = FriendRequestGate(transport, _engine({"900"}), notify=None)
+
+    asyncio.run(_friend_catchup(gate, wait_seconds=0.05, step=0.01))
+
+    assert transport.calls == [], "没连上就不该发任何 API 调用"
 

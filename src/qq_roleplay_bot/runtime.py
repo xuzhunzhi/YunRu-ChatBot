@@ -3539,30 +3539,24 @@ class FriendRequestGate:
     两条入口（2026-10-26 用户：「不能主动读吗，必须重新发送」）：
 
     * `handle()`：NapCat 推送的 `post_type=request` 事件（在线时立刻处理）；
-    * `poll_once()`：每 `QQBOT_FRIEND_POLL_SECONDS`（默认 30 分钟）主动读一次
-      `get_doubt_friends_add_request`，补上**掉线期间漏掉的**申请。
-      它跑在核心既有那条后台节拍上（与 `BalanceProbe` 同一种做法），
-      不新起一个 `while True`。
+    * `poll_once()`：**启动后补读一次** `get_doubt_friends_add_request`，捡回
+      掉线期间漏掉的申请（QQ 不会在重连后补推那条事件）。由 `_friend_catchup()`
+      在连上之后调一次就结束——**不是周期轮询**（用户 2026-10-26：「那就不需要
+      轮询了啊」→ 只保留启动这一次）。
 
     去重按事件 `flag` / 列表 `uid`（同一条申请不重复打扰），有上限，不会无限长。
     """
 
-    #: 后台节拍用它记日志（`run_background_plugin` 的 `name`）。
+    #: 日志用（`_friend_catchup` 的任务名也用它）。
     name = "friend_approval"
 
     def __init__(self, transport: QQTransport, engine: object, *, notify=None,
-                 max_seen: int = 200, interval_seconds: float | None = None) -> None:
+                 max_seen: int = 200) -> None:
         self.transport = transport
         self.engine = engine
         self._notify = notify
         self._seen: dict[str, None] = {}
         self._max_seen = max(1, int(max_seen))
-        # 30 分钟一次：用户 2026-10-26 明确「时长拉到30min一次，不要一分钟一次」。
-        # 它只是"补漏"，推送事件那条才是主路，所以不必密。
-        self.interval_seconds = (
-            float(interval_seconds) if interval_seconds is not None
-            else float(getattr(dev_config, "FRIEND_REQUEST_POLL_SECONDS", 1800.0))
-        )
 
     def _allowed(self, user_id: str) -> bool:
         allowed = getattr(self.engine, "private_debug_user_ids", ()) or ()
@@ -3607,12 +3601,17 @@ class FriendRequestGate:
         )
 
     async def poll_once(self) -> object:
-        """主动读一次待处理的好友申请，补上**掉线期间漏掉的**那些。
+        """读**一次**待处理的好友申请，补上掉线期间漏掉的那些。
 
-        用户 2026-10-26：「不能主动读吗，必须重新发送」「时长拉到30min一次，
-        不要一分钟一次」。跑在核心既有的后台节拍上（与 `BalanceProbe` 同一种做法）。
+        用户 2026-10-26：「不能主动读吗，必须重新发送」→ 加了主动读；
+        随后「那就不需要轮询了啊」→ 改成**只在启动后读一次**（见 `_friend_catchup`），
+        不再周期跑。
 
-        **每一拍都记一行** `friend_poll`（0 条也记）：这样"它到底读没读、读到几条"
+        为什么仍然值得留着这**一次**：QQ 只把好友申请当**推送事件**发一次，重连后
+        不补推；掉线期间到来的申请会一直躺在待处理列表里（今天 12:32–14:10 就断了
+        一个半小时）。
+
+        **每次调用都记一行** `friend_poll`（0 条也记）：这样"它到底读没读、读到几条"
         在日志里看得见，不必靠猜。
         """
 
@@ -3681,6 +3680,27 @@ class FriendRequestGate:
             "要放行：让他在群里发 /yunru private，你再回那条发 /super enable。"
         )
         return 1
+
+
+async def _friend_catchup(gate: FriendRequestGate, *, wait_seconds: float = 1800.0,
+                          step: float = 15.0) -> None:
+    """启动后等连接就绪，补读**一次**待处理好友申请，然后结束。
+
+    为什么只有一次（用户 2026-10-26：「那就不需要轮询了啊」）：推送事件是主路，
+    主动读只用来捡"发申请时 bot 不在线"的那一类——QQ 重连后不会补推。
+
+    为什么要等：开机时 bot 常比 NapCat 先起来（今天 12:32 断到 14:10），
+    所以不要求"启动那一刻恰好在线"；连接一回来就读一次。等满 `wait_seconds`
+    仍然没连上就放弃（只记一行，不重试）。
+    """
+
+    deadline = time.monotonic() + float(wait_seconds)
+    while time.monotonic() < deadline:
+        if getattr(gate.transport, "connected", False):
+            await gate.poll_once()
+            return
+        await asyncio.sleep(max(0.01, float(step)))
+    logger.info("friend_catchup: 等了 %ss 连接都没回来，这次不补读", int(wait_seconds))
 
 
 async def serve(transport: QQTransport, *, stage_label: str = "Stage 3") -> None:
@@ -3766,11 +3786,11 @@ async def serve(transport: QQTransport, *, stage_label: str = "Stage 3") -> None
         asyncio.create_task(run_background_plugin(plugin), name=f"plugin-{plugin.name}")
         for plugin in background if plugin_enabled(plugin)
     ]
-    # 好友申请的**主动读**：与插件同一条节拍（`run_background_plugin`），
-    # 但它不依赖 `plugins/` 目录，所以像 `BalanceProbe` 一样由核心自己起。
+    # 好友申请的**启动补读**：连上之后读一次就结束，不周期跑
+    # （用户 2026-10-26：「那就不需要轮询了啊」）。挂在 serve 这一层是因为
+    # 它要等 `transport.connected`，而那条连接状态只有这里有。
     background_tasks.append(
-        asyncio.create_task(run_background_plugin(friend_gate),
-                            name=f"plugin-{friend_gate.name}")
+        asyncio.create_task(_friend_catchup(friend_gate), name="friend-catchup")
     )
     # 余额探针：**核心自己的**一条后台节拍，不是插件（它不依赖 `plugins/` 目录）。
     # 它只在"已经切到兜底那一家的模式"下才真的发那次请求；primary 模式下
