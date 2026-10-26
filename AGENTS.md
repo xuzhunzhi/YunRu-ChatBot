@@ -179,8 +179,10 @@
   「现在 mail agent 还不是真正的大脑，后续要单独做一个真正的大脑」。
   **这里只写方向与边界，不写实现**：工具只提供能力、不判权限、不做决定；权限判定、
   护栏、审计、发送仍在核心；插件仍然不许碰对话 / 记忆 / 知识库。
-  **未实现**：`main` / `plugins` / 生产 `run\` 都没动，实验在 `stage5/letter-tools`（dev）与
-  `stage5/letter-tools-plugins`（插件树）两条分支；`mail` 只是"现在其中一个"候选能力。
+  **未落地，且已迁出（2026-10-26）**：`main` / `plugins` / 生产 `run\` 都没动；原来在
+  `stage5/letter-tools`（dev）与 `stage5/letter-tools-plugins`（插件树）两条分支上的实验，
+  连同分支与 `yunru-stage5` 工作树一起迁到独立仓库 **LivingBot**（私有），本仓库不再维护；
+  `mail` 只是"现在其中一个"候选能力。
   详述见 `docs/STAGE_BOUNDARY.md` 末节与 `data/plans/08-stage5-brain.md`（后者在被忽略的
   `data\` 下，不在仓库里）。**不许把这一条当"已经做了"来引用。**
 

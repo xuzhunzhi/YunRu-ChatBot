@@ -191,8 +191,10 @@ Stage 3 的目标是：**把对话、记忆和防护做到稳**。功能覆盖�
 
 **现在的状态（别读成已经做了）**：
 
-- **未实现、未落地**：`main` / `plugins` 两条正式分支与生产 `run\` 都没有动；实验只在
-  `stage5/letter-tools`（dev）与 `stage5/letter-tools-plugins`（插件树）两条分支上。
+- **未实现、未落地**：`main` / `plugins` 两条正式分支与生产 `run\` 都没有动。
+- **已经迁出（2026-10-26 用户：「stage5 整个切割出去，丢到 v2 去」）**：原
+  `stage5/letter-tools` / `stage5/letter-tools-plugins` 两条分支与 `yunru-stage5` 工作树已删除，
+  实验以 patch 形式迁到独立仓库 **LivingBot**（私有）；本仓库不再维护 Stage 5 代码。
 - **mail 是这条路上第一个被拿来试的能力**（用户把它列为"现在其中一个工具"），但写信 agent
   还不是"大脑"——它现在仍然是"到点写一封"的固定链路，不是"想说才说"。
 - 计划与实验记录：`data/plans/08-stage5-brain.md`（`data/` 被 `.gitignore` 忽略，**不在仓库里**）。
