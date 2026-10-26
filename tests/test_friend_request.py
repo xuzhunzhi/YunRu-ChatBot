@@ -29,17 +29,19 @@ class _FakeTransport:
     """只记下"发了什么 / 调了什么"，不发任何东西。"""
 
     def __init__(self, *, api_error: Exception | None = None,
-                 send_error: Exception | None = None) -> None:
+                 send_error: Exception | None = None,
+                 api_results: dict[str, object] | None = None) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
         self.sent: list[tuple[MessageTarget, str]] = []
         self.api_error = api_error
         self.send_error = send_error
+        self.api_results = dict(api_results or {})
 
     async def call_api(self, action: str, params: dict[str, object] | None = None):
         self.calls.append((action, dict(params or {})))
         if self.api_error is not None:
             raise self.api_error
-        return {"status": "ok", "retcode": 0, "data": {}}
+        return {"status": "ok", "retcode": 0, "data": self.api_results.get(action, {})}
 
     async def send(self, target: MessageTarget, text: str, *, reply_to: str = "") -> None:
         if self.send_error is not None:
@@ -224,3 +226,111 @@ def test_the_transport_hands_a_friend_request_to_the_core() -> None:
 
     assert len(seen) == 1, seen
     assert seen[0]["user_id"] == 901
+
+
+# --- 主动读（补掉线期间漏掉的申请，2026-10-26）---------------------------------
+#
+# 用户：「不能主动读吗，必须重新发送」「时长拉到30min一次，不要一分钟一次」。
+# 判据与事件那条**完全同源**（同一份白名单、同一个 `_approve`），只是凭证换成
+# 列表里的 `uid`、动作换成 `set_doubt_friends_add_request`。
+
+_PENDING_APPROVED = {
+    "get_doubt_friends_add_request": [
+        {"uid": "uid-900", "user_id": 900, "nick": "自己人", "msg": "加一下"},
+    ]
+}
+
+_PENDING_STRANGER = {
+    "get_doubt_friends_add_request": [
+        {"uid": "uid-901", "user_id": 901, "nick": "陌生人", "msg": "我是群友"},
+    ]
+}
+
+
+def test_poll_approves_a_whitelisted_pending_request() -> None:
+    """名单内的待处理申请：主动读也要批（用 uid，不是 flag）。"""
+
+    transport = _FakeTransport(api_results=_PENDING_APPROVED)
+    notes: list[str] = []
+
+    async def notify(text):
+        notes.append(text)
+
+    gate = FriendRequestGate(transport, _engine({"900"}), notify=notify, interval_seconds=1800)
+    asyncio.run(gate.poll_once())
+
+    assert gate.interval_seconds == 1800.0, "用户要求 30 分钟一次"
+    actions = [action for action, _ in transport.calls]
+    assert actions == ["get_doubt_friends_add_request", "set_doubt_friends_add_request"], actions
+    assert transport.calls[1][1] == {"flag": "uid-900", "approve": True}
+    assert notes == [], notes
+
+
+def test_poll_leaves_a_stranger_pending_and_tells_the_operator() -> None:
+    transport = _FakeTransport(api_results=_PENDING_STRANGER)
+    notes: list[str] = []
+
+    async def notify(text):
+        notes.append(text)
+
+    gate = FriendRequestGate(transport, _engine({"900"}), notify=notify)
+    asyncio.run(gate.poll_once())
+
+    actions = [action for action, _ in transport.calls]
+    assert actions == ["get_doubt_friends_add_request"], actions
+    assert len(notes) == 1 and "901" in notes[0] and "不在私聊白名单里" in notes[0], notes
+    assert "我是群友" in notes[0], "列表里的留言也要带上"
+
+
+def test_poll_announces_the_same_pending_request_only_once() -> None:
+    transport = _FakeTransport(api_results=_PENDING_STRANGER)
+    notes: list[str] = []
+
+    async def notify(text):
+        notes.append(text)
+
+    gate = FriendRequestGate(transport, _engine({"900"}), notify=notify)
+    asyncio.run(gate.poll_once())
+    asyncio.run(gate.poll_once())
+
+    assert len(notes) == 1, notes
+
+
+def test_poll_with_nothing_pending_does_nothing_but_read() -> None:
+    transport = _FakeTransport(api_results={"get_doubt_friends_add_request": []})
+    notes: list[str] = []
+
+    async def notify(text):
+        notes.append(text)
+
+    gate = FriendRequestGate(transport, _engine({"900"}), notify=notify)
+    result = asyncio.run(gate.poll_once())
+
+    assert [a for a, _ in transport.calls] == ["get_doubt_friends_add_request"]
+    assert notes == []
+    assert result == {"pending": 0, "approved": 0, "notified": 0}
+
+
+def test_poll_survives_a_failed_call() -> None:
+    transport = _FakeTransport(api_error=MessageNotDelivered("连接不在"))
+    notes: list[str] = []
+
+    async def notify(text):
+        notes.append(text)
+
+    gate = FriendRequestGate(transport, _engine({"900"}), notify=notify)
+    result = asyncio.run(gate.poll_once())
+
+    assert result is None
+    assert notes == [], "读不到东西不算'申请被拒'，不该打扰操作者"
+
+
+def test_poll_skips_when_the_transport_is_offline() -> None:
+    class Offline(_FakeTransport):
+        connected = False
+
+    transport = Offline(api_results=_PENDING_STRANGER)
+    gate = FriendRequestGate(transport, _engine({"900"}), notify=lambda text: None)
+    assert asyncio.run(gate.poll_once()) is None
+    assert transport.calls == [], "没连上就别去撞 API"
+

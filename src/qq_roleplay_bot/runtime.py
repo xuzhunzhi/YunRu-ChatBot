@@ -3531,20 +3531,38 @@ class FriendRequestGate:
     三条硬性质（都是"别猜"）：
 
     1. **名单外一律不批**，也不给对方回话（fail-closed，静默留在 QQ 里）；
-    2. **没有 `flag` 就批准不了**（`set_friend_add_request` 只认它）——按失败处理并通知，
-       不拿 QQ 号去猜一个 flag；
+    2. **没有凭证就批准不了**——推送事件用 `flag`（`set_friend_add_request`），
+       主动读列表用 `uid`（`set_doubt_friends_add_request`）；拿不到就按失败通知，
+       不拿 QQ 号去猜；
     3. **自动通过失败也要通知**：申请会一直挂着，操作者得知道。
 
-    去重按 `flag`（同一条申请重复推送时不重复打扰），有上限，不会无限长。
+    两条入口（2026-10-26 用户：「不能主动读吗，必须重新发送」）：
+
+    * `handle()`：NapCat 推送的 `post_type=request` 事件（在线时立刻处理）；
+    * `poll_once()`：每 `QQBOT_FRIEND_POLL_SECONDS`（默认 30 分钟）主动读一次
+      `get_doubt_friends_add_request`，补上**掉线期间漏掉的**申请。
+      它跑在核心既有那条后台节拍上（与 `BalanceProbe` 同一种做法），
+      不新起一个 `while True`。
+
+    去重按事件 `flag` / 列表 `uid`（同一条申请不重复打扰），有上限，不会无限长。
     """
 
+    #: 后台节拍用它记日志（`run_background_plugin` 的 `name`）。
+    name = "friend_approval"
+
     def __init__(self, transport: QQTransport, engine: object, *, notify=None,
-                 max_seen: int = 200) -> None:
+                 max_seen: int = 200, interval_seconds: float | None = None) -> None:
         self.transport = transport
         self.engine = engine
         self._notify = notify
         self._seen: dict[str, None] = {}
         self._max_seen = max(1, int(max_seen))
+        # 30 分钟一次：用户 2026-10-26 明确「时长拉到30min一次，不要一分钟一次」。
+        # 它只是"补漏"，推送事件那条才是主路，所以不必密。
+        self.interval_seconds = (
+            float(interval_seconds) if interval_seconds is not None
+            else float(getattr(dev_config, "FRIEND_REQUEST_POLL_SECONDS", 1800.0))
+        )
 
     def _allowed(self, user_id: str) -> bool:
         allowed = getattr(self.engine, "private_debug_user_ids", ()) or ()
@@ -3568,6 +3586,8 @@ class FriendRequestGate:
         return True
 
     async def handle(self, payload: dict[str, object]) -> None:
+        """推送事件入口（在线时立刻处理）。"""
+
         if payload.get("post_type") != "request" or payload.get("request_type") != "friend":
             return
         user_id = str(payload.get("user_id") or "").strip()
@@ -3575,24 +3595,84 @@ class FriendRequestGate:
         comment = str(payload.get("comment") or "").strip()
         if not user_id.isdigit():
             return
-        if not self._remember(flag or f"user:{user_id}"):
-            return
         if self._allowed(user_id) and flag:
-            try:
-                await self.transport.call_api(
-                    "set_friend_add_request", {"flag": flag, "approve": True}
-                )
-            except Exception as exc:  # noqa: BLE001 - 失败要告诉操作者，不能静默
-                logger.warning("Stage 3 friend approve failed: user=%s err=%s",
-                               user_id, type(exc).__name__)
-                await self._tell(
-                    f"自动通过好友申请失败：QQ {user_id}（{type(exc).__name__}）。\n"
-                    "申请还留在 QQ 里，需要你手动处理。"
-                )
+            if not self._remember(f"flag:{flag}"):
                 return
-            logger.info("Stage 3 friend approved: user=%s", user_id)
+            await self._approve(flag, user_id, action="set_friend_add_request")
             return
-        # 名单外（或没有 flag）：不批，通知操作者。留言原样带上，方便判断是谁。
+        await self._announce(
+            user_id,
+            key=f"flag:{flag}" if flag else f"user:{user_id}",
+            comment=comment,
+        )
+
+    async def poll_once(self) -> object:
+        """主动读一次待处理的好友申请，补上**掉线期间漏掉的**那些。
+
+        用户 2026-10-26：「不能主动读吗，必须重新发送」「时长拉到30min一次，
+        不要一分钟一次」。跑在核心既有的后台节拍上（与 `BalanceProbe` 同一种做法）。
+
+        **每一拍都记一行** `friend_poll`（0 条也记）：这样"它到底读没读、读到几条"
+        在日志里看得见，不必靠猜。
+        """
+
+        if not getattr(self.transport, "connected", True):
+            logger.debug("friend_poll: 未连接，跳过这一拍")
+            return None
+        try:
+            result = await self.transport.call_api(
+                "get_doubt_friends_add_request", {"count": 20}
+            )
+        except Exception:  # noqa: BLE001 - 下一拍再试，不刷屏
+            logger.warning("friend_poll_failed（下一拍再试）", exc_info=True)
+            return None
+        items = result.get("data") if isinstance(result, dict) else result
+        if not isinstance(items, list):
+            logger.info("friend_poll: 返回形状认不出 type=%s", type(items).__name__)
+            return None
+        approved = notified = 0
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            user_id = str(item.get("user_id") or "").strip()
+            credential = str(item.get("uid") or "").strip()
+            if not user_id.isdigit():
+                continue
+            comment = str(item.get("msg") or item.get("reason") or "").strip()
+            if self._allowed(user_id) and credential:
+                approved += await self._approve(
+                    credential, user_id, action="set_doubt_friends_add_request"
+                )
+            else:
+                notified += await self._announce(
+                    user_id, key=f"doubt:{credential or user_id}", comment=comment
+                )
+        logger.info(
+            "friend_poll: pending=%d approved=%d notified=%d", len(items), approved, notified
+        )
+        return {"pending": len(items), "approved": approved, "notified": notified}
+
+    async def _approve(self, credential: str, user_id: str, *, action: str) -> int:
+        """用一条凭证（事件 `flag` 或列表 `uid`）批掉一条申请；返回批了几条（0/1）。"""
+
+        try:
+            await self.transport.call_api(action, {"flag": credential, "approve": True})
+        except Exception as exc:  # noqa: BLE001 - 失败要告诉操作者，不能静默
+            logger.warning("Stage 3 friend approve failed: user=%s err=%s",
+                           user_id, type(exc).__name__)
+            await self._tell(
+                f"自动通过好友申请失败：QQ {user_id}（{type(exc).__name__}）。\n"
+                "申请还留在 QQ 里，需要你手动处理。"
+            )
+            return 0
+        logger.info("Stage 3 friend approved: user=%s", user_id)
+        return 1
+
+    async def _announce(self, user_id: str, *, key: str, comment: str) -> int:
+        """不批并通知操作者；同一条申请只通知一次（返回 0/1）。"""
+
+        if not self._remember(key):
+            return 0
         reason = "没有可用的申请凭证" if self._allowed(user_id) else "不在私聊白名单里"
         extra = f"\n留言：{comment[:200]}" if comment else ""
         await self._tell(
@@ -3600,6 +3680,7 @@ class FriendRequestGate:
             f"{reason}，这次没有通过。{extra}\n"
             "要放行：让他在群里发 /yunru private，你再回那条发 /super enable。"
         )
+        return 1
 
 
 async def serve(transport: QQTransport, *, stage_label: str = "Stage 3") -> None:
@@ -3649,10 +3730,16 @@ async def serve(transport: QQTransport, *, stage_label: str = "Stage 3") -> None
         plugin_registry.set_loop(asyncio.get_running_loop())
     # **好友申请**（2026-10-26 用户定："加好友的白名单跟 private 进行同步"）：
     # 名单就是私聊白名单那一份，批/不批与通知都在 `FriendRequestGate` 里。
-    # 接在传输层的推事件上（NapCat 会推 `post_type=request, request_type=friend`），
-    # 不是新开一条轮询——`background_plugins` 那条节拍一个都不动。
+    # 两条入口共用一个对象：
+    #   * 推送事件（在线时立刻处理）；
+    #   * 后台节拍每 30 分钟主动读一次（补掉线期间漏掉的，用户：
+    #     「不能主动读吗，必须重新发送」「时长拉到30min一次」）。
+    # 主动读挂在**既有那条后台节拍**上（与 `BalanceProbe` 同一种做法），
+    # 不新起 `while True`。
+    friend_gate = FriendRequestGate(transport, engine)
+    engine.friend_requests = friend_gate
     if hasattr(transport, "on_friend_request"):
-        transport.on_friend_request = FriendRequestGate(transport, engine).handle  # type: ignore[attr-defined]
+        transport.on_friend_request = friend_gate.handle  # type: ignore[attr-defined]
     background = build_background_plugins(engine)
     await transport.start()
     if memory is not None:
@@ -3679,6 +3766,12 @@ async def serve(transport: QQTransport, *, stage_label: str = "Stage 3") -> None
         asyncio.create_task(run_background_plugin(plugin), name=f"plugin-{plugin.name}")
         for plugin in background if plugin_enabled(plugin)
     ]
+    # 好友申请的**主动读**：与插件同一条节拍（`run_background_plugin`），
+    # 但它不依赖 `plugins/` 目录，所以像 `BalanceProbe` 一样由核心自己起。
+    background_tasks.append(
+        asyncio.create_task(run_background_plugin(friend_gate),
+                            name=f"plugin-{friend_gate.name}")
+    )
     # 余额探针：**核心自己的**一条后台节拍，不是插件（它不依赖 `plugins/` 目录）。
     # 它只在"已经切到兜底那一家的模式"下才真的发那次请求；primary 模式下
     # `poll_once()` 立刻返回，一次网络都不打。走既有节拍循环，不新起 `while True`。

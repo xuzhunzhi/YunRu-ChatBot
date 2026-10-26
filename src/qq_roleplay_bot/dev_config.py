@@ -926,6 +926,9 @@ APPROVE_NOTIFY_USER_IDS = _csv_ids("QQBOT_APPROVE_NOTIFY_USER_IDS") or SUPER_ADM
 FRIEND_REQUEST_NOTIFY_USER_IDS = (
     _csv_ids("QQBOT_FRIEND_NOTIFY_USER_IDS") or SUPER_ADMIN_USER_IDS
 )
+# 主动读一次"待处理好友申请"的间隔（秒）。用户 2026-10-26：「时长拉到30min一次，
+# 不要一分钟一次」——推送事件是主路，这条只是补掉线期间漏掉的，不必密。
+FRIEND_REQUEST_POLL_SECONDS = _float("QQBOT_FRIEND_POLL_SECONDS", 1800.0)
 # 同一批申请最多处理几条（每处理一条要一次写调用，别让积压把一轮拖死）。
 APPROVE_MAX_PER_TICK = _int("QQBOT_APPROVE_MAX_PER_TICK", 5)
 MAIL_POLL_SECONDS = _float("QQBOT_MAIL_POLL_SECONDS", 300.0)
