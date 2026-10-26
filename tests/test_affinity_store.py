@@ -240,10 +240,11 @@ def test_daily_cap_window_slides() -> None:
         pump(store, clock, times=2)  # 10 → 18 → 26（各自跨了一天）
         clock[0] += 60
         assert write(store, closeness=8) == ""       # 同一天：26 → 34（窗口里净 16）
-        assert write(store, closeness=8) == "affinity_rejected_daily_cap"  # 16 + 8 > 20
+        # 34 已进 30–49 档：+8 折成 +6，窗口净 16 + 6 > 20，仍然该被每日上限拒。
+        assert write(store, closeness=8) == "affinity_rejected_daily_cap"
         clock[0] += DAY + 60                         # 窗口滑过去
-        assert write(store, closeness=8) == ""
-        assert store.relationship(USER)[0] == 42
+        assert write(store, closeness=8) == ""       # 2026-10-25 起 34 档只加 +6
+        assert store.relationship(USER)[0] == 40
 
 
 # --- 防备不对称 -------------------------------------------------------------
@@ -307,19 +308,20 @@ def test_high_affinity_refuses_to_drop_but_manual_path_still_works() -> None:
     clock = [1_000_000.0]
     with tempfile.TemporaryDirectory() as tmp:
         store = make_store(tmp, clock=lambda: clock[0])
-        # 10 → 98（11 天，每天 +8；每天净变化 8 ≤ 20）。
-        pump(store, clock, times=11)
-        assert store.relationship(USER)[0] == 98 >= AFFINITY_HIGH_HOLD
+        # 10 → 95（2026-10-25 起每天 +8 会按档位打折，见 `test_affinity_marginal`；
+        # 这里只是把"高位"造出来，所以按真实轨迹走 25 天，不再假设 11 天到 98）。
+        pump(store, clock, times=25)
+        assert store.relationship(USER)[0] == 95 >= AFFINITY_HIGH_HOLD
 
         clock[0] += DAY + 60
         assert write(store, closeness=-4) == "affinity_rejected_high_affinity_hold"
         clock[0] += DAY + 60
         assert write(store, closeness=-16, severe=True) == "affinity_rejected_high_affinity_hold"
-        assert store.relationship(USER)[0] == 98
+        assert store.relationship(USER)[0] == 95
 
         # 超管手动那条路（`manual=True`）不受这条限制——用户原话里写明的例外。
         assert write(store, closeness=-4, manual=True) == ""
-        assert store.relationship(USER)[0] == 94
+        assert store.relationship(USER)[0] == 91
         assert store.reset_relationship(USER) is True
         assert store.relationship(USER) == (DEFAULT_CLOSENESS, DEFAULT_GUARDEDNESS)
 
@@ -328,7 +330,7 @@ def test_affinity_below_ninety_five_can_still_drop() -> None:
     clock = [1_000_000.0]
     with tempfile.TemporaryDirectory() as tmp:
         store = make_store(tmp, clock=lambda: clock[0])
-        pump(store, clock, times=10)  # 10 → 90
+        pump(store, clock, times=20)  # 10 → 90（边际效益下 20 天，见 `test_affinity_marginal`）
         assert store.relationship(USER)[0] == 90
         clock[0] += DAY + 60
         assert write(store, closeness=-4) == ""
@@ -384,14 +386,14 @@ def test_decay_after_thirty_days_of_silence() -> None:
     clock = [1000.0]
     with tempfile.TemporaryDirectory() as tmp:
         store = make_store(tmp, clock=lambda: clock[0])
-        pump(store, clock, axis="closeness", times=7)  # 10 → 66
-        assert store.relationship(USER) == (66, 0)
+        pump(store, clock, axis="closeness", times=7)  # 2026-10-25 起 10 → 56（边际效益）
+        assert store.relationship(USER) == (56, 0)
 
         clock[0] += 29 * DAY
         assert store.decay_relationships() == 0, "不到 30 天不该动"
         clock[0] += 2 * DAY
         assert store.decay_relationships() == 1
-        assert store.relationship(USER)[0] == 56, "一次降一档（10）"
+        assert store.relationship(USER)[0] == 46, "一次降一档（10）"
         assert store.relationship(USER)[1] == DEFAULT_GUARDEDNESS
 
     # 再等一轮也照样会降（衰减后刷新了"最近说话时间"）。
@@ -434,10 +436,10 @@ def test_decay_never_touches_a_high_affinity_bond() -> None:
     clock = [1_000_000.0]
     with tempfile.TemporaryDirectory() as tmp:
         store = make_store(tmp, clock=lambda: clock[0])
-        pump(store, clock, times=11)  # 98
+        pump(store, clock, times=25)  # 95（2026-10-25 起的真实轨迹）
         clock[0] += 60 * DAY
         store.decay_relationships()
-        assert store.relationship(USER)[0] == 98
+        assert store.relationship(USER)[0] == 95
 
 
 def test_chat_traffic_refreshes_last_seen() -> None:

@@ -423,9 +423,62 @@ class AttributionGateTests(_Base):
         self.assertEqual(self.rows("diansai_2026"), [])
         self.assertEqual(self.store.rejection_counts(), {"rejected_ungrounded_specifics": 1})
 
+    def test_bare_place_words_do_not_become_a_hometown_profile(self):
+        """只发了两条孤立地名 → 不许写"山东临沂人"（2026-10-25 真库事故）。
+
+        真事：群 `1084401296` 的「印花布」只发了「山东」「临沂」（当时在问别人的来处），
+        维护 agent 就写出画像「山东临沂人；聊起各地来处时说自己是山东临沂的」。
+        `SELF_STATEMENT_KINDS` 只收 `status`，`profile` 绕过去了；这里钉的就是
+        `ORIGIN_CLAIM` 那道不分 kind 的窄闸。
+        突变：删掉 `ORIGIN_CLAIM` 那一段 → 这条必须红。
+        """
+
+        self.now += 1
+        first = self.event("山东")
+        second = self.event("临沂")
+        self.store.append(first)
+        self.store.append(second)
+        batch = self.store.claim({GROUP}, lease_seconds=60)
+        assert batch is not None
+        applied = self.commit(batch, "ADD", evidence=[first.id, second.id],
+                              kind="profile", key="profile/hometown",
+                              content="山东临沂人", durable=True, ttl=None)
+        self.assertEqual(applied, [], "两个孤立地名不许变成籍贯")
+        self.assertEqual(
+            self.store.rejection_counts()["rejected_not_self_statement"], 1)
+
+    def test_a_hometown_that_he_actually_said_still_passes(self):
+        """他本人说了「我是山东临沂的」→ 照旧能写。"""
+
+        applied = self.write("我是山东临沂的", "ADD", kind="profile",
+                             key="profile/hometown", content="山东临沂人",
+                             durable=True, ttl=None)
+        self.assertEqual([op.op for op in applied], ["ADD"])
+        self.assertEqual(self.counts_for("profile/hometown")["content"], "山东临沂人")
+
+    def test_an_impression_profile_is_not_hit_by_the_origin_gate(self):
+        """画像里的印象句不是自述 → 这道闸不许误伤（"他说话直"照旧能写）。"""
+
+        applied = self.write("你这句说得不对，别插话", "ADD", kind="profile",
+                             key="profile/speech", content="他说话直，常当面说你哪句不对",
+                             durable=True, ttl=None)
+        self.assertEqual([op.op for op in applied], ["ADD"])
+
+    def test_a_hometown_quoted_verbatim_passes_even_without_first_person(self):
+        """正文照抄依据（coverage ≥ QUOTE_RATIO）→ 放行，第一人称不是唯一出路。
+
+        `山东临沂的` 里没有"我/咱/俺"，但正文 `山东临沂人` 与它的词元重合恰好是
+        0.6（山东/东临/临沂），与自述闸同一口径。
+        突变：把 `ORIGIN_CLAIM` 那段改成"只认第一人称" → 这条必须红。
+        """
+
+        applied = self.write("山东临沂的", "ADD", kind="profile",
+                             key="profile/hometown", content="山东临沂人",
+                             durable=True, ttl=None)
+        self.assertEqual([op.op for op in applied], ["ADD"])
+
     def test_a_date_that_was_actually_said_still_passes(self):
         """原话里真有的日期照旧放行（不许误伤合法的时间标注）。"""
-
         applied = self.write("我 2026-11 参加电赛", "ADD", key="diansai_date",
                              content="2026-11 参加电赛", ttl=30)
         self.assertEqual([op.op for op in applied], ["ADD"])

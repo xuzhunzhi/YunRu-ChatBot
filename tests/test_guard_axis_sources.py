@@ -14,24 +14,31 @@
 
 ## 改成了什么样
 
+**2026-10-24 拆权（用户原话：*"判定没有任何写权限，判定只能调起回复"*、
+*"被冒犯立刻变冷……这个只要写缓存就好"*）之后，判定这条路一条关系流水都不写。**
+本文件现在钉的是：
+
 1. **判定只出一个信号**（`dialogue_judge.JUDGE_SYSTEM_PROMPT`）：`<guard>` 三个取值——
    `UP` 只给"针对她本人的贬损/阴阳/嘲弄"，`PROBE` 给"当面打探她怎么做的"，
    其余（玩笑、朋友式调侃、追问质疑、跟她无关的杂事）一律 `HOLD`；
    `UP` 时的 `<guard_reason>` **只能**填闭合表里的词（`insult` / `sarcasm` / `belittle`）。
 2. **政策留在核心**（`stage3_main.GUARD_RAISING_OFFENSES` + `_apply_guard_signal`）：
-   只有表里那几个由头才允许 `apply_affinity(guardedness=+1)`；表外的一律**一个字都不写**。
+   只有表里那几个由头才允许挂冷感（`_guard_flash`，只进内存）；表外的一律**什么都不做**。
    `PROBE` 则连回复都不拼——**当轮不接、关系轴零增量**。
+   持久化（关系轴 / 证据行）全部归维护 agent（海马体），这里一个字都不落库。
    与"插件不决定政策"同一条思路：信号可以来自模型，**决定权在核心**。
 
 ## 这份测试的形状
 
-* **反例必须不涨**（富哥之家整天互相调侃，判错一次就把全群戒备都抬起来）：
+* **反例必须不变冷、不写库**（富哥之家整天互相调侃，判错一次就把全群戒备都抬起来）：
   朋友式调侃 / 与她不相关的杂事 / 普通追问质疑 / 探机制（顺带还要"当轮不接"）；
-* **正例必须涨**：针对她的贬损羞辱、阴阳怪气地挤兑；
+* **正例必须变冷但不写库**：针对她的贬损羞辱、阴阳怪气地挤兑——这一轮读到的档位
+  升到「有点端着」，`guard_raised` +1，但 `relationship()` 与 `relationship_log`
+  一个数都不动；
 * **降的那一侧不许弄丢**：长期互动要让戒备**回落**（维护那条 `-1`）。
 
-反例的起点是**已经是 2 档**（"留意"），这样涨和跌都会被看见——从 0 起步的话
-"跌"会被下限吃掉、测不出来。
+反例的起点是**已经是 2 档**（"留意"）的旧写法已随 2026-10-20 刻度作废；现在反例
+从 0 起步，因为"不涨"只需要看库值没变，不需要先垫高。
 
 ## 突变（各自还原，三条都会红；跑法见下面每条指名的用例）
 
@@ -40,7 +47,7 @@
    → `test_probe_of_her_implementation_is_held_for_the_turn_and_writes_nothing`
    与 `test_probe_also_holds_when_it_comes_with_a_reply_route` 红
    （这一轮会回话，而且关系流水里多一条）。
-2. **让朋友式玩笑能涨**：把核心那一关反过来（越过 `GUARD_RAISING_OFFENSES` 直接写）
+2. **让朋友式玩笑能挂冷感**：把核心那一关反过来（越过 `GUARD_RAISING_OFFENSES` 直接挂）
    → 三条反例（`test_negative_friendly_banter_…` / `…_unrelated_topics_…` /
    `…_plain_followups_…`）全红。
 3. **让维护无法回落**：把 `memory_store` 里维护那一次 `_apply_affinity(..., may_lower_guard=True)`
@@ -63,6 +70,7 @@ from qq_roleplay_bot.memory_store import (
     GUARD_RAISE_MAX,
     MemoryStore,
 )
+from qq_roleplay_bot.relationship_tiers import guard_tier
 from qq_roleplay_bot.stage3_main import (
     GUARD_RAISING_OFFENSES,
     DialogueEngine,
@@ -318,11 +326,18 @@ def test_probe_also_holds_when_it_comes_with_a_reply_route() -> None:
         assert store.relationship(USER) == (DEFAULT_CLOSENESS, DEFAULT_GUARDEDNESS)
 
 
-# --- 正例：针对她的贬损 / 阴阳怪气 —— 必须涨 -----------------------------------
+# --- 正例：针对她的贬损 / 阴阳怪气 —— 这一轮必须变冷（但只挂缓存） -------------
 
 
-def test_positive_offenses_toward_her_raise_guardedness() -> None:
-    """骂她、阴阳她、嘲她没本事——这三类是**唯一**还能让防备升的东西。"""
+def test_positive_offenses_toward_her_flash_a_cold_stance_without_writing() -> None:
+    """骂她、阴阳她、嘲她没本事——这三类仍然让这一轮变冷，但**只挂内存缓存**。
+
+    2026-10-24 用户口径：*"判定没有任何写权限，判定只能调起回复"*、
+    *"被冒犯立刻变冷……这个只要写缓存就好"*。所以这里钉四件事：
+    ① 照样回（冷着回）；② 库里的防备一个数都不动；③ `relationship_log` 一条都不新增；
+    ④ 这一轮读到的档位已经是「有点端着」，`guard_raised` +1。
+    持久化那一侧归维护 agent（见 `test_maintenance_can_still_relax_guardedness`）。
+    """
 
     cases = (
         (1, "insult", "@YunRu 你就是个没用的废物"),
@@ -335,18 +350,26 @@ def test_positive_offenses_toward_her_raise_guardedness() -> None:
             result = asyncio.run(engine.handle(msg(index, bench, mentioned=True)))
 
             assert result is not None, f"{bench}：被冒犯也照样得回，只是回得冷"
-            assert store.relationship(USER)[1] == GUARD_RAISE_MAX, bench
+            assert store.relationship(USER)[1] == DEFAULT_GUARDEDNESS, (
+                f"{bench}：判定不许写关系轴")
+            assert store.recent_relationship_changes(0.0, limit=10) == (), (
+                f"{bench}：关系流水一条都不该有")
+            assert engine._stance_for(msg(index + 10, bench)).guardedness == GUARD_RAISE_MAX, (
+                f"{bench}：冷感要叠在这一轮的档位上")
+            assert guard_tier(GUARD_RAISE_MAX).name == "有点端着"
+            assert guard_tier(GUARD_RAISE_MAX).name in reply.requests[0][2]["content"], (
+                f"{bench}：回复那一轮读到的必须是冷着的档位")
             assert engine.snapshot().guard_raised == 1, bench
             assert engine.snapshot().guard_probe_held == 0, bench
-            # 落库的依据是表里那句固定说法，不是模型写的自由文本。
-            assert store.relationship_detail(USER)["last"]["reason"] == OFFENSE_CODES[offense]
+            assert engine.snapshot().guard_rejected == 0, bench
+            # 越界的分析（旧版会落库的那句固定说法）不许进她的 prompt。
             assert OFFENSE_CODES[offense] not in reply.requests[0][2]["content"], (
                 "越界的分析不许进她的 prompt"
             )
 
 
 def test_the_allowed_offenses_are_a_closed_table() -> None:
-    """允许升防备的由头是**闭集**，而且提示词里点的就是这几个。
+    """允许挂冷感的由头是**闭集**，而且提示词里点的就是这几个。
 
     两边漂了（提示词多一个词、核心不认识）就等于"判定的越界信号被悄悄丢掉"，
     所以这条同时钉住"表里有什么"和"提示词写的就是它"。
@@ -375,7 +398,8 @@ def test_the_allowed_offenses_are_a_closed_table() -> None:
 def test_maintenance_can_still_relax_guardedness() -> None:
     """维护那条下调必须还在：长期互动正常，防备**回落**。
 
-    与"只升不降"不冲突——升是判定当轮的事（一次 +8），降是维护 agent 复盘的事
+    与"只升不降"不冲突——2026-10-24 拆权后**升和降都归维护 agent**（判定只挂缓存、
+    一个字都不写）。升是它复盘时按证据写，降也是它按长期互动松一档
     （7 天最多松 10 = 一档）。走的是**真路**：维护 agent 的结构化输出（`AFFINITY` op）
     → `MemoryStore.commit` → `apply_affinity(..., may_lower_guard=True)`。
     把那一处翻掉或去掉，"防备再也降不下来"，这一条会当场红。

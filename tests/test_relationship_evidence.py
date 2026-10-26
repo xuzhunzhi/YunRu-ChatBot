@@ -1,12 +1,18 @@
 """关系变动的**证据句**（`relationship_evidence`，2026-10-16）。
 
-由来：关系流水从前只存一句概括理由（`OFFENSE_CODES` 里的固定说法），事后回答不了
-"到底哪句话触发的"。现在判定把那一句原话抄回来，核对过"它真的在这一轮的输入里"
-之后存进一张**旁表**。
+由来：关系流水从前只存一句概括理由（旧版判定写的固定说法），事后回答不了
+"到底哪句话触发的"。现在每次关系变动带一句原话，存进一张**旁表**。
+
+**2026-10-24 拆权后，这张表只由维护 agent（海马体）那条路写**：用户口径
+*"判定没有任何写权限，判定只能调起回复"*——判定报 UP 只挂内存缓存，
+`relationship_evidence` 一行都不落。判定侧仍会核对自己抄回的原话
+（`_verify_guard_quote`），但那只用来计数/记日志，不再落库；维护侧
+（`MemoryStore.apply_affinity(evidence=...)`）的证据链一个字没动。
 
 这一份钉住五件事（每一条都对应一种"看起来做了、其实没做到"的失败）：
 
-1. **校验不过就不存**：`quote in rendered_input` 不成立时一条都不写，只加计数；
+1. **判定这条路不落证据、维护那条路照旧落**：判定报 UP 后旁表为空、关系轴不动；
+   维护 `apply_affinity` 的逐字校验与两级脱敏照旧；
 2. **两级脱敏不是照搬**：命中 `broad_terms` 的**片段抹除**（"这jb机器人" → "这jb〔略〕"），
    命中机制类七条的**整句不存**（只留规则码 + 长度 + 时间）；
 3. **保留期 30 天、和流水（365 天）分开**；
@@ -150,11 +156,17 @@ def _evidence(store: MemoryStore, user_id: str = USER) -> tuple[dict, ...]:
     return store.relationship_evidence(user_id, limit=10)
 
 
-# --- 1. 逐字校验：过了才存，不过不存 ------------------------------------------
+# --- 1. 判定不落证据；维护那条路照旧落 ----------------------------------------
 
 
-def test_a_verbatim_quote_is_stored_and_answers_which_sentence() -> None:
-    """核得过 → 存下来，而且答案就是"哪一句"。"""
+def test_the_judge_path_stores_no_evidence_but_maintenance_still_does() -> None:
+    """判定报 UP：旁表**一行都不写**；维护那条真路照旧逐字存证。
+
+    2026-10-24 用户口径：*"判定没有任何写权限，判定只能调起回复"*、
+    *"人物画像、记忆、世界知识属于海马体"*。所以这里先钉判定这条路（原话核得过
+    也不落库、关系轴不动），再钉维护那条路没被这次拆权弄坏（逐字校验/截断/定位
+    都还在 `MemoryStore.apply_affinity(evidence=...)` 里）。
+    """
 
     with tempfile.TemporaryDirectory() as tmp:
         store = _store(tmp)
@@ -170,6 +182,18 @@ def test_a_verbatim_quote_is_stored_and_answers_which_sentence() -> None:
         judge.output = guard_up(quote)
         asyncio.run(engine.handle(_msg(2, "@YunRu 你就是个没用的废物")))
 
+        assert _evidence(store) == (), "判定这条路一个证据行都不许写"
+        assert store.relationship(USER) == (10, 0), "判定这条路连关系轴都不许写"
+        assert store.recent_relationship_changes(0.0, limit=10) == ()
+        assert engine.snapshot().evidence_stored == 0
+        assert engine.snapshot().quote_unverified == 0, "原话核得过，只是不落库"
+        assert engine.snapshot().guard_raised == 1, "冷感照旧挂在缓存里"
+
+        # 维护那条真路：证据链不许动（source 不是 judge，`may_lower_guard` 不参与）。
+        assert store.apply_affinity(
+            USER, guardedness=GUARD_RAISE_MAX, reason="他当面贬损羞辱",
+            source="maintenance", evidence={"quote": quote, "who_alias": "1", "seq": 5},
+        ) == ""
         rows = _evidence(store)
         assert len(rows) == 1, rows
         assert rows[0]["quote"] == quote
@@ -177,17 +201,17 @@ def test_a_verbatim_quote_is_stored_and_answers_which_sentence() -> None:
         assert rows[0]["rule"] == ""
         assert int(rows[0]["quote_chars"]) == len(quote)
         assert int(rows[0]["quote_truncated"]) == 0
-        assert int(rows[0]["seq"]) > 0
-        assert rows[0]["who_alias"]
-        assert engine.snapshot().evidence_stored == 1
-        assert engine.snapshot().quote_unverified == 0
+        assert int(rows[0]["seq"]) == 5
+        assert rows[0]["who_alias"] == "1"
 
 
-def test_a_quote_that_is_not_in_the_input_refuses_the_write() -> None:
-    """模型编一句/改写一句 → **这次写入被拒**，防备一点不动。
+def test_a_quote_that_is_not_in_the_input_is_counted_but_stores_nothing() -> None:
+    """模型编一句/改写一句 → 不落证据、只加计数；冷感照旧（判定本来就不写库）。
 
-    2026-10-20 用户口径：拿不到原话就拒绝这次写入，而不是记一条查不了的理由。
-    旧行为是"证据存不下来、档位照升"——那正是全库只有 1 条证据的原因。
+    2026-10-20 用户口径"拿不到原话就拒绝这次写入"针对的是**关系轴写入**；
+    2026-10-24 拆权后判定没有写入可拒（用户原话：*"判定没有任何写权限，
+    判定只能调起回复"*）。所以这里钉的是：核不过的原话不落旁表、`quote_unverified`
+    计数 +1，而这一轮的冷感（内存缓存）与关系轴（一个字不写）各自照旧。
     """
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -199,9 +223,10 @@ def test_a_quote_that_is_not_in_the_input_refuses_the_write() -> None:
         snapshot = engine.snapshot()
         assert snapshot.quote_unverified == 1
         assert snapshot.evidence_stored == 0
-        assert snapshot.guard_raised == 0
-        assert snapshot.guard_rejected == 1
-        assert store.relationship(USER)[1] == 0, "没有原话就不改防备"
+        assert snapshot.guard_raised == 1, "判定只挂缓存，不涉及'这次写入'"
+        assert snapshot.guard_rejected == 0
+        assert store.relationship(USER)[1] == 0, "判定一个字都不写"
+        assert store.recent_relationship_changes(0.0, limit=10) == ()
 
 
 def test_a_hold_never_stores_a_quote_even_if_the_model_fills_one() -> None:
@@ -467,8 +492,9 @@ def _reply_prompt_blob(store: MemoryStore, judge_output: str, text: str) -> str:
 def test_evidence_never_reaches_her_reply_prompt() -> None:
     """她只该知道"现在该收着"，不该看到"哪句话让我记下了"。
 
-    判据用**差分**：同一段对话跑两遍，一遍让判定抄回**真的**那句（于是证据落库、
-    防备 +GUARD_RAISE_MAX），一遍抄一句输入里没有的（于是这次写入被拒、防备不动）。
+    2026-10-24 拆权后，证据只由维护那条路写（判定不落库）。判据仍是**差分**：
+    同一段对话跑两遍，一遍库里已经有维护写下的证据（防备 +GUARD_RAISE_MAX），
+    一遍没有证据、防备是默认值。
 
     2026-10-20 起 0 与 GUARD_RAISE_MAX **不再同档**（「正常分寸」vs「有点端着」），
     两份回复材料的档位文字本来就不同。所以先把那一行按**实际档位文字**
@@ -489,14 +515,21 @@ def test_evidence_never_reaches_her_reply_prompt() -> None:
 
     with tempfile.TemporaryDirectory() as stored_tmp, tempfile.TemporaryDirectory() as plain_tmp:
         stored = _store(stored_tmp)
-        with_text = _reply_prompt_blob(stored, guard_up(quote), text)
+        # 证据走**维护那条路**（判定那条路已经不写了，见上一条用例）。
+        assert stored.apply_affinity(
+            USER, guardedness=GUARD_RAISE_MAX, reason="他当面贬损羞辱",
+            source="maintenance", evidence={"quote": quote, "who_alias": "1", "seq": 5},
+        ) == ""
+        with_text = _reply_prompt_blob(
+            stored, "<route>REPLY</route><related>YES</related><guard>HOLD</guard>", text)
         assert len(_evidence(stored)) == 1, "这一步得真的存下了证据"
         assert stored.relationship(USER)[1] == GUARD_RAISE_MAX
 
         plain = _store(plain_tmp)
-        without = _reply_prompt_blob(plain, guard_up("这句根本不在输入里"), text)
+        without = _reply_prompt_blob(
+            plain, "<route>REPLY</route><related>YES</related><guard>HOLD</guard>", text)
         assert _evidence(plain) == (), "这一轮不该有证据"
-        assert plain.relationship(USER)[1] == 0, "没有原话，这次写入被拒"
+        assert plain.relationship(USER)[1] == 0
 
         with_tier = guard_tier(GUARD_RAISE_MAX)
         plain_tier = guard_tier(0)

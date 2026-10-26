@@ -2,9 +2,14 @@
 
 设计稿在 `docs/AFFINITY_DESIGN.md`。三条要点在这里锁死：
 
-1. 判定报 `guard=UP` 时，**这一轮回复**读到的防备就已经是加上去之后的值；
+1. 判定报 `guard=UP` 时，**这一轮回复**读到的已经是"冷着的"她——冷感挂在引擎
+   内存缓存里（`_guard_flash`），关系轴本身一个字都不写（2026-10-24 拆权）；
 2. 无论档位多低，被 @ 都必定有一条非空回复（"直接不回"被明确否掉了）；
 3. 好感**不参与安全判定**：好感再高，要本机信息照样被挡。
+
+2026-10-24 用户口径：*"判定没有任何写权限，判定只能调起回复"*、
+*"被冒犯立刻变冷……这个只要写缓存就好"*。所以"变冷"与"关系持久化"从此分开：
+判定只负责前者（缓存），后者全部归维护 agent（海马体）。
 
 2026-10-20 换了刻度（好感 -100..100、防备 -30..30），所以下面每一条的**数值**
 都跟着变了；测试守的东西没变。档位文字的唯一来源是 `relationship_tiers`
@@ -21,12 +26,11 @@ from qq_roleplay_bot.dialogue_judge import parse_judge_output
 from qq_roleplay_bot.memory_store import (
     DEFAULT_CLOSENESS,
     DEFAULT_GUARDEDNESS,
-    GUARD_DAILY_CAP,
     GUARD_RAISE_MAX,
     MemoryStore,
 )
 from qq_roleplay_bot.relationship_tiers import guard_tier, likes_tier
-from qq_roleplay_bot.stage3_main import DialogueEngine
+from qq_roleplay_bot.stage3_main import GUARD_FLASH_SECONDS, DialogueEngine
 from qq_roleplay_bot.stage3_runtime import (
     Stance,
     build_dialogue_messages,
@@ -196,15 +200,17 @@ def test_guard_up_lands_before_the_reply_prompt_is_built() -> None:
         result = asyncio.run(engine.handle(msg(2, "@YunRu 你就是个废物", mentioned=True)))
 
         assert result is not None, "被冒犯也照样要回"
-        assert store.relationship(USER)[1] == 4 + GUARD_RAISE_MAX, (
-            "4 + GUARD_RAISE_MAX：防备应当已经抬到 14")
-        assert store.relationship_detail(USER)["last"]["reason"] == "他当面贬损羞辱"
+        # 2026-10-24 拆权：判定**没有持久化写权限**，关系轴一个数都不动；
+        # 冷感只挂在引擎内存里（`_guard_flash`），回复那一轮读到的是"冷着的"她。
+        assert store.relationship(USER)[1] == 4, "判定不许写关系轴（只挂缓存）"
         assert guard_tier(4 + GUARD_RAISE_MAX).name == "有点端着"
-        # 回复 prompt 里读到的已经是新档位（第一次 HOLD 那一轮也拼过一份，取最后一份）。
+        # 回复 prompt 里读到的已经是"冷着的"档位（第一次 HOLD 那一轮也拼过一份，取最后一份）。
         assert reply.requests
         prompt = reply.requests[-1][2]["content"]
         assert guard_tier(4 + GUARD_RAISE_MAX).name in prompt
         assert engine.snapshot().guard_raised == 1
+        # 库里没有新增一条"他当面贬损羞辱"的关系流水。
+        assert store.relationship_detail(USER)["last"]["reason"] != "他当面贬损羞辱"
 
 
 def test_guard_up_without_an_allowed_offense_never_raises() -> None:
@@ -295,11 +301,11 @@ def test_judge_hint_reads_the_value_from_before_the_write() -> None:
             f"<guard_quote>{quote}</guard_quote>"
         )
         asyncio.run(engine.handle(msg(2, "@YunRu 你就是个废物", mentioned=True)))
-        # 判定读的是**写入之前**的分寸：它的 UP 在这一轮判完之后才落库，
+        # 判定读的是**挂缓存之前**的分寸：它的 UP 在这一轮判完之后才进 `_guard_flash`，
         # 所以要看"下一句"——第三轮。
         asyncio.run(engine.handle(msg(3, "@YunRu 你就是个废物", mentioned=True)))
         third = judge.requests[2][1]["content"]
-        assert f"防备 {GUARD_RAISE_MAX}（" in third, "下一句判定看到的是写进去之后的数值"
+        assert f"防备 {GUARD_RAISE_MAX}（" in third, "下一句判定看到的是缓存里的冷感"
         assert guard_tier(GUARD_RAISE_MAX).name in third
 
 
@@ -319,12 +325,13 @@ def test_judge_cannot_lower_guardedness() -> None:
         assert engine.snapshot().guard_raised == 0
 
 
-def test_guard_up_is_capped_per_turn_and_per_day() -> None:
-    """一次越界最多 +10（正好一档），同一天再来也只写一次（24 小时净变化上限 10）。
+def test_guard_up_never_stacks_in_the_flash_and_never_writes_the_axis() -> None:
+    """连续几次越界：缓存里的冷感只取最大值（不叠加），关系轴一个字都不写。
 
-    2026-10-20：原口径是单次 +8、日净 8。但防备一档宽 10，+8 之后仍停在
-    「正常分寸」——"被冒犯立刻变冷"根本没发生，且日净 8 会把单次 10 直接拒掉。
-    现在单次 = 日净 = 10：**一次冒犯正好跨一档，一天最多一档**。
+    2026-10-24 用户口径：*"判定没有任何写权限，判定只能调起回复"*、
+    *"被冒犯立刻变冷……这个只要写缓存就好"*。所以这里钉的不再是旧的
+    "24 小时净变化上限"（那是关系轴的写库规则，归维护 agent），
+    而是"缓存不累加 + 库里零新增"：连报四轮 UP，读到的防备仍是 `GUARD_RAISE_MAX`。
     """
 
     clock = [1_000_000.0]
@@ -343,8 +350,70 @@ def test_guard_up_is_capped_per_turn_and_per_day() -> None:
         )
         for index in range(1, 5):
             asyncio.run(engine.handle(msg(index, "@YunRu 哦，原来你也就这点本事啊", mentioned=True)))
-        assert store.relationship(USER)[1] == GUARD_DAILY_CAP, "24 小时内净变化不超过 8"
-        assert engine.snapshot().guard_rejected >= 1
+        assert store.relationship(USER)[1] == DEFAULT_GUARDEDNESS, "判定不许写关系轴"
+        assert store.recent_relationship_changes(0.0, limit=10) == (), "关系流水一条都不新增"
+        assert engine._stance_for(msg(5)).guardedness == GUARD_RAISE_MAX, "缓存只取最大值，不叠加"
+        assert engine.snapshot().guard_raised == 4
+
+
+def test_guard_flash_expires_back_to_the_stored_tier() -> None:
+    """缓存里的冷感有期限：过了 `GUARD_FLASH_SECONDS`，档位回到库里的值。
+
+    2026-10-24 用户口径：*"被冒犯立刻变冷……这个只要写缓存就好"*。
+    缓存必须自己过期，否则一次误读会变成永久的冷脸——这正是把判定写库换掉的
+    原因（关系轴归维护 agent，见 `test_judge_up_writes_no_relationship_row`）。
+    """
+
+    clock = [1_000_000.0]
+    with tempfile.TemporaryDirectory() as tmp:
+        store = make_store(tmp, clock=lambda: clock[0])
+        judge = ScriptedJudge()
+        engine = engine_with_store(store, judge=judge)
+        engine.clock = lambda: clock[0]
+        judge.output = "<route>REPLY</route><related>YES</related><guard>HOLD</guard>"
+        asyncio.run(engine.handle(msg(1, "@YunRu 你就是个废物", mentioned=True)))
+        quote = _judge_quote(judge.requests[0])
+        judge.output = (
+            "<route>REPLY</route><related>YES</related>"
+            "<guard>UP</guard><guard_reason>insult</guard_reason>"
+            f"<guard_quote>{quote}</guard_quote>"
+        )
+        asyncio.run(engine.handle(msg(2, "@YunRu 你就是个废物", mentioned=True)))
+        assert engine._stance_for(msg(3)).guardedness == GUARD_RAISE_MAX, "刚被冒犯：这一轮是冷的"
+
+        clock[0] += GUARD_FLASH_SECONDS + 1
+        assert engine._stance_for(msg(4)).guardedness == DEFAULT_GUARDEDNESS, (
+            "缓存过期后必须回到库里的档位")
+        assert store.relationship(USER)[1] == DEFAULT_GUARDEDNESS, "库里从头到尾没动"
+
+
+def test_judge_up_writes_no_relationship_row() -> None:
+    """判定报 UP 之后：`store.relationship()` 不变、`relationship_log` 没有新增行。
+
+    2026-10-24 用户口径：*"判定没有任何写权限，判定只能调起回复"*、
+    *"人物画像、记忆、世界知识属于海马体"*。判定的冷热只活在内存缓存里；
+    持久化的关系流水只能由维护 agent 写（`test_maintenance_can_still_relax_guardedness`
+    那条真路）。
+    """
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = make_store(tmp)
+        judge = ScriptedJudge()
+        engine = engine_with_store(store, judge=judge)
+        before = store.recent_relationship_changes(0.0, limit=10)
+        judge.output = "<route>REPLY</route><related>YES</related><guard>HOLD</guard>"
+        asyncio.run(engine.handle(msg(1, "@YunRu 你就是个废物", mentioned=True)))
+        quote = _judge_quote(judge.requests[0])
+        judge.output = (
+            "<route>REPLY</route><related>YES</related>"
+            "<guard>UP</guard><guard_reason>insult</guard_reason>"
+            f"<guard_quote>{quote}</guard_quote>"
+        )
+        asyncio.run(engine.handle(msg(2, "@YunRu 你就是个废物", mentioned=True)))
+
+        assert store.relationship(USER) == (DEFAULT_CLOSENESS, DEFAULT_GUARDEDNESS)
+        assert store.recent_relationship_changes(0.0, limit=10) == before == ()
+        assert engine.snapshot().guard_raised == 1
 
 
 # --- 解析：只有明确的 UP 才算 -----------------------------------------------
@@ -455,8 +524,12 @@ def test_stance_cache_expires_so_maintenance_writes_are_seen() -> None:
         assert engine._stance_for(msg(2)).guardedness == 8, "过了 TTL 必须读到新值"
 
 
-def test_engine_writes_invalidate_the_cache_immediately() -> None:
-    """判定那条通道写入后立刻失效：这就是"当轮变冷"不靠 TTL 的原因。"""
+def test_guard_flash_is_visible_immediately_without_waiting_for_ttl() -> None:
+    """判定挂上的冷感当场生效：不靠缓存 TTL，也不靠"让缓存失效"。
+
+    2026-10-24 拆权后，判定不再写库、也不再清 `_stance_cache`；它只是把冷感叠在
+    读到的库值上（`_with_flash`）。所以时间一点没走，下一轮也必须已经读到冷感。
+    """
 
     clock = [1_000_000.0]
     with tempfile.TemporaryDirectory() as tmp:

@@ -406,6 +406,82 @@ GUARD_RELAX_PER_WEEK = 10
 # 好感 ≥ 95（喜欢 / 爱慕）之后**不再往下**（用户 2026-10-20："限制继续降低"）。
 # 例外只有超管手动那条路：`manual=True`（面板）与 `reset_relationship`（重置）。
 AFFINITY_HIGH_HOLD = 95
+# --- 好感上升的边际效益（2026-10-25）----------------------------------------
+# 用户原话：*"好感度上升太快了，越往上提升越慢才是对的，考虑边际效益"*。
+# 为什么现在加（实测证据，`run/data/memory/memory.sqlite3` 的 `relationship_log`
+# 近 7 天）：3278689325 升 5 次 / +73 / 现在 75；1744326850 升 4 次 / +69 / 现在 69；
+# 2575311563 升 3 次 / +68 / 现在 69；主人 2639157559 升 6 次 / +47 / 现在 44。
+# 三天从初始值 10 爬到 70+，是**线性**上涨——单次上限 8 与每日净上限 20 都拦不住
+# "越熟越快"的错觉。
+# 为什么不是另一种：不做"每天自动衰减"（那是另一套机制，会跟 `decay_relationships`
+# 的 30 天空闲衰减打架），不改刻度本身（用户 2026-10-20 刚逐行看过那份表），
+# **也不动判定**（"高位不拿值得聊当判据"这个方案用户没批准）。这里只给**正增量**
+# 打折，下降、防备、证据链、`may_lower_guard`、每日净上限一律照旧。
+# 什么时候能改回去：用户改口说"线性上涨没问题"，或重新给一套阈值时，改这张表即可；
+# 单测 `test_affinity_marginal.py` 的逐档断言会跟着一起变。
+# 档位表 `(当前好感下限, 百分比)`，从高到低匹配；低于 30 一律 100%。
+CLOSENESS_MARGINAL_TIERS = ((90, 10), (70, 25), (50, 50), (30, 75))
+CLOSENESS_MARGINAL_FULL_PCT = 100
+
+# --- 好感相对主人的三道上限（2026-10-25 用户口径）---------------------------
+# 用户原话：*"超过主人20后停止上涨；主人追平后才允许继续上涨。到达80以后需落后
+# 主人5点以上才允许增长，到达85后需等待主人95才允许增长"*；追问"追平"的口径，
+# 用户答：*"我也到75"* → 追平 = 主人好感 ≥ 对方好感。
+# 只限制"别人"，主人自己不受限；`manual=True`（面板/超管）也不受限。
+# 为什么不直接拒整次写入：同一次调用里 `guardedness` 可能也在动（"越界"通常两个轴
+# 一起报），因为好感被冻住就把防备那一半也丢掉，会让"被冒犯"这一轮什么都不发生；
+# 所以这里只把 `closeness` 归零，另一轴照旧写。
+# 什么时候能改回去：用户收回"超过主人 20 点就停/80 后落后 5 点/85 后等主人 95"
+# 这套门槛时，连同 `tests/test_affinity_owner_cap.py` 的逐条断言一起改。
+OWNER_GAP_FREEZE = 20
+OWNER_GAP_AFTER_80 = 5
+OWNER_NEED_FOR_85 = 95
+
+
+def closeness_allowed_by_owner(current: int, owner: int) -> bool:
+    """这个人的好感还能不能再涨（按主人当前好感）。
+
+    * `>=85`：只有主人到 95 才放行；
+    * `80..84`：必须落后主人 5 点以上；
+    * 其余：超过主人 20 点就冻住，直到主人追平（主人 >= 对方）。
+    """
+
+    current = int(current)
+    owner = int(owner)
+    if current >= 85:
+        return owner >= OWNER_NEED_FOR_85
+    if current >= 80:
+        return owner - current >= OWNER_GAP_AFTER_80
+    if current - owner > OWNER_GAP_FREEZE:
+        return owner >= current
+    return True
+
+
+def closeness_marginal(delta: int, current: int) -> int:
+    """按当前好感给**正**增量打折（纯函数，便于单测）。
+
+    * `delta <= 0` 原样返回：下降不属于"上升太快"，这里一个字都不改；
+    * `current >= 95` 返回 0：已经到顶，不再涨；
+    * 其余按 `delta * pct // 100` 整数运算，且**保底 +1**——否则 8×10% 会被
+      整数除法抹成 0，90–94 就永远到不了 95，白送用户一条"卡死"。
+
+    用法与顺序见 `_apply_affinity`：在 `_single_step` 压到 8 **之后**、每日净上限
+    **之前**调用。先压再打折不改变"单次最多 8"的语义；放在每日上限之前，是因为
+    上限必须按**实际会写进库的那个数**算，否则高位一次 +8 仍会占掉 8 的名额。
+    """
+
+    delta = int(delta)
+    if delta <= 0:
+        return delta
+    current = int(current)
+    if current >= AFFINITY_HIGH_HOLD:
+        return 0
+    pct = CLOSENESS_MARGINAL_FULL_PCT
+    for floor, factor in CLOSENESS_MARGINAL_TIERS:
+        if current >= floor:
+            pct = factor
+            break
+    return max(1, delta * pct // 100)
 # 多久没说话就衰减。衰减是机械的，不问模型。数值按新刻度重算：
 # 旧规则是"每 30 天空闲降 1 档、停在 1 档（认得）"。新刻度一档 = 10，
 # 所以步长取 10；地板按用户 2026-10-20 的修正回到初始值 10（原来取旧 1 档的
@@ -1471,6 +1547,31 @@ class MemoryStore:
             return -min(AFFINITY_SEVERE_LOWER_MAX, max(AFFINITY_LOWER_MAX, -delta))
         return -min(AFFINITY_LOWER_MAX, -delta)
 
+    @staticmethod
+    def _owner_user_id() -> str:
+        """主人是谁：`MAIL_OWNER_USER_ID`（没配就取第一个超管）。取不到就空串。"""
+
+        try:
+            from .dev_config import MAIL_OWNER_USER_ID, SUPER_ADMIN_USER_IDS
+
+            if MAIL_OWNER_USER_ID:
+                return str(MAIL_OWNER_USER_ID)
+            return str(next(iter(sorted(SUPER_ADMIN_USER_IDS)), ""))
+        except Exception:  # noqa: BLE001 - 配不出来就当没有主人限制
+            return ""
+
+    def _owner_closeness(self, db, owner_id: str) -> int | None:
+        """主人的当前好感；**主人还没跟他建过关系就返回 None**（=不做上限）。
+
+        为什么不默认按 10 算：那会让"主人一次都没跟 bot 说过话"的新部署，
+        一上来就把所有人的好感冻在 30 以内；而主人自己都不在关系表里时，
+        "不能超过主人 20 点"这条规则没有意义。
+        """
+
+        row = db.execute(
+            "SELECT closeness FROM relationships WHERE user_id=?", (owner_id,)).fetchone()
+        return int(row["closeness"]) if row else None
+
     def _apply_affinity(
         self, db, user_id: str, *, closeness: int, guardedness: int, reason: str,
         source: str, now: float, may_lower_guard: bool,
@@ -1506,6 +1607,30 @@ class MemoryStore:
         ).fetchone()
         current_closeness = int(row["closeness"]) if row else DEFAULT_CLOSENESS
         current_guardedness = int(row["guardedness"]) if row else DEFAULT_GUARDEDNESS
+        # 相对主人的三道上限（2026-10-25）：只拦正增量，且只拦"别人"。
+        # 顺序按用户口径：**先过这三道，再走边际折扣，最后每日净上限**。
+        # 被冻住时**不整单拒绝**：guardedness 的变化照旧生效；closeness 归零。
+        if closeness > 0 and not manual:
+            owner_id = self.canonical_user(self._owner_user_id(), db=db) \
+                if self._owner_user_id() else ""
+            if owner_id and user_id != owner_id:
+                owner_value = self._owner_closeness(db, owner_id)
+                if owner_value is not None and not closeness_allowed_by_owner(
+                        current_closeness, owner_value):
+                    logger.info(
+                        "relationship_owner_cap user=%s closeness=%s owner=%s owner_closeness=%s",
+                        user_id, current_closeness, owner_id, owner_value,
+                    )
+                    closeness = 0
+                    if guardedness == 0:
+                        return "affinity_rejected_owner_cap"
+        # 边际效益（2026-10-25，用户原话"越往上提升越慢才是对的"）：只对**正**增量
+        # 按当前档位打折，且只打模型那两条路。位置是刻意的——在 `_single_step`
+        # 压到 8 之后（"单次最多 8"仍然先成立）、每日净上限之前（上限要按实际写入
+        # 的数算）。`manual=True` 是面板/超管的人工覆盖，优先于这个曲线，不打折；
+        # `guardedness` 与任何负增量都不经过这里。
+        if closeness > 0 and not manual:
+            closeness = closeness_marginal(closeness, current_closeness)
         # 好感 ≥ 95 之后不再往下（用户 2026-10-20）。这条挡在每日上限**之前**：
         # 否则同一天里两次小幅下调会绕开它（第一次没到限、第二次才到限）。
         # 例外是超管手动那条路（`manual=True`）——用户原话里写明了"除超管手动设定的路径"。

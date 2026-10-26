@@ -502,4 +502,8 @@ class MemoryMetrics:
     input_tokens: int = 0
     output_tokens: int = 0
     last_duration_seconds: float = 0.0
+    # 被"画像口径"闸门拒掉的关系变动条数（2026-10-24）。单独计数而不是混进
+    # `operations.AFFINITY`：那一列是**真正生效**的操作数，把被拒的算进去会让
+    # "关系动了几次"这个读数骗人。
+    affinity_rejected: int = 0
     operations: dict[str, int] = field(default_factory=lambda: dict.fromkeys(sorted(OPS), 0))
